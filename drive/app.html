@@ -1,0 +1,29 @@
+﻿<div class="container">
+  <header>
+    <h1>CWL Roster Overview</h1>
+    <a id="openAdminLink" class="header-btn" href="__ADMIN_URL__">Admin Panel</a>
+  </header>
+
+  <div class="card search-card">
+    <div class="search-top">
+      <label for="rosterSearchInput" class="search-label">Search by name or tag</label>
+      <button id="clearRosterSearchBtn" class="search-clear hidden" type="button">Clear</button>
+    </div>
+    <input id="rosterSearchInput" class="search-input" type="search" placeholder="e.g. PlayerName or #TAG123"
+      autocomplete="off" />
+    <div id="rosterSearchInfo" class="search-info">Showing all players.</div>
+  </div>
+
+  <div id="globalLastUpdated" class="card global-last-updated hidden" aria-live="polite">
+    <div class="global-last-updated__label">Last updated</div>
+    <div id="globalLastUpdatedValue" class="global-last-updated__value">-</div>
+  </div>
+
+  <div id="loading" class="card">
+    <div class="empty">Loading...</div>
+  </div>
+
+  <div id="rosters"></div>
+
+  <div id="load-error" class="card hidden"></div>
+</div>

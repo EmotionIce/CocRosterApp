@@ -1,0 +1,851 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Roster Admin</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="build-stamp" content="<?!= buildStamp ?>" />
+  <style>
+    <?!= css ?>
+
+    /* Admin-only tweaks */
+    .admin-card {
+      margin-bottom: 16px;
+    }
+
+    .admin-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .admin-row {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .admin-row label {
+      font-weight: 600;
+    }
+
+    .admin-input,
+    .admin-textarea,
+    .admin-select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      font: inherit;
+      background: rgba(148, 163, 184, 0.12);
+      color: #fff;
+    }
+
+    .admin-textarea {
+      min-height: 84px;
+      resize: vertical;
+    }
+
+    .admin-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 14px;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      background: #111827;
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .btn.secondary {
+      background: rgba(148, 163, 184, 0.12);
+      color: #e5e7eb;
+      border-color: #475569;
+    }
+
+    #loadActiveBtn {
+      gap: 10px;
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.28), rgba(14, 165, 233, 0.22));
+      border-color: rgba(110, 231, 183, 0.42);
+      color: #f8fafc;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 26px rgba(8, 145, 178, 0.16);
+      position: relative;
+      transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
+      white-space: nowrap;
+    }
+
+    #loadActiveBtn::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #6ee7b7;
+      box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.14);
+      flex: 0 0 auto;
+    }
+
+    #loadActiveBtn:hover:not(:disabled) {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.34), rgba(14, 165, 233, 0.28));
+      border-color: rgba(167, 243, 208, 0.72);
+      transform: translateY(-1px);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 16px 30px rgba(8, 145, 178, 0.2);
+    }
+
+    #loadActiveBtn:focus-visible {
+      outline: none;
+      border-color: rgba(186, 230, 253, 0.85);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 26px rgba(8, 145, 178, 0.16);
+    }
+
+    #loadActiveBtn:disabled {
+      box-shadow: none;
+      transform: none;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .small {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .muted {
+      color: #6b7280;
+    }
+
+    table.admin-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    table.admin-table th,
+    table.admin-table td {
+      padding: 8px;
+      border-bottom: 1px solid #e5e7eb;
+      vertical-align: top;
+    }
+
+    table.admin-table th {
+      text-align: left;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #6b7280;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.12);
+      font-size: 12px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .collapse-btn {
+      padding: 6px 10px;
+      border-radius: 10px;
+      border: 1px solid #e5e7eb;
+      background: rgba(148, 163, 184, 0.12);
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .player-admin-actions {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px dashed #334155;
+      display: grid;
+      gap: 6px;
+    }
+
+    .player-admin-summary {
+      width: 100%;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 6px 8px;
+      background: rgba(15, 23, 42, 0.78);
+      color: #e5e7eb;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      cursor: pointer;
+    }
+
+    .player-admin-summary:hover {
+      border-color: #475569;
+      background: rgba(15, 23, 42, 0.9);
+    }
+
+    .player-admin-summary:focus-visible {
+      outline: none;
+      border-color: rgba(56, 189, 248, 0.7);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+    }
+
+    .player-admin-summary-main {
+      color: #cbd5e1;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+
+    .player-admin-summary-meta {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      min-width: 0;
+      margin-left: auto;
+      flex-wrap: wrap;
+    }
+
+    .player-admin-summary-pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #475569;
+      border-radius: 999px;
+      padding: 2px 6px;
+      font-size: 10px;
+      font-weight: 700;
+      color: #fda4af;
+      background: rgba(127, 29, 29, 0.28);
+      white-space: nowrap;
+    }
+
+    .player-admin-summary-caret {
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1;
+      transition: transform 140ms ease;
+    }
+
+    .player-admin-actions.is-expanded .player-admin-summary-caret {
+      transform: rotate(180deg);
+    }
+
+    .player-admin-tray {
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      background: rgba(11, 18, 32, 0.72);
+      padding: 6px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .player-admin-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .player-admin-settings {
+      border: 1px solid #1f2937;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.58);
+      padding: 6px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .player-admin-settings-title {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #cbd5e1;
+    }
+
+    .player-admin-toggle-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 4px;
+    }
+
+    .player-admin-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #334155;
+      border-radius: 7px;
+      padding: 5px 8px;
+      background: #0f172a;
+      color: #e5e7eb;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      line-height: 1.2;
+    }
+
+    .player-admin-btn.secondary {
+      background: transparent;
+    }
+
+    .player-admin-toggle {
+      justify-content: space-between;
+      text-align: left;
+      min-height: 30px;
+      line-height: 1.2;
+    }
+
+    .player-admin-toggle.is-off {
+      border-color: #334155;
+      background: rgba(15, 23, 42, 0.88);
+      color: #cbd5e1;
+    }
+
+    .player-admin-toggle.is-on {
+      border-color: rgba(248, 113, 113, 0.45);
+      background: rgba(127, 29, 29, 0.28);
+      color: #fecaca;
+    }
+
+    .player-admin-btn.danger {
+      border-color: #7f1d1d;
+      background: #3f1414;
+    }
+
+    .player-admin-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .player-admin-panel {
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: #0b1220;
+      padding: 6px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .player-admin-row {
+      display: grid;
+      grid-template-columns: 95px 1fr;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .player-admin-row label {
+      font-size: 11px;
+      color: #94a3b8;
+      font-weight: 600;
+    }
+
+    .player-admin-input,
+    .player-admin-select {
+      width: 100%;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: #0f172a;
+      color: #e5e7eb;
+      padding: 6px 8px;
+      font: inherit;
+      font-size: 12px;
+    }
+
+    .player-admin-inline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .player-admin-notes {
+      display: grid;
+      gap: 6px;
+    }
+
+    .player-admin-notes-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .player-admin-note-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .workflow-block {
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.55);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .workflow-title {
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+
+    .clan-sync-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .roster-admin-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .clan-sync-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 6px 10px;
+      background: #0f172a;
+      color: #e5e7eb;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .clan-sync-btn.secondary {
+      background: transparent;
+    }
+
+    .clan-sync-btn.danger {
+      border-color: rgba(248, 113, 113, 0.55);
+      background: rgba(127, 29, 29, 0.52);
+      color: #fecaca;
+    }
+
+    .clan-sync-btn.danger:hover:not(:disabled) {
+      background: rgba(127, 29, 29, 0.66);
+    }
+
+    .clan-sync-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .auto-refresh-panel {
+      display: grid;
+      gap: 4px;
+      padding: 8px 10px;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.72);
+      min-width: 230px;
+    }
+
+    .auto-refresh-toggle-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #e5e7eb;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .auto-refresh-toggle-row input {
+      accent-color: #22c55e;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+    }
+
+    .auto-refresh-status {
+      font-size: 11px;
+      line-height: 1.35;
+      color: #94a3b8;
+      white-space: pre-line;
+    }
+
+    @media (max-width: 640px) {
+      #loadActiveBtn {
+        width: 100%;
+        justify-content: center;
+      }
+
+      .player-admin-summary {
+        align-items: flex-start;
+      }
+
+      .player-admin-summary-main {
+        white-space: normal;
+      }
+
+      .player-admin-summary-meta {
+        margin-left: 0;
+        justify-content: flex-start;
+      }
+
+      .player-admin-buttons .player-admin-btn {
+        flex: 1 1 0;
+        min-width: 70px;
+      }
+
+      .player-admin-toggle-row {
+        grid-template-columns: 1fr;
+      }
+
+      .player-admin-row {
+        grid-template-columns: 1fr;
+      }
+
+      .player-admin-note-row {
+        grid-template-columns: 1fr;
+      }
+
+      .auto-refresh-panel {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body style="margin:0;">
+  <div class="container">
+    <header>
+      <h1>Roster Admin</h1>
+    </header>
+
+    <div class="card admin-card">
+      <div class="admin-grid">
+        <div class="admin-row">
+          <label for="pw">Admin password</label>
+          <input id="pw" type="password" class="admin-input" placeholder="Enter password" />
+        </div>
+        <div class="admin-actions">
+          <button id="loginBtn" class="btn" type="button" disabled>Loading…</button>
+          <span id="loginStatus" class="small muted">Initializing admin…</span>
+        </div>
+        <div class="small">
+          Publishing is protected server-side. Unlock only reveals the UI in your browser.
+        </div>
+      </div>
+    </div>
+
+    <div id="adminPanel" class="card admin-card hidden">
+      <div class="admin-grid">
+        <div class="workflow-block">
+          <div class="section-head">
+            <div class="workflow-title">Current roster workflow</div>
+            <span class="pill">active data</span>
+          </div>
+
+          <div class="admin-row">
+            <label for="pageTitle">Page title</label>
+            <input id="pageTitle" class="admin-input" value="Roster Overview" />
+          </div>
+
+          <div class="admin-actions">
+            <button id="loadActiveBtn" class="btn secondary" type="button">Load active config</button>
+            <button id="refreshAllBtn" class="btn secondary" type="button" disabled>Refresh all</button>
+            <button id="publishBtn" class="btn" type="button" disabled>Publish</button>
+            <span id="status" class="small muted"></span>
+            <div class="auto-refresh-panel">
+              <label class="auto-refresh-toggle-row" for="autoRefreshToggle">
+                <input id="autoRefreshToggle" type="checkbox" disabled />
+                <span>Auto-refresh periodically</span>
+              </label>
+              <div class="small muted">Every 2 hours</div>
+              <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
+            </div>
+          </div>
+
+          <div class="small muted">
+            Use this for the currently published roster. Load it, make manual preview edits, then publish.
+          </div>
+
+          <div class="workflow-block">
+            <div class="section-head">
+              <div style="font-weight:700;">Clan Sync</div>
+              <button id="toggleClanSyncBtn" class="collapse-btn" type="button" aria-expanded="false"
+                aria-controls="clanSyncBody">Expand</button>
+            </div>
+            <div id="clanSyncBody" class="hidden">
+              <div class="small muted">Manual sync via Official Clash API through RoyaleAPI proxy.</div>
+              <div style="overflow:auto; margin-top:10px;">
+                <table class="admin-table" id="clanSyncTable">
+                  <thead>
+                    <tr>
+                      <th style="min-width:180px;">Roster</th>
+                      <th style="min-width:160px;">Tracking</th>
+                      <th style="min-width:180px;">Connected clan tag</th>
+                      <th style="min-width:340px;">Actions</th>
+                      <th style="min-width:220px;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="workflow-block">
+            <div class="section-head">
+              <div style="font-weight:700;">Tracking stats</div>
+              <button id="toggleCwlPerfBtn" class="collapse-btn" type="button" aria-expanded="false"
+                aria-controls="cwlPerfBody">Expand</button>
+            </div>
+            <div id="cwlPerfBody" class="hidden">
+              <div class="small muted">Refresh tracking stats for each roster, run CWL-only bench suggestions, or clear
+                preview marks.
+              </div>
+              <div style="overflow:auto; margin-top:10px;">
+                <table class="admin-table" id="cwlPerfTable">
+                  <thead>
+                    <tr>
+                      <th style="min-width:220px;">Roster</th>
+                      <th style="min-width:360px;">Actions</th>
+                      <th style="min-width:220px;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="workflow-block">
+          <div class="section-head">
+            <div class="workflow-title">Import new XLSX workflow</div>
+            <button id="toggleImportWorkflowBtn" class="collapse-btn" type="button" aria-expanded="false"
+              aria-controls="importWorkflowBody">Expand</button>
+          </div>
+
+          <div id="importWorkflowBody" class="hidden">
+            <div class="admin-grid">
+              <div class="admin-row">
+                <label for="xlsxInput">XLSX import</label>
+                <input id="xlsxInput" type="file" class="admin-input" accept=".xlsx" />
+              </div>
+
+              <div>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                  <div style="font-weight:700;">Roster specs</div>
+                  <button id="addRosterBtn" class="btn secondary" type="button">Add roster</button>
+                </div>
+                <div class="small muted" style="margin-top:6px;">
+                  Allocation fills higher difficulty first (competitive → standard → relaxed).
+                </div>
+
+                <div style="overflow:auto; margin-top:10px;">
+                  <table class="admin-table" id="rosterTable">
+                    <thead>
+                      <tr>
+                        <th style="min-width:90px;">ID</th>
+                        <th style="min-width:220px;">Title</th>
+                        <th style="min-width:110px;">Main</th>
+                        <th style="min-width:110px;">Subs</th>
+                        <th style="min-width:160px;">Difficulty</th>
+                        <th style="min-width:90px;"></th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div>
+                <div style="font-weight:700;">Filters</div>
+                <div class="admin-grid" style="margin-top:10px;">
+                  <div class="admin-row">
+                    <label for="excludeWarOut">Exclude war out</label>
+                    <input id="excludeWarOut" type="checkbox" checked />
+                  </div>
+                  <div class="admin-row">
+                    <label for="allowedClans">Allowed clans</label>
+                    <input id="allowedClans" class="admin-input" placeholder="Comma-separated, empty = all" />
+                  </div>
+                  <div class="admin-row">
+                    <label for="requireDiscord">Require Discord name</label>
+                    <input id="requireDiscord" type="checkbox" />
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div class="section-head">
+                  <div style="font-weight:700;">Overrides (optional)</div>
+                  <button id="toggleOverridesBtn" class="collapse-btn" type="button" aria-expanded="true"
+                    aria-controls="overridesSectionBody">Collapse</button>
+                </div>
+                <div id="overridesSectionBody">
+                  <div class="small muted" style="margin-top:6px;">Tags must include #. JSON only.</div>
+                  <div class="admin-grid" style="margin-top:10px;">
+                    <div class="admin-row">
+                      <label for="overridesJson">Overrides JSON</label>
+                      <textarea id="overridesJson" class="admin-textarea"
+                        placeholder='{"excluded":["#ABC123"],"pinned":{"#DEF456":{"rosterId":"R1","role":"main","slot":3}}}'></textarea>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="admin-actions">
+                <button id="previewBtn" class="btn secondary" type="button">Generate preview</button>
+              </div>
+
+              <div class="small">
+                Max recommended players per import: <span class="pill">200</span>
+                <span class="muted">to avoid timeouts.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="reportWrap" class="hidden">
+          <div style="font-weight:700; margin-top:6px;">Generation report</div>
+          <pre id="report" class="small"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preview area uses the same DOM targets as the public page -->
+    <div class="card">
+      <div class="section-head" style="margin-bottom:10px;">
+        <div class="small muted">Preview</div>
+        <div class="admin-actions" style="gap:8px;">
+          <button id="toggleAddPreviewRosterPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
+            aria-controls="addPreviewRosterPanel">Add roster</button>
+          <button id="toggleAddPlayerPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
+            aria-controls="addPlayerPanel">Add member</button>
+        </div>
+      </div>
+
+      <div id="addPreviewRosterPanel" class="workflow-block hidden" style="margin-bottom:10px;">
+        <div class="section-head">
+          <div style="font-weight:700;">Add roster to loaded preview</div>
+          <span id="addPreviewRosterHint" class="small muted">Load active config or generate preview first.</span>
+        </div>
+
+        <div class="admin-grid">
+          <div class="admin-row">
+            <label for="addPreviewRosterId">Roster ID</label>
+            <input id="addPreviewRosterId" class="admin-input" placeholder="e.g. master-2-b" />
+          </div>
+          <div class="admin-row">
+            <label for="addPreviewRosterTitle">Title</label>
+            <input id="addPreviewRosterTitle" class="admin-input" placeholder="Roster title" />
+          </div>
+          <div class="admin-row">
+            <label for="addPreviewRosterClanTag">Clan tag</label>
+            <input id="addPreviewRosterClanTag" class="admin-input" placeholder="#2L0JRQ8L8 (optional)" />
+          </div>
+          <div class="admin-row">
+            <label for="addPreviewRosterTrackingMode">Tracking mode</label>
+            <select id="addPreviewRosterTrackingMode" class="admin-select">
+              <option value="cwl">CWL</option>
+              <option value="regularWar">Regular clan war</option>
+            </select>
+          </div>
+
+          <div class="admin-actions">
+            <button id="addPreviewRosterBtn" class="btn secondary" type="button" disabled>Add roster</button>
+            <span id="addPreviewRosterStatus" class="small muted"></span>
+          </div>
+        </div>
+      </div>
+
+      <div id="addPlayerPanel" class="workflow-block hidden" style="margin-bottom:10px;">
+        <div class="section-head">
+          <div style="font-weight:700;">Add player to loaded preview</div>
+          <span id="addPlayerHint" class="small muted">Load active config or generate preview first.</span>
+        </div>
+
+        <div class="admin-grid">
+          <div class="admin-row">
+            <label for="addPlayerRoster">Roster</label>
+            <select id="addPlayerRoster" class="admin-select" disabled></select>
+          </div>
+          <div class="admin-row">
+            <label for="addPlayerName">Name</label>
+            <input id="addPlayerName" class="admin-input" placeholder="Player name" />
+          </div>
+          <div class="admin-row">
+            <label for="addPlayerDiscord">Discord</label>
+            <input id="addPlayerDiscord" class="admin-input" placeholder="Discord name (optional)" />
+          </div>
+          <div class="admin-row">
+            <label for="addPlayerTh">TH</label>
+            <input id="addPlayerTh" class="admin-input" type="number" min="1" step="1" placeholder="e.g. 17" />
+          </div>
+          <div class="admin-row">
+            <label for="addPlayerTag">Tag</label>
+            <input id="addPlayerTag" class="admin-input" placeholder="#ABC123" />
+          </div>
+          <div class="admin-row">
+            <label for="addPlayerNotes">Notes</label>
+            <textarea id="addPlayerNotes" class="admin-textarea" placeholder="One note per line (optional)"></textarea>
+          </div>
+
+          <div class="admin-actions">
+            <button id="addPlayerBtn" class="btn secondary" type="button" disabled>Add player</button>
+            <span id="addPlayerStatus" class="small muted"></span>
+          </div>
+        </div>
+      </div>
+
+      <div id="loading" class="card">
+        <div class="empty">Waiting for preview…</div>
+      </div>
+      <div id="rosters"></div>
+      <div id="load-error" class="card hidden"></div>
+    </div>
+  </div>
+
+  <script>
+    // keep the renderer, but do not auto-load public data on the admin page
+    window.ROSTER_CLIENT_DISABLE_AUTOLOAD = true;
+    window.ROSTER_ADMIN_MODE = true;
+    window.BUILD_STAMP = <?!= JSON.stringify(buildStamp) ?>;
+    window.ROSTER_BASE_URL = <?!= JSON.stringify(baseUrl) ?>;
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="<?= baseUrl ?>?asset=generator.js&v=<?!= encodeURIComponent(buildStamp) ?>"></script>
+  <script src="<?= baseUrl ?>?asset=client.js&v=<?!= encodeURIComponent(buildStamp) ?>"></script>
+  <script src="<?= baseUrl ?>?asset=admin.js&v=<?!= encodeURIComponent(buildStamp) ?>"></script>
+</body>
+
+</html>

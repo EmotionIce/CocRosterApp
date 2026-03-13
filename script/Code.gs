@@ -1,0 +1,6508 @@
+const FOLDER_ID = "1NrNOgGhK-hsrF7FPFQ7ck2NT9h6DGidH";
+const ARCHIVE_FOLDER_NAME = "_roster-admin-history";
+const ASSET_TEXT_CACHE_VERSION = "v2";
+const ASSET_TEXT_CACHE_TTL_ROSTER_SECONDS = 30;
+const ASSET_TEXT_CACHE_TTL_STATIC_SECONDS = 600;
+const FILE_LOOKUP_CACHE_VERSION = "v1";
+const FILE_LOOKUP_CACHE_TTL_SECONDS = 30;
+const ACTIVE_ROSTER_FILENAME = "roster-data.json";
+const ACTIVE_ROSTER_JOB_LOCK_KEY = "ACTIVE_ROSTER_JOB_LOCK";
+const ACTIVE_ROSTER_JOB_LOCK_WAIT_MS = 30 * 1000;
+const ACTIVE_ROSTER_JOB_LOCK_LEASE_MS = 15 * 60 * 1000;
+const ACTIVE_ROSTER_JOB_LOCK_POLL_MS = 250;
+const AUTO_REFRESH_HANDLER_NAME = "autoRefreshActiveRosterTick";
+const AUTO_REFRESH_INTERVAL_HOURS = 2;
+const AUTO_REFRESH_INTERVAL_MS = AUTO_REFRESH_INTERVAL_HOURS * 60 * 60 * 1000;
+const AUTO_REFRESH_ENABLED_PROPERTY = "AUTO_REFRESH_ENABLED";
+const AUTO_REFRESH_TRIGGER_ID_PROPERTY = "AUTO_REFRESH_TRIGGER_ID";
+const AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY = "AUTO_REFRESH_LAST_RUN_STARTED_AT";
+const AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY = "AUTO_REFRESH_LAST_RUN_FINISHED_AT";
+const AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY = "AUTO_REFRESH_LAST_RUN_STATUS";
+const AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY = "AUTO_REFRESH_LAST_RUN_SUMMARY";
+const AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY = "AUTO_REFRESH_LAST_ISSUE_SUMMARY";
+const AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY = "AUTO_REFRESH_LAST_RUN_ERROR";
+const AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY = "AUTO_REFRESH_LAST_RUN_ISSUE_COUNT";
+const AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY = "AUTO_REFRESH_LAST_ARCHIVE_DATE";
+const ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY = "ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT";
+const AUTO_REFRESH_DAILY_ARCHIVE_PREFIX = "roster-data.autorefresh.daily";
+const AUTO_REFRESH_DAILY_ARCHIVE_KEEP_DAYS = 30;
+
+function doGet(e) {
+	const p = e && e.parameter ? e.parameter : {};
+	const asset = p.asset ? String(p.asset) : "";
+	if (asset) return serveAsset_(asset);
+
+	if (p.debug === "1") {
+		const info = listFolderFiles_();
+		return ContentService.createTextOutput(JSON.stringify(info, null, 2)).setMimeType(ContentService.MimeType.JSON);
+	}
+
+	const css = getAssetText_("styles.css");
+	const buildStamp = new Date().toISOString();
+	const baseUrl = ScriptApp.getService().getUrl();
+
+	if (String(p.page || "") === "admin") {
+		const t = HtmlService.createTemplateFromFile("Admin");
+		t.css = css;
+		t.buildStamp = buildStamp;
+		t.baseUrl = baseUrl; // <-- THIS WAS MISSING
+		return t.evaluate().setTitle("Roster Admin").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+	}
+
+	const appHtml = getAssetText_("app.html").replace(/__ADMIN_URL__/g, baseUrl + "?page=admin");
+	const clientJs = getAssetText_("client.js");
+	let inlineRosterData = null;
+	const rosterDataText = getAssetText_(ACTIVE_ROSTER_FILENAME);
+	if (rosterDataText) {
+		try {
+			inlineRosterData = JSON.parse(rosterDataText);
+		} catch (err) {
+			Logger.log("Unable to parse %s for inline bootstrap: %s", ACTIVE_ROSTER_FILENAME, err && (err.message || err.stack) ? err.message || err.stack : String(err));
+		}
+	}
+	const html = buildIndexHtml_({
+		css: css,
+		appHtml: appHtml,
+		clientJs: clientJs,
+		buildStamp: buildStamp,
+		baseUrl: baseUrl,
+		inlineRosterData: inlineRosterData,
+	});
+
+	return HtmlService.createHtmlOutput(html).setTitle("CWL Roster").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function buildIndexHtml_(view) {
+	const model = view && typeof view === "object" ? view : {};
+	const css = typeof model.css === "string" ? model.css : "";
+	const appHtml = typeof model.appHtml === "string" ? model.appHtml : "";
+	const clientJs = typeof model.clientJs === "string" ? model.clientJs : "";
+	const buildStamp = typeof model.buildStamp === "string" ? model.buildStamp : "";
+	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : "";
+	const inlineRosterData = model && typeof model.inlineRosterData === "object" && model.inlineRosterData ? model.inlineRosterData : null;
+	const inlineRosterScriptJson = serializeJsonForScriptEmbedding_(inlineRosterData);
+
+	return [
+		"<!doctype html>",
+		"<html>",
+		"",
+		"<head>",
+		'    <meta charset="utf-8" />',
+		'    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+		"    <title>CWL Roster</title>",
+		'    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />',
+		'    <meta http-equiv="Pragma" content="no-cache" />',
+		'    <meta http-equiv="Expires" content="0" />',
+		'    <meta name="build-stamp" content="' + escapeHtmlAttribute_(buildStamp) + '" />',
+		"    <style>",
+		css,
+		"    </style>",
+		"</head>",
+		"",
+		'<body style="margin:0;">',
+		'    <div id="app">',
+		appHtml,
+		"    </div>",
+		"",
+		"    <script>",
+		"        // useful for debugging caching in devtools",
+		"        window.BUILD_STAMP = " + JSON.stringify(buildStamp) + ";",
+		"        window.ROSTER_BASE_URL = " + JSON.stringify(baseUrl) + ";",
+		"        window.__ROSTER_DATA__ = " + inlineRosterScriptJson + ";",
+		"    </script>",
+		"",
+		"    <script>",
+		clientJs,
+		"    </script>",
+		"</body>",
+		"",
+		"</html>",
+	].join("\n");
+}
+
+function escapeHtmlAttribute_(value) {
+	return String(value == null ? "" : value)
+		.replace(/&/g, "&amp;")
+		.replace(/"/g, "&quot;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+function serializeJsonForScriptEmbedding_(value) {
+	return JSON.stringify(value == null ? null : value).replace(/</g, "\\u003c");
+}
+
+function errorMessage_(err) {
+	return err && (err.message || err.stack) ? err.message || err.stack : String(err);
+}
+
+function parseRosterDataText_(text, sourceLabel) {
+	const label = String(sourceLabel == null ? ACTIVE_ROSTER_FILENAME : sourceLabel).trim() || ACTIVE_ROSTER_FILENAME;
+	const raw = String(text == null ? "" : text);
+	if (!raw) throw new Error("Missing " + label + " in Drive folder: " + FOLDER_ID);
+	try {
+		return JSON.parse(raw);
+	} catch (err) {
+		throw new Error(label + " is not valid JSON:\n\n" + errorMessage_(err));
+	}
+}
+
+function readActiveRosterSnapshotFromDrive_() {
+	const file = findFileByName_(ACTIVE_ROSTER_FILENAME);
+	if (!file) throw new Error("Missing " + ACTIVE_ROSTER_FILENAME + " in Drive folder: " + FOLDER_ID);
+	const text = file.getBlob().getDataAsString("UTF-8");
+	const rosterData = parseRosterDataText_(text, ACTIVE_ROSTER_FILENAME);
+	return { file: file, text: text, rosterData: rosterData };
+}
+
+function readActiveRosterDataFromDrive_() {
+	return readActiveRosterSnapshotFromDrive_().rosterData;
+}
+
+// Called from client.js via google.script.run (no CORS, short cache with Drive fallback)
+function getRosterData() {
+	return parseRosterDataText_(getAssetText_(ACTIVE_ROSTER_FILENAME), ACTIVE_ROSTER_FILENAME);
+}
+
+function verifyAdminPassword(password) {
+	assertAdminPassword_(password);
+	return { ok: true };
+}
+
+function getPlayerProfile(playerTag, password) {
+	const normalizedTag = normalizeTag_(playerTag);
+	if (!isValidPlayerTag_(normalizedTag)) {
+		throw new Error("Invalid player tag.");
+	}
+
+	const isAdmin = hasValidAdminPassword_(password);
+	if (!isAdmin && !isPublishedRosterTag_(normalizedTag)) {
+		throw new Error("Not authorized to fetch this player tag.");
+	}
+
+	const cache = CacheService.getScriptCache();
+	const cacheKey = "playerProfile:" + normalizedTag;
+	const cached = cache.get(cacheKey);
+	if (cached) {
+		try {
+			const parsed = JSON.parse(cached);
+			if (parsed && parsed.ok && normalizeTag_(parsed.tag) === normalizedTag) {
+				return parsed;
+			}
+		} catch (err) {
+			Logger.log("Ignoring invalid player profile cache for %s: %s", normalizedTag, err && err.message ? err.message : String(err));
+		}
+	}
+
+	try {
+		const player = cocFetch_("/players/" + encodeTagForPath_(normalizedTag));
+		const payload = {
+			ok: true,
+			tag: normalizedTag,
+			fetchedAt: new Date().toISOString(),
+			player: player && typeof player === "object" ? player : {},
+		};
+
+		try {
+			cache.put(cacheKey, JSON.stringify(payload), PLAYER_PROFILE_CACHE_TTL_SECONDS);
+		} catch (cacheErr) {
+			Logger.log("Unable to cache player profile for %s: %s", normalizedTag, cacheErr && cacheErr.message ? cacheErr.message : String(cacheErr));
+		}
+
+		return payload;
+	} catch (err) {
+		throw normalizePlayerProfileError_(normalizedTag, err);
+	}
+}
+
+function getTownHallIconData(levelRaw) {
+	const level = toNonNegativeInt_(levelRaw);
+	if (level < 1 || level > 18) {
+		throw new Error("Invalid Town Hall level.");
+	}
+
+	const cache = CacheService.getScriptCache();
+	const cacheKey = "townHallIcon:" + level;
+	const cached = cache.get(cacheKey);
+	if (cached) {
+		try {
+			const parsed = JSON.parse(cached);
+			if (parsed && parsed.ok && Number(parsed.level) === level && parsed.dataUrl) {
+				return parsed;
+			}
+		} catch (err) {
+			Logger.log("Ignoring invalid Town Hall icon cache for level %s: %s", level, err && err.message ? err.message : String(err));
+		}
+	}
+
+	const candidates = ["assets/icons/th" + level + ".webp", "assets/icons/th" + level + ".wepb", "th" + level + ".webp", "th" + level + ".wepb"];
+	const file = findFirstFileByNameCandidates_(candidates);
+	if (!file) {
+		return { ok: false, level: level, dataUrl: "", fileName: "" };
+	}
+
+	const blob = file.getBlob();
+	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
+	const payload = {
+		ok: true,
+		level: level,
+		fileName: file.getName(),
+		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
+	};
+
+	try {
+		cache.put(cacheKey, JSON.stringify(payload), TOWN_HALL_ICON_CACHE_TTL_SECONDS);
+	} catch (cacheErr) {
+		Logger.log("Unable to cache Town Hall icon for level %s: %s", level, cacheErr && cacheErr.message ? cacheErr.message : String(cacheErr));
+	}
+
+	return payload;
+}
+
+function normalizeLeagueFamilyKey_(value) {
+	const raw = String(value == null ? "" : value)
+		.trim()
+		.toLowerCase();
+	if (!raw) return "";
+	const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+	return normalized.replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeLeagueMatchText_(value) {
+	const raw = String(value == null ? "" : value)
+		.trim()
+		.toLowerCase();
+	if (!raw) return "";
+	const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+	return normalized
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/[^a-z0-9]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function resolveHomeLeagueAssetFamily_(leagueNameRaw) {
+	const text = normalizeLeagueMatchText_(leagueNameRaw);
+	const compact = normalizeLeagueFamilyKey_(leagueNameRaw);
+	if (!text) return "";
+	const hasWord = (word) => new RegExp("(^|\\s)" + String(word) + "(\\s|$)").test(text);
+	const hasCompact = (fragment) => compact.indexOf(String(fragment)) >= 0;
+	if (hasWord("unranked")) return "unranked";
+	if (hasWord("skeleton")) return "skeleton";
+	if (hasWord("barbarian")) return "barbarian";
+	if (hasWord("archer")) return "archer";
+	if (hasWord("wizard")) return "wizard";
+	if (hasWord("valkyrie")) return "valkyrie";
+	if (hasWord("witch")) return "witch";
+	if (hasWord("golem")) return "golem";
+	if (hasWord("pekka") || hasCompact("pekka")) return "pekka";
+	if (hasWord("titan")) return "titan";
+	if (hasWord("electro")) return "electro";
+	if (hasWord("dragon")) return "dragon";
+	if (hasWord("legend")) return "legend";
+	return "";
+}
+
+function getHomeLeagueAssetPath_(leagueNameRaw) {
+	const family = resolveHomeLeagueAssetFamily_(leagueNameRaw);
+	if (family === "unranked") return "assets/icons/league-unranked.webp";
+	if (family === "skeleton") return "assets/icons/league-skeleton.webp";
+	if (family === "barbarian") return "assets/icons/league-barbarian.webp";
+	if (family === "archer") return "assets/icons/league-archer.webp";
+	if (family === "wizard") return "assets/icons/league-wizard.webp";
+	if (family === "valkyrie") return "assets/icons/league-valkyrie.webp";
+	if (family === "witch") return "assets/icons/league-witch.webp";
+	if (family === "golem") return "assets/icons/league-golem.webp";
+	if (family === "pekka") return "assets/icons/league-pekka.webp";
+	if (family === "titan") return "assets/icons/league-titan.webp";
+	if (family === "dragon") return "assets/icons/league-dragon.webp";
+	if (family === "electro") return "assets/icons/league-electro.webp";
+	if (family === "legend") return "assets/icons/league-legend.webp";
+	return "";
+}
+
+function getLeagueIconData(leagueNameRaw) {
+	const leagueName = String(leagueNameRaw == null ? "" : leagueNameRaw).trim();
+	const family = resolveHomeLeagueAssetFamily_(leagueName);
+	const assetPath = getHomeLeagueAssetPath_(leagueName);
+	if (!assetPath) {
+		Logger.log("No local league icon mapping for league name '%s'.", leagueName);
+		return { ok: false, leagueName: leagueName, family: family, assetPath: "", dataUrl: "", fileName: "" };
+	}
+
+	const key = normalizeLeagueFamilyKey_(family) || assetPath;
+	const cache = CacheService.getScriptCache();
+	const cacheKey = "leagueIcon:" + LEAGUE_ICON_CACHE_VERSION + ":" + key;
+	const cached = cache.get(cacheKey);
+	if (cached) {
+		try {
+			const parsed = JSON.parse(cached);
+			if (parsed && parsed.ok && parsed.key === key && parsed.dataUrl) {
+				return parsed;
+			}
+		} catch (err) {
+			Logger.log("Ignoring invalid league icon cache for key %s: %s", key, err && err.message ? err.message : String(err));
+		}
+	}
+
+	const baseName = assetPath.split(/[\/\\]/).pop() || "";
+	const typoAssetPath = /\.webp$/i.test(assetPath) ? assetPath.replace(/\.webp$/i, ".wepb") : assetPath;
+	const typoBaseName = /\.webp$/i.test(baseName) ? baseName.replace(/\.webp$/i, ".wepb") : baseName;
+	// Prefer exact relative-path assets to avoid selecting wrong duplicate filenames elsewhere in Drive.
+	const file = findFileByRelativePath_(assetPath) || findFileByRelativePath_(typoAssetPath) || findFirstFileByNameCandidates_([baseName, typoBaseName]);
+	if (!file) {
+		Logger.log("No league icon file found for league '%s' mapped to '%s'.", leagueName, assetPath);
+		return { ok: false, key: key, leagueName: leagueName, family: family, assetPath: assetPath, dataUrl: "", fileName: "" };
+	}
+
+	const blob = file.getBlob();
+	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
+	const payload = {
+		ok: true,
+		key: key,
+		leagueName: leagueName,
+		family: family,
+		assetPath: assetPath,
+		fileName: file.getName(),
+		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
+	};
+
+	try {
+		cache.put(cacheKey, JSON.stringify(payload), LEAGUE_ICON_CACHE_TTL_SECONDS);
+	} catch (cacheErr) {
+		Logger.log("Unable to cache league icon for key %s: %s", key, cacheErr && cacheErr.message ? cacheErr.message : String(cacheErr));
+	}
+
+	return payload;
+}
+
+function parseActiveRosterJobLockState_(raw) {
+	const text = String(raw == null ? "" : raw).trim();
+	if (!text) return null;
+	try {
+		const parsed = JSON.parse(text);
+		const token = String((parsed && parsed.token) || "").trim();
+		const owner = String((parsed && parsed.owner) || "").trim();
+		const expiresAt = Number(parsed && parsed.expiresAt);
+		if (!token || !isFinite(expiresAt)) return null;
+		return {
+			token: token,
+			owner: owner,
+			expiresAt: Math.floor(expiresAt),
+		};
+	} catch (err) {
+		return null;
+	}
+}
+
+function tryAcquireActiveRosterJobLock_(ownerRaw, waitMsRaw) {
+	const owner = String(ownerRaw == null ? "unknown" : ownerRaw).trim() || "unknown";
+	const waitMs = Math.max(0, Number(waitMsRaw) || 0);
+	const deadlineMs = Date.now() + waitMs;
+	const props = PropertiesService.getScriptProperties();
+	const token = Utilities.getUuid();
+	let acquired = false;
+
+	while (!acquired) {
+		const scriptLock = LockService.getScriptLock();
+		const remainingMs = waitMs > 0 ? Math.max(250, deadlineMs - Date.now()) : 250;
+		const didLock = scriptLock.tryLock(Math.min(5000, remainingMs));
+		if (!didLock) {
+			if (waitMs <= 0 || Date.now() >= deadlineMs) break;
+			Utilities.sleep(ACTIVE_ROSTER_JOB_LOCK_POLL_MS);
+			continue;
+		}
+
+		try {
+			const nowMs = Date.now();
+			const current = parseActiveRosterJobLockState_(props.getProperty(ACTIVE_ROSTER_JOB_LOCK_KEY));
+			if (!current || current.expiresAt <= nowMs) {
+				props.setProperty(
+					ACTIVE_ROSTER_JOB_LOCK_KEY,
+					JSON.stringify({
+						token: token,
+						owner: owner,
+						expiresAt: nowMs + ACTIVE_ROSTER_JOB_LOCK_LEASE_MS,
+					}),
+				);
+				acquired = true;
+			}
+		} finally {
+			scriptLock.releaseLock();
+		}
+
+		if (acquired) {
+			return { token: token, owner: owner };
+		}
+		if (waitMs <= 0 || Date.now() >= deadlineMs) break;
+		Utilities.sleep(ACTIVE_ROSTER_JOB_LOCK_POLL_MS);
+	}
+	return null;
+}
+
+function releaseActiveRosterJobLock_(tokenRaw) {
+	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
+	if (!token) return false;
+	const props = PropertiesService.getScriptProperties();
+	const scriptLock = LockService.getScriptLock();
+	const didLock = scriptLock.tryLock(5000);
+	if (!didLock) return false;
+	try {
+		const current = parseActiveRosterJobLockState_(props.getProperty(ACTIVE_ROSTER_JOB_LOCK_KEY));
+		if (current && current.token === token) {
+			props.deleteProperty(ACTIVE_ROSTER_JOB_LOCK_KEY);
+			return true;
+		}
+		return false;
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
+function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
+	if (typeof callback !== "function") {
+		throw new Error("Active roster job callback is required.");
+	}
+	const acquired = tryAcquireActiveRosterJobLock_(ownerRaw, waitMsRaw);
+	if (!acquired) {
+		throw new Error("Another active roster refresh/publish flow is running. Please wait and try again.");
+	}
+	try {
+		return callback();
+	} finally {
+		releaseActiveRosterJobLock_(acquired.token);
+	}
+}
+
+function updateActiveRosterDataCaches_(file, text) {
+	const fileObj = file && typeof file === "object" ? file : null;
+	const cache = getScriptCacheSafe_();
+	const fileId = fileObj && fileObj.getId ? String(fileObj.getId() || "").trim() : "";
+	const payloadText = String(text == null ? "" : text);
+
+	writeStringToCache_(cache, buildAssetTextCacheKey_(ACTIVE_ROSTER_FILENAME), payloadText, getAssetTextCacheTtlSeconds_(ACTIVE_ROSTER_FILENAME));
+
+	if (fileId) {
+		writeStringToCache_(cache, buildNewestFileIdCacheKey_(ACTIVE_ROSTER_FILENAME), fileId, FILE_LOOKUP_CACHE_TTL_SECONDS);
+		writeStringToCache_(cache, buildFileIdsCacheKey_(ACTIVE_ROSTER_FILENAME), JSON.stringify({ ids: [fileId] }), FILE_LOOKUP_CACHE_TTL_SECONDS);
+	}
+}
+
+function getServerDateString_(dateRaw) {
+	const date = dateRaw instanceof Date ? dateRaw : new Date();
+	const timezone = Session.getScriptTimeZone ? Session.getScriptTimeZone() : "Etc/UTC";
+	return Utilities.formatDate(date, timezone, "yyyy-MM-dd");
+}
+
+function parseIsoToMs_(isoRaw) {
+	const text = String(isoRaw == null ? "" : isoRaw).trim();
+	if (!text) return 0;
+	const ms = new Date(text).getTime();
+	return isFinite(ms) ? ms : 0;
+}
+
+function buildAutoRefreshDailyArchiveFilename_(dateStringRaw) {
+	const dateString = String(dateStringRaw == null ? "" : dateStringRaw).trim();
+	if (!dateString) return "";
+	return AUTO_REFRESH_DAILY_ARCHIVE_PREFIX + "." + dateString + ".json";
+}
+
+function isAutoRefreshDailyArchiveFilename_(nameRaw) {
+	const name = String(nameRaw == null ? "" : nameRaw).trim();
+	const match = /^roster-data\.autorefresh\.daily\.(\d{4}-\d{2}-\d{2})\.json$/i.exec(name);
+	return match ? String(match[1] || "") : "";
+}
+
+function normalizeActiveRosterForCompare_(rosterDataRaw) {
+	const validated = validateRosterData_(rosterDataRaw);
+	return JSON.stringify({
+		schemaVersion: validated.schemaVersion,
+		pageTitle: validated.pageTitle,
+		rosters: validated.rosters,
+	});
+}
+
+function hasActiveRosterPayloadChanged_(beforeRaw, afterRaw) {
+	return normalizeActiveRosterForCompare_(beforeRaw) !== normalizeActiveRosterForCompare_(afterRaw);
+}
+
+function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
+	const timestamp = String(timestampRaw == null ? "" : timestampRaw).trim() || new Date().toISOString();
+	const validated = validateRosterData_(rosterDataRaw);
+	const out = {
+		schemaVersion: validated.schemaVersion,
+		pageTitle: validated.pageTitle,
+		rosters: validated.rosters,
+		lastUpdatedAt: timestamp,
+	};
+	return validateRosterData_(out);
+}
+
+function markActiveDataWriteSuccess_(timestampRaw) {
+	const timestamp = String(timestampRaw == null ? "" : timestampRaw).trim() || new Date().toISOString();
+	const props = PropertiesService.getScriptProperties();
+	props.setProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY, timestamp);
+}
+
+function getLastSuccessfulActiveWriteAt_() {
+	const props = PropertiesService.getScriptProperties();
+	const text = String(props.getProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY) || "").trim();
+	if (text) return text;
+	try {
+		const activeData = readActiveRosterDataFromDrive_();
+		const fallback = String((activeData && activeData.lastUpdatedAt) || "").trim();
+		if (!fallback) return "";
+		props.setProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY, fallback);
+		return fallback;
+	} catch (err) {
+		return "";
+	}
+}
+
+function isRecentSuccessfulActiveWrite_() {
+	const lastWriteAt = getLastSuccessfulActiveWriteAt_();
+	const lastWriteMs = parseIsoToMs_(lastWriteAt);
+	if (!lastWriteMs) return false;
+	return Date.now() - lastWriteMs < AUTO_REFRESH_INTERVAL_MS;
+}
+
+function shortenIssueMessage_(messageRaw, maxLenRaw) {
+	const text = String(messageRaw == null ? "" : messageRaw)
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return "";
+	const maxLen = Math.max(40, toNonNegativeInt_(maxLenRaw) || 160);
+	if (text.length <= maxLen) return text;
+	return text.slice(0, Math.max(0, maxLen - 3)).trim() + "...";
+}
+
+function buildAutoRefreshIssueSummary_(issuesRaw) {
+	const issues = Array.isArray(issuesRaw) ? issuesRaw : [];
+	if (!issues.length) return "";
+	const first = issues[0] && typeof issues[0] === "object" ? issues[0] : {};
+	const rosterName = String(first.rosterName == null ? "" : first.rosterName).trim() || "Unknown roster";
+	const step = String(first.step == null ? "" : first.step).trim() || "pipeline";
+	const message = shortenIssueMessage_(first.message, 180) || "Unknown issue.";
+	return rosterName + " | " + step + " | " + message;
+}
+
+function buildActiveRosterTempFilename_() {
+	const stem = ACTIVE_ROSTER_FILENAME.replace(/\.json$/i, "") || "roster-data";
+	const timestamp = new Date().toISOString().replace(/[:.]/g, "_");
+	const nonce = Utilities.getUuid().replace(/-/g, "");
+	return stem + ".tmp." + timestamp + "." + nonce + ".json";
+}
+
+function createVerifiedTempActiveRosterDataFile_(folder, payloadTextRaw) {
+	const payloadText = String(payloadTextRaw == null ? "" : payloadTextRaw);
+	const tempName = buildActiveRosterTempFilename_();
+	const file = folder.createFile(tempName, payloadText, "application/json");
+	const writtenText = file.getBlob().getDataAsString("UTF-8");
+	validateRosterData_(parseRosterDataText_(writtenText, tempName));
+	return { file: file, text: writtenText, name: tempName };
+}
+
+function replaceActiveRosterDataFile_(validatedRosterData, options) {
+	const opts = options && typeof options === "object" ? options : {};
+	const validated = validateRosterData_(validatedRosterData);
+	const folder = opts.folder && typeof opts.folder === "object" ? opts.folder : DriveApp.getFolderById(FOLDER_ID);
+	const archiveFolder = opts.archiveFolder && typeof opts.archiveFolder === "object" ? opts.archiveFolder : null;
+	const backupEnabled = !!archiveFolder;
+	const backupNameStem = String(opts.backupNameStem == null ? "roster-data" : opts.backupNameStem).trim() || "roster-data";
+	const payloadText = JSON.stringify(validated, null, 2);
+	const oldFiles = findFilesByNameInFolder_(folder, ACTIVE_ROSTER_FILENAME);
+	const tempResult = createVerifiedTempActiveRosterDataFile_(folder, payloadText);
+	const tempFile = tempResult.file;
+	let promoted = false;
+
+	try {
+		if (backupEnabled && oldFiles.length) {
+			const timestamp = new Date().toISOString().replace(/[:.]/g, "_");
+			for (let i = 0; i < oldFiles.length; i++) {
+				const oldFile = oldFiles[i];
+				const suffix = i === 0 ? "" : "." + (i + 1);
+				archiveFolder.createFile(backupNameStem + "." + timestamp + suffix + ".backup.json", oldFile.getBlob());
+			}
+		}
+		tempFile.setName(ACTIVE_ROSTER_FILENAME);
+		promoted = true;
+	} catch (err) {
+		let tempLooksPromoted = false;
+		let promotionStateKnown = true;
+		try {
+			tempLooksPromoted = String(tempFile.getName ? tempFile.getName() : "") === ACTIVE_ROSTER_FILENAME;
+		} catch (nameErr) {
+			promotionStateKnown = false;
+			tempLooksPromoted = false;
+		}
+		if (tempLooksPromoted) {
+			promoted = true;
+			Logger.log("Active roster temp promotion reported an error but appears successful: %s", errorMessage_(err));
+		}
+		if (!promoted) {
+			if (promotionStateKnown) {
+				try {
+					tempFile.setTrashed(true);
+				} catch (cleanupErr) {
+					Logger.log("Unable to cleanup temporary roster file after failed replacement: %s", errorMessage_(cleanupErr));
+				}
+			} else {
+				Logger.log("Unable to verify temp promotion state after replacement error; leaving temp file untouched: %s", errorMessage_(err));
+			}
+			throw err;
+		}
+	}
+
+	for (let i = 0; i < oldFiles.length; i++) {
+		try {
+			oldFiles[i].setTrashed(true);
+		} catch (err) {
+			Logger.log("Unable to trash stale active roster file '%s': %s", oldFiles[i].getName(), errorMessage_(err));
+		}
+	}
+
+	try {
+		updateActiveRosterDataCaches_(tempFile, tempResult.text);
+	} catch (cacheErr) {
+		Logger.log("Unable to update active roster caches after replacement: %s", errorMessage_(cacheErr));
+	}
+
+	return {
+		file: tempFile,
+		replacedCount: oldFiles.length,
+		validatedRosterData: validated,
+	};
+}
+
+function writePublishedRosterData_(rosterDataRaw) {
+	const publishedAt = new Date().toISOString();
+	const validated = withRosterLastUpdatedAt_(rosterDataRaw, publishedAt);
+	const folder = DriveApp.getFolderById(FOLDER_ID);
+	const archiveFolder = getArchiveFolder_();
+	moveLegacyHistoryFilesToArchive_(folder, archiveFolder);
+	replaceActiveRosterDataFile_(validated, {
+		folder: folder,
+		archiveFolder: archiveFolder,
+		backupNameStem: "roster-data",
+	});
+
+	const oldMetaFiles = findFilesByNameInFolder_(archiveFolder, "roster-data.last-import.json");
+	for (let i = 0; i < oldMetaFiles.length; i++) oldMetaFiles[i].setTrashed(true);
+
+	const counts = countRosterPayload_(validated);
+	const meta = {
+		publishedAt: publishedAt,
+		lastUpdatedAt: publishedAt,
+		folderId: FOLDER_ID,
+		archiveFolderId: archiveFolder.getId(),
+		pageTitle: validated.pageTitle || "",
+		rosterCount: Array.isArray(validated.rosters) ? validated.rosters.length : 0,
+		playerCount: counts.playerCount,
+		noteCount: counts.noteCount,
+	};
+	archiveFolder.createFile("roster-data.last-import.json", JSON.stringify(meta, null, 2), "application/json");
+	Logger.log("publishRosterData ok folderId=%s archiveFolderId=%s rosters=%s players=%s notes=%s", FOLDER_ID, archiveFolder.getId(), meta.rosterCount, counts.playerCount, counts.noteCount);
+	markActiveDataWriteSuccess_(publishedAt);
+	return meta;
+}
+
+function createAutoRefreshDailyArchiveIfNeeded_(archiveFolder, dateStringRaw, sourceTextRaw) {
+	const folder = archiveFolder && typeof archiveFolder === "object" ? archiveFolder : null;
+	if (!folder) return { created: false, existed: false, archiveDate: "", fileName: "" };
+
+	const archiveDate = String(dateStringRaw == null ? "" : dateStringRaw).trim() || getServerDateString_(new Date());
+	const fileName = buildAutoRefreshDailyArchiveFilename_(archiveDate);
+	if (!fileName) return { created: false, existed: false, archiveDate: "", fileName: "" };
+
+	const existing = findFilesByNameInFolder_(folder, fileName);
+	if (existing.length > 0) {
+		return { created: false, existed: true, archiveDate: archiveDate, fileName: fileName };
+	}
+
+	const sourceText = String(sourceTextRaw == null ? "" : sourceTextRaw);
+	folder.createFile(fileName, sourceText, "application/json");
+	return { created: true, existed: false, archiveDate: archiveDate, fileName: fileName };
+}
+
+function cleanupOldAutoRefreshDailyArchives_(archiveFolder, todayRaw) {
+	const folder = archiveFolder && typeof archiveFolder === "object" ? archiveFolder : null;
+	if (!folder) return 0;
+	const today = todayRaw instanceof Date ? todayRaw : new Date();
+	const cutoffDate = new Date(today.getTime() - AUTO_REFRESH_DAILY_ARCHIVE_KEEP_DAYS * 24 * 60 * 60 * 1000);
+	const cutoffDateString = getServerDateString_(cutoffDate);
+	let deletedCount = 0;
+
+	const it = folder.getFiles();
+	while (it.hasNext()) {
+		const file = it.next();
+		const archiveDate = isAutoRefreshDailyArchiveFilename_(file.getName && file.getName());
+		if (!archiveDate || archiveDate >= cutoffDateString) continue;
+		try {
+			file.setTrashed(true);
+			deletedCount++;
+		} catch (err) {
+			Logger.log("Unable to delete stale auto-refresh archive '%s': %s", file.getName(), errorMessage_(err));
+		}
+	}
+	return deletedCount;
+}
+
+function findLatestAutoRefreshArchiveDate_(archiveFolder) {
+	const folder = archiveFolder && typeof archiveFolder === "object" ? archiveFolder : null;
+	if (!folder) return "";
+	let latest = "";
+	const it = folder.getFiles();
+	while (it.hasNext()) {
+		const file = it.next();
+		const archiveDate = isAutoRefreshDailyArchiveFilename_(file.getName && file.getName());
+		if (!archiveDate) continue;
+		if (!latest || archiveDate > latest) latest = archiveDate;
+	}
+	return latest;
+}
+
+function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterDataRaw) {
+	const sourceSnapshot = sourceSnapshotRaw && typeof sourceSnapshotRaw === "object" ? sourceSnapshotRaw : readActiveRosterSnapshotFromDrive_();
+	const sourceData = validateRosterData_(sourceSnapshot.rosterData);
+	const refreshedData = validateRosterData_(refreshedRosterDataRaw);
+	const changed = hasActiveRosterPayloadChanged_(sourceData, refreshedData);
+	if (!changed) {
+		const sourceCounts = countRosterPayload_(sourceData);
+		return {
+			changed: false,
+			written: false,
+			writtenAt: "",
+			replacedCount: 0,
+			playerCount: sourceCounts.playerCount,
+			noteCount: sourceCounts.noteCount,
+			rosterCount: Array.isArray(sourceData.rosters) ? sourceData.rosters.length : 0,
+			archiveCreated: false,
+			archiveDate: "",
+			archiveCleanupDeleted: 0,
+		};
+	}
+
+	const writtenAt = new Date().toISOString();
+	const payloadToWrite = withRosterLastUpdatedAt_(refreshedData, writtenAt);
+	const payloadText = JSON.stringify(payloadToWrite, null, 2);
+	const counts = countRosterPayload_(payloadToWrite);
+	const writeResult = replaceActiveRosterDataFile_(payloadToWrite);
+	const archiveFolder = getArchiveFolder_();
+	const archiveDate = getServerDateString_(new Date());
+	let archiveCreated = false;
+	try {
+		const archiveResult = createAutoRefreshDailyArchiveIfNeeded_(archiveFolder, archiveDate, payloadText);
+		archiveCreated = !!archiveResult.created;
+		if (archiveResult.archiveDate) {
+			PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, archiveResult.archiveDate);
+		}
+	} catch (err) {
+		Logger.log("Unable to create auto-refresh daily archive: %s", errorMessage_(err));
+	}
+	const archiveCleanupDeleted = cleanupOldAutoRefreshDailyArchives_(archiveFolder, new Date());
+	markActiveDataWriteSuccess_(writtenAt);
+
+	return {
+		changed: true,
+		written: true,
+		writtenAt: writtenAt,
+		replacedCount: writeResult.replacedCount,
+		playerCount: counts.playerCount,
+		noteCount: counts.noteCount,
+		rosterCount: Array.isArray(payloadToWrite.rosters) ? payloadToWrite.rosters.length : 0,
+		archiveCreated: archiveCreated,
+		archiveDate: archiveDate,
+		archiveCleanupDeleted: archiveCleanupDeleted,
+	};
+}
+
+function findRosterInDataById_(rosterData, rosterIdRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) return null;
+	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		if (String(roster.id || "").trim() === rosterId) return roster;
+	}
+	return null;
+}
+
+function runAutoRefreshAllRosters_(rosterDataRaw) {
+	let rosterData = validateRosterData_(rosterDataRaw);
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const issues = [];
+	const perRoster = [];
+	let processedRosters = 0;
+	let rostersWithIssues = 0;
+	let ownershipSnapshot = null;
+	let ownershipSnapshotError = null;
+	try {
+		ownershipSnapshot = buildLiveRosterOwnershipSnapshot_(rosterData);
+	} catch (err) {
+		ownershipSnapshotError = err;
+	}
+
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const rosterId = String(roster.id || "").trim();
+		if (!rosterId) continue;
+		processedRosters++;
+
+		const rosterTitle = String(roster.title || "").trim();
+		const rosterLabel = rosterTitle ? rosterTitle : rosterId;
+		const rosterIssues = [];
+		const addIssue = (stepRaw, messageRaw) => {
+			const step = String(stepRaw == null ? "" : stepRaw).trim() || "pipeline";
+			const message = shortenIssueMessage_(messageRaw, 200);
+			if (!message) return;
+			const issue = {
+				rosterId: rosterId,
+				rosterName: rosterLabel,
+				step: step,
+				message: message,
+			};
+			rosterIssues.push(issue);
+			issues.push(issue);
+		};
+
+		const currentRoster = findRosterInDataById_(rosterData, rosterId);
+		const trackingMode = getRosterTrackingMode_(currentRoster);
+		const lineupStepLabel = trackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup";
+		const statsStepLabel = trackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats";
+		const noCurrentWarMessage = trackingMode === "regularWar" ? "no current regular war found" : "no current cwl war found";
+		const hasConnectedClanTag = !!normalizeTag_(currentRoster && currentRoster.connectedClanTag);
+		if (!hasConnectedClanTag) {
+			addIssue("sync clan roster pool", "Connected clan tag is missing.");
+		}
+
+		if (hasConnectedClanTag) {
+			try {
+				if (ownershipSnapshotError) throw ownershipSnapshotError;
+				const syncPool = syncClanRosterPoolInternal_(rosterData, rosterId, { ownershipSnapshot: ownershipSnapshot });
+				rosterData = syncPool && syncPool.rosterData ? syncPool.rosterData : rosterData;
+			} catch (err) {
+				addIssue("sync clan roster pool", errorMessage_(err));
+			}
+
+			try {
+				const syncToday = syncClanTodayLineupInternal_(rosterData, rosterId);
+				rosterData = syncToday && syncToday.rosterData ? syncToday.rosterData : rosterData;
+				const message = String((syncToday && syncToday.result && syncToday.result.message) || "")
+					.trim()
+					.toLowerCase();
+				if (message === noCurrentWarMessage) {
+					Logger.log("autoRefresh: roster '%s' has no current war for mode '%s'; treated as non-fatal.", rosterId, trackingMode);
+				}
+			} catch (err) {
+				addIssue(lineupStepLabel, errorMessage_(err));
+			}
+
+			try {
+				const refresh = refreshTrackingStatsInternal_(rosterData, rosterId);
+				rosterData = refresh && refresh.rosterData ? refresh.rosterData : rosterData;
+			} catch (err) {
+				addIssue(statsStepLabel, errorMessage_(err));
+			}
+		}
+
+		if (trackingMode === "cwl") {
+			try {
+				const bench = computeBenchSuggestionsInternal_(rosterData, rosterId);
+				rosterData = bench && bench.rosterData ? bench.rosterData : rosterData;
+			} catch (err) {
+				addIssue("compute bench suggestions", errorMessage_(err));
+			}
+		}
+
+		if (rosterIssues.length > 0) rostersWithIssues++;
+		perRoster.push({
+			rosterId: rosterId,
+			rosterName: rosterLabel,
+			issueCount: rosterIssues.length,
+			issues: rosterIssues,
+		});
+	}
+
+	return {
+		rosterData: validateRosterData_(rosterData),
+		processedRosters: processedRosters,
+		rostersWithIssues: rostersWithIssues,
+		issueCount: issues.length,
+		issues: issues,
+		issueSummary: buildAutoRefreshIssueSummary_(issues),
+		perRoster: perRoster,
+	};
+}
+
+function buildAutoRefreshSummary_(runResult, writeResult) {
+	const run = runResult && typeof runResult === "object" ? runResult : {};
+	const write = writeResult && typeof writeResult === "object" ? writeResult : {};
+	const processed = Math.max(0, toNonNegativeInt_(run.processedRosters));
+	const withIssues = Math.max(0, toNonNegativeInt_(run.rostersWithIssues));
+	const issueCount = Math.max(0, toNonNegativeInt_(run.issueCount));
+	const changed = !!write.changed;
+	if (!changed) {
+		return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s), no active payload change.";
+	}
+	const rostersWritten = Math.max(0, toNonNegativeInt_(write.rosterCount));
+	return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s), wrote " + rostersWritten + " roster(s).";
+}
+
+function setAutoRefreshRunResult_(statusRaw, summaryRaw, errorRaw, issueCountRaw, issueSummaryRaw, startedAtRaw, finishedAtRaw) {
+	const status = String(statusRaw == null ? "" : statusRaw).trim() || "error";
+	const summary = String(summaryRaw == null ? "" : summaryRaw)
+		.trim()
+		.slice(0, 500);
+	const error = String(errorRaw == null ? "" : errorRaw)
+		.trim()
+		.slice(0, 2000);
+	const issueSummary = String(issueSummaryRaw == null ? "" : issueSummaryRaw)
+		.trim()
+		.slice(0, 500);
+	const issueCount = Math.max(0, toNonNegativeInt_(issueCountRaw));
+	const startedAt = String(startedAtRaw == null ? "" : startedAtRaw).trim() || new Date().toISOString();
+	const finishedAt = String(finishedAtRaw == null ? "" : finishedAtRaw).trim() || new Date().toISOString();
+	const props = PropertiesService.getScriptProperties();
+	props.setProperties(
+		{
+			[AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY]: startedAt,
+			[AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY]: finishedAt,
+			[AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY]: status,
+			[AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY]: summary,
+			[AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY]: issueSummary,
+			[AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY]: error,
+			[AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY]: String(issueCount),
+		},
+		false,
+	);
+}
+
+function isAutoRefreshEnabled_() {
+	const raw = String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_ENABLED_PROPERTY) || "")
+		.trim()
+		.toLowerCase();
+	return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function getTriggerUniqueId_(trigger) {
+	if (!trigger || typeof trigger !== "object" || typeof trigger.getUniqueId !== "function") return "";
+	try {
+		return String(trigger.getUniqueId() || "").trim();
+	} catch (err) {
+		return "";
+	}
+}
+
+function listAutoRefreshTriggers_() {
+	const all = ScriptApp.getProjectTriggers();
+	return all.filter((trigger) => {
+		try {
+			return String(trigger.getHandlerFunction() || "") === AUTO_REFRESH_HANDLER_NAME;
+		} catch (err) {
+			return false;
+		}
+	});
+}
+
+function removeAutoRefreshTriggers_() {
+	const triggers = listAutoRefreshTriggers_();
+	let removed = 0;
+	for (let i = 0; i < triggers.length; i++) {
+		try {
+			ScriptApp.deleteTrigger(triggers[i]);
+			removed++;
+		} catch (err) {
+			Logger.log("Unable to delete auto-refresh trigger: %s", errorMessage_(err));
+		}
+	}
+	return removed;
+}
+
+function ensureSingleAutoRefreshTrigger_() {
+	const props = PropertiesService.getScriptProperties();
+	const configuredId = String(props.getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
+	const triggers = listAutoRefreshTriggers_();
+	let keep = null;
+
+	if (configuredId) {
+		for (let i = 0; i < triggers.length; i++) {
+			if (getTriggerUniqueId_(triggers[i]) === configuredId) {
+				keep = triggers[i];
+				break;
+			}
+		}
+	}
+	if (!keep && triggers.length) keep = triggers[0];
+
+	const keepId = getTriggerUniqueId_(keep);
+	for (let i = 0; i < triggers.length; i++) {
+		const trigger = triggers[i];
+		const triggerId = getTriggerUniqueId_(trigger);
+		const isKeptTrigger = !!keep && ((keepId && triggerId === keepId) || (!keepId && trigger === keep));
+		if (isKeptTrigger) continue;
+		try {
+			ScriptApp.deleteTrigger(trigger);
+		} catch (err) {
+			Logger.log("Unable to delete duplicate auto-refresh trigger: %s", errorMessage_(err));
+		}
+	}
+
+	if (!keep) {
+		keep = ScriptApp.newTrigger(AUTO_REFRESH_HANDLER_NAME).timeBased().everyHours(AUTO_REFRESH_INTERVAL_HOURS).create();
+	}
+	return keep;
+}
+
+function reconcileAutoRefreshTriggerState_() {
+	const props = PropertiesService.getScriptProperties();
+	const enabled = isAutoRefreshEnabled_();
+	if (!enabled) {
+		removeAutoRefreshTriggers_();
+		props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
+		return { enabled: false, triggerId: "", hasTrigger: false };
+	}
+
+	const trigger = ensureSingleAutoRefreshTrigger_();
+	const triggerId = getTriggerUniqueId_(trigger);
+	if (triggerId) props.setProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
+	else props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
+	return { enabled: true, triggerId: triggerId, hasTrigger: !!triggerId };
+}
+
+function readAutoRefreshSettings_() {
+	const props = PropertiesService.getScriptProperties();
+	const enabled = isAutoRefreshEnabled_();
+	const triggerId = String(props.getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
+	const lastRunIssueCount = Math.max(0, toNonNegativeInt_(props.getProperty(AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY)));
+	let lastArchiveDate = "";
+	try {
+		const archiveFolder = getExistingArchiveFolderOrNull_();
+		if (archiveFolder) {
+			lastArchiveDate = findLatestAutoRefreshArchiveDate_(archiveFolder);
+			if (lastArchiveDate) props.setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, lastArchiveDate);
+			else props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
+		} else {
+			props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
+		}
+	} catch (err) {
+		lastArchiveDate = String(props.getProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY) || "").trim();
+		Logger.log("Unable to resolve latest auto-refresh archive date: %s", errorMessage_(err));
+	}
+	return {
+		enabled: enabled,
+		intervalHours: AUTO_REFRESH_INTERVAL_HOURS,
+		intervalMinutes: AUTO_REFRESH_INTERVAL_HOURS * 60,
+		triggerId: triggerId,
+		hasTrigger: !!triggerId,
+		lastRunStartedAt: String(props.getProperty(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim(),
+		lastRunFinishedAt: String(props.getProperty(AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY) || "").trim(),
+		lastRunStatus: String(props.getProperty(AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY) || "").trim(),
+		lastRunSummary: String(props.getProperty(AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY) || "").trim(),
+		lastIssueSummary: String(props.getProperty(AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY) || "").trim(),
+		lastRunError: String(props.getProperty(AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY) || "").trim(),
+		lastRunIssueCount: lastRunIssueCount,
+		lastSuccessfulActiveRefreshAt: getLastSuccessfulActiveWriteAt_(),
+		lastArchiveDate: lastArchiveDate,
+	};
+}
+
+function getAutoRefreshSettings(password) {
+	assertAdminPassword_(password);
+	const scriptLock = LockService.getScriptLock();
+	scriptLock.waitLock(30000);
+	try {
+		reconcileAutoRefreshTriggerState_();
+		return readAutoRefreshSettings_();
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
+function setAutoRefreshEnabled(enabledRaw, password) {
+	assertAdminPassword_(password);
+	const enabled = toBooleanFlag_(enabledRaw);
+	const scriptLock = LockService.getScriptLock();
+	scriptLock.waitLock(30000);
+	try {
+		const props = PropertiesService.getScriptProperties();
+		if (enabled) props.setProperty(AUTO_REFRESH_ENABLED_PROPERTY, "1");
+		else props.deleteProperty(AUTO_REFRESH_ENABLED_PROPERTY);
+		reconcileAutoRefreshTriggerState_();
+		return readAutoRefreshSettings_();
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
+function autoRefreshActiveRosterTick() {
+	const startedAt = new Date().toISOString();
+	let runIssueCount = 0;
+	let runIssueSummary = "";
+
+	if (!isAutoRefreshEnabled_()) {
+		setAutoRefreshRunResult_("skipped", "Auto-refresh skipped because it is disabled.", "", 0, "", startedAt, new Date().toISOString());
+		return { ok: true, skipped: true, reason: "disabled" };
+	}
+
+	const acquired = tryAcquireActiveRosterJobLock_("auto-refresh", 0);
+	if (!acquired) {
+		setAutoRefreshRunResult_("skipped", "Auto-refresh skipped due to overlap with another active roster refresh/publish flow.", "", 0, "", startedAt, new Date().toISOString());
+		return { ok: true, skipped: true, reason: "overlap" };
+	}
+
+	try {
+		PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY, startedAt);
+		if (isRecentSuccessfulActiveWrite_()) {
+			const lastWriteAt = getLastSuccessfulActiveWriteAt_();
+			const summary = "Auto-refresh skipped: active data was written recently (" + (lastWriteAt || "unknown") + ").";
+			try {
+				const archiveFolder = getExistingArchiveFolderOrNull_();
+				if (archiveFolder) cleanupOldAutoRefreshDailyArchives_(archiveFolder, new Date());
+			} catch (cleanupErr) {
+				Logger.log("Unable to cleanup stale auto-refresh archives: %s", errorMessage_(cleanupErr));
+			}
+			setAutoRefreshRunResult_("skipped", summary, "", 0, "", startedAt, new Date().toISOString());
+			return { ok: true, skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
+		}
+
+		const sourceSnapshot = readActiveRosterSnapshotFromDrive_();
+		const runResult = runAutoRefreshAllRosters_(sourceSnapshot.rosterData);
+		runIssueCount = runResult.issueCount;
+		runIssueSummary = String(runResult.issueSummary || "").trim();
+		const writeResult = writeAutoRefreshedActiveRosterData_(sourceSnapshot, runResult.rosterData);
+
+		let summary = buildAutoRefreshSummary_(runResult, writeResult);
+		if (writeResult.changed && writeResult.archiveCreated) {
+			summary += " Daily archive created for " + writeResult.archiveDate + ".";
+		}
+		if (writeResult.changed && writeResult.archiveCleanupDeleted > 0) {
+			summary += " Cleaned " + writeResult.archiveCleanupDeleted + " stale daily archive(s).";
+		}
+		if (!writeResult.changed) {
+			try {
+				const archiveFolder = getExistingArchiveFolderOrNull_();
+				const cleanupDeleted = archiveFolder ? cleanupOldAutoRefreshDailyArchives_(archiveFolder, new Date()) : 0;
+				if (cleanupDeleted > 0) {
+					summary += " Cleaned " + cleanupDeleted + " stale daily archive(s).";
+				}
+			} catch (cleanupErr) {
+				Logger.log("Unable to cleanup stale auto-refresh archives: %s", errorMessage_(cleanupErr));
+			}
+		}
+
+		setAutoRefreshRunResult_("ok", summary, "", runIssueCount, runIssueSummary, startedAt, new Date().toISOString());
+		Logger.log("autoRefreshActiveRosterTick ok: %s", summary);
+		return {
+			ok: true,
+			summary: summary,
+			changed: !!writeResult.changed,
+			processedRosters: runResult.processedRosters,
+			issueCount: runIssueCount,
+		};
+	} catch (err) {
+		const message = errorMessage_(err);
+		setAutoRefreshRunResult_("error", "Auto-refresh run failed.", message, runIssueCount, runIssueSummary, startedAt, new Date().toISOString());
+		Logger.log("autoRefreshActiveRosterTick failed: %s", message);
+		return { ok: false, error: message };
+	} finally {
+		releaseActiveRosterJobLock_(acquired.token);
+	}
+}
+
+/**
+ * Replaces roster-data.json in Drive using a validated temporary file and keeps publish backups.
+ * Called from Admin UI via google.script.run.publishRosterData(rosterData, password)
+ */
+function publishRosterData(rosterData, password) {
+	assertAdminPassword_(password);
+	checkPublishCooldown_();
+	return withActiveRosterJobLock_("manual-publish", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		const meta = writePublishedRosterData_(rosterData);
+		markPublish_();
+		return { ok: true, publishedAt: meta.publishedAt, playerCount: meta.playerCount, noteCount: meta.noteCount };
+	});
+}
+
+// Optional: keep for manual checks like ?asset=styles.css
+function serveAsset_(name) {
+	const safeName = String(name)
+		.replace(/^[\/\\]+/, "")
+		.replace(/\.\./g, "");
+	try {
+		const file = findFileByName_(safeName);
+
+		if (!file) {
+			return ContentService.createTextOutput("404 - asset not found: " + safeName).setMimeType(ContentService.MimeType.TEXT);
+		}
+
+		const ext = (safeName.split(".").pop() || "").toLowerCase();
+		const text = file.getBlob().getDataAsString("UTF-8");
+
+		let mime = ContentService.MimeType.TEXT;
+		if (ext === "js") mime = ContentService.MimeType.JAVASCRIPT;
+		if (ext === "json") mime = ContentService.MimeType.JSON;
+		if (ext === "html") mime = ContentService.MimeType.HTML;
+		// css stays TEXT (fine)
+
+		return ContentService.createTextOutput(text).setMimeType(mime);
+	} catch (err) {
+		return ContentService.createTextOutput("ASSET_ERROR for " + safeName + ":\n\n" + (err && (err.stack || err.message) ? err.stack || err.message : String(err))).setMimeType(ContentService.MimeType.TEXT);
+	}
+}
+
+function findFileByName_(filename) {
+	const cache = getScriptCacheSafe_();
+	const cacheKey = buildNewestFileIdCacheKey_(filename);
+	const cachedNewestId = readStringFromCache_(cache, cacheKey);
+	if (cachedNewestId) {
+		const cachedNewest = resolveFileByIdAndName_(cachedNewestId, filename);
+		if (cachedNewest) return cachedNewest;
+	}
+
+	const files = findFilesByName_(filename);
+	if (!files.length) return null;
+	files.sort((a, b) => {
+		const at = a.getLastUpdated ? a.getLastUpdated().getTime() : 0;
+		const bt = b.getLastUpdated ? b.getLastUpdated().getTime() : 0;
+		return bt - at;
+	});
+	const newest = files[0];
+	const newestId = newest && newest.getId ? String(newest.getId() || "").trim() : "";
+	if (newestId) {
+		writeStringToCache_(cache, cacheKey, newestId, FILE_LOOKUP_CACHE_TTL_SECONDS);
+	}
+	return newest;
+}
+
+function findFilesByName_(filename) {
+	const cache = getScriptCacheSafe_();
+	const cacheKey = buildFileIdsCacheKey_(filename);
+	const cachedPayload = readStringFromCache_(cache, cacheKey);
+	if (cachedPayload) {
+		const cachedIds = parseCachedFileIds_(cachedPayload);
+		if (cachedIds) {
+			const cachedFiles = resolveFilesByIdsAndName_(cachedIds, filename);
+			if (cachedFiles) return cachedFiles;
+		}
+	}
+
+	const folder = DriveApp.getFolderById(FOLDER_ID);
+	const files = findFilesByNameInFolder_(folder, filename);
+	const fileIds = [];
+	for (let i = 0; i < files.length; i++) {
+		const fileId = files[i] && files[i].getId ? String(files[i].getId() || "").trim() : "";
+		if (fileId) fileIds.push(fileId);
+	}
+	writeStringToCache_(cache, cacheKey, JSON.stringify({ ids: fileIds }), FILE_LOOKUP_CACHE_TTL_SECONDS);
+	return files;
+}
+
+function findFilesByNameInFolder_(folder, filename) {
+	const it = folder.getFilesByName(filename);
+	const out = [];
+	while (it.hasNext()) out.push(it.next());
+	return out;
+}
+
+function getExistingArchiveFolderOrNull_() {
+	const props = PropertiesService.getScriptProperties();
+	const configuredArchiveId = String(props.getProperty("ARCHIVE_FOLDER_ID") || "").trim();
+	if (configuredArchiveId) {
+		try {
+			return DriveApp.getFolderById(configuredArchiveId);
+		} catch (err) {
+			Logger.log("Invalid ARCHIVE_FOLDER_ID '%s': %s", configuredArchiveId, err && err.message ? err.message : String(err));
+		}
+	}
+
+	const root = DriveApp.getFolderById(FOLDER_ID);
+	const it = root.getFoldersByName(ARCHIVE_FOLDER_NAME);
+	if (it.hasNext()) return it.next();
+	return null;
+}
+
+function getArchiveFolder_() {
+	const existing = getExistingArchiveFolderOrNull_();
+	if (existing) return existing;
+	const root = DriveApp.getFolderById(FOLDER_ID);
+	return root.createFolder(ARCHIVE_FOLDER_NAME);
+}
+
+function moveLegacyHistoryFilesToArchive_(mainFolder, archiveFolder) {
+	if (!mainFolder || !archiveFolder) return;
+	const it = mainFolder.getFiles();
+	while (it.hasNext()) {
+		const f = it.next();
+		const name = f.getName();
+		const isBackup = /^roster-data\..+\.backup\.json$/i.test(name);
+		const isLastImport = name === "roster-data.last-import.json";
+		if (!isBackup && !isLastImport) continue;
+		try {
+			f.moveTo(archiveFolder);
+		} catch (err) {
+			Logger.log("Unable to move history file '%s' to archive folder '%s': %s", name, archiveFolder.getId(), err && err.message ? err.message : String(err));
+		}
+	}
+}
+
+function getAssetText_(filename) {
+	const safeFilename = String(filename == null ? "" : filename).trim();
+	if (!safeFilename) return "";
+
+	const cache = getScriptCacheSafe_();
+	const cacheKey = buildAssetTextCacheKey_(safeFilename);
+	const cachedText = readStringFromCache_(cache, cacheKey);
+	if (cachedText !== null) return cachedText;
+
+	const file = findFileByName_(safeFilename);
+	if (!file) return "";
+	const text = file.getBlob().getDataAsString("UTF-8");
+	writeStringToCache_(cache, cacheKey, text, getAssetTextCacheTtlSeconds_(safeFilename));
+	return text;
+}
+
+function getScriptCacheSafe_() {
+	try {
+		return CacheService.getScriptCache();
+	} catch (err) {
+		Logger.log("Unable to get script cache: %s", err && err.message ? err.message : String(err));
+		return null;
+	}
+}
+
+function readStringFromCache_(cache, key) {
+	if (!cache || !key) return null;
+	try {
+		const value = cache.get(key);
+		return value == null ? null : String(value);
+	} catch (err) {
+		Logger.log("Cache get failed for key '%s': %s", key, err && err.message ? err.message : String(err));
+		return null;
+	}
+}
+
+function writeStringToCache_(cache, key, value, ttlSeconds) {
+	if (!cache || !key || value == null) return;
+	const ttl = Math.max(1, Number(ttlSeconds) || 0);
+	try {
+		cache.put(key, String(value), ttl);
+	} catch (err) {
+		Logger.log("Cache put failed for key '%s': %s", key, err && err.message ? err.message : String(err));
+	}
+}
+
+function buildAssetTextCacheKey_(filename) {
+	return "assetText:" + ASSET_TEXT_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
+}
+
+function buildFileIdsCacheKey_(filename) {
+	return "fileIdsByName:" + FILE_LOOKUP_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
+}
+
+function buildNewestFileIdCacheKey_(filename) {
+	return "newestFileIdByName:" + FILE_LOOKUP_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
+}
+
+function getAssetTextCacheTtlSeconds_(filename) {
+	const lower = String(filename == null ? "" : filename)
+		.trim()
+		.toLowerCase();
+	if (lower === ACTIVE_ROSTER_FILENAME.toLowerCase()) return ASSET_TEXT_CACHE_TTL_ROSTER_SECONDS;
+	return ASSET_TEXT_CACHE_TTL_STATIC_SECONDS;
+}
+
+function parseCachedFileIds_(raw) {
+	try {
+		const parsed = JSON.parse(raw);
+		const ids = parsed && Array.isArray(parsed.ids) ? parsed.ids : null;
+		if (!ids) return null;
+		const out = [];
+		for (let i = 0; i < ids.length; i++) {
+			const id = String(ids[i] == null ? "" : ids[i]).trim();
+			if (!id) return null;
+			out.push(id);
+		}
+		return out;
+	} catch (err) {
+		return null;
+	}
+}
+
+function resolveFileByIdAndName_(fileId, expectedFilename) {
+	const id = String(fileId == null ? "" : fileId).trim();
+	const expected = String(expectedFilename == null ? "" : expectedFilename);
+	if (!id || !expected) return null;
+	try {
+		const file = DriveApp.getFileById(id);
+		if (!file) return null;
+		if (String(file.getName() || "") !== expected) return null;
+		if (file.isTrashed && file.isTrashed()) return null;
+		return file;
+	} catch (err) {
+		return null;
+	}
+}
+
+function resolveFilesByIdsAndName_(fileIds, expectedFilename) {
+	if (!Array.isArray(fileIds)) return null;
+	const out = [];
+	for (let i = 0; i < fileIds.length; i++) {
+		const file = resolveFileByIdAndName_(fileIds[i], expectedFilename);
+		if (!file) return null;
+		out.push(file);
+	}
+	return out;
+}
+
+function listFolderFiles_() {
+	const folder = DriveApp.getFolderById(FOLDER_ID);
+	const it = folder.getFiles();
+
+	const byName = {};
+	while (it.hasNext()) {
+		const f = it.next();
+		const n = f.getName();
+		if (!byName[n]) byName[n] = [];
+		byName[n].push({
+			size: f.getSize(),
+			lastUpdated: f.getLastUpdated ? f.getLastUpdated().toISOString() : null,
+		});
+	}
+
+	return Object.keys(byName)
+		.sort()
+		.map((name) => ({
+			name,
+			count: byName[name].length,
+			versions: byName[name],
+		}));
+}
+
+function assertAdminPassword_(password) {
+	const props = PropertiesService.getScriptProperties();
+	const configured = props.getProperty("ADMIN_PW");
+	const adminPwRaw = configured != null && String(configured).length > 0 ? String(configured) : "change-me";
+	const adminPw = adminPwRaw.trim();
+	const providedPw = String(password || "").trim();
+
+	if (providedPw !== adminPw) {
+		throw new Error("Authentication failed. Check script property ADMIN_PW (default is 'change-me' when unset).");
+	}
+}
+
+function checkPublishCooldown_() {
+	const props = PropertiesService.getScriptProperties();
+	const nowMs = Date.now();
+	const lastMs = parseInt(props.getProperty("LAST_PUBLISH_MS") || "0", 10) || 0;
+
+	// 10 seconds cooldown
+	if (nowMs - lastMs < 10000) {
+		throw new Error("Publish cooldown: please wait a few seconds and try again.");
+	}
+}
+
+function markPublish_() {
+	PropertiesService.getScriptProperties().setProperty("LAST_PUBLISH_MS", String(Date.now()));
+}
+
+const COC_PROXY_BASE_URL = "https://cocproxy.royaleapi.dev/v1";
+const PLAYER_PROFILE_CACHE_TTL_SECONDS = 300;
+const TOWN_HALL_ICON_CACHE_TTL_SECONDS = 3600;
+const LEAGUE_ICON_CACHE_TTL_SECONDS = 3600;
+const LEAGUE_ICON_CACHE_VERSION = "v4";
+// How long to retain a member's tracking data after they stop appearing in the roster.
+// This is intentionally long (e.g., 28 days) to avoid losing war history for temporary departures.
+const REGULAR_WAR_MISSING_GRACE_MS = 28 * 24 * 60 * 60 * 1000; // 28 days
+const REGULAR_WAR_WARLOG_LIMIT = 25;
+const ROSTER_LOCK_KEY_PREFIX = "ROSTER_LOCK:";
+const ROSTER_LOCK_WAIT_MS = 30 * 1000;
+const ROSTER_LOCK_LEASE_MS = 10 * 60 * 1000;
+const ROSTER_LOCK_POLL_MS = 250;
+
+function parseRosterLockState_(raw) {
+	const text = String(raw == null ? "" : raw).trim();
+	if (!text) return null;
+
+	try {
+		const parsed = JSON.parse(text);
+		const token = String((parsed && parsed.token) || "").trim();
+		const expiresAt = Number(parsed && parsed.expiresAt);
+		if (!token || !isFinite(expiresAt)) return null;
+		return {
+			token: token,
+			expiresAt: Math.floor(expiresAt),
+		};
+	} catch (err) {
+		return null;
+	}
+}
+
+function withRosterLock_(rosterIdRaw, callback) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) throw new Error("Roster ID is required.");
+	if (typeof callback !== "function") throw new Error("Roster lock callback is required.");
+
+	const props = PropertiesService.getScriptProperties();
+	const lockKey = ROSTER_LOCK_KEY_PREFIX + rosterId;
+	const token = Utilities.getUuid();
+	const deadlineMs = Date.now() + ROSTER_LOCK_WAIT_MS;
+	let acquired = false;
+
+	while (!acquired && Date.now() < deadlineMs) {
+		const scriptLock = LockService.getScriptLock();
+		const remainingMs = Math.max(250, deadlineMs - Date.now());
+		const didLock = scriptLock.tryLock(Math.min(5000, remainingMs));
+		if (!didLock) {
+			Utilities.sleep(ROSTER_LOCK_POLL_MS);
+			continue;
+		}
+
+		try {
+			const nowMs = Date.now();
+			const current = parseRosterLockState_(props.getProperty(lockKey));
+			if (!current || current.expiresAt <= nowMs) {
+				props.setProperty(
+					lockKey,
+					JSON.stringify({
+						token: token,
+						expiresAt: nowMs + ROSTER_LOCK_LEASE_MS,
+					}),
+				);
+				acquired = true;
+			}
+		} finally {
+			scriptLock.releaseLock();
+		}
+
+		if (!acquired) Utilities.sleep(ROSTER_LOCK_POLL_MS);
+	}
+
+	if (!acquired) {
+		throw new Error("Roster refresh is already running for '" + rosterId + "'. Please wait and try again.");
+	}
+
+	try {
+		return callback();
+	} finally {
+		const releaseLock = LockService.getScriptLock();
+		const didLock = releaseLock.tryLock(5000);
+		if (!didLock) return;
+
+		try {
+			const current = parseRosterLockState_(props.getProperty(lockKey));
+			if (current && current.token === token) {
+				props.deleteProperty(lockKey);
+			}
+		} finally {
+			releaseLock.releaseLock();
+		}
+	}
+}
+
+function hasValidAdminPassword_(password) {
+	try {
+		assertAdminPassword_(password);
+		return true;
+	} catch (err) {
+		return false;
+	}
+}
+
+function normalizeTag_(tagRaw) {
+	const t = String(tagRaw == null ? "" : tagRaw)
+		.trim()
+		.toUpperCase();
+	if (!t) return "";
+	return t.startsWith("#") ? t : "#" + t;
+}
+
+function getRosterTrackingMode_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	return roster.trackingMode === "regularWar" ? "regularWar" : "cwl";
+}
+
+function isValidPlayerTag_(tagRaw) {
+	const tag = normalizeTag_(tagRaw);
+	return /^#[PYLQGRJCUV0289]{3,15}$/.test(tag);
+}
+
+function encodeTagForPath_(tagRaw) {
+	const normalized = normalizeTag_(tagRaw);
+	if (!normalized) return "";
+	return encodeURIComponent(normalized);
+}
+
+function isPublishedRosterTag_(tagRaw) {
+	const wantedTag = normalizeTag_(tagRaw);
+	if (!wantedTag) return false;
+
+	const rosterData = getRosterData();
+	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const players = []
+			.concat(Array.isArray(roster.main) ? roster.main : [])
+			.concat(Array.isArray(roster.subs) ? roster.subs : [])
+			.concat(Array.isArray(roster.missing) ? roster.missing : []);
+		for (let j = 0; j < players.length; j++) {
+			if (normalizeTag_(players[j] && players[j].tag) === wantedTag) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function findFirstFileByNameCandidates_(names) {
+	const list = Array.isArray(names) ? names : [];
+	const matches = [];
+	const seenIds = {};
+
+	for (let i = 0; i < list.length; i++) {
+		const rawName = String(list[i] == null ? "" : list[i])
+			.replace(/^[\/\\]+/, "")
+			.replace(/\.\./g, "");
+		if (!rawName) continue;
+
+		const byPath = findFileByRelativePath_(rawName);
+		if (byPath) {
+			const pathFileId = byPath && byPath.getId ? byPath.getId() : "";
+			if (pathFileId && !seenIds[pathFileId]) {
+				seenIds[pathFileId] = true;
+				matches.push(byPath);
+			}
+		}
+
+		const candidates = [rawName];
+		const parts = rawName.split(/[\/\\]/);
+		const baseName = parts.length ? parts[parts.length - 1] : rawName;
+		if (baseName && baseName !== rawName) candidates.push(baseName);
+
+		for (let j = 0; j < candidates.length; j++) {
+			const files = findFilesByName_(candidates[j]);
+			for (let k = 0; k < files.length; k++) {
+				const file = files[k];
+				const fileId = file && file.getId ? file.getId() : "";
+				if (!fileId || seenIds[fileId]) continue;
+				seenIds[fileId] = true;
+				matches.push(file);
+			}
+		}
+	}
+
+	matches.sort((a, b) => {
+		const at = a && a.getLastUpdated ? a.getLastUpdated().getTime() : 0;
+		const bt = b && b.getLastUpdated ? b.getLastUpdated().getTime() : 0;
+		return bt - at;
+	});
+
+	return matches.length ? matches[0] : null;
+}
+
+function findFileByRelativePath_(pathRaw) {
+	const safePath = String(pathRaw == null ? "" : pathRaw)
+		.replace(/^[\/\\]+/, "")
+		.replace(/\.\./g, "")
+		.replace(/\\/g, "/");
+	if (!safePath) return null;
+
+	const segments = safePath
+		.split("/")
+		.map((part) => String(part || "").trim())
+		.filter((part) => part);
+	if (!segments.length) return null;
+	if (segments.length === 1) {
+		return findFileByName_(segments[0]);
+	}
+
+	const filename = segments[segments.length - 1];
+	let folders = [DriveApp.getFolderById(FOLDER_ID)];
+
+	for (let i = 0; i < segments.length - 1; i++) {
+		const folderName = segments[i];
+		const nextFolders = [];
+		for (let j = 0; j < folders.length; j++) {
+			const it = folders[j].getFoldersByName(folderName);
+			while (it.hasNext()) nextFolders.push(it.next());
+		}
+		if (!nextFolders.length) return null;
+		folders = nextFolders;
+	}
+
+	const files = [];
+	for (let i = 0; i < folders.length; i++) {
+		const it = folders[i].getFilesByName(filename);
+		while (it.hasNext()) files.push(it.next());
+	}
+	if (!files.length) return null;
+
+	files.sort((a, b) => {
+		const at = a && a.getLastUpdated ? a.getLastUpdated().getTime() : 0;
+		const bt = b && b.getLastUpdated ? b.getLastUpdated().getTime() : 0;
+		return bt - at;
+	});
+	return files[0];
+}
+
+function inferAssetMimeType_(filename, providedMimeType) {
+	const mimeType = String(providedMimeType || "").trim();
+	if (mimeType) return mimeType;
+
+	const lowerName = String(filename || "").toLowerCase();
+	if (/\.we?bp$/i.test(lowerName)) return "image/webp";
+	if (/\.png$/i.test(lowerName)) return "image/png";
+	if (/\.jpe?g$/i.test(lowerName)) return "image/jpeg";
+	if (/\.gif$/i.test(lowerName)) return "image/gif";
+	return "application/octet-stream";
+}
+
+function normalizePlayerProfileError_(playerTag, err) {
+	const tag = normalizeTag_(playerTag);
+	if (err && err.statusCode === 404) {
+		return new Error("Player not found for tag " + tag + ".");
+	}
+	if (err && err.statusCode === 429) {
+		const retryAfter = err && err.retryAfter ? " Retry-After: " + err.retryAfter + "." : "";
+		return new Error("Clash API rate limit reached. Please try again in a moment." + retryAfter);
+	}
+	if (err && err.statusCode >= 500) {
+		return new Error("Clash API is temporarily unavailable. Please try again in a moment.");
+	}
+	if (err && (err.statusCode === 401 || err.statusCode === 403)) {
+		return new Error("Clash API auth failed. Check COC_API_TOKEN and proxy access.");
+	}
+	if (err instanceof Error) return err;
+	return new Error("Player profile request failed for " + tag + ".");
+}
+
+function readTownHallLevel_(obj) {
+	const raw = obj && obj.townHallLevel != null ? obj.townHallLevel : obj && obj.townhallLevel != null ? obj.townhallLevel : null;
+	const n = Number(raw);
+	if (!isFinite(n)) return null;
+	return Math.max(0, Math.floor(n));
+}
+
+function getCocApiToken_() {
+	const token = String(PropertiesService.getScriptProperties().getProperty("COC_API_TOKEN") || "").trim();
+	if (!token) {
+		throw new Error("Missing Script Property COC_API_TOKEN.");
+	}
+	return token;
+}
+
+function cocFetch_(path) {
+	const token = getCocApiToken_();
+	const cleanPath = String(path || "").startsWith("/") ? String(path || "") : "/" + String(path || "");
+	const url = COC_PROXY_BASE_URL + cleanPath;
+	const res = UrlFetchApp.fetch(url, {
+		method: "get",
+		muteHttpExceptions: true,
+		headers: {
+			Authorization: "Bearer " + token,
+			Accept: "application/json",
+		},
+	});
+
+	const status = res.getResponseCode();
+	const headers = res.getAllHeaders ? res.getAllHeaders() : {};
+	const retryAfter = headers && (headers["Retry-After"] || headers["retry-after"] || "");
+	const text = res.getContentText("UTF-8");
+	let body = null;
+	try {
+		body = text ? JSON.parse(text) : null;
+	} catch (err) {
+		body = null;
+	}
+
+	if (status >= 200 && status < 300) {
+		return body && typeof body === "object" ? body : {};
+	}
+
+	let msg = "Clash API request failed (" + status + ").";
+	if (status === 401 || status === 403) {
+		msg = "Clash API auth failed (" + status + "). Check COC_API_TOKEN and proxy access.";
+	} else if (status === 404) {
+		msg = "Clash API resource not found (404).";
+	} else if (status === 429) {
+		msg = "Clash API rate limit reached (429)." + (retryAfter ? " Retry-After: " + retryAfter + "." : "");
+	}
+
+	const err = new Error(msg);
+	err.name = "CocApiError";
+	err.statusCode = status;
+	err.retryAfter = retryAfter ? String(retryAfter) : "";
+	err.apiBody = body;
+	throw err;
+}
+
+function mapApiMembers_(membersRaw) {
+	const out = [];
+	const seen = {};
+	const list = Array.isArray(membersRaw) ? membersRaw : [];
+	for (let i = 0; i < list.length; i++) {
+		const m = list[i] && typeof list[i] === "object" ? list[i] : {};
+		const tag = normalizeTag_(m.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+
+		const mp = Number(m.mapPosition);
+		out.push({
+			tag: tag,
+			name: String(m.name == null ? "" : m.name),
+			th: readTownHallLevel_(m),
+			mapPosition: isFinite(mp) ? Math.floor(mp) : null,
+		});
+	}
+	return out;
+}
+
+function compareByOrderingRule_(a, b) {
+	const aTh = a && typeof a.th === "number" && isFinite(a.th) ? a.th : -1;
+	const bTh = b && typeof b.th === "number" && isFinite(b.th) ? b.th : -1;
+	if (aTh !== bTh) return bTh - aTh;
+	const aTag = normalizeTag_(a && a.tag);
+	const bTag = normalizeTag_(b && b.tag);
+	return aTag < bTag ? -1 : aTag > bTag ? 1 : 0;
+}
+
+function toNonNegativeInt_(value) {
+	const n = Number(value);
+	if (!isFinite(n)) return 0;
+	return Math.max(0, Math.floor(n));
+}
+
+function toBooleanFlag_(value) {
+	if (value === true || value === false) return value;
+	const text = String(value == null ? "" : value)
+		.trim()
+		.toLowerCase();
+	if (!text) return false;
+	return text === "true" || text === "1" || text === "yes" || text === "on";
+}
+
+function collectRosterPoolPlayers_(roster) {
+	const main = Array.isArray(roster && roster.main) ? roster.main : [];
+	const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
+	const missing = Array.isArray(roster && roster.missing) ? roster.missing : [];
+	const out = [];
+	const seen = {};
+	const pool = main.concat(subs).concat(missing);
+	for (let i = 0; i < pool.length; i++) {
+		const player = pool[i] && typeof pool[i] === "object" ? pool[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		out.push(player);
+	}
+	return out;
+}
+
+function buildRosterPoolTagSet_(roster) {
+	const out = {};
+	const players = collectRosterPoolPlayers_(roster);
+	for (let i = 0; i < players.length; i++) {
+		const tag = normalizeTag_(players[i] && players[i].tag);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+function createEmptyCwlStatEntry_() {
+	return {
+		starsTotal: 0,
+		daysInLineup: 0,
+		resolvedWarDays: 0,
+		attacksMade: 0,
+		missedAttacks: 0,
+		threeStarCount: 0,
+		totalDestruction: 0,
+		countedAttacks: 0,
+		currentWarAttackPending: 0,
+		hitUpCount: 0,
+		hitDownCount: 0,
+		sameThHitCount: 0,
+	};
+}
+
+function createEmptyRegularWarCurrentEntry_(attacksAllowedRaw) {
+	const attacksAllowed = toNonNegativeInt_(attacksAllowedRaw);
+	return {
+		inWar: false,
+		mapPosition: null,
+		townHallLevel: 0,
+		attacksAllowed: attacksAllowed,
+		attacksUsed: 0,
+		attacksRemaining: attacksAllowed,
+		starsTotal: 0,
+		totalDestruction: 0,
+		countedAttacks: 0,
+		threeStarCount: 0,
+		opponentAttacks: 0,
+		missedAttacks: 0,
+		hitUpCount: 0,
+		sameThHitCount: 0,
+		hitDownCount: 0,
+	};
+}
+
+function createEmptyRegularWarAggregateEntry_() {
+	return {
+		warsInLineup: 0,
+		attacksMade: 0,
+		attacksMissed: 0,
+		starsTotal: 0,
+		totalDestruction: 0,
+		countedAttacks: 0,
+		threeStarCount: 0,
+		hitUpCount: 0,
+		sameThHitCount: 0,
+		hitDownCount: 0,
+	};
+}
+
+function sanitizeRegularWarCurrentEntry_(entryRaw, attacksAllowedRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const out = createEmptyRegularWarCurrentEntry_(entry.attacksAllowed != null ? entry.attacksAllowed : attacksAllowedRaw);
+	out.inWar = toBooleanFlag_(entry.inWar);
+	out.mapPosition = entry.mapPosition == null ? null : toNonNegativeInt_(entry.mapPosition);
+	out.townHallLevel = toNonNegativeInt_(entry.townHallLevel);
+	out.attacksAllowed = toNonNegativeInt_(entry.attacksAllowed != null ? entry.attacksAllowed : attacksAllowedRaw);
+	out.attacksUsed = toNonNegativeInt_(entry.attacksUsed);
+	out.attacksRemaining = toNonNegativeInt_(entry.attacksRemaining != null ? entry.attacksRemaining : Math.max(0, out.attacksAllowed - out.attacksUsed));
+	out.starsTotal = toNonNegativeInt_(entry.starsTotal);
+	out.totalDestruction = toNonNegativeInt_(entry.totalDestruction);
+	out.countedAttacks = toNonNegativeInt_(entry.countedAttacks);
+	out.threeStarCount = toNonNegativeInt_(entry.threeStarCount);
+	out.opponentAttacks = toNonNegativeInt_(entry.opponentAttacks);
+	out.missedAttacks = toNonNegativeInt_(entry.missedAttacks);
+	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
+	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
+	out.hitDownCount = toNonNegativeInt_(entry.hitDownCount);
+	return out;
+}
+
+function sanitizeRegularWarAggregateEntry_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const out = createEmptyRegularWarAggregateEntry_();
+	out.warsInLineup = toNonNegativeInt_(entry.warsInLineup);
+	out.attacksMade = toNonNegativeInt_(entry.attacksMade);
+	out.attacksMissed = toNonNegativeInt_(entry.attacksMissed);
+	out.starsTotal = toNonNegativeInt_(entry.starsTotal);
+	out.totalDestruction = toNonNegativeInt_(entry.totalDestruction);
+	out.countedAttacks = toNonNegativeInt_(entry.countedAttacks);
+	out.threeStarCount = toNonNegativeInt_(entry.threeStarCount);
+	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
+	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
+	out.hitDownCount = toNonNegativeInt_(entry.hitDownCount);
+	return out;
+}
+
+function createEmptyWarPerformanceStats_() {
+	return {
+		warsInLineup: 0,
+		daysInLineup: 0,
+		resolvedWarDays: 0,
+		attacksMade: 0,
+		attacksMissed: 0,
+		starsTotal: 0,
+		totalDestruction: 0,
+		countedAttacks: 0,
+		threeStarCount: 0,
+		hitUpCount: 0,
+		sameThHitCount: 0,
+		hitDownCount: 0,
+	};
+}
+
+function createEmptyRegularWarMembershipEntry_() {
+	return {
+		firstSeenAt: "",
+		lastSeenAt: "",
+		missingSince: "",
+		status: "active",
+	};
+}
+
+function createEmptyRegularWarLifecycleState_() {
+	return {
+		activeWarKey: "",
+		activeWarState: "notinwar",
+		activeWarLastSeenAt: "",
+		lastFinalizedWarKey: "",
+		lastFinalizedAt: "",
+		lastFinalizationSource: "",
+		lastFinalizationIncomplete: false,
+	};
+}
+
+function sanitizeWarPerformanceStatsEntry_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const out = createEmptyWarPerformanceStats_();
+	out.warsInLineup = toNonNegativeInt_(entry.warsInLineup);
+	out.daysInLineup = toNonNegativeInt_(entry.daysInLineup);
+	out.resolvedWarDays = toNonNegativeInt_(entry.resolvedWarDays);
+	out.attacksMade = toNonNegativeInt_(entry.attacksMade);
+	out.attacksMissed = toNonNegativeInt_(entry.attacksMissed);
+	out.starsTotal = toNonNegativeInt_(entry.starsTotal);
+	out.totalDestruction = toNonNegativeInt_(entry.totalDestruction);
+	out.countedAttacks = toNonNegativeInt_(entry.countedAttacks);
+	out.threeStarCount = toNonNegativeInt_(entry.threeStarCount);
+	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
+	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
+	out.hitDownCount = toNonNegativeInt_(entry.hitDownCount);
+	return out;
+}
+
+function sanitizeWarPerformanceEntry_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	return {
+		overall: sanitizeWarPerformanceStatsEntry_(entry.overall),
+		regular: sanitizeWarPerformanceStatsEntry_(entry.regular),
+		cwl: sanitizeWarPerformanceStatsEntry_(entry.cwl),
+		membership: sanitizeRegularWarMembershipEntry_(entry.membership),
+	};
+}
+
+function sanitizeRegularWarLifecycleState_(rawState) {
+	const state = rawState && typeof rawState === "object" ? rawState : {};
+	return {
+		activeWarKey: String(state.activeWarKey == null ? "" : state.activeWarKey).trim(),
+		activeWarState:
+			String(state.activeWarState == null ? "" : state.activeWarState)
+				.trim()
+				.toLowerCase() || "notinwar",
+		activeWarLastSeenAt: typeof state.activeWarLastSeenAt === "string" ? state.activeWarLastSeenAt : "",
+		lastFinalizedWarKey: String(state.lastFinalizedWarKey == null ? "" : state.lastFinalizedWarKey).trim(),
+		lastFinalizedAt: typeof state.lastFinalizedAt === "string" ? state.lastFinalizedAt : "",
+		lastFinalizationSource: typeof state.lastFinalizationSource === "string" ? state.lastFinalizationSource : "",
+		lastFinalizationIncomplete: toBooleanFlag_(state.lastFinalizationIncomplete),
+	};
+}
+
+function sanitizeWarPerformanceMeta_(rawMeta) {
+	const meta = rawMeta && typeof rawMeta === "object" ? rawMeta : {};
+	const out = {};
+	const keys = Object.keys(meta);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		const value = meta[key];
+		if (typeof value === "string") out[key] = value;
+		else if (typeof value === "boolean") out[key] = value;
+		else if (typeof value === "number" && isFinite(value)) out[key] = Math.floor(value);
+	}
+
+	out.finalizedRegularWarCount = toNonNegativeInt_(meta.finalizedRegularWarCount != null ? meta.finalizedRegularWarCount : out.finalizedRegularWarCount);
+	out.finalizedCwlWarCount = toNonNegativeInt_(meta.finalizedCwlWarCount != null ? meta.finalizedCwlWarCount : out.finalizedCwlWarCount);
+	out.lastFinalizationReason = typeof meta.lastFinalizationReason === "string" ? meta.lastFinalizationReason : String(out.lastFinalizationReason || "");
+	out.lastFinalizationSource = typeof meta.lastFinalizationSource === "string" ? meta.lastFinalizationSource : String(out.lastFinalizationSource || "");
+	out.lastSuccessfulLongTermFinalizationAt = typeof meta.lastSuccessfulLongTermFinalizationAt === "string" ? meta.lastSuccessfulLongTermFinalizationAt : String(out.lastSuccessfulLongTermFinalizationAt || "");
+	out.lastRegularWarFinalizedAt = typeof meta.lastRegularWarFinalizedAt === "string" ? meta.lastRegularWarFinalizedAt : String(out.lastRegularWarFinalizedAt || "");
+	out.lastRegularWarFinalizationSource = typeof meta.lastRegularWarFinalizationSource === "string" ? meta.lastRegularWarFinalizationSource : String(out.lastRegularWarFinalizationSource || "");
+	out.lastRegularWarFinalizationReason = typeof meta.lastRegularWarFinalizationReason === "string" ? meta.lastRegularWarFinalizationReason : String(out.lastRegularWarFinalizationReason || "");
+	out.lastRegularWarFinalizationWarKey = typeof meta.lastRegularWarFinalizationWarKey === "string" ? meta.lastRegularWarFinalizationWarKey : String(out.lastRegularWarFinalizationWarKey || "");
+	out.lastRegularWarFinalizationIncomplete = toBooleanFlag_(meta.lastRegularWarFinalizationIncomplete != null ? meta.lastRegularWarFinalizationIncomplete : out.lastRegularWarFinalizationIncomplete);
+	out.lastCwlWarFinalizedAt = typeof meta.lastCwlWarFinalizedAt === "string" ? meta.lastCwlWarFinalizedAt : String(out.lastCwlWarFinalizedAt || "");
+	out.lastCwlWarFinalizedTag = typeof meta.lastCwlWarFinalizedTag === "string" ? meta.lastCwlWarFinalizedTag : String(out.lastCwlWarFinalizedTag || "");
+	return out;
+}
+
+function sanitizeRegularWarSnapshot_(rawSnapshot) {
+	const snapshot = rawSnapshot && typeof rawSnapshot === "object" ? rawSnapshot : null;
+	if (!snapshot) return null;
+
+	const warMeta = sanitizeRegularWarCurrentWar_(snapshot.warMeta && typeof snapshot.warMeta === "object" ? snapshot.warMeta : snapshot);
+	if (!warMeta || !warMeta.warKey) return null;
+
+	const statsByTagRaw = snapshot.statsByTag && typeof snapshot.statsByTag === "object" ? snapshot.statsByTag : {};
+	const statsByTag = {};
+	const statTags = Object.keys(statsByTagRaw);
+	for (let i = 0; i < statTags.length; i++) {
+		const tag = normalizeTag_(statTags[i]);
+		if (!tag) continue;
+		statsByTag[tag] = sanitizeWarPerformanceStatsEntry_(statsByTagRaw[statTags[i]]);
+	}
+
+	const currentByTagRaw = snapshot.currentByTag && typeof snapshot.currentByTag === "object" ? snapshot.currentByTag : {};
+	const currentByTag = {};
+	const currentTags = Object.keys(currentByTagRaw);
+	for (let i = 0; i < currentTags.length; i++) {
+		const tag = normalizeTag_(currentTags[i]);
+		if (!tag) continue;
+		currentByTag[tag] = sanitizeRegularWarCurrentEntry_(currentByTagRaw[currentTags[i]], warMeta.attacksPerMember);
+	}
+
+	return {
+		warMeta: warMeta,
+		capturedAt: typeof snapshot.capturedAt === "string" ? snapshot.capturedAt : "",
+		isFinal: toBooleanFlag_(snapshot.isFinal),
+		isComplete: snapshot.isComplete == null ? true : toBooleanFlag_(snapshot.isComplete),
+		source: typeof snapshot.source === "string" ? snapshot.source : "",
+		statsByTag: statsByTag,
+		currentByTag: currentByTag,
+	};
+}
+
+function sanitizeRosterWarPerformance_(rawWarPerformance) {
+	if (rawWarPerformance == null) return null;
+	const warPerformance = rawWarPerformance && typeof rawWarPerformance === "object" ? rawWarPerformance : {};
+	const byTagRaw = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
+	const byTag = {};
+	const tagKeys = Object.keys(byTagRaw);
+	for (let i = 0; i < tagKeys.length; i++) {
+		const tag = normalizeTag_(tagKeys[i]);
+		if (!tag) continue;
+		byTag[tag] = sanitizeWarPerformanceEntry_(byTagRaw[tagKeys[i]]);
+	}
+
+	const processedRegularWarKeysRaw = warPerformance.processedRegularWarKeys && typeof warPerformance.processedRegularWarKeys === "object" ? warPerformance.processedRegularWarKeys : {};
+	const processedRegularWarKeys = {};
+	const regularWarKeys = Object.keys(processedRegularWarKeysRaw);
+	for (let i = 0; i < regularWarKeys.length; i++) {
+		const key = String(regularWarKeys[i] == null ? "" : regularWarKeys[i]).trim();
+		if (!key) continue;
+		processedRegularWarKeys[key] = true;
+	}
+
+	const processedCwlWarTagsRaw = warPerformance.processedCwlWarTags && typeof warPerformance.processedCwlWarTags === "object" ? warPerformance.processedCwlWarTags : {};
+	const processedCwlWarTags = {};
+	const cwlWarTags = Object.keys(processedCwlWarTagsRaw);
+	for (let i = 0; i < cwlWarTags.length; i++) {
+		const tag = normalizeTag_(cwlWarTags[i]);
+		if (!tag) continue;
+		processedCwlWarTags[tag] = true;
+	}
+
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	if (!meta.lastFinalizationReason && typeof warPerformance.lastFinalizationReason === "string") {
+		meta.lastFinalizationReason = warPerformance.lastFinalizationReason;
+	}
+	if (!meta.lastFinalizationSource && typeof warPerformance.lastFinalizationSource === "string") {
+		meta.lastFinalizationSource = warPerformance.lastFinalizationSource;
+	}
+	const membershipByTagRaw = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
+	const membershipByTag = {};
+	const membershipKeys = Object.keys(membershipByTagRaw);
+	for (let i = 0; i < membershipKeys.length; i++) {
+		const tag = normalizeTag_(membershipKeys[i]);
+		if (!tag) continue;
+		membershipByTag[tag] = sanitizeRegularWarMembershipEntry_(membershipByTagRaw[membershipKeys[i]]);
+	}
+
+	const lifecycleRaw = warPerformance.regularWarLifecycle && typeof warPerformance.regularWarLifecycle === "object" ? warPerformance.regularWarLifecycle : {};
+	const lifecycle = sanitizeRegularWarLifecycleState_(lifecycleRaw);
+	const snapshot = sanitizeRegularWarSnapshot_(warPerformance.lastRegularWarSnapshot);
+	return {
+		lastRefreshedAt: typeof warPerformance.lastRefreshedAt === "string" ? warPerformance.lastRefreshedAt : "",
+		lastFinalizedAt: typeof warPerformance.lastFinalizedAt === "string" ? warPerformance.lastFinalizedAt : "",
+		lastFinalizationReason: typeof meta.lastFinalizationReason === "string" ? meta.lastFinalizationReason : "",
+		lastFinalizationSource: typeof meta.lastFinalizationSource === "string" ? meta.lastFinalizationSource : "",
+		processedRegularWarKeys: processedRegularWarKeys,
+		processedCwlWarTags: processedCwlWarTags,
+		byTag: byTag,
+		membershipByTag: membershipByTag,
+		meta: meta,
+		regularWarLifecycle: lifecycle,
+		lastRegularWarSnapshot: snapshot,
+	};
+}
+
+function ensureWarPerformance_(roster) {
+	if (!roster || typeof roster !== "object") return null;
+	const next = sanitizeRosterWarPerformance_(roster.warPerformance) || {
+		lastRefreshedAt: "",
+		lastFinalizedAt: "",
+		lastFinalizationReason: "",
+		lastFinalizationSource: "",
+		processedRegularWarKeys: {},
+		processedCwlWarTags: {},
+		lastRegularWarSnapshot: null,
+		byTag: {},
+		membershipByTag: {},
+		meta: sanitizeWarPerformanceMeta_(null),
+		regularWarLifecycle: createEmptyRegularWarLifecycleState_(),
+	};
+	if (!next.processedRegularWarKeys || typeof next.processedRegularWarKeys !== "object") next.processedRegularWarKeys = {};
+	if (!next.processedCwlWarTags || typeof next.processedCwlWarTags !== "object") next.processedCwlWarTags = {};
+	if (!next.byTag || typeof next.byTag !== "object") next.byTag = {};
+	if (!next.membershipByTag || typeof next.membershipByTag !== "object") next.membershipByTag = {};
+	if (!next.meta || typeof next.meta !== "object") next.meta = sanitizeWarPerformanceMeta_(null);
+	if (!next.regularWarLifecycle || typeof next.regularWarLifecycle !== "object") next.regularWarLifecycle = createEmptyRegularWarLifecycleState_();
+	next.lastRegularWarSnapshot = sanitizeRegularWarSnapshot_(next.lastRegularWarSnapshot);
+	return next;
+}
+
+function prepareWarPerformanceForRefresh_(roster, nowIso) {
+	if (!roster || typeof roster !== "object") return null;
+	let warPerformance = ensureWarPerformance_(roster);
+	roster.warPerformance = warPerformance;
+	updateWarPerformanceMembership_(roster, nowIso);
+	warPerformance = ensureWarPerformance_(roster);
+	roster.warPerformance = warPerformance;
+	return warPerformance;
+}
+
+function mergeWarPerformanceStats_(dest, src) {
+	if (!dest || typeof dest !== "object" || !src || typeof src !== "object") return;
+	dest.warsInLineup = toNonNegativeInt_(dest.warsInLineup) + toNonNegativeInt_(src.warsInLineup);
+	dest.daysInLineup = toNonNegativeInt_(dest.daysInLineup) + toNonNegativeInt_(src.daysInLineup);
+	dest.resolvedWarDays = toNonNegativeInt_(dest.resolvedWarDays) + toNonNegativeInt_(src.resolvedWarDays);
+	dest.attacksMade = toNonNegativeInt_(dest.attacksMade) + toNonNegativeInt_(src.attacksMade);
+	dest.attacksMissed = toNonNegativeInt_(dest.attacksMissed) + toNonNegativeInt_(src.attacksMissed);
+	dest.starsTotal = toNonNegativeInt_(dest.starsTotal) + toNonNegativeInt_(src.starsTotal);
+	dest.totalDestruction = toNonNegativeInt_(dest.totalDestruction) + toNonNegativeInt_(src.totalDestruction);
+	dest.countedAttacks = toNonNegativeInt_(dest.countedAttacks) + toNonNegativeInt_(src.countedAttacks);
+	dest.threeStarCount = toNonNegativeInt_(dest.threeStarCount) + toNonNegativeInt_(src.threeStarCount);
+	dest.hitUpCount = toNonNegativeInt_(dest.hitUpCount) + toNonNegativeInt_(src.hitUpCount);
+	dest.sameThHitCount = toNonNegativeInt_(dest.sameThHitCount) + toNonNegativeInt_(src.sameThHitCount);
+	dest.hitDownCount = toNonNegativeInt_(dest.hitDownCount) + toNonNegativeInt_(src.hitDownCount);
+}
+
+function getWarSidesForClan_(warRaw, clanTagRaw) {
+	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag) return null;
+
+	if (war.clan || war.opponent) {
+		const side = pickWarSideForClan_(war, clanTag);
+		if (!side) return null;
+		return {
+			side: side,
+			opponentSide: getOpponentSideForClan_(war, clanTag),
+			attacksPerMember: toNonNegativeInt_(war.attacksPerMember),
+		};
+	}
+
+	const clanSideRaw = war.clanSide && typeof war.clanSide === "object" ? war.clanSide : null;
+	const opponentSideRaw = war.opponentSide && typeof war.opponentSide === "object" ? war.opponentSide : null;
+	if (!clanSideRaw && !opponentSideRaw) return null;
+	const clanSideTag = normalizeTag_(clanSideRaw && clanSideRaw.tag);
+	const opponentSideTag = normalizeTag_(opponentSideRaw && opponentSideRaw.tag);
+	const attacksPerMember = toNonNegativeInt_(war.attacksPerMember != null ? war.attacksPerMember : war.currentWarMeta && war.currentWarMeta.attacksPerMember);
+	if (clanSideTag === clanTag) return { side: clanSideRaw, opponentSide: opponentSideRaw, attacksPerMember: attacksPerMember };
+	if (opponentSideTag === clanTag) return { side: opponentSideRaw, opponentSide: clanSideRaw, attacksPerMember: attacksPerMember };
+	return null;
+}
+
+function buildWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThByTagRaw, trackedTagSet, modeRaw) {
+	const out = {};
+	const members = Array.isArray(membersRaw) ? membersRaw : [];
+	const opponentThByTag = opponentThByTagRaw && typeof opponentThByTagRaw === "object" ? opponentThByTagRaw : {};
+	const mode = String(modeRaw == null ? "" : modeRaw)
+		.trim()
+		.toLowerCase();
+	const attacksPerMember = toNonNegativeInt_(attacksPerMemberRaw);
+	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
+
+	for (let i = 0; i < members.length; i++) {
+		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+		const stats = createEmptyWarPerformanceStats_();
+		if (mode === "cwl") {
+			stats.daysInLineup = 1;
+			stats.resolvedWarDays = 1;
+			stats.attacksMissed = attacks.length === 0 ? 1 : 0;
+		} else {
+			stats.warsInLineup = 1;
+			stats.attacksMissed = Math.max(0, attacksPerMember - attacks.length);
+		}
+		stats.attacksMade = attacks.length;
+		const attackerTh = readTownHallLevel_(member);
+		for (let j = 0; j < attacks.length; j++) {
+			const attack = attacks[j] && typeof attacks[j] === "object" ? attacks[j] : {};
+			const stars = toNonNegativeInt_(attack.stars);
+			const destruction = readAttackDestruction_(attack);
+			const defenderTag = normalizeTag_(attack.defenderTag);
+			const defenderTh = defenderTag && Object.prototype.hasOwnProperty.call(opponentThByTag, defenderTag) ? opponentThByTag[defenderTag] : null;
+			stats.starsTotal += stars;
+			stats.totalDestruction += destruction;
+			stats.countedAttacks++;
+			if (stars === 3) stats.threeStarCount++;
+			if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
+				if (attackerTh < defenderTh) stats.hitUpCount++;
+				else if (attackerTh > defenderTh) stats.hitDownCount++;
+				else stats.sameThHitCount++;
+			}
+		}
+		out[tag] = stats;
+	}
+	return out;
+}
+
+function computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet) {
+	const sides = getWarSidesForClan_(war, clanTag);
+	if (!sides) return {};
+	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
+	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "regular");
+}
+
+function computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet) {
+	const sides = getWarSidesForClan_(war, clanTag);
+	if (!sides) return {};
+	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
+	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "cwl");
+}
+
+function getStableRegularWarKey_(warLikeRaw, clanTagRaw) {
+	const warLike = warLikeRaw && typeof warLikeRaw === "object" ? warLikeRaw : {};
+	const clanTagFallback = normalizeTag_(clanTagRaw);
+	const currentWarMeta = warLike.currentWarMeta && typeof warLike.currentWarMeta === "object" ? warLike.currentWarMeta : {};
+	const warMeta = warLike.warMeta && typeof warLike.warMeta === "object" ? warLike.warMeta : {};
+	const directWarKey = String(warLike.warKey != null ? warLike.warKey : currentWarMeta.warKey != null ? currentWarMeta.warKey : warMeta.warKey != null ? warMeta.warKey : "").trim();
+
+	let clanTag = normalizeTag_(warLike.clanTag || currentWarMeta.clanTag || warMeta.clanTag || clanTagFallback);
+	let opponentTag = normalizeTag_(warLike.opponentTag || currentWarMeta.opponentTag || warMeta.opponentTag);
+
+	if (!clanTag || !opponentTag) {
+		const sides = getWarSidesForClan_(warLike, clanTagFallback || clanTag);
+		if (sides) {
+			const sideTag = normalizeTag_(sides.side && sides.side.tag);
+			const opponentSideTag = normalizeTag_(sides.opponentSide && sides.opponentSide.tag);
+			clanTag = clanTag || sideTag || clanTagFallback;
+			opponentTag = opponentTag || opponentSideTag;
+		}
+	}
+
+	const preparationStartTime = String(warLike.preparationStartTime != null ? warLike.preparationStartTime : currentWarMeta.preparationStartTime != null ? currentWarMeta.preparationStartTime : warMeta.preparationStartTime != null ? warMeta.preparationStartTime : "");
+	const startTime = String(warLike.startTime != null ? warLike.startTime : currentWarMeta.startTime != null ? currentWarMeta.startTime : warMeta.startTime != null ? warMeta.startTime : "");
+	const endTime = String(warLike.endTime != null ? warLike.endTime : currentWarMeta.endTime != null ? currentWarMeta.endTime : warMeta.endTime != null ? warMeta.endTime : "");
+	const keySeed = preparationStartTime || startTime || endTime || "";
+
+	if (directWarKey) {
+		const parts = directWarKey.split("|");
+		if (parts.length >= 3) {
+			const keyClan = normalizeTag_(parts[0]) || clanTag || clanTagFallback || "";
+			const keyOpponent = normalizeTag_(parts[1]) || opponentTag || "";
+			const keySuffix = parts.slice(2).join("|");
+			return keyClan + "|" + keyOpponent + "|" + keySuffix;
+		}
+	}
+
+	return (clanTag || clanTagFallback || "") + "|" + (opponentTag || "") + "|" + keySeed;
+}
+
+function findWarLogEntryByWarKey_(clanTag, warKey, limitRaw) {
+	if (!clanTag || !warKey) return null;
+	const entries = fetchClanWarLog_(clanTag, limitRaw || REGULAR_WAR_WARLOG_LIMIT);
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i] && typeof entries[i] === "object" ? entries[i] : {};
+		const entryWarKey = getStableRegularWarKey_(entry, clanTag);
+		if (entryWarKey && entryWarKey === warKey) return entry;
+	}
+	return null;
+}
+
+function warHasMemberLevelDataForClan_(war, clanTag) {
+	const sides = getWarSidesForClan_(war, clanTag);
+	if (!sides) return false;
+	const members = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
+	return members.length > 0;
+}
+
+function ensureWarPerformancePlayerEntry_(warPerformance, tagRaw) {
+	const tag = normalizeTag_(tagRaw);
+	if (!tag || !warPerformance || typeof warPerformance !== "object") return null;
+	if (!warPerformance.byTag || typeof warPerformance.byTag !== "object") warPerformance.byTag = {};
+	if (!warPerformance.byTag[tag]) {
+		warPerformance.byTag[tag] = {
+			overall: createEmptyWarPerformanceStats_(),
+			regular: createEmptyWarPerformanceStats_(),
+			cwl: createEmptyWarPerformanceStats_(),
+			membership: createEmptyRegularWarMembershipEntry_(),
+		};
+	}
+	return warPerformance.byTag[tag];
+}
+
+function recordRegularWarFinalizationAttempt_(warPerformance, warKey, source, reason, incomplete, finalized, nowIso) {
+	if (!warPerformance || typeof warPerformance !== "object") return;
+	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	meta.lastRegularWarFinalizationWarKey = String(warKey == null ? "" : warKey).trim();
+	meta.lastRegularWarFinalizationSource = String(source == null ? "" : source).trim();
+	meta.lastRegularWarFinalizationReason = String(reason == null ? "" : reason).trim();
+	meta.lastRegularWarFinalizationIncomplete = !!incomplete;
+	meta.lastRegularWarFinalizationAttemptAt = nowText;
+	meta.lastRegularWarFinalizationStatus = finalized ? "finalized" : "skipped";
+	warPerformance.meta = meta;
+}
+
+function resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw) {
+	const mode = String(modeRaw == null ? "" : modeRaw)
+		.trim()
+		.toLowerCase();
+	const identifier = mode === "cwl" ? normalizeTag_(identifierRaw) : String(identifierRaw == null ? "" : identifierRaw).trim();
+	return { mode: mode, identifier: identifier };
+}
+
+function markWarPerformanceFinalization_(warPerformance, modeRaw, identifierRaw, nowIso, sourceRaw, reasonRaw, incompleteFlag) {
+	if (!warPerformance || typeof warPerformance !== "object") return;
+	const target = resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw);
+	const mode = target.mode;
+	const identifier = target.identifier;
+	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+	const source = String(sourceRaw == null ? "" : sourceRaw).trim() || "finalized";
+	const reason = String(reasonRaw == null ? "" : reasonRaw).trim() || source;
+	const incomplete = !!incompleteFlag;
+
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	meta.lastFinalizationReason = reason;
+	meta.lastFinalizationSource = source;
+	meta.lastSuccessfulLongTermFinalizationAt = nowText;
+	if (mode === "regular") {
+		meta.finalizedRegularWarCount = toNonNegativeInt_(meta.finalizedRegularWarCount) + 1;
+		meta.lastRegularWarFinalizedAt = nowText;
+		meta.lastRegularWarFinalizationSource = source;
+		meta.lastRegularWarFinalizationReason = reason;
+		meta.lastRegularWarFinalizationWarKey = identifier;
+		meta.lastRegularWarFinalizationIncomplete = incomplete;
+	} else if (mode === "cwl") {
+		meta.finalizedCwlWarCount = toNonNegativeInt_(meta.finalizedCwlWarCount) + 1;
+		meta.lastCwlWarFinalizedAt = nowText;
+		meta.lastCwlWarFinalizedTag = identifier;
+	}
+	warPerformance.meta = meta;
+	warPerformance.lastFinalizedAt = nowText;
+	warPerformance.lastFinalizationReason = reason;
+	warPerformance.lastFinalizationSource = source;
+
+	const lifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
+	if (mode === "regular") {
+		lifecycle.lastFinalizedWarKey = identifier;
+		lifecycle.lastFinalizedAt = nowText;
+		lifecycle.lastFinalizationSource = source;
+		lifecycle.lastFinalizationIncomplete = incomplete;
+	}
+	warPerformance.regularWarLifecycle = lifecycle;
+}
+
+function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifierRaw, statsByTagRaw, nowIso, source, reason, incomplete) {
+	const target = resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw);
+	const mode = target.mode;
+	if (!warPerformance || typeof warPerformance !== "object") {
+		return {
+			applied: false,
+			identifier: "",
+			mode: mode,
+			reason: "invalidWarPerformance",
+		};
+	}
+	if (mode !== "regular" && mode !== "cwl") return { applied: false, identifier: "", mode: mode, reason: "unsupportedMode" };
+	const identifier = target.identifier;
+	if (!identifier) return { applied: false, identifier: "", mode: mode, reason: "missingIdentifier" };
+
+	if (!warPerformance.processedRegularWarKeys || typeof warPerformance.processedRegularWarKeys !== "object") warPerformance.processedRegularWarKeys = {};
+	if (!warPerformance.processedCwlWarTags || typeof warPerformance.processedCwlWarTags !== "object") warPerformance.processedCwlWarTags = {};
+	const processedMap = mode === "regular" ? warPerformance.processedRegularWarKeys : warPerformance.processedCwlWarTags;
+	if (processedMap[identifier]) return { applied: false, identifier: identifier, mode: mode, reason: "alreadyProcessed" };
+
+	const statsByTag = statsByTagRaw && typeof statsByTagRaw === "object" ? statsByTagRaw : {};
+	const tagKeys = Object.keys(statsByTag);
+	for (let i = 0; i < tagKeys.length; i++) {
+		const tag = normalizeTag_(tagKeys[i]);
+		if (!tag) continue;
+		const stats = sanitizeWarPerformanceStatsEntry_(statsByTag[tagKeys[i]]);
+		const entry = ensureWarPerformancePlayerEntry_(warPerformance, tag);
+		if (!entry) continue;
+		if (mode === "regular") mergeWarPerformanceStats_(entry.regular, stats);
+		else mergeWarPerformanceStats_(entry.cwl, stats);
+		mergeWarPerformanceStats_(entry.overall, stats);
+	}
+
+	processedMap[identifier] = true;
+	markWarPerformanceFinalization_(warPerformance, mode, identifier, nowIso, source, reason, incomplete);
+	return { applied: true, identifier: identifier, mode: mode, reason: "applied" };
+}
+
+function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, trackedTagSet, nowIso, source, reason, incomplete) {
+	const warKey = getStableRegularWarKey_(war, clanTag);
+	if (!warKey) return false;
+	const warStatsByTag = computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet);
+	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "regular", warKey, warStatsByTag, nowIso, source || "regularWarFinalized", reason || "regularWarFinalized", !!incomplete);
+	return !!result.applied;
+}
+
+function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTagSet, nowIso, source, reason, incomplete) {
+	const snapshot = sanitizeRegularWarSnapshot_(snapshotRaw);
+	if (!snapshot || !snapshot.warMeta || !snapshot.warMeta.warKey) return false;
+	const statsByTagRaw = snapshot.statsByTag && typeof snapshot.statsByTag === "object" ? snapshot.statsByTag : {};
+	const filteredStats = {};
+	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
+	const tags = Object.keys(statsByTagRaw);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		filteredStats[tag] = sanitizeWarPerformanceStatsEntry_(statsByTagRaw[tags[i]]);
+	}
+	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "regular", snapshot.warMeta.warKey, filteredStats, nowIso, source || "regularWarSnapshotFinalized", reason || "regularWarSnapshotFinalized", !!incomplete);
+	return !!result.applied;
+}
+
+function ingestCwlWarIntoWarPerformance_(warPerformance, war, warTagRaw, clanTag, trackedTagSet, nowIso, source) {
+	const warTag = normalizeTag_(warTagRaw) || normalizeTag_(war && war.warTag);
+	if (!warTag) return false;
+	const statsByTag = computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet);
+	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "cwl", warTag, statsByTag, nowIso, source || "cwlWarFinalized", "cwlWarFinalized", false);
+	return !!result.applied;
+}
+
+function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, nowIso) {
+	const currentWar = currentWarRaw && typeof currentWarRaw === "object" ? currentWarRaw : null;
+	if (!currentWar) return null;
+	const currentWarMetaRaw = currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : currentWar;
+	const warMeta = sanitizeRegularWarCurrentWar_(
+		Object.assign({}, currentWarMetaRaw, {
+			warKey: getStableRegularWarKey_(currentWar, clanTag),
+			available: currentWar.available == null ? currentWarMetaRaw.available : currentWar.available,
+		}),
+	);
+	const state = String(warMeta.state == null ? "" : warMeta.state)
+		.trim()
+		.toLowerCase();
+	if (state !== "preparation" && state !== "inwar" && state !== "warended") return null;
+
+	const sides = getWarSidesForClan_(currentWar, clanTag);
+	if (!sides) return null;
+	const attacksPerMember = toNonNegativeInt_(warMeta.attacksPerMember != null ? warMeta.attacksPerMember : sides.attacksPerMember);
+	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
+	const members = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
+	const statsByTag = buildWarStatsFromMembers_(members, attacksPerMember, opponentThByTag, trackedTagSet, "regular");
+	if (state !== "warended") {
+		const statTags = Object.keys(statsByTag);
+		for (let i = 0; i < statTags.length; i++) {
+			const tag = normalizeTag_(statTags[i]);
+			if (!tag || !statsByTag[tag]) continue;
+			statsByTag[tag].attacksMissed = 0;
+		}
+	}
+	const currentByTag = {};
+	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
+
+	for (let i = 0; i < members.length; i++) {
+		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		const entry = createEmptyRegularWarCurrentEntry_(attacksPerMember);
+		entry.inWar = true;
+		entry.mapPosition = member.mapPosition == null ? null : toNonNegativeInt_(member.mapPosition);
+		entry.townHallLevel = toNonNegativeInt_(readTownHallLevel_(member));
+		entry.attacksAllowed = attacksPerMember;
+		const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+		entry.attacksUsed = attacks.length;
+		entry.attacksRemaining = Math.max(0, entry.attacksAllowed - entry.attacksUsed);
+		entry.opponentAttacks = toNonNegativeInt_(member.opponentAttacks);
+		entry.missedAttacks = state === "warended" ? Math.max(0, entry.attacksAllowed - entry.attacksUsed) : 0;
+		const attackerTh = readTownHallLevel_(member);
+		for (let j = 0; j < attacks.length; j++) {
+			const attack = attacks[j] && typeof attacks[j] === "object" ? attacks[j] : {};
+			const stars = toNonNegativeInt_(attack.stars);
+			const destruction = readAttackDestruction_(attack);
+			const defenderTag = normalizeTag_(attack.defenderTag);
+			const defenderTh = defenderTag && Object.prototype.hasOwnProperty.call(opponentThByTag, defenderTag) ? opponentThByTag[defenderTag] : null;
+			entry.starsTotal += stars;
+			entry.totalDestruction += destruction;
+			entry.countedAttacks++;
+			if (stars === 3) entry.threeStarCount++;
+			if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
+				if (attackerTh < defenderTh) entry.hitUpCount++;
+				else if (attackerTh > defenderTh) entry.hitDownCount++;
+				else entry.sameThHitCount++;
+			}
+		}
+		currentByTag[tag] = sanitizeRegularWarCurrentEntry_(entry, attacksPerMember);
+	}
+
+	return {
+		warMeta: warMeta,
+		capturedAt: typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString(),
+		isFinal: state === "warended",
+		isComplete: true,
+		source: "currentWar",
+		statsByTag: statsByTag,
+		currentByTag: currentByTag,
+	};
+}
+
+function shouldFinalizePreviousRegularWar_(previousWarKeyRaw, currentWarKeyRaw, currentWarStateRaw) {
+	const previousWarKey = String(previousWarKeyRaw == null ? "" : previousWarKeyRaw).trim();
+	if (!previousWarKey) return false;
+	const currentWarKey = String(currentWarKeyRaw == null ? "" : currentWarKeyRaw).trim();
+	const currentWarState = String(currentWarStateRaw == null ? "" : currentWarStateRaw)
+		.trim()
+		.toLowerCase();
+	if (currentWarKey && previousWarKey === currentWarKey && currentWarState !== "warended") return false;
+	return true;
+}
+
+function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const warPerformance = options.warPerformance && typeof options.warPerformance === "object" ? options.warPerformance : null;
+	if (!warPerformance) return { attempted: false, finalized: false, source: "", incomplete: false, reason: "missingWarPerformance" };
+	const previousWarKey = String(options.previousWarKey == null ? "" : options.previousWarKey).trim();
+	if (!previousWarKey) return { attempted: false, finalized: false, source: "", incomplete: false, reason: "missingPreviousWarKey" };
+	const nowIso = typeof options.nowIso === "string" && options.nowIso ? options.nowIso : new Date().toISOString();
+	const trackedTagSet = options.trackedTagSet && typeof options.trackedTagSet === "object" ? options.trackedTagSet : {};
+	const clanTag = normalizeTag_(options.clanTag);
+	const currentWar = options.currentWar && typeof options.currentWar === "object" ? options.currentWar : null;
+	const currentWarMeta = sanitizeRegularWarCurrentWar_(options.currentWarMeta);
+	const previousSnapshot = sanitizeRegularWarSnapshot_(options.previousSnapshot);
+
+	if (warPerformance.processedRegularWarKeys && warPerformance.processedRegularWarKeys[previousWarKey]) {
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "alreadyProcessed", "alreadyProcessed", false, false, nowIso);
+		return { attempted: true, finalized: false, source: "alreadyProcessed", incomplete: false, reason: "alreadyProcessed" };
+	}
+
+	if (currentWar && currentWarMeta.warKey === previousWarKey && String(currentWarMeta.state || "").toLowerCase() === "warended" && warHasMemberLevelDataForClan_(currentWar, clanTag)) {
+		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, currentWar, clanTag, trackedTagSet, nowIso, "currentWarEnded", "directCurrentWarEnded", false);
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "currentWarEnded", "directCurrentWarEnded", false, finalized, nowIso);
+		return { attempted: true, finalized: finalized, source: "currentWarEnded", incomplete: false, reason: finalized ? "directCurrentWarEnded" : "directCurrentWarEndedSkipped" };
+	}
+
+	let warLogEntry = null;
+	let warLogLookupFailed = false;
+	try {
+		warLogEntry = findWarLogEntryByWarKey_(clanTag, previousWarKey, REGULAR_WAR_WARLOG_LIMIT);
+	} catch (err) {
+		warLogLookupFailed = true;
+	}
+	if (warLogEntry && warHasMemberLevelDataForClan_(warLogEntry, clanTag)) {
+		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, warLogEntry, clanTag, trackedTagSet, nowIso, "targetedWarLog", "targetedWarLogFallback", false);
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "targetedWarLog", "targetedWarLogFallback", false, finalized, nowIso);
+		return { attempted: true, finalized: finalized, source: "targetedWarLog", incomplete: false, reason: finalized ? "targetedWarLogFallback" : "targetedWarLogFallbackSkipped" };
+	}
+
+	if (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey === previousWarKey) {
+		const fallbackReason = warLogEntry ? "warLogMissingMemberDetail_snapshotFallback" : warLogLookupFailed ? "warLogLookupFailed_snapshotFallback" : "snapshotFallbackNoFinalData";
+		const finalized = finalizeRegularWarFromSnapshot_(warPerformance, previousSnapshot, trackedTagSet, nowIso, "liveSnapshotFallback", fallbackReason, true);
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "liveSnapshotFallback", fallbackReason, true, finalized, nowIso);
+		return { attempted: true, finalized: finalized, source: "liveSnapshotFallback", incomplete: true, reason: fallbackReason };
+	}
+	if (warLogLookupFailed) {
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "warLogLookupFailed", "warLogLookupFailed_noSnapshot", true, false, nowIso);
+		return { attempted: true, finalized: false, source: "warLogLookupFailed", incomplete: true, reason: "warLogLookupFailed_noSnapshot" };
+	}
+
+	recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "noFinalData", "noFinalDataAvailable", true, false, nowIso);
+	return { attempted: true, finalized: false, source: "noFinalData", incomplete: true, reason: "noFinalDataAvailable" };
+}
+
+function tryFinalizePreviousRegularWar_(optionsRaw) {
+	return finalizeRegularWarFromLiveOrFallback_(optionsRaw);
+}
+
+function ensureTrackedWarMembership_(warPerformance, activeTagSetRaw, nowIso) {
+	if (!warPerformance || typeof warPerformance !== "object") return;
+	const activeTagSet = activeTagSetRaw && typeof activeTagSetRaw === "object" ? activeTagSetRaw : {};
+	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
+	const allTags = Object.assign({}, membershipByTag, activeTagSet);
+	for (const rawTag in allTags) {
+		if (!Object.prototype.hasOwnProperty.call(allTags, rawTag)) continue;
+		const tag = normalizeTag_(rawTag);
+		if (!tag) continue;
+		const entry = sanitizeRegularWarMembershipEntry_(membershipByTag[tag]);
+		const isActive = !!activeTagSet[tag];
+		if (!entry.firstSeenAt) entry.firstSeenAt = nowText;
+		if (isActive) {
+			entry.status = "active";
+			entry.lastSeenAt = nowText;
+			entry.missingSince = "";
+		} else {
+			if (entry.status !== "temporaryMissing") {
+				entry.status = "temporaryMissing";
+				entry.missingSince = nowText;
+			} else if (!(parseIsoToMs_(entry.missingSince) > 0)) {
+				entry.missingSince = nowText;
+			}
+		}
+		membershipByTag[tag] = entry;
+	}
+	warPerformance.membershipByTag = membershipByTag;
+}
+
+function markTrackedMemberMissing_(warPerformance, missingTagSetRaw, nowIso) {
+	if (!warPerformance || typeof warPerformance !== "object") return;
+	const missingTagSet = missingTagSetRaw && typeof missingTagSetRaw === "object" ? missingTagSetRaw : {};
+	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
+	const tags = Object.keys(missingTagSet);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const entry = sanitizeRegularWarMembershipEntry_(membershipByTag[tag]);
+		if (!entry.firstSeenAt) entry.firstSeenAt = nowText;
+		if (!(parseIsoToMs_(entry.missingSince) > 0)) entry.missingSince = nowText;
+		entry.status = "temporaryMissing";
+		membershipByTag[tag] = entry;
+	}
+	warPerformance.membershipByTag = membershipByTag;
+}
+
+function pruneExpiredTrackedWarMembers_(warPerformance, nowIso) {
+	if (!warPerformance || typeof warPerformance !== "object") return [];
+	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const removedTags = [];
+	for (const rawTag in membershipByTag) {
+		if (!Object.prototype.hasOwnProperty.call(membershipByTag, rawTag)) continue;
+		const tag = normalizeTag_(rawTag);
+		if (!tag) continue;
+		const entry = sanitizeRegularWarMembershipEntry_(membershipByTag[rawTag]);
+		if (entry.status !== "temporaryMissing") continue;
+		const missingSinceMs = parseIsoToMs_(entry.missingSince);
+		if (!(missingSinceMs > 0) || nowMs - missingSinceMs < REGULAR_WAR_MISSING_GRACE_MS) continue;
+		delete membershipByTag[rawTag];
+		if (warPerformance.byTag && Object.prototype.hasOwnProperty.call(warPerformance.byTag, tag)) {
+			delete warPerformance.byTag[tag];
+		}
+		removedTags.push(tag);
+	}
+	warPerformance.membershipByTag = membershipByTag;
+	return removedTags;
+}
+
+function buildRosterActiveTagSet_(roster) {
+	const out = {};
+	const rosterObj = roster && typeof roster === "object" ? roster : {};
+	const players = [].concat(Array.isArray(rosterObj.main) ? rosterObj.main : []).concat(Array.isArray(rosterObj.subs) ? rosterObj.subs : []);
+	for (let i = 0; i < players.length; i++) {
+		const tag = normalizeTag_(players[i] && players[i].tag);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+function buildRosterMissingTagSet_(roster) {
+	const out = {};
+	const missing = Array.isArray(roster && roster.missing) ? roster.missing : [];
+	for (let i = 0; i < missing.length; i++) {
+		const tag = normalizeTag_(missing[i] && missing[i].tag);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+function removeRosterPlayersByTagSet_(roster, tagSetRaw) {
+	if (!roster || typeof roster !== "object") return false;
+	const tagSet = tagSetRaw && typeof tagSetRaw === "object" ? tagSetRaw : {};
+	let changed = false;
+	const filterPlayers = (playersRaw) => {
+		const players = Array.isArray(playersRaw) ? playersRaw : [];
+		const out = [];
+		for (let i = 0; i < players.length; i++) {
+			const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (tag && tagSet[tag]) {
+				changed = true;
+				continue;
+			}
+			out.push(player);
+		}
+		return out;
+	};
+	roster.main = filterPlayers(roster.main);
+	roster.subs = filterPlayers(roster.subs);
+	roster.missing = filterPlayers(roster.missing);
+	return changed;
+}
+
+function buildTrackedWarHistoryTagSet_(roster, warPerformanceRaw, nowIso) {
+	const out = buildRosterPoolTagSet_(roster);
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const tags = Object.keys(membershipByTag);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const entry = sanitizeRegularWarMembershipEntry_(membershipByTag[tags[i]]);
+		if (entry.status !== "temporaryMissing") {
+			out[tag] = true;
+			continue;
+		}
+		const missingSinceMs = parseIsoToMs_(entry.missingSince);
+		if (!(missingSinceMs > 0) || nowMs - missingSinceMs < REGULAR_WAR_MISSING_GRACE_MS) out[tag] = true;
+	}
+	return out;
+}
+
+function updateWarPerformanceMembership_(roster, nowIso) {
+	if (!roster || typeof roster !== "object") return;
+	const warPerformance = ensureWarPerformance_(roster);
+	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+	const activeTagSet = buildRosterActiveTagSet_(roster);
+	const missingTagSet = buildRosterMissingTagSet_(roster);
+	ensureTrackedWarMembership_(warPerformance, activeTagSet, nowText);
+	markTrackedMemberMissing_(warPerformance, missingTagSet, nowText);
+	const removedTags = pruneExpiredTrackedWarMembers_(warPerformance, nowText);
+	const removedTagSet = {};
+	for (let i = 0; i < removedTags.length; i++) {
+		removedTagSet[removedTags[i]] = true;
+	}
+	if (Object.keys(removedTagSet).length > 0) {
+		const removedFromRoster = removeRosterPlayersByTagSet_(roster, removedTagSet);
+		if (removedFromRoster) {
+			normalizeRosterSlots_(roster);
+			clearRosterBenchSuggestions_(roster);
+		}
+	}
+	for (let i = 0; i < removedTags.length; i++) {
+		pruneTagFromRosterTrackingState_(roster, removedTags[i]);
+	}
+	warPerformance.lastRefreshedAt = nowText;
+	roster.warPerformance = warPerformance;
+}
+
+function sanitizeRegularWarMembershipEntry_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const out = createEmptyRegularWarMembershipEntry_();
+	const statusRaw = String(entry.status == null ? "" : entry.status)
+		.trim()
+		.toLowerCase();
+	out.firstSeenAt = typeof entry.firstSeenAt === "string" ? entry.firstSeenAt : "";
+	out.lastSeenAt = typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : "";
+	out.missingSince = typeof entry.missingSince === "string" ? entry.missingSince : "";
+	out.status = statusRaw === "temporarymissing" ? "temporaryMissing" : "active";
+	return out;
+}
+
+function sanitizeRegularWarCurrentWar_(rawCurrentWar) {
+	const currentWar = rawCurrentWar && typeof rawCurrentWar === "object" ? rawCurrentWar : {};
+	const state = String(currentWar.state == null ? "" : currentWar.state)
+		.trim()
+		.toLowerCase();
+	const clanTag = normalizeTag_(currentWar.clanTag);
+	const opponentTag = normalizeTag_(currentWar.opponentTag);
+	const preparationStartTime = typeof currentWar.preparationStartTime === "string" ? currentWar.preparationStartTime : "";
+	const startTime = typeof currentWar.startTime === "string" ? currentWar.startTime : "";
+	const endTime = typeof currentWar.endTime === "string" ? currentWar.endTime : "";
+	const warKey = getStableRegularWarKey_(currentWar, clanTag);
+	return {
+		warKey: warKey,
+		available: toBooleanFlag_(currentWar.available),
+		state: state || "notinwar",
+		teamSize: toNonNegativeInt_(currentWar.teamSize),
+		attacksPerMember: toNonNegativeInt_(currentWar.attacksPerMember),
+		clanTag: clanTag,
+		clanName: typeof currentWar.clanName === "string" ? currentWar.clanName : "",
+		opponentTag: opponentTag,
+		opponentName: typeof currentWar.opponentName === "string" ? currentWar.opponentName : "",
+		preparationStartTime: preparationStartTime,
+		startTime: startTime,
+		endTime: endTime,
+		unavailableReason: typeof currentWar.unavailableReason === "string" ? currentWar.unavailableReason : "",
+		statusMessage: typeof currentWar.statusMessage === "string" ? currentWar.statusMessage : "",
+	};
+}
+
+function sanitizeRegularWarAggregateMeta_(rawMeta) {
+	const meta = rawMeta && typeof rawMeta === "object" ? rawMeta : {};
+	return {
+		source: typeof meta.source === "string" ? meta.source : "",
+		warLogAvailable: toBooleanFlag_(meta.warLogAvailable),
+		warsTracked: toNonNegativeInt_(meta.warsTracked),
+		lastSuccessfulWarLogRefreshAt: typeof meta.lastSuccessfulWarLogRefreshAt === "string" ? meta.lastSuccessfulWarLogRefreshAt : "",
+		unavailableReason: typeof meta.unavailableReason === "string" ? meta.unavailableReason : "",
+		statusMessage: typeof meta.statusMessage === "string" ? meta.statusMessage : "",
+	};
+}
+
+function sanitizeCwlStatEntry_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const resolvedWarDays = entry.resolvedWarDays != null ? toNonNegativeInt_(entry.resolvedWarDays) : toNonNegativeInt_(entry.daysInLineup);
+	const out = createEmptyCwlStatEntry_();
+	out.starsTotal = toNonNegativeInt_(entry.starsTotal);
+	out.daysInLineup = resolvedWarDays;
+	out.resolvedWarDays = resolvedWarDays;
+	out.attacksMade = toNonNegativeInt_(entry.attacksMade);
+	out.missedAttacks = toNonNegativeInt_(entry.missedAttacks);
+	out.threeStarCount = toNonNegativeInt_(entry.threeStarCount);
+	out.totalDestruction = toNonNegativeInt_(entry.totalDestruction);
+	out.countedAttacks = toNonNegativeInt_(entry.countedAttacks);
+	out.currentWarAttackPending = Math.min(1, toNonNegativeInt_(entry.currentWarAttackPending));
+	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
+	out.hitDownCount = toNonNegativeInt_(entry.hitDownCount);
+	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
+	return out;
+}
+
+function deriveCwlMetrics_(entryRaw) {
+	const entry = sanitizeCwlStatEntry_(entryRaw);
+	const possibleStars = 3 * entry.resolvedWarDays;
+	return {
+		starsTotal: entry.starsTotal,
+		daysInLineup: entry.daysInLineup,
+		resolvedWarDays: entry.resolvedWarDays,
+		attacksMade: entry.attacksMade,
+		missedAttacks: entry.missedAttacks,
+		threeStarCount: entry.threeStarCount,
+		totalDestruction: entry.totalDestruction,
+		countedAttacks: entry.countedAttacks,
+		currentWarAttackPending: entry.currentWarAttackPending,
+		hitUpCount: entry.hitUpCount,
+		hitDownCount: entry.hitDownCount,
+		sameThHitCount: entry.sameThHitCount,
+		possibleStars: possibleStars,
+		starsPerf: possibleStars > 0 ? entry.starsTotal / possibleStars : null,
+		avgDestruction: entry.countedAttacks > 0 ? entry.totalDestruction / entry.countedAttacks : null,
+		destructionPerf: entry.resolvedWarDays > 0 ? entry.totalDestruction / (100 * entry.resolvedWarDays) : null,
+	};
+}
+
+function readAttackDestruction_(attackRaw) {
+	const attack = attackRaw && typeof attackRaw === "object" ? attackRaw : {};
+	const raw = attack.destructionPercentage != null ? attack.destructionPercentage : attack.destruction;
+	return toNonNegativeInt_(raw);
+}
+
+function buildMemberThByTag_(membersRaw) {
+	const out = {};
+	const members = Array.isArray(membersRaw) ? membersRaw : [];
+	for (let i = 0; i < members.length; i++) {
+		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
+		const tag = normalizeTag_(member.tag);
+		const th = readTownHallLevel_(member);
+		if (!tag || !isFinite(th)) continue;
+		out[tag] = Math.max(0, Math.floor(th));
+	}
+	return out;
+}
+
+function getOpponentSideForClan_(war, clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (war && war.clan && normalizeTag_(war.clan.tag) === clanTag) return war.opponent || null;
+	if (war && war.opponent && normalizeTag_(war.opponent.tag) === clanTag) return war.clan || null;
+	return null;
+}
+
+function metricCompareValue_(value) {
+	return value == null ? -1 : value;
+}
+
+function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, regularWarRaw, nowIso) {
+	const out = {};
+	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+	for (const rawTag in rosterPoolTagSet) {
+		if (!Object.prototype.hasOwnProperty.call(rosterPoolTagSet, rawTag)) continue;
+		const tag = normalizeTag_(rawTag);
+		if (tag) out[tag] = true;
+	}
+
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const addMembership = (membershipRaw) => {
+		const membershipByTag = membershipRaw && typeof membershipRaw === "object" ? membershipRaw : {};
+		const keys = Object.keys(membershipByTag);
+		for (let i = 0; i < keys.length; i++) {
+			const tag = normalizeTag_(keys[i]);
+			if (!tag) continue;
+			const entry = sanitizeRegularWarMembershipEntry_(membershipByTag[keys[i]]);
+			if (entry.status !== "temporaryMissing") {
+				out[tag] = true;
+				continue;
+			}
+			const missingSinceMs = parseIsoToMs_(entry.missingSince);
+			if (!(missingSinceMs > 0) || nowMs - missingSinceMs < REGULAR_WAR_MISSING_GRACE_MS) {
+				out[tag] = true;
+			}
+		}
+	};
+
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	addMembership(warPerformance.membershipByTag);
+	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
+	addMembership(regularWar.membershipByTag);
+	return out;
+}
+
+function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
+	if (rawStats == null) return null;
+	const stats = rawStats && typeof rawStats === "object" ? rawStats : {};
+	const allowedTags = retainedTagSet && typeof retainedTagSet === "object" ? retainedTagSet : {};
+	const byTagRaw = stats.byTag && typeof stats.byTag === "object" ? stats.byTag : {};
+	const byTag = {};
+	const keys = Object.keys(byTagRaw);
+
+	for (let i = 0; i < keys.length; i++) {
+		const normalizedTag = normalizeTag_(keys[i]);
+		if (!normalizedTag || !allowedTags[normalizedTag]) continue;
+
+		byTag[normalizedTag] = sanitizeCwlStatEntry_(byTagRaw[keys[i]]);
+	}
+
+	return {
+		lastRefreshedAt: typeof stats.lastRefreshedAt === "string" ? stats.lastRefreshedAt : "",
+		season: typeof stats.season === "string" ? stats.season : "",
+		byTag: byTag,
+	};
+}
+
+function sanitizeRosterRegularWar_(regularWarRaw, retainedTagSet) {
+	if (regularWarRaw == null) return null;
+	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
+	const allowedTags = retainedTagSet && typeof retainedTagSet === "object" ? retainedTagSet : {};
+	const byTagRaw = regularWar.byTag && typeof regularWar.byTag === "object" ? regularWar.byTag : {};
+	const membershipByTagRaw = regularWar.membershipByTag && typeof regularWar.membershipByTag === "object" ? regularWar.membershipByTag : {};
+	const byTag = {};
+	const membershipByTag = {};
+	const byTagKeys = Object.keys(byTagRaw);
+	const membershipKeys = Object.keys(membershipByTagRaw);
+
+	for (let i = 0; i < byTagKeys.length; i++) {
+		const normalizedTag = normalizeTag_(byTagKeys[i]);
+		if (!normalizedTag || !allowedTags[normalizedTag]) continue;
+		const entry = byTagRaw[byTagKeys[i]] && typeof byTagRaw[byTagKeys[i]] === "object" ? byTagRaw[byTagKeys[i]] : {};
+		byTag[normalizedTag] = {
+			current: sanitizeRegularWarCurrentEntry_(entry.current, entry.current && entry.current.attacksAllowed),
+			aggregate: sanitizeRegularWarAggregateEntry_(entry.aggregate),
+		};
+	}
+
+	for (let i = 0; i < membershipKeys.length; i++) {
+		const normalizedTag = normalizeTag_(membershipKeys[i]);
+		if (!normalizedTag || !allowedTags[normalizedTag]) continue;
+		membershipByTag[normalizedTag] = sanitizeRegularWarMembershipEntry_(membershipByTagRaw[membershipKeys[i]]);
+	}
+
+	return {
+		lastRefreshedAt: typeof regularWar.lastRefreshedAt === "string" ? regularWar.lastRefreshedAt : "",
+		currentWar: sanitizeRegularWarCurrentWar_(regularWar.currentWar),
+		aggregateMeta: sanitizeRegularWarAggregateMeta_(regularWar.aggregateMeta),
+		byTag: byTag,
+		membershipByTag: membershipByTag,
+	};
+}
+
+function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
+	if (rawSuggestions == null) return null;
+	const suggestions = rawSuggestions && typeof rawSuggestions === "object" ? rawSuggestions : {};
+	const allowedTags = rosterPoolTagSet && typeof rosterPoolTagSet === "object" ? rosterPoolTagSet : {};
+	const pairsRaw = Array.isArray(suggestions.pairs) ? suggestions.pairs : [];
+	const benchTagsRaw = Array.isArray(suggestions.benchTags) ? suggestions.benchTags : [];
+	const swapInTagsRaw = Array.isArray(suggestions.swapInTags) ? suggestions.swapInTags : [];
+	const resultRaw = suggestions.result && typeof suggestions.result === "object" ? suggestions.result : {};
+	const seenPairKeys = {};
+	const seenBenchTags = {};
+	const seenSwapInTags = {};
+	const benchTags = [];
+	const swapInTags = [];
+	const pairs = [];
+	const sanitizeTagList = (rawList) => {
+		const list = Array.isArray(rawList) ? rawList : [];
+		const out = [];
+		const seen = {};
+		for (let i = 0; i < list.length; i++) {
+			const tag = normalizeTag_(list[i]);
+			if (!tag || !allowedTags[tag] || seen[tag]) continue;
+			seen[tag] = true;
+			out.push(tag);
+		}
+		return out;
+	};
+	const sanitizeStringList = (rawList, limit) => {
+		const list = Array.isArray(rawList) ? rawList : [];
+		const maxLen = Math.max(0, toNonNegativeInt_(limit || 0));
+		const out = [];
+		const seen = {};
+		for (let i = 0; i < list.length; i++) {
+			const text = String(list[i] == null ? "" : list[i]).trim();
+			if (!text || seen[text]) continue;
+			seen[text] = true;
+			out.push(text);
+			if (maxLen > 0 && out.length >= maxLen) break;
+		}
+		return out;
+	};
+	const toFiniteNumberOrNull = (value) => {
+		const n = Number(value);
+		return isFinite(n) ? n : null;
+	};
+
+	const addBenchTag = (tagRaw) => {
+		const tag = normalizeTag_(tagRaw);
+		if (!tag || !allowedTags[tag] || seenBenchTags[tag]) return;
+		seenBenchTags[tag] = true;
+		benchTags.push(tag);
+	};
+
+	const addSwapInTag = (tagRaw) => {
+		const tag = normalizeTag_(tagRaw);
+		if (!tag || !allowedTags[tag] || seenSwapInTags[tag]) return;
+		seenSwapInTags[tag] = true;
+		swapInTags.push(tag);
+	};
+
+	for (let i = 0; i < pairsRaw.length; i++) {
+		const pair = pairsRaw[i] && typeof pairsRaw[i] === "object" ? pairsRaw[i] : {};
+		const outTag = normalizeTag_(pair.outTag);
+		const inTag = normalizeTag_(pair.inTag);
+		if (!outTag || !inTag || !allowedTags[outTag] || !allowedTags[inTag]) continue;
+		const pairKey = outTag + "|" + inTag;
+		if (seenPairKeys[pairKey]) continue;
+		seenPairKeys[pairKey] = true;
+		addBenchTag(outTag);
+		addSwapInTag(inTag);
+		const pairOut = {
+			outTag: outTag,
+			inTag: inTag,
+			reasonCode: typeof pair.reasonCode === "string" ? pair.reasonCode : "",
+			reasonText: typeof pair.reasonText === "string" ? pair.reasonText : "",
+		};
+		if (typeof pair.shortReason === "string") pairOut.shortReason = pair.shortReason;
+		const scoreDelta = toFiniteNumberOrNull(pair.scoreDelta);
+		if (scoreDelta != null) pairOut.scoreDelta = scoreDelta;
+		if (typeof pair.rewardImpact === "string") pairOut.rewardImpact = pair.rewardImpact;
+		pairs.push(pairOut);
+	}
+
+	for (let i = 0; i < benchTagsRaw.length; i++) addBenchTag(benchTagsRaw[i]);
+	for (let i = 0; i < swapInTagsRaw.length; i++) addSwapInTag(swapInTagsRaw[i]);
+
+	const updatedAt = typeof suggestions.updatedAt === "string" ? suggestions.updatedAt : "";
+	const algorithm = typeof suggestions.algorithm === "string" ? suggestions.algorithm.trim() : "";
+	const nextEditableDayIndexRaw = suggestions.nextEditableDayIndex;
+	const nextEditableDayIndex = nextEditableDayIndexRaw == null ? null : Math.floor(Number(nextEditableDayIndexRaw));
+	const safeNextEditableDayIndex = isFinite(nextEditableDayIndex) ? nextEditableDayIndex : null;
+	const targetMainTags = sanitizeTagList(suggestions.targetMainTags);
+	const actionableTargetMainTags = sanitizeTagList(suggestions.actionableTargetMainTags);
+	const plannerSummaryRaw = suggestions.plannerSummary && typeof suggestions.plannerSummary === "object" ? suggestions.plannerSummary : null;
+	let plannerSummary = null;
+	if (plannerSummaryRaw) {
+		const next = {
+			remainingEditableDays: toNonNegativeInt_(plannerSummaryRaw.remainingEditableDays),
+			optimalTotalSlack: toNonNegativeInt_(plannerSummaryRaw.optimalTotalSlack),
+			rewardFeasiblePlayerCount: toNonNegativeInt_(plannerSummaryRaw.rewardFeasiblePlayerCount),
+			rewardCriticalPlayerTags: sanitizeTagList(plannerSummaryRaw.rewardCriticalPlayerTags),
+			impossibleRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.impossibleRewardPlayerTags),
+			blockedByExclusions: toBooleanFlag_(plannerSummaryRaw.blockedByExclusions),
+			blockedByExclusionOutTags: sanitizeTagList(plannerSummaryRaw.blockedByExclusionOutTags),
+			blockedByExclusionInTags: sanitizeTagList(plannerSummaryRaw.blockedByExclusionInTags),
+		};
+		const solverMode = String(plannerSummaryRaw.solverMode == null ? "" : plannerSummaryRaw.solverMode).trim();
+		if (solverMode) next.solverMode = solverMode;
+		const warnings = sanitizeStringList(plannerSummaryRaw.warnings, 20);
+		if (warnings.length) next.warnings = warnings;
+		plannerSummary = next;
+	}
+	const configSnapshotRaw = suggestions.configSnapshot && typeof suggestions.configSnapshot === "object" ? suggestions.configSnapshot : null;
+	let configSnapshot = null;
+	if (configSnapshotRaw) {
+		const next = {};
+		const numericConfigKeys = ["defaultSeasonDays", "priorMeanStarsPerStart", "priorWeightAttacks", "minExpectedStarsPerStart", "maxExpectedStarsPerStart", "weightTH", "weightStarsPerf", "weightDestructionPerf", "weightThreeStarRate", "weightHitUpAbility", "weightHitEvenAbility", "weightReliabilityPenalty", "churnPenalty"];
+		for (let i = 0; i < numericConfigKeys.length; i++) {
+			const key = numericConfigKeys[i];
+			const value = toFiniteNumberOrNull(configSnapshotRaw[key]);
+			if (value != null) next[key] = value;
+		}
+		configSnapshot = Object.keys(next).length ? next : null;
+	}
+	const hasPlannerMetadata = !!algorithm || safeNextEditableDayIndex != null || targetMainTags.length > 0 || actionableTargetMainTags.length > 0 || !!plannerSummary || !!configSnapshot;
+	const hasContent = !!updatedAt || pairs.length > 0 || benchTags.length > 0 || swapInTags.length > 0 || Object.keys(resultRaw).length > 0 || hasPlannerMetadata;
+	if (!hasContent) return null;
+
+	const out = {
+		updatedAt: updatedAt,
+		benchTags: benchTags,
+		swapInTags: swapInTags,
+		pairs: pairs,
+		result: {
+			benchCount: benchTags.length > 0 ? benchTags.length : toNonNegativeInt_(resultRaw.benchCount),
+			swapCount: pairs.length > 0 ? pairs.length : toNonNegativeInt_(resultRaw.swapCount),
+			rosterPoolSize: toNonNegativeInt_(resultRaw.rosterPoolSize),
+			activeSlots: toNonNegativeInt_(resultRaw.activeSlots),
+			needsRewardsCount: toNonNegativeInt_(resultRaw.needsRewardsCount),
+		},
+	};
+	if (algorithm) out.algorithm = algorithm;
+	if (safeNextEditableDayIndex != null) out.nextEditableDayIndex = safeNextEditableDayIndex;
+	if (targetMainTags.length) out.targetMainTags = targetMainTags;
+	if (actionableTargetMainTags.length) out.actionableTargetMainTags = actionableTargetMainTags;
+	if (plannerSummary) out.plannerSummary = plannerSummary;
+	if (configSnapshot) out.configSnapshot = configSnapshot;
+	return out;
+}
+
+function normalizeRosterSlots_(roster) {
+	if (!roster || typeof roster !== "object") return;
+	if (!Array.isArray(roster.main)) roster.main = [];
+	if (!Array.isArray(roster.subs)) roster.subs = [];
+	if (!Array.isArray(roster.missing)) roster.missing = [];
+
+	for (let i = 0; i < roster.main.length; i++) {
+		if (!roster.main[i] || typeof roster.main[i] !== "object") roster.main[i] = {};
+		roster.main[i].slot = i + 1;
+	}
+	for (let i = 0; i < roster.subs.length; i++) {
+		if (!roster.subs[i] || typeof roster.subs[i] !== "object") roster.subs[i] = {};
+		roster.subs[i].slot = null;
+	}
+	for (let i = 0; i < roster.missing.length; i++) {
+		if (!roster.missing[i] || typeof roster.missing[i] !== "object") roster.missing[i] = {};
+		roster.missing[i].slot = null;
+	}
+	roster.badges = { main: roster.main.length, subs: roster.subs.length, missing: roster.missing.length };
+}
+
+function clearRosterBenchSuggestions_(roster) {
+	if (!roster || typeof roster !== "object") return;
+	if (Object.prototype.hasOwnProperty.call(roster, "benchSuggestions")) {
+		delete roster.benchSuggestions;
+	}
+}
+
+function findRosterById_(rosterData, rosterIdRaw) {
+	const rosterDataSafe = validateRosterData_(rosterData);
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) throw new Error("Roster ID is required.");
+
+	const rosters = Array.isArray(rosterDataSafe.rosters) ? rosterDataSafe.rosters : [];
+	const roster = rosters.find((r) => String((r && r.id) || "").trim() === rosterId);
+	if (!roster) throw new Error("Roster not found: " + rosterId);
+
+	return { rosterData: rosterDataSafe, roster: roster, rosterId: rosterId };
+}
+
+function findRosterForClanSync_(rosterData, rosterIdRaw) {
+	const ctx = findRosterById_(rosterData, rosterIdRaw);
+	const roster = ctx.roster;
+	const connectedClanTag = normalizeTag_(roster.connectedClanTag);
+	if (!connectedClanTag) {
+		throw new Error("Connected clan tag is missing for roster '" + ctx.rosterId + "'.");
+	}
+	roster.connectedClanTag = connectedClanTag;
+	ctx.trackingMode = getRosterTrackingMode_(roster);
+	ctx.clanTag = connectedClanTag;
+	return ctx;
+}
+
+function fetchClanMembers_(clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag) throw new Error("Clan tag is required.");
+	const data = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/members");
+	return mapApiMembers_(data && data.items);
+}
+
+function fetchLeagueGroupData_(clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag) throw new Error("Clan tag is required.");
+	const data = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup");
+
+	const clans = Array.isArray(data && data.clans) ? data.clans : [];
+	let clanEntry = null;
+	for (let i = 0; i < clans.length; i++) {
+		const c = clans[i] && typeof clans[i] === "object" ? clans[i] : {};
+		if (normalizeTag_(c.tag) === clanTag) {
+			clanEntry = c;
+			break;
+		}
+	}
+
+	return {
+		clanFound: !!clanEntry,
+		members: mapApiMembers_(clanEntry && clanEntry.members),
+		warTags: extractLeagueGroupWarTags_(data),
+	};
+}
+
+function isPrivateWarLogError_(err) {
+	return !!(err && Number(err.statusCode) === 403);
+}
+
+function buildNoCurrentRegularWarResult_(clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	return {
+		available: false,
+		state: "notinwar",
+		participants: [],
+		clanSide: null,
+		opponentSide: null,
+		currentWarMeta: {
+			warKey: clanTag + "||",
+			available: false,
+			state: "notinwar",
+			teamSize: 0,
+			attacksPerMember: 0,
+			clanTag: clanTag,
+			clanName: "",
+			opponentTag: "",
+			opponentName: "",
+			preparationStartTime: "",
+			startTime: "",
+			endTime: "",
+		},
+	};
+}
+
+function buildPrivateRegularWarResult_(clanTagRaw) {
+	const base = buildNoCurrentRegularWarResult_(clanTagRaw);
+	base.currentWarMeta.unavailableReason = "privateWarLog";
+	base.currentWarMeta.statusMessage = "Live war data unavailable because the clan war log is private.";
+	return base;
+}
+
+function fetchCurrentRegularWar_(clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag) throw new Error("Clan tag is required.");
+
+	let war = null;
+	try {
+		war = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar");
+	} catch (err) {
+		if (err && err.statusCode === 404) {
+			return buildNoCurrentRegularWarResult_(clanTag);
+		}
+		if (isPrivateWarLogError_(err)) {
+			return buildPrivateRegularWarResult_(clanTag);
+		}
+		throw err;
+	}
+
+	const warObj = war && typeof war === "object" ? war : {};
+	const state = String((warObj && warObj.state) || "")
+		.trim()
+		.toLowerCase();
+	const clanSide = pickWarSideForClan_(warObj, clanTag);
+	if (!clanSide) {
+		return buildNoCurrentRegularWarResult_(clanTag);
+	}
+
+	const opponentSide = getOpponentSideForClan_(warObj, clanTag);
+	const opponentTag = normalizeTag_(opponentSide && opponentSide.tag);
+	const preparationStartTime = typeof warObj.preparationStartTime === "string" ? warObj.preparationStartTime : "";
+	const startTime = typeof warObj.startTime === "string" ? warObj.startTime : "";
+	const endTime = typeof warObj.endTime === "string" ? warObj.endTime : "";
+	const warKey = getStableRegularWarKey_(
+		{
+			clanTag: normalizeTag_(clanSide.tag) || clanTag,
+			opponentTag: opponentTag,
+			preparationStartTime: preparationStartTime,
+			startTime: startTime,
+			endTime: endTime,
+		},
+		clanTag,
+	);
+	const currentWarMeta = {
+		warKey: warKey,
+		available: true,
+		state: state || "notinwar",
+		teamSize: toNonNegativeInt_(warObj.teamSize),
+		attacksPerMember: toNonNegativeInt_(warObj.attacksPerMember),
+		clanTag: normalizeTag_(clanSide.tag) || clanTag,
+		clanName: String(clanSide.name == null ? "" : clanSide.name),
+		opponentTag: opponentTag,
+		opponentName: String(opponentSide && opponentSide.name != null ? opponentSide.name : ""),
+		preparationStartTime: preparationStartTime,
+		startTime: startTime,
+		endTime: endTime,
+	};
+
+	return {
+		available: true,
+		state: currentWarMeta.state,
+		participants: mapApiMembers_(clanSide.members),
+		clanSide: clanSide,
+		opponentSide: opponentSide,
+		currentWarMeta: currentWarMeta,
+	};
+}
+
+function fetchClanWarLog_(clanTagRaw, limitRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag) throw new Error("Clan tag is required.");
+	const limit = Math.max(1, toNonNegativeInt_(limitRaw) || REGULAR_WAR_WARLOG_LIMIT);
+	const data = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/warlog?limit=" + limit);
+	const itemsRaw = Array.isArray(data) ? data : Array.isArray(data && data.items) ? data.items : [];
+	const out = [];
+	for (let i = 0; i < itemsRaw.length; i++) {
+		const entry = itemsRaw[i] && typeof itemsRaw[i] === "object" ? itemsRaw[i] : {};
+		out.push(entry);
+	}
+	return out;
+}
+
+function extractLeagueGroupWarTags_(leaguegroupRaw) {
+	const rounds = Array.isArray(leaguegroupRaw && leaguegroupRaw.rounds) ? leaguegroupRaw.rounds : [];
+	const warTags = [];
+	const seen = {};
+	for (let i = 0; i < rounds.length; i++) {
+		const round = rounds[i] && typeof rounds[i] === "object" ? rounds[i] : {};
+		const tags = Array.isArray(round.warTags) ? round.warTags : [];
+		for (let j = 0; j < tags.length; j++) {
+			const warTag = normalizeTag_(tags[j]);
+			if (!warTag || warTag === "#0" || seen[warTag]) continue;
+			seen[warTag] = true;
+			warTags.push(warTag);
+		}
+	}
+	return warTags;
+}
+
+function leagueGroupContainsClan_(leaguegroupRaw, clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const clans = Array.isArray(leaguegroupRaw && leaguegroupRaw.clans) ? leaguegroupRaw.clans : [];
+	for (let i = 0; i < clans.length; i++) {
+		const clan = clans[i] && typeof clans[i] === "object" ? clans[i] : {};
+		if (normalizeTag_(clan.tag) === clanTag) return true;
+	}
+	return false;
+}
+
+function pickWarSideForClan_(war, clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const clanSide = war && war.clan && normalizeTag_(war.clan.tag) === clanTag ? war.clan : null;
+	if (clanSide) return clanSide;
+	const oppSide = war && war.opponent && normalizeTag_(war.opponent.tag) === clanTag ? war.opponent : null;
+	return oppSide;
+}
+
+function resolveRosterPoolSource_(clanTagRaw, rosterIdRaw, ownershipSnapshotRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const snapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : null;
+	if (snapshot && rosterId) {
+		const membersByRosterId = snapshot.membersByRosterId && typeof snapshot.membersByRosterId === "object" ? snapshot.membersByRosterId : {};
+		if (Array.isArray(membersByRosterId[rosterId])) {
+			return { sourceUsed: "members", members: membersByRosterId[rosterId] };
+		}
+	}
+	return { sourceUsed: "members", members: fetchClanMembers_(clanTag) };
+}
+
+function buildRosterPlayerSeedByTag_(rosterData) {
+	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const out = {};
+
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const players = []
+			.concat(Array.isArray(roster.main) ? roster.main : [])
+			.concat(Array.isArray(roster.subs) ? roster.subs : [])
+			.concat(Array.isArray(roster.missing) ? roster.missing : []);
+		for (let j = 0; j < players.length; j++) {
+			const player = players[j] && typeof players[j] === "object" ? players[j] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag || out[tag]) continue;
+			out[tag] = player;
+		}
+	}
+
+	return out;
+}
+
+function buildLiveRosterOwnershipSnapshot_(rosterData) {
+	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const membersByRosterId = {};
+	const memberTagSetByRosterId = {};
+	const ownerRosterIdByTag = {};
+	const liveMemberByTag = {};
+	const connectedClanTagByRosterId = {};
+	const connectedRosterIds = [];
+	const membersByClanTag = {};
+
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const rosterId = String(roster.id || "").trim();
+		if (!rosterId) continue;
+
+		const clanTag = normalizeTag_(roster.connectedClanTag);
+		if (!clanTag) continue;
+
+		connectedRosterIds.push(rosterId);
+		connectedClanTagByRosterId[rosterId] = clanTag;
+
+		let members = membersByClanTag[clanTag];
+		if (!members) {
+			members = fetchClanMembers_(clanTag);
+			membersByClanTag[clanTag] = members;
+		}
+		membersByRosterId[rosterId] = members;
+
+		const tagSet = {};
+		for (let j = 0; j < members.length; j++) {
+			const member = members[j] && typeof members[j] === "object" ? members[j] : {};
+			const tag = normalizeTag_(member.tag);
+			if (!tag || tagSet[tag]) continue;
+			tagSet[tag] = true;
+			if (!ownerRosterIdByTag[tag]) ownerRosterIdByTag[tag] = rosterId;
+			if (!liveMemberByTag[tag]) liveMemberByTag[tag] = member;
+		}
+		memberTagSetByRosterId[rosterId] = tagSet;
+	}
+
+	return {
+		membersByRosterId: membersByRosterId,
+		memberTagSetByRosterId: memberTagSetByRosterId,
+		ownerRosterIdByTag: ownerRosterIdByTag,
+		liveMemberByTag: liveMemberByTag,
+		connectedClanTagByRosterId: connectedClanTagByRosterId,
+		connectedRosterIds: connectedRosterIds,
+		seedPlayerByTag: buildRosterPlayerSeedByTag_(rosterData),
+	};
+}
+
+function applyLiveMemberToRosterPlayer_(playerRaw, memberRaw) {
+	const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+	const member = memberRaw && typeof memberRaw === "object" ? memberRaw : {};
+	let changed = false;
+
+	if (member.name && member.name !== player.name) {
+		player.name = member.name;
+		changed = true;
+	}
+	if (typeof member.th === "number" && isFinite(member.th) && member.th > 0 && member.th !== player.th) {
+		player.th = Math.floor(member.th);
+		changed = true;
+	}
+
+	return changed;
+}
+
+function createRosterPlayerFromSeed_(tagRaw, seedRaw, memberRaw) {
+	const tag = normalizeTag_(tagRaw);
+	const seed = seedRaw && typeof seedRaw === "object" ? seedRaw : {};
+	const member = memberRaw && typeof memberRaw === "object" ? memberRaw : {};
+
+	const seedTh = typeof seed.th === "number" && isFinite(seed.th) ? Math.max(0, Math.floor(seed.th)) : 0;
+	const liveTh = typeof member.th === "number" && isFinite(member.th) && member.th > 0 ? Math.floor(member.th) : null;
+
+	return {
+		slot: null,
+		name: member.name || (typeof seed.name === "string" ? seed.name : ""),
+		discord: typeof seed.discord === "string" ? seed.discord : "",
+		th: liveTh != null ? liveTh : seedTh,
+		tag: tag,
+		notes: sanitizeNotes_(seed.notes != null ? seed.notes : seed.note),
+		excludeAsSwapTarget: toBooleanFlag_(seed.excludeAsSwapTarget),
+		excludeAsSwapSource: toBooleanFlag_(seed.excludeAsSwapSource),
+	};
+}
+
+function pruneTagFromRosterTrackingState_(roster, tagRaw) {
+	const tag = normalizeTag_(tagRaw);
+	if (!tag || !roster || typeof roster !== "object") return false;
+	let changed = false;
+
+	const regularWar = roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : null;
+	if (regularWar && regularWar.byTag && typeof regularWar.byTag === "object" && Object.prototype.hasOwnProperty.call(regularWar.byTag, tag)) {
+		delete regularWar.byTag[tag];
+		changed = true;
+	}
+	if (regularWar && regularWar.membershipByTag && typeof regularWar.membershipByTag === "object" && Object.prototype.hasOwnProperty.call(regularWar.membershipByTag, tag)) {
+		delete regularWar.membershipByTag[tag];
+		changed = true;
+	}
+
+	const cwlStats = roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : null;
+	if (cwlStats && cwlStats.byTag && typeof cwlStats.byTag === "object" && Object.prototype.hasOwnProperty.call(cwlStats.byTag, tag)) {
+		delete cwlStats.byTag[tag];
+		changed = true;
+	}
+
+	const warPerformance = roster.warPerformance && typeof roster.warPerformance === "object" ? roster.warPerformance : null;
+	if (warPerformance && warPerformance.byTag && typeof warPerformance.byTag === "object" && Object.prototype.hasOwnProperty.call(warPerformance.byTag, tag)) {
+		delete warPerformance.byTag[tag];
+		changed = true;
+	}
+	if (warPerformance && warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" && Object.prototype.hasOwnProperty.call(warPerformance.membershipByTag, tag)) {
+		delete warPerformance.membershipByTag[tag];
+		changed = true;
+	}
+
+	return changed;
+}
+
+function evictOwnedSourceTagsFromOtherRosters_(rosterData, ownerRosterIdRaw, sourceTagsRaw, ownerRosterIdByTagRaw) {
+	const ownerRosterId = String(ownerRosterIdRaw == null ? "" : ownerRosterIdRaw).trim();
+	const sourceTags = Array.isArray(sourceTagsRaw) ? sourceTagsRaw : [];
+	const ownerRosterIdByTag = ownerRosterIdByTagRaw && typeof ownerRosterIdByTagRaw === "object" ? ownerRosterIdByTagRaw : {};
+	const ownedTagSet = {};
+	const ownedTags = [];
+	for (let i = 0; i < sourceTags.length; i++) {
+		const tag = normalizeTag_(sourceTags[i]);
+		if (!tag || ownedTagSet[tag]) continue;
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== ownerRosterId) continue;
+		ownedTagSet[tag] = true;
+		ownedTags.push(tag);
+	}
+
+	const seedByTag = {};
+	let removedFromOtherRosters = 0;
+	if (!ownedTags.length) {
+		return {
+			ownedTagSet: ownedTagSet,
+			ownedTags: ownedTags,
+			seedByTag: seedByTag,
+			removedFromOtherRosters: removedFromOtherRosters,
+		};
+	}
+
+	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const rosterId = String(roster.id || "").trim();
+		if (!rosterId || rosterId === ownerRosterId) continue;
+
+		let changed = false;
+		const removedTagSet = {};
+		const filterPlayers = (playersRaw) => {
+			const players = Array.isArray(playersRaw) ? playersRaw : [];
+			const next = [];
+			for (let j = 0; j < players.length; j++) {
+				const player = players[j] && typeof players[j] === "object" ? players[j] : {};
+				const tag = normalizeTag_(player.tag);
+				if (tag && ownedTagSet[tag]) {
+					changed = true;
+					removedFromOtherRosters++;
+					removedTagSet[tag] = true;
+					if (!seedByTag[tag]) seedByTag[tag] = player;
+					continue;
+				}
+				next.push(player);
+			}
+			return next;
+		};
+
+		const nextMain = filterPlayers(roster.main);
+		const nextSubs = filterPlayers(roster.subs);
+		const nextMissing = filterPlayers(roster.missing);
+		if (!changed) continue;
+
+		roster.main = nextMain;
+		roster.subs = nextSubs;
+		roster.missing = nextMissing;
+		const removedTags = Object.keys(removedTagSet);
+		for (let j = 0; j < removedTags.length; j++) {
+			pruneTagFromRosterTrackingState_(roster, removedTags[j]);
+		}
+		normalizeRosterSlots_(roster);
+		clearRosterBenchSuggestions_(roster);
+	}
+
+	return {
+		ownedTagSet: ownedTagSet,
+		ownedTags: ownedTags,
+		seedByTag: seedByTag,
+		removedFromOtherRosters: removedFromOtherRosters,
+	};
+}
+
+function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, ownershipSnapshotRaw, nowIsoRaw) {
+	const nowText = String(nowIsoRaw == null ? "" : nowIsoRaw).trim() || new Date().toISOString();
+	const nowMs = parseIsoToMs_(nowText) || Date.now();
+	if (!roster || typeof roster !== "object") throw new Error("Roster is required.");
+	if (!Array.isArray(roster.main)) roster.main = [];
+	if (!Array.isArray(roster.subs)) roster.subs = [];
+	if (!Array.isArray(roster.missing)) roster.missing = [];
+
+	const rosterId = String(roster.id || "").trim();
+	const sourceList = Array.isArray(sourceMembers) ? sourceMembers : [];
+	const ownershipSnapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : {};
+	const ownerRosterIdByTag = ownershipSnapshot.ownerRosterIdByTag && typeof ownershipSnapshot.ownerRosterIdByTag === "object" ? ownershipSnapshot.ownerRosterIdByTag : {};
+	const liveMemberByTag = ownershipSnapshot.liveMemberByTag && typeof ownershipSnapshot.liveMemberByTag === "object" ? ownershipSnapshot.liveMemberByTag : {};
+	const seedPlayerByTag = ownershipSnapshot.seedPlayerByTag && typeof ownershipSnapshot.seedPlayerByTag === "object" ? ownershipSnapshot.seedPlayerByTag : {};
+
+	const sourceByTag = {};
+	for (let i = 0; i < sourceList.length; i++) {
+		const member = sourceList[i] && typeof sourceList[i] === "object" ? sourceList[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag || sourceByTag[tag]) continue;
+		sourceByTag[tag] = member;
+	}
+	const sourceTags = Object.keys(sourceByTag);
+	const ownershipMove = evictOwnedSourceTagsFromOtherRosters_(rosterData, rosterId, sourceTags, ownerRosterIdByTag);
+	const sourceSet = ownershipMove.ownedTagSet;
+	const ownedSourceTags = ownershipMove.ownedTags;
+	const displacedSeedByTag = ownershipMove.seedByTag;
+
+	const dedupePlayers = (playersRaw) => {
+		const list = Array.isArray(playersRaw) ? playersRaw : [];
+		const out = [];
+		const seen = {};
+		for (let i = 0; i < list.length; i++) {
+			const player = list[i] && typeof list[i] === "object" ? list[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag || seen[tag]) continue;
+			seen[tag] = true;
+			out.push(player);
+		}
+		return out;
+	};
+
+	const markFromLive = (playerRaw) => {
+		const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) return;
+		const live = sourceByTag[tag] || liveMemberByTag[tag];
+		if (!live) return;
+		applyLiveMemberToRosterPlayer_(player, live);
+	};
+
+	let main = dedupePlayers(roster.main);
+	let subs = dedupePlayers(roster.subs);
+	let missing = dedupePlayers(roster.missing);
+
+	const trackedByTag = {};
+	const trackedTags = [];
+	const trackedPlayerByTag = {};
+	const collectTracked = (playersRaw) => {
+		const players = Array.isArray(playersRaw) ? playersRaw : [];
+		for (let i = 0; i < players.length; i++) {
+			const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag || trackedByTag[tag]) continue;
+			trackedByTag[tag] = true;
+			trackedTags.push(tag);
+			trackedPlayerByTag[tag] = player;
+		}
+	};
+	collectTracked(main);
+	collectTracked(subs);
+	collectTracked(missing);
+
+	const warPerformance = ensureWarPerformance_(roster);
+	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
+	warPerformance.membershipByTag = membershipByTag;
+	const ensureMembership = (tag) => {
+		const current = sanitizeRegularWarMembershipEntry_(membershipByTag[tag]);
+		membershipByTag[tag] = current;
+		return current;
+	};
+	const setMembershipActive = (tag) => {
+		const membership = ensureMembership(tag);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowText;
+		membership.lastSeenAt = nowText;
+		membership.missingSince = "";
+		membership.status = "active";
+		membershipByTag[tag] = membership;
+	};
+	const setMembershipTemporaryMissing = (tag) => {
+		const membership = ensureMembership(tag);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowText;
+		const missingSinceMs = parseIsoToMs_(membership.missingSince);
+		membership.missingSince = missingSinceMs > 0 ? membership.missingSince : nowText;
+		membership.status = "temporaryMissing";
+		membershipByTag[tag] = membership;
+	};
+
+	for (let i = 0; i < main.length; i++) markFromLive(main[i]);
+	for (let i = 0; i < subs.length; i++) markFromLive(subs[i]);
+	for (let i = 0; i < missing.length; i++) markFromLive(missing[i]);
+
+	const updated = trackedTags.filter((tag) => sourceSet[tag]).length;
+	for (let i = 0; i < trackedTags.length; i++) {
+		const tag = trackedTags[i];
+		if (!sourceSet[tag]) continue;
+		setMembershipActive(tag);
+	}
+
+	let movedToMissing = 0;
+	let removed = 0;
+	let removedCrossOwned = 0;
+	const missingSet = {};
+	for (let i = 0; i < missing.length; i++) {
+		const tag = normalizeTag_(missing[i] && missing[i].tag);
+		if (!tag || missingSet[tag]) continue;
+		missingSet[tag] = true;
+	}
+
+	const keptMain = [];
+	for (let i = 0; i < main.length; i++) {
+		const player = main[i] && typeof main[i] === "object" ? main[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) continue;
+		if (sourceSet[tag]) {
+			keptMain.push(player);
+			continue;
+		}
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== rosterId) {
+			removed++;
+			removedCrossOwned++;
+			pruneTagFromRosterTrackingState_(roster, tag);
+			continue;
+		}
+		movedToMissing++;
+		if (!missingSet[tag]) {
+			missing.push(player);
+			missingSet[tag] = true;
+		}
+		setMembershipTemporaryMissing(tag);
+	}
+	main = keptMain;
+
+	const keptSubs = [];
+	for (let i = 0; i < subs.length; i++) {
+		const player = subs[i] && typeof subs[i] === "object" ? subs[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) continue;
+		if (sourceSet[tag]) {
+			keptSubs.push(player);
+			continue;
+		}
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== rosterId) {
+			removed++;
+			removedCrossOwned++;
+			pruneTagFromRosterTrackingState_(roster, tag);
+			continue;
+		}
+		movedToMissing++;
+		if (!missingSet[tag]) {
+			missing.push(player);
+			missingSet[tag] = true;
+		}
+		setMembershipTemporaryMissing(tag);
+	}
+	subs = keptSubs;
+
+	const mainSet = {};
+	const subsSet = {};
+	for (let i = 0; i < main.length; i++) {
+		const tag = normalizeTag_(main[i] && main[i].tag);
+		if (tag) mainSet[tag] = true;
+	}
+	for (let i = 0; i < subs.length; i++) {
+		const tag = normalizeTag_(subs[i] && subs[i].tag);
+		if (tag) subsSet[tag] = true;
+	}
+
+	let restored = 0;
+	let retainedMissing = 0;
+	const nextMissing = [];
+	for (let i = 0; i < missing.length; i++) {
+		const player = missing[i] && typeof missing[i] === "object" ? missing[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) continue;
+
+		if (sourceSet[tag]) {
+			restored++;
+			if (!mainSet[tag] && !subsSet[tag]) {
+				subs.push(player);
+				subsSet[tag] = true;
+			}
+			setMembershipActive(tag);
+			continue;
+		}
+
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== rosterId) {
+			removed++;
+			removedCrossOwned++;
+			pruneTagFromRosterTrackingState_(roster, tag);
+			continue;
+		}
+
+		const membership = ensureMembership(tag);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowText;
+		if (!membership.missingSince || parseIsoToMs_(membership.missingSince) <= 0) membership.missingSince = nowText;
+		membership.status = "temporaryMissing";
+		membershipByTag[tag] = membership;
+		const missingSinceMs = parseIsoToMs_(membership.missingSince);
+		const expired = missingSinceMs > 0 && nowMs - missingSinceMs >= REGULAR_WAR_MISSING_GRACE_MS;
+		if (expired) {
+			removed++;
+			pruneTagFromRosterTrackingState_(roster, tag);
+			continue;
+		}
+
+		retainedMissing++;
+		nextMissing.push(player);
+	}
+	missing = nextMissing;
+
+	const presentSet = {};
+	const markPresent = (playersRaw) => {
+		const players = Array.isArray(playersRaw) ? playersRaw : [];
+		for (let i = 0; i < players.length; i++) {
+			const tag = normalizeTag_(players[i] && players[i].tag);
+			if (tag) presentSet[tag] = true;
+		}
+	};
+	markPresent(main);
+	markPresent(subs);
+	markPresent(missing);
+
+	let added = 0;
+	for (let i = 0; i < ownedSourceTags.length; i++) {
+		const tag = ownedSourceTags[i];
+		if (!tag || presentSet[tag]) continue;
+		const source = sourceByTag[tag] || liveMemberByTag[tag];
+		const seed = displacedSeedByTag[tag] || trackedPlayerByTag[tag] || seedPlayerByTag[tag];
+		const player = createRosterPlayerFromSeed_(tag, seed, source);
+		subs.push(player);
+		presentSet[tag] = true;
+		added++;
+		setMembershipActive(tag);
+	}
+	subs.sort(compareByOrderingRule_);
+
+	roster.main = main;
+	roster.subs = subs;
+	roster.missing = missing;
+	roster.warPerformance = warPerformance;
+	normalizeRosterSlots_(roster);
+
+	if (added > 0 || movedToMissing > 0 || restored > 0 || removed > 0 || updated > 0) {
+		clearRosterBenchSuggestions_(roster);
+	}
+
+	return {
+		added: added,
+		removed: removed,
+		removedCrossOwned: removedCrossOwned,
+		updated: updated,
+		movedToMissing: movedToMissing,
+		restored: restored,
+		retainedMissing: retainedMissing,
+		sourceUsed: sourceUsed,
+	};
+}
+
+function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIso, ownershipSnapshotRaw) {
+	const nowText = String(nowIso == null ? "" : nowIso).trim() || new Date().toISOString();
+	const nowMs = parseIsoToMs_(nowText) || Date.now();
+	if (!roster || typeof roster !== "object") throw new Error("Roster is required.");
+	if (!Array.isArray(roster.main)) roster.main = [];
+	if (!Array.isArray(roster.subs)) roster.subs = [];
+	if (!Array.isArray(roster.missing)) roster.missing = [];
+
+	const rosterId = String(roster.id || "").trim();
+	const sourceList = Array.isArray(sourceMembers) ? sourceMembers : [];
+	const ownershipSnapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : {};
+	const ownerRosterIdByTag = ownershipSnapshot.ownerRosterIdByTag && typeof ownershipSnapshot.ownerRosterIdByTag === "object" ? ownershipSnapshot.ownerRosterIdByTag : {};
+	const liveMemberByTag = ownershipSnapshot.liveMemberByTag && typeof ownershipSnapshot.liveMemberByTag === "object" ? ownershipSnapshot.liveMemberByTag : {};
+	const seedPlayerByTag = ownershipSnapshot.seedPlayerByTag && typeof ownershipSnapshot.seedPlayerByTag === "object" ? ownershipSnapshot.seedPlayerByTag : {};
+
+	const sourceByTag = {};
+	for (let i = 0; i < sourceList.length; i++) {
+		const member = sourceList[i] && typeof sourceList[i] === "object" ? sourceList[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag || sourceByTag[tag]) continue;
+		sourceByTag[tag] = member;
+	}
+	const sourceTags = Object.keys(sourceByTag);
+	const ownershipMove = evictOwnedSourceTagsFromOtherRosters_(rosterData, rosterId, sourceTags, ownerRosterIdByTag);
+	const sourceSet = ownershipMove.ownedTagSet;
+	const ownedSourceTags = ownershipMove.ownedTags;
+	const displacedSeedByTag = ownershipMove.seedByTag;
+
+	const dedupePlayers = (playersRaw) => {
+		const list = Array.isArray(playersRaw) ? playersRaw : [];
+		const out = [];
+		const seen = {};
+		for (let i = 0; i < list.length; i++) {
+			const player = list[i] && typeof list[i] === "object" ? list[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag || seen[tag]) continue;
+			seen[tag] = true;
+			out.push(player);
+		}
+		return out;
+	};
+
+	const markFromLive = (playerRaw) => {
+		const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) return;
+		const live = sourceByTag[tag] || liveMemberByTag[tag];
+		if (!live) return;
+		applyLiveMemberToRosterPlayer_(player, live);
+	};
+
+	let main = dedupePlayers(roster.main);
+	let subs = dedupePlayers(roster.subs);
+	let missing = dedupePlayers(roster.missing);
+
+	const trackedByTag = {};
+	const trackedTags = [];
+	const trackedPlayerByTag = {};
+	const collectTracked = (playersRaw) => {
+		const players = Array.isArray(playersRaw) ? playersRaw : [];
+		for (let i = 0; i < players.length; i++) {
+			const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag || trackedByTag[tag]) continue;
+			trackedByTag[tag] = true;
+			trackedTags.push(tag);
+			trackedPlayerByTag[tag] = player;
+		}
+	};
+	collectTracked(main);
+	collectTracked(subs);
+	collectTracked(missing);
+
+	const regularWar = roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : {};
+	const byTag = regularWar.byTag && typeof regularWar.byTag === "object" ? regularWar.byTag : {};
+	const membershipByTag = regularWar.membershipByTag && typeof regularWar.membershipByTag === "object" ? regularWar.membershipByTag : {};
+	regularWar.byTag = byTag;
+	regularWar.membershipByTag = membershipByTag;
+	roster.regularWar = regularWar;
+
+	const ensureMembership = (tag) => {
+		const current = sanitizeRegularWarMembershipEntry_(membershipByTag[tag]);
+		membershipByTag[tag] = current;
+		return current;
+	};
+	const setMembershipActive = (tag) => {
+		const membership = ensureMembership(tag);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowText;
+		membership.lastSeenAt = nowText;
+		membership.missingSince = "";
+		membership.status = "active";
+		membershipByTag[tag] = membership;
+	};
+	const setMembershipTemporaryMissing = (tag) => {
+		const membership = ensureMembership(tag);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowText;
+		membership.lastSeenAt = membership.lastSeenAt || "";
+		const missingSinceMs = parseIsoToMs_(membership.missingSince);
+		membership.missingSince = missingSinceMs > 0 ? membership.missingSince : nowText;
+		membership.status = "temporaryMissing";
+		membershipByTag[tag] = membership;
+	};
+
+	for (let i = 0; i < main.length; i++) markFromLive(main[i]);
+	for (let i = 0; i < subs.length; i++) markFromLive(subs[i]);
+	for (let i = 0; i < missing.length; i++) markFromLive(missing[i]);
+
+	const updated = trackedTags.filter((tag) => sourceSet[tag]).length;
+	for (let i = 0; i < trackedTags.length; i++) {
+		const tag = trackedTags[i];
+		if (!sourceSet[tag]) continue;
+		setMembershipActive(tag);
+	}
+
+	let movedToMissing = 0;
+	const missingSet = {};
+	for (let i = 0; i < missing.length; i++) {
+		const tag = normalizeTag_(missing[i] && missing[i].tag);
+		if (!tag || missingSet[tag]) continue;
+		missingSet[tag] = true;
+	}
+
+	let removed = 0;
+	let removedCrossOwned = 0;
+
+	const keptMain = [];
+	for (let i = 0; i < main.length; i++) {
+		const player = main[i] && typeof main[i] === "object" ? main[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) continue;
+		if (sourceSet[tag]) {
+			keptMain.push(player);
+			continue;
+		}
+
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== rosterId) {
+			removed++;
+			removedCrossOwned++;
+			delete byTag[tag];
+			delete membershipByTag[tag];
+			continue;
+		}
+
+		movedToMissing++;
+		if (!missingSet[tag]) {
+			missing.push(player);
+			missingSet[tag] = true;
+		}
+		setMembershipTemporaryMissing(tag);
+	}
+	main = keptMain;
+
+	const keptSubs = [];
+	for (let i = 0; i < subs.length; i++) {
+		const player = subs[i] && typeof subs[i] === "object" ? subs[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) continue;
+		if (sourceSet[tag]) {
+			keptSubs.push(player);
+			continue;
+		}
+
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== rosterId) {
+			removed++;
+			removedCrossOwned++;
+			delete byTag[tag];
+			delete membershipByTag[tag];
+			continue;
+		}
+
+		movedToMissing++;
+		if (!missingSet[tag]) {
+			missing.push(player);
+			missingSet[tag] = true;
+		}
+		setMembershipTemporaryMissing(tag);
+	}
+	subs = keptSubs;
+
+	const mainSet = {};
+	const subsSet = {};
+	for (let i = 0; i < main.length; i++) {
+		const tag = normalizeTag_(main[i] && main[i].tag);
+		if (tag) mainSet[tag] = true;
+	}
+	for (let i = 0; i < subs.length; i++) {
+		const tag = normalizeTag_(subs[i] && subs[i].tag);
+		if (tag) subsSet[tag] = true;
+	}
+
+	let restored = 0;
+	let retainedMissing = 0;
+	const nextMissing = [];
+	for (let i = 0; i < missing.length; i++) {
+		const player = missing[i] && typeof missing[i] === "object" ? missing[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag) continue;
+		if (sourceSet[tag]) {
+			restored++;
+			if (!mainSet[tag] && !subsSet[tag]) {
+				subs.push(player);
+				subsSet[tag] = true;
+			}
+			setMembershipActive(tag);
+			continue;
+		}
+
+		const owner = String(ownerRosterIdByTag[tag] || "").trim();
+		if (owner && owner !== rosterId) {
+			removed++;
+			removedCrossOwned++;
+			delete byTag[tag];
+			delete membershipByTag[tag];
+			continue;
+		}
+
+		const membership = ensureMembership(tag);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowText;
+		if (!membership.missingSince || parseIsoToMs_(membership.missingSince) <= 0) membership.missingSince = nowText;
+		membership.status = "temporaryMissing";
+		membershipByTag[tag] = membership;
+		const missingSinceMs = parseIsoToMs_(membership.missingSince);
+		const expired = missingSinceMs > 0 && nowMs - missingSinceMs >= REGULAR_WAR_MISSING_GRACE_MS;
+		if (expired) {
+			removed++;
+			delete byTag[tag];
+			delete membershipByTag[tag];
+			continue;
+		}
+
+		retainedMissing++;
+		nextMissing.push(player);
+	}
+	missing = nextMissing;
+
+	const presentSet = {};
+	const markPresent = (playersRaw) => {
+		const players = Array.isArray(playersRaw) ? playersRaw : [];
+		for (let i = 0; i < players.length; i++) {
+			const tag = normalizeTag_(players[i] && players[i].tag);
+			if (tag) presentSet[tag] = true;
+		}
+	};
+	markPresent(main);
+	markPresent(subs);
+	markPresent(missing);
+
+	let added = 0;
+	for (let i = 0; i < ownedSourceTags.length; i++) {
+		const tag = ownedSourceTags[i];
+		if (!tag || presentSet[tag]) continue;
+		const source = sourceByTag[tag] || liveMemberByTag[tag];
+		const seed = displacedSeedByTag[tag] || trackedPlayerByTag[tag] || seedPlayerByTag[tag];
+		const player = createRosterPlayerFromSeed_(tag, seed, source);
+		subs.push(player);
+		presentSet[tag] = true;
+		added++;
+		setMembershipActive(tag);
+	}
+	subs.sort(compareByOrderingRule_);
+
+	roster.main = main;
+	roster.subs = subs;
+	roster.missing = missing;
+
+	const finalTagSet = buildRosterPoolTagSet_(roster);
+	const byTagKeys = Object.keys(byTag);
+	for (let i = 0; i < byTagKeys.length; i++) {
+		const tag = normalizeTag_(byTagKeys[i]);
+		if (!tag || finalTagSet[tag]) continue;
+		delete byTag[byTagKeys[i]];
+	}
+	const membershipKeys = Object.keys(membershipByTag);
+	for (let i = 0; i < membershipKeys.length; i++) {
+		const tag = normalizeTag_(membershipKeys[i]);
+		if (!tag || finalTagSet[tag]) continue;
+		delete membershipByTag[membershipKeys[i]];
+	}
+
+	normalizeRosterSlots_(roster);
+	if (added > 0 || movedToMissing > 0 || restored > 0 || removed > 0) {
+		clearRosterBenchSuggestions_(roster);
+	}
+
+	return {
+		mode: "regularWar",
+		added: added,
+		removed: removed,
+		removedCrossOwned: removedCrossOwned,
+		updated: updated,
+		movedToMissing: movedToMissing,
+		restored: restored,
+		retainedMissing: retainedMissing,
+		sourceUsed: "members",
+	};
+}
+
+function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const warTags = Array.isArray(warTagsRaw) ? warTagsRaw : [];
+	for (let i = 0; i < warTags.length; i++) {
+		const warTag = normalizeTag_(warTags[i]);
+		if (!warTag || warTag === "#0") continue;
+
+		const war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+		const state = String((war && war.state) || "").toLowerCase();
+		if (state !== "preparation" && state !== "inwar") continue;
+
+		const side = pickWarSideForClan_(war, clanTag);
+		if (!side) continue;
+
+		return {
+			warTag: warTag,
+			warState: state,
+			members: mapApiMembers_(side.members),
+		};
+	}
+	return null;
+}
+
+function applyTodayLineupSync_(roster, participantsRaw) {
+	const main = Array.isArray(roster && roster.main) ? roster.main : [];
+	const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
+	const rosterPool = main.concat(subs);
+	const beforeMainOrder = main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const beforeSubsOrder = subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+
+	const poolByTag = {};
+	const poolTagsInOrder = [];
+	for (let i = 0; i < rosterPool.length; i++) {
+		const p = rosterPool[i] && typeof rosterPool[i] === "object" ? rosterPool[i] : {};
+		const tag = normalizeTag_(p.tag);
+		if (!tag || poolByTag[tag]) continue;
+		poolByTag[tag] = p;
+		poolTagsInOrder.push(tag);
+	}
+
+	const participantsAll = mapApiMembers_(participantsRaw);
+	const participantsByTag = {};
+	for (let i = 0; i < participantsAll.length; i++) {
+		participantsByTag[participantsAll[i].tag] = participantsAll[i];
+	}
+
+	const participantsFiltered = participantsAll.filter((m) => !!poolByTag[m.tag]);
+	const hasAnyMapPosition = participantsFiltered.some((m) => typeof m.mapPosition === "number" && isFinite(m.mapPosition));
+
+	let orderedParticipantTags = [];
+	if (hasAnyMapPosition) {
+		const sorted = participantsFiltered.slice().sort((a, b) => {
+			const aPos = typeof a.mapPosition === "number" && isFinite(a.mapPosition) ? a.mapPosition : Number.MAX_SAFE_INTEGER;
+			const bPos = typeof b.mapPosition === "number" && isFinite(b.mapPosition) ? b.mapPosition : Number.MAX_SAFE_INTEGER;
+			if (aPos !== bPos) return aPos - bPos;
+			return compareByOrderingRule_(a, b);
+		});
+		orderedParticipantTags = sorted.map((x) => x.tag);
+	} else {
+		const wantedSet = {};
+		for (let i = 0; i < participantsFiltered.length; i++) wantedSet[participantsFiltered[i].tag] = true;
+
+		const ordered = [];
+		for (let i = 0; i < poolTagsInOrder.length; i++) {
+			const tag = poolTagsInOrder[i];
+			if (wantedSet[tag]) ordered.push(tag);
+		}
+
+		const orderedSet = {};
+		for (let i = 0; i < ordered.length; i++) orderedSet[ordered[i]] = true;
+		const unplaced = participantsFiltered
+			.filter((p) => !orderedSet[p.tag])
+			.sort(compareByOrderingRule_)
+			.map((p) => p.tag);
+
+		orderedParticipantTags = ordered.concat(unplaced);
+	}
+
+	let updated = 0;
+	for (let i = 0; i < orderedParticipantTags.length; i++) {
+		const tag = orderedParticipantTags[i];
+		const player = poolByTag[tag];
+		const src = participantsByTag[tag];
+		if (!player || !src) continue;
+
+		let changed = false;
+		if (src.name && src.name !== player.name) {
+			player.name = src.name;
+			changed = true;
+		}
+		if (typeof src.th === "number" && isFinite(src.th) && src.th > 0 && src.th !== player.th) {
+			player.th = src.th;
+			changed = true;
+		}
+		if (changed) updated++;
+	}
+
+	const participantSet = {};
+	for (let i = 0; i < orderedParticipantTags.length; i++) participantSet[orderedParticipantTags[i]] = true;
+	const nonParticipantTags = poolTagsInOrder.filter((tag) => !participantSet[tag]);
+	const nonSet = {};
+	for (let i = 0; i < nonParticipantTags.length; i++) nonSet[nonParticipantTags[i]] = true;
+
+	const subsOrderedTags = [];
+	for (let i = 0; i < subs.length; i++) {
+		const tag = normalizeTag_(subs[i] && subs[i].tag);
+		if (tag && nonSet[tag]) subsOrderedTags.push(tag);
+	}
+	const subsOrderedSet = {};
+	for (let i = 0; i < subsOrderedTags.length; i++) subsOrderedSet[subsOrderedTags[i]] = true;
+
+	for (let i = 0; i < main.length; i++) {
+		const tag = normalizeTag_(main[i] && main[i].tag);
+		if (tag && nonSet[tag] && !subsOrderedSet[tag]) {
+			subsOrderedTags.push(tag);
+			subsOrderedSet[tag] = true;
+		}
+	}
+
+	const remainder = nonParticipantTags
+		.filter((tag) => !subsOrderedSet[tag])
+		.map((tag) => poolByTag[tag])
+		.sort(compareByOrderingRule_)
+		.map((p) => normalizeTag_(p && p.tag));
+	for (let i = 0; i < remainder.length; i++) subsOrderedTags.push(remainder[i]);
+
+	roster.main = orderedParticipantTags.map((tag) => poolByTag[tag]).filter(Boolean);
+	roster.subs = subsOrderedTags.map((tag) => poolByTag[tag]).filter(Boolean);
+	normalizeRosterSlots_(roster);
+
+	const afterMainOrder = roster.main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const afterSubsOrder = roster.subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	if (beforeMainOrder.join("|") !== afterMainOrder.join("|") || beforeSubsOrder.join("|") !== afterSubsOrder.join("|") || updated > 0) {
+		clearRosterBenchSuggestions_(roster);
+	}
+
+	return {
+		activeSet: roster.main.length,
+		benched: roster.subs.length,
+		updated: updated,
+	};
+}
+
+function testClanConnection(rosterData, rosterId, password) {
+	assertAdminPassword_(password);
+	const ctx = findRosterForClanSync_(rosterData, rosterId);
+	const members = fetchClanMembers_(ctx.clanTag);
+	return { ok: true, memberCount: members.length };
+}
+
+function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
+	const ctx = findRosterForClanSync_(rosterData, rosterId);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const ownershipSnapshot = options.ownershipSnapshot && typeof options.ownershipSnapshot === "object" ? options.ownershipSnapshot : buildLiveRosterOwnershipSnapshot_(ctx.rosterData);
+	const nowIso = new Date().toISOString();
+	let result = null;
+	const source = resolveRosterPoolSource_(ctx.clanTag, ctx.rosterId, ownershipSnapshot);
+	if (ctx.trackingMode === "regularWar") {
+		result = applyRegularWarRosterPoolSync_(ctx.rosterData, ctx.roster, source.members, nowIso, ownershipSnapshot);
+	} else {
+		result = applyRosterPoolSync_(ctx.rosterData, ctx.roster, source.members, source.sourceUsed, ownershipSnapshot, nowIso);
+	}
+	updateWarPerformanceMembership_(ctx.roster, nowIso);
+	const outRosterData = validateRosterData_(ctx.rosterData);
+	return { ok: true, rosterData: outRosterData, result: result };
+}
+
+function syncClanRosterPoolInternal_(rosterData, rosterId, optionsRaw) {
+	return withRosterLock_(rosterId, function () {
+		return syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw);
+	});
+}
+
+function syncClanRosterPool(rosterData, rosterId, password) {
+	assertAdminPassword_(password);
+	return syncClanRosterPoolInternal_(rosterData, rosterId);
+}
+
+function syncClanTodayLineupCore_(rosterData, rosterId) {
+	const ctx = findRosterForClanSync_(rosterData, rosterId);
+	if (ctx.trackingMode === "regularWar") {
+		const currentWar = fetchCurrentRegularWar_(ctx.clanTag);
+		const currentWarMeta = currentWar && currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : {};
+		const unavailableReason = String((currentWarMeta && currentWarMeta.unavailableReason) || "").trim();
+		if (unavailableReason === "privateWarLog") {
+			const previousRegularWar = ctx.roster.regularWar && typeof ctx.roster.regularWar === "object" ? ctx.roster.regularWar : {};
+			const previousCurrentWar = sanitizeRegularWarCurrentWar_(previousRegularWar.currentWar);
+			const nextCurrentWar = Object.assign({}, previousCurrentWar);
+			if (!nextCurrentWar.clanTag) nextCurrentWar.clanTag = ctx.clanTag;
+			if (!nextCurrentWar.warKey || nextCurrentWar.warKey === "||") nextCurrentWar.warKey = normalizeTag_(ctx.clanTag) + "||";
+			nextCurrentWar.available = false;
+			nextCurrentWar.state = "notinwar";
+			nextCurrentWar.unavailableReason = "privateWarLog";
+			nextCurrentWar.statusMessage = "Live war data unavailable because the clan war log is private.";
+			if (!ctx.roster.regularWar || typeof ctx.roster.regularWar !== "object") ctx.roster.regularWar = {};
+			ctx.roster.regularWar.currentWar = nextCurrentWar;
+			const outRosterData = validateRosterData_(ctx.rosterData);
+			return {
+				ok: true,
+				rosterData: outRosterData,
+				result: {
+					mode: "regularWar",
+					activeSet: Array.isArray(ctx.roster.main) ? ctx.roster.main.length : 0,
+					benched: Array.isArray(ctx.roster.subs) ? ctx.roster.subs.length : 0,
+					missing: Array.isArray(ctx.roster.missing) ? ctx.roster.missing.length : 0,
+					updated: 0,
+					unavailableReason: "privateWarLog",
+					message: "current war lineup unavailable: private war log",
+				},
+			};
+		}
+		const state = String((currentWar && currentWar.state) || "")
+			.trim()
+			.toLowerCase();
+		const lineupSource = state === "preparation" || state === "inwar" ? currentWar.participants : [];
+		const result = applyTodayLineupSync_(ctx.roster, lineupSource);
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: {
+				mode: "regularWar",
+				activeSet: result.activeSet,
+				benched: result.benched,
+				missing: Array.isArray(ctx.roster.missing) ? ctx.roster.missing.length : 0,
+				updated: result.updated,
+				message: state === "preparation" || state === "inwar" ? "" : "no current regular war found",
+			},
+		};
+	}
+
+	let leaguegroup = null;
+	try {
+		leaguegroup = fetchLeagueGroupData_(ctx.clanTag);
+	} catch (err) {
+		if (err && err.statusCode === 404) {
+			throw new Error("No CWL league group found (404). Sync today lineup requires an active CWL league group.");
+		}
+		throw err;
+	}
+
+	if (!leaguegroup || !leaguegroup.clanFound) {
+		throw new Error("Connected clan is not present in the current CWL league group.");
+	}
+
+	const currentWar = findCurrentCwlWarForClan_(ctx.clanTag, leaguegroup.warTags);
+	if (!currentWar) {
+		return {
+			ok: true,
+			rosterData: ctx.rosterData,
+			result: { mode: "cwl", activeSet: 0, benched: 0, updated: 0, message: "no current CWL war found" },
+		};
+	}
+
+	const result = applyTodayLineupSync_(ctx.roster, currentWar.members);
+	const outRosterData = validateRosterData_(ctx.rosterData);
+	return {
+		ok: true,
+		rosterData: outRosterData,
+		result: Object.assign({ mode: "cwl" }, result),
+	};
+}
+
+function syncClanTodayLineupInternal_(rosterData, rosterId) {
+	return withRosterLock_(rosterId, function () {
+		return syncClanTodayLineupCore_(rosterData, rosterId);
+	});
+}
+
+function syncClanTodayLineup(rosterData, rosterId, password) {
+	assertAdminPassword_(password);
+	return syncClanTodayLineupInternal_(rosterData, rosterId);
+}
+
+function refreshCwlStatsCore_(rosterData, rosterId) {
+	const ctx = findRosterForClanSync_(rosterData, rosterId);
+	const nowIso = new Date().toISOString();
+	const warPerformance = prepareWarPerformanceForRefresh_(ctx.roster, nowIso);
+	let leaguegroup = null;
+	try {
+		leaguegroup = cocFetch_("/clans/" + encodeTagForPath_(ctx.clanTag) + "/currentwar/leaguegroup");
+	} catch (err) {
+		if (err && err.statusCode === 404) {
+			throw new Error("CWL not available");
+		}
+		throw err;
+	}
+
+	const warTags = extractLeagueGroupWarTags_(leaguegroup);
+	if (!leagueGroupContainsClan_(leaguegroup, ctx.clanTag) || !warTags.length) {
+		throw new Error("CWL not available");
+	}
+
+	const rosterPoolTagSet = buildRosterPoolTagSet_(ctx.roster);
+	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
+	const byTag = {};
+	let warsProcessed = 0;
+	let finalizedCwlWars = 0;
+
+	for (let i = 0; i < warTags.length; i++) {
+		const warTag = warTags[i];
+		const war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+		const warState = String((war && war.state) || "").toLowerCase();
+		if (warState !== "inwar" && warState !== "warended") continue;
+
+		const side = pickWarSideForClan_(war, ctx.clanTag);
+		if (!side) continue;
+		warsProcessed++;
+		if (warState === "warended") {
+			const ingested = ingestCwlWarIntoWarPerformance_(warPerformance, war, warTag, ctx.clanTag, trackedHistoryTagSet, nowIso, "cwlRefreshWarEnded");
+			if (ingested) finalizedCwlWars++;
+		}
+
+		const opponentSide = getOpponentSideForClan_(war, ctx.clanTag);
+		const opponentThByTag = buildMemberThByTag_(opponentSide && opponentSide.members);
+
+		const members = Array.isArray(side.members) ? side.members : [];
+		for (let j = 0; j < members.length; j++) {
+			const member = members[j] && typeof members[j] === "object" ? members[j] : {};
+			const tag = normalizeTag_(member.tag);
+			if (!tag || !rosterPoolTagSet[tag]) continue;
+
+			if (!byTag[tag]) {
+				byTag[tag] = createEmptyCwlStatEntry_();
+			}
+
+			const stats = byTag[tag];
+			const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+			if (warState === "inwar" && attacks.length === 0) {
+				stats.currentWarAttackPending = 1;
+				continue;
+			}
+
+			const attackerTh = readTownHallLevel_(member);
+			stats.daysInLineup++;
+			stats.resolvedWarDays++;
+			stats.attacksMade += attacks.length;
+			if (attacks.length === 0) stats.missedAttacks++;
+
+			for (let k = 0; k < attacks.length; k++) {
+				const attack = attacks[k] && typeof attacks[k] === "object" ? attacks[k] : {};
+				const stars = toNonNegativeInt_(attack.stars);
+				const destruction = readAttackDestruction_(attack);
+				const defenderTag = normalizeTag_(attack.defenderTag);
+				const defenderTh = defenderTag && Object.prototype.hasOwnProperty.call(opponentThByTag, defenderTag) ? opponentThByTag[defenderTag] : null;
+				stats.starsTotal += stars;
+				stats.totalDestruction += destruction;
+				stats.countedAttacks++;
+				if (stars === 3) stats.threeStarCount++;
+				if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
+					if (attackerTh < defenderTh) stats.hitUpCount++;
+					else if (attackerTh > defenderTh) stats.hitDownCount++;
+					else stats.sameThHitCount++;
+				}
+			}
+		}
+	}
+
+	ctx.roster.cwlStats = {
+		lastRefreshedAt: nowIso,
+		season: typeof leaguegroup.season === "string" ? leaguegroup.season : "",
+		byTag: byTag,
+	};
+	warPerformance.lastRefreshedAt = nowIso;
+	ctx.roster.warPerformance = warPerformance;
+	clearRosterBenchSuggestions_(ctx.roster);
+
+	const outRosterData = validateRosterData_(ctx.rosterData);
+	return {
+		ok: true,
+		rosterData: outRosterData,
+		result: {
+			mode: "cwl",
+			warsProcessed: warsProcessed,
+			playersTracked: Object.keys(byTag).length,
+			finalizedCwlWars: finalizedCwlWars,
+		},
+	};
+}
+
+function refreshRegularWarStatsCore_(rosterData, rosterId) {
+	const ctx = findRosterForClanSync_(rosterData, rosterId);
+	const nowIso = new Date().toISOString();
+
+	const previousRegularWar = ctx.roster.regularWar && typeof ctx.roster.regularWar === "object" ? ctx.roster.regularWar : {};
+	const previousByTag = previousRegularWar.byTag && typeof previousRegularWar.byTag === "object" ? previousRegularWar.byTag : {};
+	const previousMembershipByTag = previousRegularWar.membershipByTag && typeof previousRegularWar.membershipByTag === "object" ? previousRegularWar.membershipByTag : {};
+	const previousCurrentWarMeta = sanitizeRegularWarCurrentWar_(previousRegularWar.currentWar);
+
+	const warPerformance = prepareWarPerformanceForRefresh_(ctx.roster, nowIso);
+	const previousSnapshot = sanitizeRegularWarSnapshot_(warPerformance.lastRegularWarSnapshot);
+	const lifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
+	warPerformance.regularWarLifecycle = lifecycle;
+	const trackedTagSet = buildRosterPoolTagSet_(ctx.roster);
+	const trackedTags = Object.keys(trackedTagSet);
+
+	const currentWar = fetchCurrentRegularWar_(ctx.clanTag);
+	const currentWarMetaBase = currentWar && currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : buildNoCurrentRegularWarResult_(ctx.clanTag).currentWarMeta;
+	const fetchedCurrentWarMeta = sanitizeRegularWarCurrentWar_(Object.assign({}, currentWarMetaBase, { available: !!(currentWar && currentWar.available) }));
+	const currentWarUnavailableReason = String(fetchedCurrentWarMeta.unavailableReason || "").trim();
+	const isCurrentWarPrivate = currentWarUnavailableReason === "privateWarLog";
+	const currentWarMeta = isCurrentWarPrivate ? Object.assign({}, previousCurrentWarMeta) : fetchedCurrentWarMeta;
+	if (!currentWarMeta.clanTag) currentWarMeta.clanTag = ctx.clanTag;
+	if (!currentWarMeta.warKey || currentWarMeta.warKey === "||") {
+		currentWarMeta.warKey = getStableRegularWarKey_(currentWarMeta, ctx.clanTag);
+	}
+	if (!currentWarMeta.warKey || currentWarMeta.warKey === "||") currentWarMeta.warKey = normalizeTag_(ctx.clanTag) + "||";
+	if (isCurrentWarPrivate) {
+		currentWarMeta.available = false;
+		currentWarMeta.state = "notinwar";
+		currentWarMeta.unavailableReason = "privateWarLog";
+		currentWarMeta.statusMessage = "Live war data unavailable because the clan war log is private.";
+	} else {
+		currentWarMeta.unavailableReason = "";
+		currentWarMeta.statusMessage = "";
+	}
+	const currentWarState =
+		String((currentWar && currentWar.state) || currentWarMeta.state || "")
+			.trim()
+			.toLowerCase() || "notinwar";
+	currentWarMeta.state = currentWarState;
+
+	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
+	const liveSnapshot = isCurrentWarPrivate ? null : buildRegularWarLiveSnapshot_(currentWar, ctx.clanTag, trackedHistoryTagSet, nowIso);
+	const currentLiveWarKey = liveSnapshot && liveSnapshot.warMeta ? String(liveSnapshot.warMeta.warKey || "").trim() : "";
+	const previousActiveWarKey = String((lifecycle && lifecycle.activeWarKey) || (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey) || "").trim();
+
+	let finalization = { attempted: false, finalized: false, source: "", incomplete: false, reason: "" };
+	const shouldFinalizePrevious = !isCurrentWarPrivate && shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentLiveWarKey || currentWarMeta.warKey, currentWarState);
+	if (shouldFinalizePrevious) {
+		finalization = tryFinalizePreviousRegularWar_({
+			warPerformance: warPerformance,
+			previousWarKey: previousActiveWarKey,
+			currentWar: currentWar,
+			currentWarMeta: liveSnapshot && liveSnapshot.warMeta ? liveSnapshot.warMeta : currentWarMeta,
+			previousSnapshot: previousSnapshot,
+			clanTag: ctx.clanTag,
+			trackedTagSet: trackedHistoryTagSet,
+			nowIso: nowIso,
+		});
+	}
+
+	if (!previousActiveWarKey && liveSnapshot && currentWarState === "warended" && currentLiveWarKey) {
+		finalization = tryFinalizePreviousRegularWar_({
+			warPerformance: warPerformance,
+			previousWarKey: currentLiveWarKey,
+			currentWar: currentWar,
+			currentWarMeta: liveSnapshot.warMeta,
+			previousSnapshot: liveSnapshot,
+			clanTag: ctx.clanTag,
+			trackedTagSet: trackedHistoryTagSet,
+			nowIso: nowIso,
+		});
+	}
+
+	const nextLifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
+	const keepPendingPreviousWar = !isCurrentWarPrivate && !liveSnapshot && !!previousActiveWarKey && !!shouldFinalizePrevious && !!(finalization && finalization.attempted) && !(finalization && finalization.finalized);
+	if (isCurrentWarPrivate) {
+		nextLifecycle.activeWarKey = previousActiveWarKey || nextLifecycle.activeWarKey;
+		nextLifecycle.activeWarState = nextLifecycle.activeWarState || "notinwar";
+		nextLifecycle.activeWarLastSeenAt = nextLifecycle.activeWarLastSeenAt || nowIso;
+	} else if (liveSnapshot && currentWarState !== "warended") {
+		nextLifecycle.activeWarKey = String(liveSnapshot.warMeta && liveSnapshot.warMeta.warKey ? liveSnapshot.warMeta.warKey : "");
+		nextLifecycle.activeWarState = currentWarState;
+		nextLifecycle.activeWarLastSeenAt = nowIso;
+		warPerformance.lastRegularWarSnapshot = liveSnapshot;
+	} else if (keepPendingPreviousWar) {
+		nextLifecycle.activeWarKey = previousActiveWarKey;
+		nextLifecycle.activeWarState = "pendingfinalization";
+		nextLifecycle.activeWarLastSeenAt = nowIso;
+	} else {
+		nextLifecycle.activeWarKey = "";
+		nextLifecycle.activeWarState = currentWarState || "notinwar";
+		nextLifecycle.activeWarLastSeenAt = nowIso;
+		if (liveSnapshot && currentWarState === "warended") {
+			warPerformance.lastRegularWarSnapshot = liveSnapshot;
+		}
+	}
+	if (finalization && finalization.finalized) {
+		nextLifecycle.lastFinalizedWarKey = previousActiveWarKey || currentLiveWarKey || nextLifecycle.lastFinalizedWarKey;
+		nextLifecycle.lastFinalizedAt = nowIso;
+		nextLifecycle.lastFinalizationSource = String(finalization.source || "");
+		nextLifecycle.lastFinalizationIncomplete = !!finalization.incomplete;
+	}
+	warPerformance.regularWarLifecycle = nextLifecycle;
+	warPerformance.lastRefreshedAt = nowIso;
+	ctx.roster.warPerformance = warPerformance;
+
+	const attacksPerMember = toNonNegativeInt_(currentWarMeta.attacksPerMember);
+	const liveCurrentByTag = liveSnapshot && liveSnapshot.currentByTag && typeof liveSnapshot.currentByTag === "object" ? liveSnapshot.currentByTag : {};
+	const byTag = {};
+	for (let i = 0; i < trackedTags.length; i++) {
+		const tag = trackedTags[i];
+		const previousEntry = previousByTag[tag] && typeof previousByTag[tag] === "object" ? previousByTag[tag] : {};
+		let currentEntry = createEmptyRegularWarCurrentEntry_(attacksPerMember);
+		if (isCurrentWarPrivate && previousEntry.current) {
+			currentEntry = sanitizeRegularWarCurrentEntry_(previousEntry.current, previousEntry.current && previousEntry.current.attacksAllowed);
+		} else if (Object.prototype.hasOwnProperty.call(liveCurrentByTag, tag)) {
+			currentEntry = sanitizeRegularWarCurrentEntry_(liveCurrentByTag[tag], attacksPerMember);
+		}
+
+		const perfEntry = warPerformance && warPerformance.byTag && typeof warPerformance.byTag === "object" && warPerformance.byTag[tag] && typeof warPerformance.byTag[tag] === "object" ? warPerformance.byTag[tag] : null;
+		const perfRegular = perfEntry && perfEntry.regular ? sanitizeWarPerformanceStatsEntry_(perfEntry.regular) : null;
+		const aggregateEntry = perfRegular
+			? sanitizeRegularWarAggregateEntry_({
+					warsInLineup: perfRegular.warsInLineup,
+					attacksMade: perfRegular.attacksMade,
+					attacksMissed: perfRegular.attacksMissed,
+					starsTotal: perfRegular.starsTotal,
+					totalDestruction: perfRegular.totalDestruction,
+					countedAttacks: perfRegular.countedAttacks,
+					threeStarCount: perfRegular.threeStarCount,
+					hitUpCount: perfRegular.hitUpCount,
+					sameThHitCount: perfRegular.sameThHitCount,
+					hitDownCount: perfRegular.hitDownCount,
+				})
+			: previousEntry.aggregate
+				? sanitizeRegularWarAggregateEntry_(previousEntry.aggregate)
+				: createEmptyRegularWarAggregateEntry_();
+		byTag[tag] = {
+			current: sanitizeRegularWarCurrentEntry_(currentEntry, attacksPerMember),
+			aggregate: aggregateEntry,
+		};
+	}
+
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	const aggregateMeta = {
+		source: "warPerformance",
+		warLogAvailable: false,
+		warsTracked: toNonNegativeInt_(meta.finalizedRegularWarCount),
+		lastSuccessfulWarLogRefreshAt: typeof meta.lastRegularWarFinalizedAt === "string" ? meta.lastRegularWarFinalizedAt : "",
+		unavailableReason: "",
+		statusMessage: meta.lastRegularWarFinalizationIncomplete ? "At least one regular-war finalization used fallback data and may be incomplete." : "",
+	};
+
+	const membershipByTag = {};
+	const setMembership = (playersRaw, role) => {
+		const players = Array.isArray(playersRaw) ? playersRaw : [];
+		for (let i = 0; i < players.length; i++) {
+			const tag = normalizeTag_(players[i] && players[i].tag);
+			if (!tag || !trackedTagSet[tag]) continue;
+			const previousMembership = sanitizeRegularWarMembershipEntry_(previousMembershipByTag[tag]);
+			const isMissing = role === "temporaryMissing";
+			membershipByTag[tag] = {
+				firstSeenAt: previousMembership.firstSeenAt || nowIso,
+				lastSeenAt: isMissing ? previousMembership.lastSeenAt || "" : nowIso,
+				missingSince: isMissing ? previousMembership.missingSince || nowIso : "",
+				status: isMissing ? "temporaryMissing" : "active",
+			};
+		}
+	};
+	setMembership(ctx.roster.main, "active");
+	setMembership(ctx.roster.subs, "active");
+	setMembership(ctx.roster.missing, "temporaryMissing");
+
+	ctx.roster.regularWar = {
+		lastRefreshedAt: nowIso,
+		currentWar: currentWarMeta,
+		aggregateMeta: sanitizeRegularWarAggregateMeta_(aggregateMeta),
+		byTag: byTag,
+		membershipByTag: membershipByTag,
+	};
+	updateWarPerformanceMembership_(ctx.roster, nowIso);
+	clearRosterBenchSuggestions_(ctx.roster);
+
+	const outRosterData = validateRosterData_(ctx.rosterData);
+	return {
+		ok: true,
+		rosterData: outRosterData,
+		result: {
+			mode: "regularWar",
+			currentWarState: currentWarState,
+			playersTracked: trackedTags.length,
+			warsProcessed: toNonNegativeInt_(aggregateMeta.warsTracked),
+			warLogAvailable: false,
+			finalizationAttempted: !!(finalization && finalization.attempted),
+			finalizedRegularWar: !!(finalization && finalization.finalized),
+			finalizationSource: String((finalization && finalization.source) || ""),
+			finalizationReason: String((finalization && finalization.reason) || ""),
+			finalizationIncomplete: !!(finalization && finalization.incomplete),
+			teamSize: toNonNegativeInt_(currentWarMeta.teamSize),
+			attacksPerMember: toNonNegativeInt_(currentWarMeta.attacksPerMember),
+			currentWarUnavailableReason: String(currentWarMeta.unavailableReason || ""),
+			currentWarStatusMessage: String(currentWarMeta.statusMessage || ""),
+			aggregateUnavailableReason: String(aggregateMeta && aggregateMeta.unavailableReason ? aggregateMeta.unavailableReason : ""),
+			aggregateStatusMessage: String(aggregateMeta && aggregateMeta.statusMessage ? aggregateMeta.statusMessage : ""),
+		},
+	};
+}
+
+function refreshTrackingStatsCore_(rosterData, rosterId) {
+	const ctx = findRosterById_(rosterData, rosterId);
+	const trackingMode = getRosterTrackingMode_(ctx.roster);
+	if (trackingMode === "regularWar") {
+		return refreshRegularWarStatsCore_(ctx.rosterData, ctx.rosterId);
+	}
+	return refreshCwlStatsCore_(ctx.rosterData, ctx.rosterId);
+}
+
+function refreshCwlStatsInternal_(rosterData, rosterId) {
+	return withRosterLock_(rosterId, function () {
+		return refreshCwlStatsCore_(rosterData, rosterId);
+	});
+}
+
+function refreshCwlStats(rosterData, rosterId, password) {
+	assertAdminPassword_(password);
+	return refreshCwlStatsInternal_(rosterData, rosterId);
+}
+
+function refreshTrackingStatsInternal_(rosterData, rosterId) {
+	return withRosterLock_(rosterId, function () {
+		return refreshTrackingStatsCore_(rosterData, rosterId);
+	});
+}
+
+function refreshTrackingStats(rosterData, rosterId, password) {
+	assertAdminPassword_(password);
+	return refreshTrackingStatsInternal_(rosterData, rosterId);
+}
+
+const CWL_BENCH_PLANNER_CONFIG = {
+	algorithm: "season_milp_v1",
+	defaultSeasonDays: 7,
+	priorMeanStarsPerStart: 2.0,
+	priorWeightAttacks: 2.5,
+	minExpectedStarsPerStart: 1.25,
+	maxExpectedStarsPerStart: 2.75,
+	perfPriorWeight: 3.0,
+	starsPerfPriorMean: 0.5,
+	destructionPerfPriorMean: 0.5,
+	threeStarRatePriorWeight: 4.0,
+	reliabilityPriorWeight: 2.5,
+	weightTH: 0.38,
+	weightStarsPerf: 0.22,
+	weightDestructionPerf: 0.14,
+	weightThreeStarRate: 0.1,
+	weightHitUpAbility: 0.08,
+	weightHitEvenAbility: 0.08,
+	weightReliabilityPenalty: 0.2,
+	churnPenalty: 0.03,
+	reasonStrengthDeltaThreshold: 0.05,
+	optimizerMaxPlayers: 42,
+	optimizerMaxDays: 8,
+	optimizerMaxStateCells: 250000,
+	optimizerScoreScale: 100000,
+};
+
+function getBenchPlannerConfig_() {
+	const out = {};
+	const keys = Object.keys(CWL_BENCH_PLANNER_CONFIG);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		out[key] = CWL_BENCH_PLANNER_CONFIG[key];
+	}
+	return out;
+}
+
+function compareTagsAsc_(a, b) {
+	const left = String(a == null ? "" : a);
+	const right = String(b == null ? "" : b);
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function clampNumber_(value, minValue, maxValue) {
+	const n = Number(value);
+	if (!isFinite(n)) return Number(minValue);
+	if (n < minValue) return Number(minValue);
+	if (n > maxValue) return Number(maxValue);
+	return n;
+}
+
+function normalizeUnitMetric_(value, fallbackValue) {
+	const fallback = clampNumber_(fallbackValue, 0, 1);
+	const n = Number(value);
+	if (!isFinite(n)) return fallback;
+	return clampNumber_(n, 0, 1);
+}
+
+function shrinkToward_(observedValue, priorMean, sampleSize, priorWeight) {
+	const observed = Number(observedValue);
+	const prior = Number(priorMean);
+	const n = Math.max(0, Number(sampleSize) || 0);
+	const w = Math.max(0, Number(priorWeight) || 0);
+	const safeObserved = isFinite(observed) ? observed : prior;
+	const safePrior = isFinite(prior) ? prior : 0;
+	const denom = w + n;
+	if (denom <= 0) return safePrior;
+	return (w * safePrior + n * safeObserved) / denom;
+}
+
+function dedupeTagList_(tagsRaw) {
+	const list = Array.isArray(tagsRaw) ? tagsRaw : [];
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < list.length; i++) {
+		const tag = normalizeTag_(list[i]);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		out.push(tag);
+	}
+	return out;
+}
+
+function dedupeStringList_(listRaw, limit) {
+	const list = Array.isArray(listRaw) ? listRaw : [];
+	const maxLen = Math.max(0, toNonNegativeInt_(limit || 0));
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < list.length; i++) {
+		const text = String(list[i] == null ? "" : list[i]).trim();
+		if (!text || seen[text]) continue;
+		seen[text] = true;
+		out.push(text);
+		if (maxLen > 0 && out.length >= maxLen) break;
+	}
+	return out;
+}
+
+function listToTagSet_(listRaw) {
+	const tags = Array.isArray(listRaw) ? listRaw : [];
+	const out = {};
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+function tagListDiff_(leftListRaw, rightSetRaw) {
+	const leftList = Array.isArray(leftListRaw) ? leftListRaw : [];
+	const rightSet = rightSetRaw && typeof rightSetRaw === "object" ? rightSetRaw : {};
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < leftList.length; i++) {
+		const tag = normalizeTag_(leftList[i]);
+		if (!tag || seen[tag] || rightSet[tag]) continue;
+		seen[tag] = true;
+		out.push(tag);
+	}
+	return out;
+}
+
+function safeRoundNumber_(value, digits) {
+	const n = Number(value);
+	if (!isFinite(n)) return 0;
+	const p = Math.pow(10, Math.max(0, toNonNegativeInt_(digits || 0)));
+	return Math.round(n * p) / p;
+}
+
+function computeExpectedStarsPerStart_(playerStats, config) {
+	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
+	const priorMean = isFinite(Number(config && config.priorMeanStarsPerStart)) ? Number(config.priorMeanStarsPerStart) : 2.0;
+	const priorWeight = Math.max(0, Number(config && config.priorWeightAttacks) || 0);
+	const minExpected = isFinite(Number(config && config.minExpectedStarsPerStart)) ? Number(config.minExpectedStarsPerStart) : 1.25;
+	const maxExpected = isFinite(Number(config && config.maxExpectedStarsPerStart)) ? Number(config.maxExpectedStarsPerStart) : 2.75;
+	const countedAttacks = toNonNegativeInt_(stats.countedAttacks);
+	const starsTotal = toNonNegativeInt_(stats.starsTotal);
+	const observedAvgStars = starsTotal / Math.max(1, countedAttacks);
+	const denom = priorWeight + countedAttacks;
+	const raw = denom > 0 ? (priorWeight * priorMean + countedAttacks * observedAvgStars) / denom : priorMean;
+	return clampNumber_(raw, minExpected, maxExpected);
+}
+
+function computeStartsNeededForReward_(playerStats, remainingDays, config) {
+	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
+	const starsTotal = toNonNegativeInt_(stats.starsTotal);
+	const starsNeeded = Math.max(0, 8 - starsTotal);
+	const expectedStarsPerStart = computeExpectedStarsPerStart_(stats, config);
+	const startsNeeded = starsNeeded > 0 ? Math.max(0, Math.ceil(starsNeeded / Math.max(0.01, expectedStarsPerStart))) : 0;
+	const remainingEditableDays = Math.max(0, toNonNegativeInt_(remainingDays));
+	const rewardSlackMargin = remainingEditableDays - startsNeeded;
+	return {
+		starsNeeded: starsNeeded,
+		expectedStarsPerStart: expectedStarsPerStart,
+		startsNeeded: startsNeeded,
+		rewardSlackMargin: rewardSlackMargin,
+		rewardFeasible: rewardSlackMargin >= 0,
+		rewardCritical: startsNeeded > 0 && rewardSlackMargin === 0,
+		impossibleReward: rewardSlackMargin < 0,
+	};
+}
+
+function computeStrengthScore_(playerStats, planningContext, config) {
+	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
+	const ctx = planningContext && typeof planningContext === "object" ? planningContext : {};
+	const weights = config && typeof config === "object" ? config : {};
+	const th = toNonNegativeInt_(stats.th);
+	const countedAttacks = toNonNegativeInt_(stats.countedAttacks);
+	const resolvedWarDays = toNonNegativeInt_(stats.resolvedWarDays);
+	const thMin = toNonNegativeInt_(ctx.thMin);
+	const thMax = toNonNegativeInt_(ctx.thMax);
+	const normTH = thMax > thMin ? clampNumber_((th - thMin) / (thMax - thMin), 0, 1) : 0.5;
+
+	const starsPerfPrior = normalizeUnitMetric_(weights.starsPerfPriorMean, 0.5);
+	const destructionPrior = normalizeUnitMetric_(weights.destructionPerfPriorMean, 0.5);
+	const perfPriorWeight = Math.max(0, Number(weights.perfPriorWeight) || 0);
+	const starsPerfRaw = normalizeUnitMetric_(stats.starsPerf, starsPerfPrior);
+	const destructionPerfRaw = normalizeUnitMetric_(stats.destructionPerf, destructionPrior);
+	const shrinkedStarsPerf = normalizeUnitMetric_(shrinkToward_(starsPerfRaw, starsPerfPrior, countedAttacks, perfPriorWeight), starsPerfPrior);
+	const shrinkedDestructionPerf = normalizeUnitMetric_(shrinkToward_(destructionPerfRaw, destructionPrior, countedAttacks, perfPriorWeight), destructionPrior);
+
+	const threeStarRateRaw = clampNumber_(toNonNegativeInt_(stats.threeStarCount) / Math.max(1, countedAttacks), 0, 1);
+	const threeStarRateMean = normalizeUnitMetric_(ctx.poolThreeStarRateMean, 0.33);
+	const shrinkedThreeStarRate = normalizeUnitMetric_(shrinkToward_(threeStarRateRaw, threeStarRateMean, countedAttacks, Math.max(0, Number(weights.threeStarRatePriorWeight) || 0)), threeStarRateMean);
+
+	const hitUpShare = clampNumber_(toNonNegativeInt_(stats.hitUpCount) / Math.max(1, countedAttacks), 0, 1);
+	const hitEvenShare = clampNumber_(toNonNegativeInt_(stats.sameThHitCount) / Math.max(1, countedAttacks), 0, 1);
+	const hitUpAbility = clampNumber_(0.65 * shrinkedStarsPerf + 0.35 * hitUpShare, 0, 1);
+	const hitEvenAbility = clampNumber_(0.65 * shrinkedStarsPerf + 0.35 * hitEvenShare, 0, 1);
+
+	const missRateRaw = clampNumber_(toNonNegativeInt_(stats.missedAttacks) / Math.max(1, resolvedWarDays), 0, 1);
+	const poolMissRateMean = normalizeUnitMetric_(ctx.poolMissRateMean, 0.1);
+	const reliabilityPenalty = normalizeUnitMetric_(shrinkToward_(missRateRaw, poolMissRateMean, resolvedWarDays, Math.max(0, Number(weights.reliabilityPriorWeight) || 0)), poolMissRateMean);
+
+	const score = (Number(weights.weightTH) || 0) * normTH + (Number(weights.weightStarsPerf) || 0) * shrinkedStarsPerf + (Number(weights.weightDestructionPerf) || 0) * shrinkedDestructionPerf + (Number(weights.weightThreeStarRate) || 0) * shrinkedThreeStarRate + (Number(weights.weightHitUpAbility) || 0) * hitUpAbility + (Number(weights.weightHitEvenAbility) || 0) * hitEvenAbility - (Number(weights.weightReliabilityPenalty) || 0) * reliabilityPenalty;
+
+	return {
+		score: score,
+		normTH: normTH,
+		shrinkedStarsPerf: shrinkedStarsPerf,
+		shrinkedDestructionPerf: shrinkedDestructionPerf,
+		shrinkedThreeStarRate: shrinkedThreeStarRate,
+		hitUpAbility: hitUpAbility,
+		hitEvenAbility: hitEvenAbility,
+		reliabilityPenalty: reliabilityPenalty,
+	};
+}
+
+function buildCwlSeasonContext_(roster, config) {
+	const rosterSafe = roster && typeof roster === "object" ? roster : {};
+	const rosterStatsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object" ? rosterSafe.cwlStats.byTag : {};
+	const defaultSeasonDays = Math.max(1, toNonNegativeInt_((config && config.defaultSeasonDays) || 7));
+	let maxResolvedWarDays = 0;
+	let hasPendingCurrentWarAttack = false;
+	const statsTags = Object.keys(rosterStatsByTag);
+	for (let i = 0; i < statsTags.length; i++) {
+		const entry = sanitizeCwlStatEntry_(rosterStatsByTag[statsTags[i]]);
+		maxResolvedWarDays = Math.max(maxResolvedWarDays, toNonNegativeInt_(entry.resolvedWarDays));
+		if (toNonNegativeInt_(entry.currentWarAttackPending) > 0) {
+			hasPendingCurrentWarAttack = true;
+		}
+	}
+
+	const lockedDaysEstimate = clampNumber_(maxResolvedWarDays + (hasPendingCurrentWarAttack ? 1 : 0), 0, defaultSeasonDays);
+	const seasonFromRoster = rosterSafe && rosterSafe.cwlStats && typeof rosterSafe.cwlStats.season === "string" ? rosterSafe.cwlStats.season : "";
+	const fallbackContext = {
+		source: "stats_fallback",
+		season: seasonFromRoster || "",
+		totalSeasonDays: defaultSeasonDays,
+		completedDays: clampNumber_(maxResolvedWarDays, 0, defaultSeasonDays),
+		lockedDays: lockedDaysEstimate,
+		remainingEditableDays: Math.max(0, defaultSeasonDays - lockedDaysEstimate),
+		nextEditableDayIndex: defaultSeasonDays - lockedDaysEstimate > 0 ? 0 : -1,
+		warnings: [],
+	};
+
+	const clanTag = normalizeTag_(rosterSafe.connectedClanTag);
+	if (!clanTag) {
+		fallbackContext.warnings.push("season-context-no-connected-clan-tag");
+		return fallbackContext;
+	}
+
+	try {
+		const leaguegroup = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup");
+		const rounds = Array.isArray(leaguegroup && leaguegroup.rounds) ? leaguegroup.rounds : [];
+		const totalSeasonDays = rounds.length > 0 ? rounds.length : fallbackContext.totalSeasonDays;
+		const roundStates = [];
+
+		for (let i = 0; i < totalSeasonDays; i++) {
+			const round = rounds[i] && typeof rounds[i] === "object" ? rounds[i] : {};
+			const warTags = Array.isArray(round.warTags) ? round.warTags : [];
+			let roundState = "editable";
+			let foundClanWar = false;
+
+			for (let j = 0; j < warTags.length; j++) {
+				const warTag = normalizeTag_(warTags[j]);
+				if (!warTag || warTag === "#0") continue;
+
+				let war = null;
+				try {
+					war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+				} catch (err) {
+					if (err && err.statusCode === 404) continue;
+					throw err;
+				}
+				if (!pickWarSideForClan_(war, clanTag)) continue;
+				foundClanWar = true;
+
+				const warState = String((war && war.state) || "").toLowerCase();
+				if (warState === "warended") roundState = "completed";
+				else if (warState === "inwar") roundState = "locked";
+				else roundState = "editable";
+				break;
+			}
+
+			if (!foundClanWar) {
+				roundState = "editable";
+			}
+			roundStates.push(roundState);
+		}
+
+		let completedDays = 0;
+		let lockedDays = 0;
+		let remainingEditableDays = 0;
+		for (let i = 0; i < roundStates.length; i++) {
+			if (roundStates[i] === "completed") {
+				completedDays++;
+				lockedDays++;
+			} else if (roundStates[i] === "locked") {
+				lockedDays++;
+			} else {
+				remainingEditableDays++;
+			}
+		}
+
+		return {
+			source: "leaguegroup",
+			season: leaguegroup && typeof leaguegroup.season === "string" ? leaguegroup.season : seasonFromRoster || "",
+			totalSeasonDays: totalSeasonDays,
+			completedDays: completedDays,
+			lockedDays: lockedDays,
+			remainingEditableDays: remainingEditableDays,
+			nextEditableDayIndex: remainingEditableDays > 0 ? 0 : -1,
+			warnings: [],
+		};
+	} catch (err) {
+		Logger.log("buildCwlSeasonContext_ fallback for clan %s: %s", clanTag, err && err.message ? err.message : String(err));
+		fallbackContext.warnings.push("season-context-api-fallback");
+		return fallbackContext;
+	}
+}
+
+function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
+	const rosterSafe = roster && typeof roster === "object" ? roster : {};
+	const season = seasonContext && typeof seasonContext === "object" ? seasonContext : {};
+	const rosterStatsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object" ? rosterSafe.cwlStats.byTag : {};
+	const currentMainRaw = Array.isArray(rosterSafe.main) ? rosterSafe.main : [];
+	const poolPlayersRaw = collectRosterPoolPlayers_(rosterSafe);
+	let requestedMainSize = Number(rosterSafe && rosterSafe.badges && rosterSafe.badges.main);
+	if (!isFinite(requestedMainSize)) requestedMainSize = currentMainRaw.length;
+	requestedMainSize = Math.max(0, Math.floor(requestedMainSize));
+
+	const currentMainTags = [];
+	const currentMainSeen = {};
+	for (let i = 0; i < currentMainRaw.length; i++) {
+		const tag = normalizeTag_(currentMainRaw[i] && currentMainRaw[i].tag);
+		if (!tag || currentMainSeen[tag]) continue;
+		currentMainSeen[tag] = true;
+		currentMainTags.push(tag);
+	}
+	const currentMainTagSet = listToTagSet_(currentMainTags);
+
+	const players = [];
+	const playersByTag = {};
+	let thMin = Number.MAX_SAFE_INTEGER;
+	let thMax = 0;
+	let sumThreeStarRate = 0;
+	let sumMissRate = 0;
+	let countedForMeans = 0;
+
+	for (let i = 0; i < poolPlayersRaw.length; i++) {
+		const player = poolPlayersRaw[i] && typeof poolPlayersRaw[i] === "object" ? poolPlayersRaw[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || playersByTag[tag]) continue;
+
+		const metrics = deriveCwlMetrics_(rosterStatsByTag[tag]);
+		const rewardModel = computeStartsNeededForReward_(metrics, season.remainingEditableDays, config);
+		const th = typeof player.th === "number" && isFinite(player.th) ? Math.floor(player.th) : 0;
+		const next = {
+			tag: tag,
+			name: String(player.name == null ? "" : player.name),
+			th: th,
+			isCurrentMain: !!currentMainTagSet[tag],
+			starsTotal: metrics.starsTotal,
+			missedAttacks: metrics.missedAttacks,
+			countedAttacks: metrics.countedAttacks,
+			starsPerf: metrics.starsPerf,
+			destructionPerf: metrics.destructionPerf,
+			avgDestruction: metrics.avgDestruction,
+			currentWarAttackPending: metrics.currentWarAttackPending,
+			threeStarCount: metrics.threeStarCount,
+			hitUpCount: metrics.hitUpCount,
+			sameThHitCount: metrics.sameThHitCount,
+			hitDownCount: metrics.hitDownCount,
+			resolvedWarDays: metrics.resolvedWarDays,
+			attacksMade: metrics.attacksMade,
+			excludeAsSwapTarget: toBooleanFlag_(player.excludeAsSwapTarget),
+			excludeAsSwapSource: toBooleanFlag_(player.excludeAsSwapSource),
+			expectedStarsPerStart: rewardModel.expectedStarsPerStart,
+			starsNeeded: rewardModel.starsNeeded,
+			startsNeeded: rewardModel.startsNeeded,
+			rewardSlackMargin: rewardModel.rewardSlackMargin,
+			rewardFeasible: rewardModel.rewardFeasible,
+			rewardCritical: rewardModel.rewardCritical,
+			impossibleReward: rewardModel.impossibleReward,
+			hasMissedAttackHistory: metrics.missedAttacks > 0,
+			strengthScore: 0,
+		};
+		players.push(next);
+		playersByTag[tag] = next;
+
+		thMin = Math.min(thMin, th);
+		thMax = Math.max(thMax, th);
+		sumThreeStarRate += toNonNegativeInt_(metrics.threeStarCount) / Math.max(1, toNonNegativeInt_(metrics.countedAttacks));
+		sumMissRate += toNonNegativeInt_(metrics.missedAttacks) / Math.max(1, toNonNegativeInt_(metrics.resolvedWarDays));
+		countedForMeans++;
+	}
+
+	if (players.length === 0) thMin = 0;
+	const planningContext = {
+		thMin: thMin,
+		thMax: thMax,
+		poolThreeStarRateMean: countedForMeans > 0 ? sumThreeStarRate / countedForMeans : 0.33,
+		poolMissRateMean: countedForMeans > 0 ? sumMissRate / countedForMeans : 0.1,
+	};
+
+	for (let i = 0; i < players.length; i++) {
+		const strength = computeStrengthScore_(players[i], planningContext, config);
+		players[i].strengthScore = strength.score;
+		players[i].strengthComponents = strength;
+	}
+
+	const dedupedCurrentMainTags = [];
+	for (let i = 0; i < currentMainTags.length; i++) {
+		if (!playersByTag[currentMainTags[i]]) continue;
+		dedupedCurrentMainTags.push(currentMainTags[i]);
+	}
+
+	const effectiveMainSize = Math.max(0, Math.min(requestedMainSize, players.length));
+	const needsRewardsCount = players.filter((p) => p.starsNeeded > 0).length;
+
+	return {
+		players: players,
+		playersByTag: playersByTag,
+		rosterPoolSize: players.length,
+		requestedMainSize: requestedMainSize,
+		mainSize: effectiveMainSize,
+		currentMainTags: dedupedCurrentMainTags,
+		currentMainTagSet: listToTagSet_(dedupedCurrentMainTags),
+		remainingEditableDays: Math.max(0, toNonNegativeInt_(season.remainingEditableDays)),
+		needsRewardsCount: needsRewardsCount,
+		seasonContext: season,
+	};
+}
+
+function parsePlannerStateKey_(stateKey) {
+	const parts = String(stateKey == null ? "" : stateKey).split("|");
+	const starts = Math.max(0, parseInt(parts[0] || "0", 10) || 0);
+	const coverage = Math.max(0, parseInt(parts[1] || "0", 10) || 0);
+	return { starts: starts, coverage: coverage };
+}
+
+function comparePlannerStateKeys_(a, b) {
+	const pa = parsePlannerStateKey_(a);
+	const pb = parsePlannerStateKey_(b);
+	if (pa.starts !== pb.starts) return pa.starts - pb.starts;
+	if (pa.coverage !== pb.coverage) return pa.coverage - pb.coverage;
+	return compareTagsAsc_(String(a), String(b));
+}
+
+function calculateCoveredStarts_(players, startCountsByTag) {
+	const list = Array.isArray(players) ? players : [];
+	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
+	let covered = 0;
+	for (let i = 0; i < list.length; i++) {
+		const p = list[i] && typeof list[i] === "object" ? list[i] : {};
+		const starts = toNonNegativeInt_(startsByTag[p.tag]);
+		const startsNeeded = toNonNegativeInt_(p.startsNeeded);
+		covered += Math.min(starts, startsNeeded);
+	}
+	return covered;
+}
+
+function buildDayZeroTargetLineup_(snapshot, remainingByTag) {
+	const remaining = remainingByTag && typeof remainingByTag === "object" ? remainingByTag : {};
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const daysLeftIncludingToday = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
+	const seen = {};
+	const candidates = [];
+
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+
+		const remainingAssignedStarts = toNonNegativeInt_(remaining[tag]);
+		if (remainingAssignedStarts <= 0) continue;
+
+		const rewardSlackRaw = Number(player.rewardSlackMargin);
+		candidates.push({
+			tag: tag,
+			mustPlayToday: remainingAssignedStarts >= daysLeftIncludingToday,
+			rewardSlackMargin: isFinite(rewardSlackRaw) ? rewardSlackRaw : Number.MAX_SAFE_INTEGER,
+			strengthScore: Number(player.strengthScore) || 0,
+			startsNeeded: toNonNegativeInt_(player.startsNeeded),
+			isCurrentMain: !!currentMainSet[tag],
+		});
+	}
+
+	candidates.sort((a, b) => {
+		if (a.mustPlayToday !== b.mustPlayToday) return a.mustPlayToday ? -1 : 1;
+		if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
+		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+		if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+		if (a.isCurrentMain !== b.isCurrentMain) return a.isCurrentMain ? -1 : 1;
+		return compareTagsAsc_(a.tag, b.tag);
+	});
+
+	return candidates.slice(0, mainSize).map((p) => p.tag);
+}
+
+function buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag) {
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
+	const remainingByTag = {};
+	for (let i = 0; i < players.length; i++) {
+		const tag = players[i].tag;
+		remainingByTag[tag] = toNonNegativeInt_(startsByTag[tag]);
+	}
+
+	const assignments = [];
+	for (let day = 0; day < days; day++) {
+		let selectedTags = [];
+		if (day === 0) {
+			selectedTags = buildDayZeroTargetLineup_(snapshot, remainingByTag);
+		} else {
+			selectedTags = players
+				.filter((p) => toNonNegativeInt_(remainingByTag[p.tag]) > 0)
+				.sort((a, b) => {
+					const aRemaining = toNonNegativeInt_(remainingByTag[a.tag]);
+					const bRemaining = toNonNegativeInt_(remainingByTag[b.tag]);
+					if (aRemaining !== bRemaining) return bRemaining - aRemaining;
+					if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+					if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+					return compareTagsAsc_(a.tag, b.tag);
+				})
+				.slice(0, mainSize)
+				.map((p) => p.tag);
+		}
+
+		if (selectedTags.length < mainSize) return null;
+		assignments.push(selectedTags);
+		for (let i = 0; i < selectedTags.length; i++) {
+			const tag = selectedTags[i];
+			remainingByTag[tag] = Math.max(0, toNonNegativeInt_(remainingByTag[tag]) - 1);
+		}
+	}
+
+	for (let i = 0; i < players.length; i++) {
+		if (toNonNegativeInt_(remainingByTag[players[i].tag]) > 0) return null;
+	}
+	return assignments;
+}
+
+function optimizeSeasonPlanByDynamicProgramming_(snapshot, coverageTarget, config) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const totalStarts = days * mainSize;
+	const targetCoverage = Math.max(0, toNonNegativeInt_(coverageTarget));
+	const scale = Math.max(1, toNonNegativeInt_((config && config.optimizerScoreScale) || 100000));
+	const retentionBonus = Math.max(0, Number(config && config.churnPenalty) || 0) * 2;
+
+	let currentLayer = {
+		"0|0": {
+			value: 0,
+			prevKey: "",
+			starts: 0,
+		},
+	};
+	const layers = [currentLayer];
+
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i];
+		const nextLayer = {};
+		const stateKeys = Object.keys(currentLayer).sort(comparePlannerStateKeys_);
+		const startsNeeded = Math.max(0, toNonNegativeInt_(player.startsNeeded));
+
+		for (let j = 0; j < stateKeys.length; j++) {
+			const key = stateKeys[j];
+			const state = currentLayer[key];
+			const parsed = parsePlannerStateKey_(key);
+			const currentStarts = parsed.starts;
+			const currentCoverage = parsed.coverage;
+
+			for (let starts = 0; starts <= days; starts++) {
+				const nextStarts = currentStarts + starts;
+				if (nextStarts > totalStarts) continue;
+				const nextCoverage = Math.min(targetCoverage, currentCoverage + Math.min(starts, startsNeeded));
+				const bonus = player.isCurrentMain && starts > 0 ? retentionBonus : 0;
+				const contribution = starts * player.strengthScore + bonus;
+				const scoreInt = state.value + Math.round(contribution * scale);
+				const nextKey = nextStarts + "|" + nextCoverage;
+				const existing = nextLayer[nextKey];
+				if (!existing || scoreInt > existing.value || (scoreInt === existing.value && starts < existing.starts)) {
+					nextLayer[nextKey] = {
+						value: scoreInt,
+						prevKey: key,
+						starts: starts,
+					};
+				}
+			}
+		}
+
+		currentLayer = nextLayer;
+		layers.push(currentLayer);
+	}
+
+	const finalKey = totalStarts + "|" + targetCoverage;
+	if (!currentLayer[finalKey]) return null;
+
+	const startCountsByTag = {};
+	let backtrackKey = finalKey;
+	for (let i = players.length - 1; i >= 0; i--) {
+		const layer = layers[i + 1];
+		const entry = layer[backtrackKey];
+		if (!entry) return null;
+		startCountsByTag[players[i].tag] = entry.starts;
+		backtrackKey = entry.prevKey;
+	}
+
+	const dayAssignments = buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag);
+	if (!dayAssignments) return null;
+
+	let totalStrength = 0;
+	for (let i = 0; i < players.length; i++) {
+		const starts = toNonNegativeInt_(startCountsByTag[players[i].tag]);
+		totalStrength += starts * players[i].strengthScore;
+	}
+	const coveredStarts = calculateCoveredStarts_(players, startCountsByTag);
+	return {
+		mode: "optimizer",
+		startCountsByTag: startCountsByTag,
+		dayAssignments: dayAssignments,
+		totalStrength: totalStrength,
+		coveredStarts: coveredStarts,
+	};
+}
+
+function boostFallbackCoverageTowardTarget_(players, startCountsByTag, coverageTarget, days) {
+	const list = Array.isArray(players) ? players : [];
+	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
+	const target = Math.max(0, toNonNegativeInt_(coverageTarget));
+	let covered = calculateCoveredStarts_(list, startsByTag);
+	let guard = 0;
+	const maxGuard = 5000;
+
+	while (covered < target && guard < maxGuard) {
+		guard++;
+		const needers = list
+			.filter((p) => toNonNegativeInt_(startsByTag[p.tag]) < days && toNonNegativeInt_(startsByTag[p.tag]) < toNonNegativeInt_(p.startsNeeded))
+			.sort((a, b) => {
+				if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
+				if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+				if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+				return compareTagsAsc_(a.tag, b.tag);
+			});
+		if (!needers.length) break;
+
+		const donors = list
+			.filter((p) => toNonNegativeInt_(startsByTag[p.tag]) > 0)
+			.sort((a, b) => {
+				const aStarts = toNonNegativeInt_(startsByTag[a.tag]);
+				const bStarts = toNonNegativeInt_(startsByTag[b.tag]);
+				const aExcess = Math.max(0, aStarts - toNonNegativeInt_(a.startsNeeded));
+				const bExcess = Math.max(0, bStarts - toNonNegativeInt_(b.startsNeeded));
+				if (aExcess !== bExcess) return bExcess - aExcess;
+				if (a.strengthScore !== b.strengthScore) return a.strengthScore - b.strengthScore;
+				return compareTagsAsc_(a.tag, b.tag);
+			});
+		if (!donors.length) break;
+
+		let improved = false;
+		for (let i = 0; i < needers.length && !improved; i++) {
+			const needy = needers[i];
+			for (let j = 0; j < donors.length && !improved; j++) {
+				const donor = donors[j];
+				if (donor.tag === needy.tag) continue;
+				const donorStarts = toNonNegativeInt_(startsByTag[donor.tag]);
+				const needyStarts = toNonNegativeInt_(startsByTag[needy.tag]);
+				if (donorStarts <= 0 || needyStarts >= days) continue;
+
+				const donorCoverageBefore = Math.min(donorStarts, toNonNegativeInt_(donor.startsNeeded));
+				const needyCoverageBefore = Math.min(needyStarts, toNonNegativeInt_(needy.startsNeeded));
+				const donorCoverageAfter = Math.min(Math.max(0, donorStarts - 1), toNonNegativeInt_(donor.startsNeeded));
+				const needyCoverageAfter = Math.min(needyStarts + 1, toNonNegativeInt_(needy.startsNeeded));
+				const deltaCoverage = donorCoverageAfter + needyCoverageAfter - (donorCoverageBefore + needyCoverageBefore);
+				if (deltaCoverage <= 0) continue;
+
+				startsByTag[donor.tag] = donorStarts - 1;
+				startsByTag[needy.tag] = needyStarts + 1;
+				covered += deltaCoverage;
+				improved = true;
+			}
+		}
+		if (!improved) break;
+	}
+}
+
+function buildFallbackSeasonLineupPlan_(snapshot, coverageTarget) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const totalStarts = days * mainSize;
+	const startCountsByTag = {};
+	for (let i = 0; i < players.length; i++) startCountsByTag[players[i].tag] = 0;
+
+	let slotsRemaining = totalStarts;
+	const rewardOrder = players.slice().sort((a, b) => {
+		if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
+		if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+		return compareTagsAsc_(a.tag, b.tag);
+	});
+
+	let progressed = true;
+	while (slotsRemaining > 0 && progressed) {
+		progressed = false;
+		for (let i = 0; i < rewardOrder.length; i++) {
+			const p = rewardOrder[i];
+			const currentStarts = toNonNegativeInt_(startCountsByTag[p.tag]);
+			if (currentStarts >= days) continue;
+			if (currentStarts >= toNonNegativeInt_(p.startsNeeded)) continue;
+			startCountsByTag[p.tag] = currentStarts + 1;
+			slotsRemaining--;
+			progressed = true;
+			if (slotsRemaining <= 0) break;
+		}
+	}
+
+	const strengthOrder = players.slice().sort((a, b) => {
+		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+		if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
+		return compareTagsAsc_(a.tag, b.tag);
+	});
+
+	while (slotsRemaining > 0) {
+		let assigned = false;
+		for (let i = 0; i < strengthOrder.length; i++) {
+			const p = strengthOrder[i];
+			const currentStarts = toNonNegativeInt_(startCountsByTag[p.tag]);
+			if (currentStarts >= days) continue;
+			startCountsByTag[p.tag] = currentStarts + 1;
+			slotsRemaining--;
+			assigned = true;
+			if (slotsRemaining <= 0) break;
+		}
+		if (!assigned) break;
+	}
+
+	boostFallbackCoverageTowardTarget_(players, startCountsByTag, coverageTarget, days);
+	const dayAssignments = buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag);
+	if (!dayAssignments) return null;
+
+	let totalStrength = 0;
+	for (let i = 0; i < players.length; i++) {
+		const starts = toNonNegativeInt_(startCountsByTag[players[i].tag]);
+		totalStrength += starts * players[i].strengthScore;
+	}
+	return {
+		mode: "fallback",
+		startCountsByTag: startCountsByTag,
+		dayAssignments: dayAssignments,
+		totalStrength: totalStrength,
+		coveredStarts: calculateCoveredStarts_(players, startCountsByTag),
+	};
+}
+
+function buildEmergencySeasonPlan_(snapshot) {
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const currentMainSet = listToTagSet_(currentMainTags);
+	const sortedPlayers = players.slice().sort((a, b) => {
+		const aCurrent = !!currentMainSet[a.tag];
+		const bCurrent = !!currentMainSet[b.tag];
+		if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+		return compareTagsAsc_(a.tag, b.tag);
+	});
+	const targetMain = sortedPlayers.slice(0, mainSize).map((p) => p.tag);
+	const dayAssignments = [];
+	for (let d = 0; d < days; d++) dayAssignments.push(targetMain.slice());
+	const startCountsByTag = {};
+	for (let i = 0; i < players.length; i++) startCountsByTag[players[i].tag] = 0;
+	for (let d = 0; d < dayAssignments.length; d++) {
+		for (let i = 0; i < dayAssignments[d].length; i++) {
+			const tag = dayAssignments[d][i];
+			startCountsByTag[tag] = toNonNegativeInt_(startCountsByTag[tag]) + 1;
+		}
+	}
+	let totalStrength = 0;
+	for (let i = 0; i < players.length; i++) {
+		totalStrength += toNonNegativeInt_(startCountsByTag[players[i].tag]) * players[i].strengthScore;
+	}
+	return {
+		mode: "emergency",
+		startCountsByTag: startCountsByTag,
+		dayAssignments: dayAssignments,
+		totalStrength: totalStrength,
+		coveredStarts: calculateCoveredStarts_(players, startCountsByTag),
+	};
+}
+
+function solveSeasonLineupPlan_(snapshot, config) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const remainingEditableDays = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const totalStarts = remainingEditableDays * mainSize;
+	const plan = {
+		dayAssignments: [],
+		targetMainTags: [],
+		startCountsByTag: {},
+		optimalTotalSlack: 0,
+		totalSlack: 0,
+		coveredStarts: 0,
+		solverMode: "none",
+		warnings: [],
+	};
+
+	if (remainingEditableDays <= 0 || mainSize <= 0 || players.length <= 0) {
+		plan.solverMode = "none";
+		return plan;
+	}
+
+	let totalStartsNeeded = 0;
+	let coverageCapacity = 0;
+	for (let i = 0; i < players.length; i++) {
+		const startsNeeded = toNonNegativeInt_(players[i].startsNeeded);
+		totalStartsNeeded += startsNeeded;
+		coverageCapacity += Math.min(remainingEditableDays, startsNeeded);
+	}
+	const coverageTarget = Math.min(totalStarts, coverageCapacity);
+	plan.optimalTotalSlack = Math.max(0, totalStartsNeeded - coverageTarget);
+
+	const estimatedStateCells = players.length * (totalStarts + 1) * (coverageTarget + 1);
+	const exceedsGuards = players.length > toNonNegativeInt_(config && config.optimizerMaxPlayers) || remainingEditableDays > toNonNegativeInt_(config && config.optimizerMaxDays) || estimatedStateCells > toNonNegativeInt_(config && config.optimizerMaxStateCells);
+
+	let solved = null;
+	if (!exceedsGuards) {
+		try {
+			solved = optimizeSeasonPlanByDynamicProgramming_(snapshot, coverageTarget, config);
+		} catch (err) {
+			Logger.log("optimizeSeasonPlanByDynamicProgramming_ failed: %s", err && err.message ? err.message : String(err));
+			plan.warnings.push("optimizer-error-fallback");
+		}
+	} else {
+		plan.warnings.push("optimizer-guard-fallback");
+	}
+
+	if (!solved) {
+		solved = buildFallbackSeasonLineupPlan_(snapshot, coverageTarget);
+	}
+	if (!solved) {
+		plan.warnings.push("fallback-scheduler-failed-emergency-plan");
+		solved = buildEmergencySeasonPlan_(snapshot);
+	}
+
+	plan.solverMode = solved && solved.mode ? solved.mode : "unknown";
+	plan.startCountsByTag = solved && solved.startCountsByTag ? solved.startCountsByTag : {};
+	plan.dayAssignments = solved && Array.isArray(solved.dayAssignments) ? solved.dayAssignments : [];
+	plan.targetMainTags = plan.dayAssignments.length ? plan.dayAssignments[0].slice() : [];
+	plan.coveredStarts = toNonNegativeInt_(solved && solved.coveredStarts);
+	plan.totalSlack = Math.max(0, totalStartsNeeded - plan.coveredStarts);
+	plan.totalStrength = Number(solved && solved.totalStrength) || 0;
+	return plan;
+}
+
+function compareActionableRemovalPriority_(tagA, tagB, snapshot, forcedKeepSet) {
+	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
+	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
+	const playerA = playersByTag[tagA] || {};
+	const playerB = playersByTag[tagB] || {};
+	const aForced = !!(forcedKeepSet && forcedKeepSet[tagA]);
+	const bForced = !!(forcedKeepSet && forcedKeepSet[tagB]);
+	if (aForced !== bForced) return aForced ? 1 : -1;
+	const aCurrent = !!currentMainSet[tagA];
+	const bCurrent = !!currentMainSet[tagB];
+	if (aCurrent !== bCurrent) return aCurrent ? 1 : -1;
+	const aNeeded = toNonNegativeInt_(playerA.startsNeeded);
+	const bNeeded = toNonNegativeInt_(playerB.startsNeeded);
+	if (aNeeded !== bNeeded) return aNeeded - bNeeded;
+	const aScore = Number(playerA.strengthScore) || 0;
+	const bScore = Number(playerB.strengthScore) || 0;
+	if (aScore !== bScore) return aScore - bScore;
+	return compareTagsAsc_(tagA, tagB);
+}
+
+function orderTargetMainTags_(selectedSet, snapshot) {
+	const set = selectedSet && typeof selectedSet === "object" ? selectedSet : {};
+	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const out = [];
+	const seen = {};
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+
+	for (let i = 0; i < currentMainTags.length; i++) {
+		const tag = normalizeTag_(currentMainTags[i]);
+		if (!tag || !set[tag] || seen[tag]) continue;
+		seen[tag] = true;
+		out.push(tag);
+		if (out.length >= mainSize) return out;
+	}
+
+	const rest = players
+		.filter((p) => set[p.tag] && !seen[p.tag])
+		.sort((a, b) => {
+			if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+			if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+			return compareTagsAsc_(a.tag, b.tag);
+		});
+	for (let i = 0; i < rest.length && out.length < mainSize; i++) {
+		out.push(rest[i].tag);
+	}
+	return out;
+}
+
+function buildActionableTargetMainTags_(snapshot, idealTargetTagsRaw) {
+	const idealTargetTags = dedupeTagList_(idealTargetTagsRaw);
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
+	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
+	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
+	const selectedSet = {};
+
+	for (let i = 0; i < idealTargetTags.length; i++) {
+		const tag = idealTargetTags[i];
+		if (!playersByTag[tag]) continue;
+		selectedSet[tag] = true;
+	}
+
+	const forcedKeepSet = {};
+	for (let i = 0; i < currentMainTags.length; i++) {
+		const tag = currentMainTags[i];
+		const player = playersByTag[tag];
+		if (!player || !player.excludeAsSwapSource) continue;
+		forcedKeepSet[tag] = true;
+		selectedSet[tag] = true;
+	}
+
+	const blockedInSet = {};
+	const selectedTagsForCheck = Object.keys(selectedSet);
+	for (let i = 0; i < selectedTagsForCheck.length; i++) {
+		const tag = selectedTagsForCheck[i];
+		const player = playersByTag[tag];
+		if (!player) continue;
+		if (!currentMainSet[tag] && player.excludeAsSwapTarget) {
+			blockedInSet[tag] = true;
+			delete selectedSet[tag];
+		}
+	}
+
+	while (Object.keys(selectedSet).length > mainSize) {
+		const removable = Object.keys(selectedSet).filter((tag) => !forcedKeepSet[tag]);
+		if (!removable.length) break;
+		removable.sort((a, b) => compareActionableRemovalPriority_(a, b, snapshot, forcedKeepSet));
+		delete selectedSet[removable[0]];
+	}
+
+	if (Object.keys(selectedSet).length < mainSize) {
+		for (let i = 0; i < currentMainTags.length && Object.keys(selectedSet).length < mainSize; i++) {
+			const tag = currentMainTags[i];
+			if (!playersByTag[tag] || selectedSet[tag]) continue;
+			selectedSet[tag] = true;
+		}
+	}
+
+	if (Object.keys(selectedSet).length < mainSize) {
+		const fillCandidates = players.slice().sort((a, b) => {
+			if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+			if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+			return compareTagsAsc_(a.tag, b.tag);
+		});
+		for (let i = 0; i < fillCandidates.length && Object.keys(selectedSet).length < mainSize; i++) {
+			const p = fillCandidates[i];
+			if (selectedSet[p.tag]) continue;
+			if (!currentMainSet[p.tag] && p.excludeAsSwapTarget) continue;
+			selectedSet[p.tag] = true;
+		}
+	}
+
+	const blockedOutTags = [];
+	const idealSet = listToTagSet_(idealTargetTags);
+	for (let i = 0; i < currentMainTags.length; i++) {
+		const tag = currentMainTags[i];
+		if (idealSet[tag]) continue;
+		const player = playersByTag[tag];
+		if (player && player.excludeAsSwapSource) blockedOutTags.push(tag);
+	}
+
+	const targetTags = orderTargetMainTags_(selectedSet, snapshot);
+	return {
+		targetTags: targetTags,
+		blockedOutTags: dedupeTagList_(blockedOutTags),
+		blockedInTags: dedupeTagList_(Object.keys(blockedInSet)),
+	};
+}
+
+function reasonRankForCode_(code) {
+	const c = String(code == null ? "" : code);
+	if (c === "reward_critical") return 4;
+	if (c === "missed_attack_risk") return 3;
+	if (c === "strength_upgrade") return 2;
+	if (c === "th_upgrade") return 1;
+	if (c === "blocked_by_exclusion") return 0;
+	return -1;
+}
+
+function buildSwapExplanation_(swapInPlayer, benchOutPlayer, config) {
+	const inPlayer = swapInPlayer && typeof swapInPlayer === "object" ? swapInPlayer : {};
+	const outPlayer = benchOutPlayer && typeof benchOutPlayer === "object" ? benchOutPlayer : {};
+	const strengthDelta = (Number(inPlayer.strengthScore) || 0) - (Number(outPlayer.strengthScore) || 0);
+	const strengthThreshold = isFinite(Number(config && config.reasonStrengthDeltaThreshold)) ? Number(config.reasonStrengthDeltaThreshold) : 0.05;
+	const rewardCriticalIn = toNonNegativeInt_(inPlayer.startsNeeded) > 0 && Number(inPlayer.rewardSlackMargin) <= 0;
+	const missedAttackRisk = !!(outPlayer.hasMissedAttackHistory && !inPlayer.hasMissedAttackHistory);
+	const thUpgrade = toNonNegativeInt_(inPlayer.th) > toNonNegativeInt_(outPlayer.th);
+
+	let reasonCode = "strength_upgrade";
+	let shortReason = "Strength upgrade";
+	if (rewardCriticalIn) {
+		reasonCode = "reward_critical";
+		shortReason = "Reward-critical start allocation";
+	} else if (missedAttackRisk) {
+		reasonCode = "missed_attack_risk";
+		shortReason = "Lower missed-attack risk";
+	} else if (strengthDelta >= strengthThreshold) {
+		reasonCode = "strength_upgrade";
+		shortReason = "Clear strength upgrade";
+	} else if (thUpgrade && strengthDelta >= -0.02) {
+		reasonCode = "th_upgrade";
+		shortReason = "TH upgrade with no major downside";
+	} else {
+		reasonCode = "strength_upgrade";
+		shortReason = "Lineup strength balancing";
+	}
+
+	const rewardImpact = "in needs " + toNonNegativeInt_(inPlayer.startsNeeded) + " start(s), out needs " + toNonNegativeInt_(outPlayer.startsNeeded) + ".";
+	const reasonText = shortReason + " (" + rewardImpact + ")";
+	return {
+		reasonCode: reasonCode,
+		shortReason: shortReason,
+		scoreDelta: safeRoundNumber_(strengthDelta, 4),
+		rewardImpact: rewardImpact,
+		reasonText: reasonText,
+		reasonRank: reasonRankForCode_(reasonCode),
+	};
+}
+
+function buildPairsFromDelta_(swapInTagsRaw, benchOutTagsRaw, snapshot, config) {
+	const swapInTags = dedupeTagList_(swapInTagsRaw);
+	const benchOutTags = dedupeTagList_(benchOutTagsRaw);
+	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
+	const availableOutByTag = listToTagSet_(benchOutTags);
+	const pairs = [];
+
+	const swapInPlayers = swapInTags
+		.map((tag) => playersByTag[tag])
+		.filter(Boolean)
+		.sort((a, b) => {
+			const aCritical = a.startsNeeded > 0 && Number(a.rewardSlackMargin) <= 0;
+			const bCritical = b.startsNeeded > 0 && Number(b.rewardSlackMargin) <= 0;
+			if (aCritical !== bCritical) return aCritical ? -1 : 1;
+			if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+			if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+			return compareTagsAsc_(a.tag, b.tag);
+		});
+
+	for (let i = 0; i < swapInPlayers.length; i++) {
+		const swapInPlayer = swapInPlayers[i];
+		const outCandidates = [];
+		for (let j = 0; j < benchOutTags.length; j++) {
+			const outTag = benchOutTags[j];
+			if (!availableOutByTag[outTag]) continue;
+			const outPlayer = playersByTag[outTag];
+			if (!outPlayer) continue;
+			const explanation = buildSwapExplanation_(swapInPlayer, outPlayer, config);
+			outCandidates.push({
+				outPlayer: outPlayer,
+				explanation: explanation,
+				thDiff: Math.abs(toNonNegativeInt_(swapInPlayer.th) - toNonNegativeInt_(outPlayer.th)),
+			});
+		}
+		if (!outCandidates.length) continue;
+
+		outCandidates.sort((a, b) => {
+			if (a.thDiff !== b.thDiff) return a.thDiff - b.thDiff;
+			if (a.explanation.reasonRank !== b.explanation.reasonRank) {
+				return b.explanation.reasonRank - a.explanation.reasonRank;
+			}
+			if (a.explanation.scoreDelta !== b.explanation.scoreDelta) {
+				return b.explanation.scoreDelta - a.explanation.scoreDelta;
+			}
+			if (a.outPlayer.strengthScore !== b.outPlayer.strengthScore) {
+				return a.outPlayer.strengthScore - b.outPlayer.strengthScore;
+			}
+			return compareTagsAsc_(a.outPlayer.tag, b.outPlayer.tag);
+		});
+
+		const chosen = outCandidates[0];
+		delete availableOutByTag[chosen.outPlayer.tag];
+		pairs.push({
+			outTag: chosen.outPlayer.tag,
+			inTag: swapInPlayer.tag,
+			reasonCode: chosen.explanation.reasonCode,
+			reasonText: chosen.explanation.reasonText,
+			shortReason: chosen.explanation.shortReason,
+			scoreDelta: chosen.explanation.scoreDelta,
+			rewardImpact: chosen.explanation.rewardImpact,
+		});
+	}
+
+	return pairs;
+}
+
+function deriveNextDaySwapSuggestionsFromPlan_(roster, plan, snapshot, config) {
+	const currentMainTags = dedupeTagList_(snapshot && snapshot.currentMainTags);
+	const currentMainSet = listToTagSet_(currentMainTags);
+	const idealTargetMainTags = dedupeTagList_(plan && plan.targetMainTags);
+	const actionable = buildActionableTargetMainTags_(snapshot, idealTargetMainTags);
+	const actionableTargetMainTags = dedupeTagList_(actionable && actionable.targetTags);
+	const actionableTargetSet = listToTagSet_(actionableTargetMainTags);
+
+	let benchTags = tagListDiff_(currentMainTags, actionableTargetSet);
+	let swapInTags = tagListDiff_(actionableTargetMainTags, currentMainSet);
+
+	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
+	benchTags = benchTags.filter((tag) => !(playersByTag[tag] && playersByTag[tag].excludeAsSwapSource));
+	swapInTags = swapInTags.filter((tag) => !(playersByTag[tag] && playersByTag[tag].excludeAsSwapTarget));
+
+	const pairs = buildPairsFromDelta_(swapInTags, benchTags, snapshot, config);
+	const blockedOutTags = dedupeTagList_(actionable && actionable.blockedOutTags);
+	const blockedInTags = dedupeTagList_(actionable && actionable.blockedInTags);
+	const blockedByExclusions = blockedOutTags.length > 0 || blockedInTags.length > 0;
+
+	return {
+		targetMainTags: idealTargetMainTags,
+		actionableTargetMainTags: actionableTargetMainTags,
+		benchTags: benchTags,
+		swapInTags: swapInTags,
+		pairs: pairs,
+		blockedByExclusions: blockedByExclusions,
+		blockedByExclusionOutTags: blockedOutTags,
+		blockedByExclusionInTags: blockedInTags,
+	};
+}
+
+function buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, config) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const rewardCriticalPlayerTags = players.filter((p) => p.rewardCritical).map((p) => p.tag);
+	const impossibleRewardPlayerTags = players.filter((p) => p.impossibleReward).map((p) => p.tag);
+	const rewardFeasiblePlayerCount = players.length - impossibleRewardPlayerTags.length;
+	const warnings = [];
+	const seasonWarnings = snapshot && snapshot.seasonContext && Array.isArray(snapshot.seasonContext.warnings) ? snapshot.seasonContext.warnings : [];
+	for (let i = 0; i < seasonWarnings.length; i++) warnings.push(seasonWarnings[i]);
+	if (snapshot && snapshot.requestedMainSize > snapshot.mainSize) warnings.push("active-slots-clamped-to-roster-size");
+	if (plan && Array.isArray(plan.warnings)) {
+		for (let i = 0; i < plan.warnings.length; i++) warnings.push(plan.warnings[i]);
+	}
+	if (snapshot && snapshot.remainingEditableDays <= 0) warnings.push("no-editable-cwl-day");
+
+	const plannerSummary = {
+		remainingEditableDays: Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays)),
+		optimalTotalSlack: Math.max(0, toNonNegativeInt_(plan && plan.optimalTotalSlack)),
+		rewardFeasiblePlayerCount: Math.max(0, toNonNegativeInt_(rewardFeasiblePlayerCount)),
+		rewardCriticalPlayerTags: rewardCriticalPlayerTags,
+		impossibleRewardPlayerTags: impossibleRewardPlayerTags,
+		blockedByExclusions: !!(suggestions && suggestions.blockedByExclusions),
+		blockedByExclusionOutTags: dedupeTagList_(suggestions && suggestions.blockedByExclusionOutTags),
+		blockedByExclusionInTags: dedupeTagList_(suggestions && suggestions.blockedByExclusionInTags),
+		solverMode: String((plan && plan.solverMode) || ""),
+	};
+	const dedupedWarnings = dedupeStringList_(warnings, 20);
+	if (dedupedWarnings.length) plannerSummary.warnings = dedupedWarnings;
+
+	return {
+		plannerSummary: plannerSummary,
+		configSnapshot: {
+			defaultSeasonDays: Number(config && config.defaultSeasonDays) || 7,
+			priorMeanStarsPerStart: Number(config && config.priorMeanStarsPerStart) || 2,
+			priorWeightAttacks: Number(config && config.priorWeightAttacks) || 0,
+			minExpectedStarsPerStart: Number(config && config.minExpectedStarsPerStart) || 0,
+			maxExpectedStarsPerStart: Number(config && config.maxExpectedStarsPerStart) || 0,
+			weightTH: Number(config && config.weightTH) || 0,
+			weightStarsPerf: Number(config && config.weightStarsPerf) || 0,
+			weightDestructionPerf: Number(config && config.weightDestructionPerf) || 0,
+			weightThreeStarRate: Number(config && config.weightThreeStarRate) || 0,
+			weightHitUpAbility: Number(config && config.weightHitUpAbility) || 0,
+			weightHitEvenAbility: Number(config && config.weightHitEvenAbility) || 0,
+			weightReliabilityPenalty: Number(config && config.weightReliabilityPenalty) || 0,
+			churnPenalty: Number(config && config.churnPenalty) || 0,
+		},
+	};
+}
+
+function computeBenchSuggestionsCore_(rosterData, rosterId) {
+	const ctx = findRosterById_(rosterData, rosterId);
+	const trackingMode = getRosterTrackingMode_(ctx.roster);
+	if (trackingMode === "regularWar") {
+		clearRosterBenchSuggestions_(ctx.roster);
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			mode: "regularWar",
+			benchTags: [],
+			swapInTags: [],
+			pairs: [],
+			rosterData: outRosterData,
+			result: {
+				mode: "regularWar",
+				benchCount: 0,
+				swapCount: 0,
+				needsRewardsCount: 0,
+				message: "bench suggestions are disabled for regular war rosters",
+			},
+			algorithm: "",
+			nextEditableDayIndex: -1,
+			plannerSummary: null,
+			targetMainTags: [],
+			actionableTargetMainTags: [],
+		};
+	}
+	const config = getBenchPlannerConfig_();
+	const updatedAt = new Date().toISOString();
+	const seasonContext = buildCwlSeasonContext_(ctx.roster, config);
+	const snapshot = buildCwlPlanningSnapshot_(ctx.roster, seasonContext, config);
+	const plan = solveSeasonLineupPlan_(snapshot, config);
+	const suggestions = deriveNextDaySwapSuggestionsFromPlan_(ctx.roster, plan, snapshot, config);
+	const summary = buildBenchSuggestionSummary_(ctx.roster, plan, suggestions, snapshot, config);
+
+	const benchSuggestions = {
+		updatedAt: updatedAt,
+		algorithm: String(config.algorithm || "season_milp_v1"),
+		nextEditableDayIndex: snapshot.remainingEditableDays > 0 ? 0 : -1,
+		targetMainTags: suggestions.targetMainTags,
+		actionableTargetMainTags: suggestions.actionableTargetMainTags,
+		benchTags: suggestions.benchTags,
+		swapInTags: suggestions.swapInTags,
+		pairs: suggestions.pairs,
+		result: {
+			benchCount: suggestions.benchTags.length,
+			swapCount: suggestions.pairs.length,
+			rosterPoolSize: snapshot.rosterPoolSize,
+			activeSlots: snapshot.requestedMainSize,
+			needsRewardsCount: snapshot.needsRewardsCount,
+		},
+		plannerSummary: summary.plannerSummary,
+		configSnapshot: summary.configSnapshot,
+	};
+
+	ctx.roster.benchSuggestions = benchSuggestions;
+	Logger.log("computeBenchSuggestions planner rosterId=%s days=%s slack=%s solver=%s swaps=%s blocked=%s", ctx.rosterId, snapshot.remainingEditableDays, plan.optimalTotalSlack, plan.solverMode, suggestions.pairs.length, suggestions.blockedByExclusions ? "1" : "0");
+
+	const outRosterData = validateRosterData_(ctx.rosterData);
+	return {
+		ok: true,
+		benchTags: benchSuggestions.benchTags,
+		swapInTags: benchSuggestions.swapInTags,
+		pairs: benchSuggestions.pairs,
+		rosterData: outRosterData,
+		result: benchSuggestions.result,
+		algorithm: benchSuggestions.algorithm,
+		nextEditableDayIndex: benchSuggestions.nextEditableDayIndex,
+		plannerSummary: benchSuggestions.plannerSummary,
+		targetMainTags: benchSuggestions.targetMainTags,
+		actionableTargetMainTags: benchSuggestions.actionableTargetMainTags,
+	};
+}
+
+function computeBenchSuggestionsInternal_(rosterData, rosterId) {
+	return withRosterLock_(rosterId, function () {
+		return computeBenchSuggestionsCore_(rosterData, rosterId);
+	});
+}
+
+function computeBenchSuggestions(rosterData, rosterId, password) {
+	assertAdminPassword_(password);
+	return computeBenchSuggestionsInternal_(rosterData, rosterId);
+}
+
+function createDebugPlayer_(tag, name, th, opts) {
+	const options = opts && typeof opts === "object" ? opts : {};
+	return {
+		slot: options.isSub ? null : 1,
+		name: String(name == null ? "" : name),
+		discord: "",
+		th: Math.max(0, toNonNegativeInt_(th)),
+		tag: normalizeTag_(tag),
+		notes: [],
+		excludeAsSwapTarget: toBooleanFlag_(options.excludeAsSwapTarget),
+		excludeAsSwapSource: toBooleanFlag_(options.excludeAsSwapSource),
+	};
+}
+
+function createDebugStats_(opts) {
+	const options = opts && typeof opts === "object" ? opts : {};
+	const out = createEmptyCwlStatEntry_();
+	const keys = Object.keys(out);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		out[key] = toNonNegativeInt_(options[key]);
+	}
+	return out;
+}
+
+function runBenchPlannerDebugScenarios() {
+	const config = getBenchPlannerConfig_();
+	const runScenario = (name, roster, remainingEditableDays, check) => {
+		const seasonContext = {
+			source: "debug",
+			season: "debug",
+			totalSeasonDays: Math.max(0, toNonNegativeInt_(remainingEditableDays)),
+			completedDays: 0,
+			lockedDays: 0,
+			remainingEditableDays: Math.max(0, toNonNegativeInt_(remainingEditableDays)),
+			nextEditableDayIndex: remainingEditableDays > 0 ? 0 : -1,
+			warnings: [],
+		};
+		const snapshot = buildCwlPlanningSnapshot_(roster, seasonContext, config);
+		const plan = solveSeasonLineupPlan_(snapshot, config);
+		const suggestions = deriveNextDaySwapSuggestionsFromPlan_(roster, plan, snapshot, config);
+		const summary = buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, config);
+		let pass = false;
+		try {
+			pass = !!check({
+				snapshot: snapshot,
+				plan: plan,
+				suggestions: suggestions,
+				summary: summary,
+			});
+		} catch (err) {
+			pass = false;
+		}
+		return {
+			name: name,
+			pass: pass,
+			solverMode: plan.solverMode,
+			optimalTotalSlack: plan.optimalTotalSlack,
+			benchTags: suggestions.benchTags,
+			swapInTags: suggestions.swapInTags,
+			blockedByExclusions: suggestions.blockedByExclusions,
+		};
+	};
+
+	const scenario1Roster = {
+		id: "dbg-1",
+		title: "Scenario 1",
+		badges: { main: 1, subs: 1 },
+		main: [createDebugPlayer_("#P20Y", "MainWeak", 13)],
+		subs: [createDebugPlayer_("#Q8LG", "SubStrong", 16, { isSub: true })],
+		cwlStats: {
+			season: "debug",
+			byTag: {
+				"#P20Y": createDebugStats_({
+					starsTotal: 8,
+					resolvedWarDays: 6,
+					attacksMade: 6,
+					missedAttacks: 1,
+					threeStarCount: 0,
+					totalDestruction: 420,
+					countedAttacks: 6,
+					hitUpCount: 0,
+					sameThHitCount: 2,
+					hitDownCount: 4,
+				}),
+				"#Q8LG": createDebugStats_({
+					starsTotal: 10,
+					resolvedWarDays: 4,
+					attacksMade: 4,
+					missedAttacks: 0,
+					threeStarCount: 3,
+					totalDestruction: 360,
+					countedAttacks: 4,
+					hitUpCount: 1,
+					sameThHitCount: 2,
+					hitDownCount: 1,
+				}),
+			},
+		},
+	};
+
+	const scenario2Roster = {
+		id: "dbg-2",
+		title: "Scenario 2",
+		badges: { main: 1, subs: 1 },
+		main: [createDebugPlayer_("#Y2P8", "MainSafe", 15)],
+		subs: [createDebugPlayer_("#G0CU", "SubCritical", 14, { isSub: true })],
+		cwlStats: {
+			season: "debug",
+			byTag: {
+				"#Y2P8": createDebugStats_({
+					starsTotal: 10,
+					resolvedWarDays: 4,
+					attacksMade: 4,
+					missedAttacks: 0,
+					threeStarCount: 2,
+					totalDestruction: 320,
+					countedAttacks: 4,
+				}),
+				"#G0CU": createDebugStats_({
+					starsTotal: 7,
+					resolvedWarDays: 3,
+					attacksMade: 3,
+					missedAttacks: 0,
+					threeStarCount: 1,
+					totalDestruction: 240,
+					countedAttacks: 3,
+				}),
+			},
+		},
+	};
+
+	const scenario3Roster = {
+		id: "dbg-3",
+		title: "Scenario 3",
+		badges: { main: 1, subs: 0 },
+		main: [createDebugPlayer_("#JQ28", "PendingOnly", 14)],
+		subs: [],
+		cwlStats: {
+			season: "debug",
+			byTag: {
+				"#JQ28": createDebugStats_({
+					starsTotal: 6,
+					resolvedWarDays: 3,
+					attacksMade: 3,
+					missedAttacks: 0,
+					threeStarCount: 1,
+					totalDestruction: 255,
+					countedAttacks: 3,
+					currentWarAttackPending: 1,
+				}),
+			},
+		},
+	};
+
+	const scenario4Roster = {
+		id: "dbg-4",
+		title: "Scenario 4",
+		badges: { main: 1, subs: 1 },
+		main: [createDebugPlayer_("#L0VG", "LockedMain", 12, { excludeAsSwapSource: true })],
+		subs: [createDebugPlayer_("#RCU2", "IdealSub", 16, { isSub: true })],
+		cwlStats: {
+			season: "debug",
+			byTag: {
+				"#L0VG": createDebugStats_({
+					starsTotal: 10,
+					resolvedWarDays: 4,
+					attacksMade: 4,
+					missedAttacks: 1,
+					threeStarCount: 0,
+					totalDestruction: 220,
+					countedAttacks: 4,
+				}),
+				"#RCU2": createDebugStats_({
+					starsTotal: 9,
+					resolvedWarDays: 3,
+					attacksMade: 3,
+					missedAttacks: 0,
+					threeStarCount: 2,
+					totalDestruction: 300,
+					countedAttacks: 3,
+				}),
+			},
+		},
+	};
+
+	const scenario5Roster = {
+		id: "dbg-5",
+		title: "Scenario 5",
+		badges: { main: 1, subs: 1 },
+		main: [createDebugPlayer_("#U8P0", "NeedOneA", 14)],
+		subs: [createDebugPlayer_("#V2GQ", "NeedOneB", 14, { isSub: true })],
+		cwlStats: {
+			season: "debug",
+			byTag: {
+				"#U8P0": createDebugStats_({
+					starsTotal: 6,
+					resolvedWarDays: 3,
+					attacksMade: 3,
+					missedAttacks: 0,
+					threeStarCount: 1,
+					totalDestruction: 255,
+					countedAttacks: 3,
+				}),
+				"#V2GQ": createDebugStats_({
+					starsTotal: 6,
+					resolvedWarDays: 3,
+					attacksMade: 3,
+					missedAttacks: 0,
+					threeStarCount: 1,
+					totalDestruction: 250,
+					countedAttacks: 3,
+				}),
+			},
+		},
+	};
+
+	const scenarios = [
+		runScenario("scenario_1_strength_sub", scenario1Roster, 2, (ctx) => ctx.suggestions.swapInTags.indexOf("#Q8LG") >= 0 && ctx.suggestions.benchTags.indexOf("#P20Y") >= 0),
+		runScenario("scenario_2_reward_critical", scenario2Roster, 1, (ctx) => ctx.suggestions.swapInTags.indexOf("#G0CU") >= 0),
+		runScenario("scenario_3_pending_neutral", scenario3Roster, 1, (ctx) => {
+			const p = ctx.snapshot.playersByTag["#JQ28"];
+			const penalty = p && p.strengthComponents ? Number(p.strengthComponents.reliabilityPenalty) : 1;
+			return isFinite(penalty) && penalty <= 0.05;
+		}),
+		runScenario("scenario_4_exclusion_block", scenario4Roster, 1, (ctx) => ctx.suggestions.benchTags.indexOf("#L0VG") < 0 && ctx.suggestions.blockedByExclusions),
+		runScenario("scenario_5_impossible_reward", scenario5Roster, 1, (ctx) => toNonNegativeInt_(ctx.summary && ctx.summary.plannerSummary && ctx.summary.plannerSummary.optimalTotalSlack) === 1),
+	];
+
+	return {
+		ok: scenarios.every((s) => !!s.pass),
+		scenarios: scenarios,
+	};
+}
+
+function sanitizeNotes_(raw) {
+	const arr = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+	return arr.map((n) => String(n == null ? "" : n).trim()).filter((n) => n);
+}
+
+function countRosterPayload_(rosterData) {
+	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	let playerCount = 0;
+	let noteCount = 0;
+	for (let i = 0; i < rosters.length; i++) {
+		const r = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const players = []
+			.concat(Array.isArray(r.main) ? r.main : [])
+			.concat(Array.isArray(r.subs) ? r.subs : [])
+			.concat(Array.isArray(r.missing) ? r.missing : []);
+		playerCount += players.length;
+		for (let j = 0; j < players.length; j++) {
+			const p = players[j] && typeof players[j] === "object" ? players[j] : {};
+			noteCount += sanitizeNotes_(p.notes != null ? p.notes : p.note).length;
+		}
+	}
+	return { playerCount, noteCount };
+}
+
+function validateRosterData_(data) {
+	if (!data || typeof data !== "object") throw new Error("Invalid roster data: expected an object.");
+
+	const out = {
+		schemaVersion: typeof data.schemaVersion === "number" && isFinite(data.schemaVersion) ? data.schemaVersion : 1,
+		pageTitle: typeof data.pageTitle === "string" ? data.pageTitle : "",
+		rosters: [],
+	};
+	const lastUpdatedAt = typeof data.lastUpdatedAt === "string" ? data.lastUpdatedAt.trim() : "";
+	if (lastUpdatedAt) out.lastUpdatedAt = lastUpdatedAt;
+
+	const rosters = Array.isArray(data.rosters) ? data.rosters : null;
+	if (!rosters) throw new Error("Invalid roster data: expected 'rosters' to be an array.");
+
+	const seenTags = {};
+
+	for (let i = 0; i < rosters.length; i++) {
+		const r = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const id = typeof r.id === "string" ? r.id : "";
+		const title = typeof r.title === "string" ? r.title : "";
+		const connectedClanTag = normalizeTag_(r.connectedClanTag);
+		const trackingMode = getRosterTrackingMode_(r);
+
+		if (!id) throw new Error("Invalid roster: missing 'id' at index " + i + ".");
+		if (!title) throw new Error("Invalid roster: missing 'title' for roster '" + id + "'.");
+
+		const main = Array.isArray(r.main) ? r.main : [];
+		const subs = Array.isArray(r.subs) ? r.subs : [];
+		const missing = Array.isArray(r.missing) ? r.missing : [];
+
+		const sanitizePlayer = (p, role) => {
+			const obj = p && typeof p === "object" ? p : {};
+			const rawTag = typeof obj.tag === "string" ? obj.tag : "";
+			const tag = normalizeTag_(rawTag);
+			const th = obj.th;
+			if (!tag) throw new Error("Invalid player in roster '" + id + "': missing 'tag'.");
+			if (seenTags[tag]) throw new Error("Duplicate player tag in output: " + tag);
+			seenTags[tag] = true;
+
+			if (typeof th !== "number" || !isFinite(th)) throw new Error("Invalid player '" + tag + "': 'th' must be a number.");
+
+			let slot = null;
+			if (role === "main" && obj.slot != null) {
+				slot = Number(obj.slot);
+				if (!isFinite(slot) || slot < 1 || Math.floor(slot) !== slot) slot = null;
+			}
+			const notes = sanitizeNotes_(obj.notes != null ? obj.notes : obj.note);
+			return {
+				slot: role === "main" ? slot : null,
+				name: typeof obj.name === "string" ? obj.name : "",
+				discord: typeof obj.discord === "string" ? obj.discord : "",
+				th: Math.floor(th),
+				tag: tag,
+				notes: notes,
+				excludeAsSwapTarget: toBooleanFlag_(obj.excludeAsSwapTarget),
+				excludeAsSwapSource: toBooleanFlag_(obj.excludeAsSwapSource),
+			};
+		};
+
+		const outMain = main.map((p) => sanitizePlayer(p, "main"));
+		const outSubs = subs.map((p) => sanitizePlayer(p, "subs"));
+		const outMissing = missing.map((p) => sanitizePlayer(p, "missing"));
+		const rosterPoolTagSet = {};
+		const rosterPool = outMain.concat(outSubs).concat(outMissing);
+		for (let j = 0; j < rosterPool.length; j++) {
+			const playerTag = normalizeTag_(rosterPool[j] && rosterPool[j].tag);
+			if (!playerTag) continue;
+			rosterPoolTagSet[playerTag] = true;
+		}
+		const sanitizedWarPerformance = sanitizeRosterWarPerformance_(r.warPerformance);
+		const retentionTagSet = buildHistoryRetentionTagSet_(rosterPoolTagSet, sanitizedWarPerformance, r.regularWar, new Date().toISOString());
+		const sanitizedCwlStats = sanitizeRosterCwlStats_(r.cwlStats, retentionTagSet);
+		const sanitizedRegularWar = sanitizeRosterRegularWar_(r.regularWar, retentionTagSet);
+		const sanitizedBenchSuggestions = sanitizeRosterBenchSuggestions_(r.benchSuggestions, rosterPoolTagSet);
+
+		// Recompute badges to match array lengths (this avoids drift)
+		const nextRoster = {
+			id,
+			title,
+			connectedClanTag: connectedClanTag,
+			trackingMode: trackingMode,
+			badges: { main: outMain.length, subs: outSubs.length, missing: outMissing.length },
+			main: outMain,
+			subs: outSubs,
+			missing: outMissing,
+		};
+		if (sanitizedCwlStats) nextRoster.cwlStats = sanitizedCwlStats;
+		if (sanitizedRegularWar) nextRoster.regularWar = sanitizedRegularWar;
+		if (sanitizedWarPerformance) nextRoster.warPerformance = sanitizedWarPerformance;
+		if (sanitizedBenchSuggestions) nextRoster.benchSuggestions = sanitizedBenchSuggestions;
+		out.rosters.push(nextRoster);
+	}
+
+	return out;
+}
