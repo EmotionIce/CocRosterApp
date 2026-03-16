@@ -77,6 +77,7 @@ function buildIndexHtml_(view) {
 	const css = typeof model.css === "string" ? model.css : "";
 	const appHtml = typeof model.appHtml === "string" ? model.appHtml : "";
 	const clientJs = typeof model.clientJs === "string" ? model.clientJs : "";
+	const safeClientJs = escapeInlineScriptText_(clientJs);
 	const buildStamp = typeof model.buildStamp === "string" ? model.buildStamp : "";
 	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : "";
 	const inlineRosterData = model && typeof model.inlineRosterData === "object" && model.inlineRosterData ? model.inlineRosterData : null;
@@ -112,7 +113,7 @@ function buildIndexHtml_(view) {
 		"    </script>",
 		"",
 		"    <script>",
-		clientJs,
+		safeClientJs,
 		"    </script>",
 		"</body>",
 		"",
@@ -130,6 +131,10 @@ function escapeHtmlAttribute_(value) {
 
 function serializeJsonForScriptEmbedding_(value) {
 	return JSON.stringify(value == null ? null : value).replace(/</g, "\\u003c");
+}
+
+function escapeInlineScriptText_(value) {
+	return String(value == null ? "" : value).replace(/<\/script/gi, "<\\/script");
 }
 
 function errorMessage_(err) {

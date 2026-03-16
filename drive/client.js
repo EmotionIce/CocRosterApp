@@ -814,12 +814,22 @@
         return (value > 0 ? "+" : "") + formatNumber(Math.abs(value));
     };
 
+    const LEGEND_WINDOW_OPTIONS = [7, 14, 30];
+    const LEGEND_EMPTY_STATE_TEXT = "Not enough local history yet, tracking just started recently.";
+
     const isValidDayKey = (valueRaw) => /^\d{4}-\d{2}-\d{2}$/.test(toStr(valueRaw).trim());
 
     const parseTimeMs = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return 0;
         const ms = new Date(value).getTime();
+        return Number.isFinite(ms) ? ms : 0;
+    };
+
+    const parseDayKeyMs = (dayKeyRaw) => {
+        const dayKey = toStr(dayKeyRaw).trim();
+        if (!isValidDayKey(dayKey)) return 0;
+        const ms = new Date(dayKey + "T00:00:00Z").getTime();
         return Number.isFinite(ms) ? ms : 0;
     };
 
@@ -831,11 +841,30 @@
         const metrics = data && data.playerMetrics && typeof data.playerMetrics === "object" ? data.playerMetrics : null;
         const byTag = metrics && metrics.byTag && typeof metrics.byTag === "object" ? metrics.byTag : null;
         if (!byTag) return null;
-        const candidates = [byTag[tag], byTag[bareTag]];
-        for (let i = 0; i < candidates.length; i++) {
-            const candidate = candidates[i];
+
+        const candidateKeys = [tag, bareTag, tag.toUpperCase(), bareTag.toUpperCase()];
+        for (let i = 0; i < candidateKeys.length; i++) {
+            const key = candidateKeys[i];
+            const candidate = byTag[key];
             if (candidate && typeof candidate === "object") return candidate;
         }
+
+        const keys = Object.keys(byTag);
+        for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            if (normalizeClanTag(key) === tag) {
+                const candidate = byTag[key];
+                if (candidate && typeof candidate === "object") return candidate;
+            }
+        }
+
+        for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            const candidate = byTag[key] && typeof byTag[key] === "object" ? byTag[key] : null;
+            const identityTag = normalizeClanTag(candidate && candidate.identity && candidate.identity.tag);
+            if (identityTag && identityTag === tag) return candidate;
+        }
+
         return null;
     };
 
@@ -845,17 +874,22 @@
 
         const pushPoint = (rawPoint) => {
             const point = rawPoint && typeof rawPoint === "object" ? rawPoint : {};
-            const trophies = toNonNegativeInt(point.trophies);
-            const capturedMs = parseTimeMs(point.capturedAt);
-            let dayKey = toStr(point.dayKey).trim();
-            if (!isValidDayKey(dayKey) && capturedMs > 0) dayKey = new Date(capturedMs).toISOString().slice(0, 10);
+            const trophiesRaw = point.trophies != null ? point.trophies : point.trophyCount;
+            const trophies = toNonNegativeInt(trophiesRaw);
+            const capturedMs = parseTimeMs(point.capturedAt || point.at || point.timestamp);
+            let dayKey = toStr(point.dayKey || point.day || point.date).trim();
+            if (!isValidDayKey(dayKey) && capturedMs > 0) {
+                dayKey = new Date(capturedMs).toISOString().slice(0, 10);
+            }
             if (!isValidDayKey(dayKey)) return;
-            const ms = capturedMs > 0 ? capturedMs : new Date(dayKey + "T12:00:00Z").getTime();
-            if (!Number.isFinite(ms)) return;
+            const dayMs = parseDayKeyMs(dayKey);
+            if (!dayMs) return;
+            const ms = capturedMs > 0 ? capturedMs : (dayMs + 12 * 60 * 60 * 1000);
             const normalized = {
-                dayKey,
-                ms,
-                trophies,
+                dayKey: dayKey,
+                dayMs: dayMs,
+                ms: ms,
+                trophies: trophies,
                 capturedAt: capturedMs > 0 ? new Date(capturedMs).toISOString() : "",
                 clanTag: normalizeClanTag(point.clanTag),
                 leagueName: toStr(point.league && point.league.name).trim(),
@@ -872,9 +906,9 @@
 
         const latestSnapshot = latestSnapshotRaw && typeof latestSnapshotRaw === "object" ? latestSnapshotRaw : null;
         if (latestSnapshot && latestSnapshot.trophies != null) {
-            const latestCapturedMs = parseTimeMs(latestSnapshot.capturedAt);
+            const latestCapturedMs = parseTimeMs(latestSnapshot.capturedAt || latestSnapshot.at || latestSnapshot.timestamp);
             pushPoint({
-                dayKey: latestCapturedMs > 0 ? new Date(latestCapturedMs).toISOString().slice(0, 10) : "",
+                dayKey: latestSnapshot.dayKey || (latestCapturedMs > 0 ? new Date(latestCapturedMs).toISOString().slice(0, 10) : ""),
                 capturedAt: latestSnapshot.capturedAt,
                 trophies: latestSnapshot.trophies,
                 clanTag: latestSnapshot.clanTag,
@@ -892,130 +926,96 @@
         if (!entry) return [];
         const history = Array.isArray(entry.trophyHistoryDaily)
             ? entry.trophyHistoryDaily
-            : (Array.isArray(entry.trophyHistory) ? entry.trophyHistory : []);
-        return normalizeLocalHistoryPoints(history, entry.latestSnapshot);
+            : (Array.isArray(entry.trophyHistory)
+                ? entry.trophyHistory
+                : (Array.isArray(entry.history && entry.history.trophyHistoryDaily)
+                    ? entry.history.trophyHistoryDaily
+                    : []));
+        const latestSnapshot = entry.latestSnapshot && typeof entry.latestSnapshot === "object"
+            ? entry.latestSnapshot
+            : (entry.snapshot && typeof entry.snapshot === "object" ? entry.snapshot : null);
+        return normalizeLocalHistoryPoints(history, latestSnapshot);
     };
 
-    const getLegendTrendPoints = (pointsRaw, windowDays) => {
+    const getLegendWindowCoverage = (pointsRaw, windowDaysRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
-        if (!points.length) return [];
-        const days = Math.max(1, toNonNegativeInt(windowDays) || 30);
-        const latest = points[points.length - 1];
-        const cutoffMs = latest.ms - days * DAY_MS;
-        return points.filter((point) => point && Number.isFinite(point.ms) && point.ms >= cutoffMs);
-    };
-
-    const findNearestComparisonPoint = (pointsRaw, targetMs, latestMs) => {
-        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
-        let best = null;
-        let bestDiff = Number.POSITIVE_INFINITY;
-        for (let i = 0; i < points.length; i++) {
-            const point = points[i] && typeof points[i] === "object" ? points[i] : null;
-            if (!point || !Number.isFinite(point.ms)) continue;
-            if (point.ms >= latestMs) continue;
-            const diff = Math.abs(point.ms - targetMs);
-            if (diff < bestDiff) {
-                best = point;
-                bestDiff = diff;
-            }
+        const windowDays = Math.max(1, toNonNegativeInt(windowDaysRaw));
+        if (!points.length) {
+            return { windowDays: windowDays, supported: false, latestDayMs: 0, cutoffDayMs: 0 };
         }
-        return best;
-    };
-
-    const computeLegendDelta = (pointsRaw, daysAgoRaw) => {
-        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
-        const daysAgo = Math.max(1, toNonNegativeInt(daysAgoRaw));
-        if (points.length < 2) {
-            return {
-                daysAgo,
-                available: false,
-                message: "Tracking started recently",
-            };
+        const latestPoint = points[points.length - 1];
+        const latestDayMs = Number.isFinite(latestPoint && latestPoint.dayMs) ? latestPoint.dayMs : 0;
+        if (!latestDayMs) {
+            return { windowDays: windowDays, supported: false, latestDayMs: 0, cutoffDayMs: 0 };
         }
-        const latest = points[points.length - 1];
-        if (!latest || !Number.isFinite(latest.ms)) {
-            return {
-                daysAgo,
-                available: false,
-                message: "Tracking started recently",
-            };
-        }
-        const targetMs = latest.ms - daysAgo * DAY_MS;
-        const comparison = findNearestComparisonPoint(points, targetMs, latest.ms);
-        if (!comparison) {
-            return {
-                daysAgo,
-                available: false,
-                message: "Tracking started recently",
-            };
-        }
-        const delta = toNonNegativeInt(latest.trophies) - toNonNegativeInt(comparison.trophies);
-        const actualDays = Math.max(1, Math.round((latest.ms - comparison.ms) / DAY_MS));
+        const cutoffDayMs = latestDayMs - (windowDays - 1) * DAY_MS;
+        const supported = points.some((point) => Number.isFinite(point && point.dayMs) && point.dayMs <= cutoffDayMs);
         return {
-            daysAgo,
-            available: true,
-            delta,
-            latest,
-            comparison,
-            actualDays,
-            approximate: Math.abs(actualDays - daysAgo) > 1,
+            windowDays: windowDays,
+            supported: supported,
+            latestDayMs: latestDayMs,
+            cutoffDayMs: cutoffDayMs,
         };
     };
 
-    const renderLegendDeltaCard = (deltaRaw) => {
-        const delta = deltaRaw && typeof deltaRaw === "object" ? deltaRaw : {};
-        const label = toNonNegativeInt(delta.daysAgo) + "d";
-        if (!delta.available) {
-            return [
-                '<div class="profile-legend-delta-card is-empty">',
-                '<div class="profile-legend-delta-card__label">', escapeHtml(label), "</div>",
-                '<div class="profile-legend-delta-card__value">-</div>',
-                '<div class="profile-legend-delta-card__meta">', escapeHtml(delta.message || "Tracking started recently"), "</div>",
-                "</div>",
-            ].join("");
+    const getLegendWindowAvailability = (pointsRaw) =>
+        LEGEND_WINDOW_OPTIONS.map((days) => {
+            const coverage = getLegendWindowCoverage(pointsRaw, days);
+            return {
+                days: days,
+                supported: coverage.supported,
+            };
+        });
+
+    const getLegendDefaultWindowDays = (pointsRaw) =>
+        getLegendWindowCoverage(pointsRaw, 30).supported ? 30 : 0;
+
+    const getLegendTrendPoints = (pointsRaw, windowDaysRaw) => {
+        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
+        const windowDays = toNonNegativeInt(windowDaysRaw);
+        if (!points.length) return [];
+        if (windowDays < 1) return points.slice();
+        const coverage = getLegendWindowCoverage(points, windowDays);
+        if (!coverage.supported) return points.slice();
+        return points.filter((point) => Number.isFinite(point && point.dayMs) && point.dayMs >= coverage.cutoffDayMs);
+    };
+
+    const computeLegendDelta = (pointsRaw, selectedIndexRaw) => {
+        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
+        const selectedIndex = Math.max(0, Math.min(points.length - 1, toNonNegativeInt(selectedIndexRaw)));
+        if (selectedIndex <= 0 || !points[selectedIndex] || !points[selectedIndex - 1]) {
+            return { available: false };
         }
-        const toneClass = delta.delta > 0 ? " is-up" : (delta.delta < 0 ? " is-down" : " is-flat");
-        const comparisonText = delta.comparison && delta.comparison.dayKey ? delta.comparison.dayKey : "";
-        const metaText = comparisonText
-            ? ((delta.approximate ? "~" : "") + delta.actualDays + "d ref • " + comparisonText)
-            : ((delta.approximate ? "~" : "") + delta.actualDays + "d ref");
-        return [
-            '<div class="profile-legend-delta-card', toneClass, '">',
-            '<div class="profile-legend-delta-card__label">', escapeHtml(label), "</div>",
-            '<div class="profile-legend-delta-card__value">', escapeHtml(formatSignedNumber(delta.delta)), "</div>",
-            '<div class="profile-legend-delta-card__meta">', escapeHtml(metaText), "</div>",
-            "</div>",
-        ].join("");
+        const delta = toNonNegativeInt(points[selectedIndex].trophies) - toNonNegativeInt(points[selectedIndex - 1].trophies);
+        return {
+            available: true,
+            delta: delta,
+        };
     };
 
     const renderLegendTrendSparkline = (pointsRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
-        if (!points.length) {
+        if (points.length < 2) {
             return {
                 hasData: false,
-                html: '<div class="profile-legend-trend__empty">No local trophy history yet.</div>',
-                caption: "Tracking has not started for this player yet.",
+                points: [],
+                chartPoints: [],
+                selectedIndex: 0,
+                width: 0,
+                html: '<div class="profile-legend-trend__empty">' + escapeHtml(LEGEND_EMPTY_STATE_TEXT) + "</div>",
             };
         }
 
-        if (points.length === 1) {
-            const only = points[0];
-            return {
-                hasData: true,
-                html: '<div class="profile-legend-trend__single-point">Only one tracked day so far (' + escapeHtml(only.dayKey) + ").</div>",
-                caption: "Tracking started recently.",
-            };
-        }
-
-        const width = 360;
-        const height = 116;
+        const width = 372;
+        const height = 164;
         const padX = 12;
-        const padY = 12;
+        const padY = 14;
+        const padBottom = 22;
         const innerWidth = width - padX * 2;
-        const innerHeight = height - padY * 2;
+        const innerHeight = height - padY - padBottom;
 
-        const minX = points[0].ms;
-        const maxX = points[points.length - 1].ms;
+        const minX = points[0].dayMs;
+        const maxX = points[points.length - 1].dayMs;
         const xRange = Math.max(1, maxX - minX);
 
         let minY = Number.POSITIVE_INFINITY;
@@ -1028,18 +1028,24 @@
         if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
             return {
                 hasData: false,
-                html: '<div class="profile-legend-trend__empty">No local trophy history yet.</div>',
-                caption: "Tracking has not started for this player yet.",
+                points: [],
+                chartPoints: [],
+                selectedIndex: 0,
+                width: 0,
+                html: '<div class="profile-legend-trend__empty">' + escapeHtml(LEGEND_EMPTY_STATE_TEXT) + "</div>",
             };
         }
+        if (minY === maxY) {
+            minY -= 10;
+            maxY += 10;
+        }
         const yRange = Math.max(1, maxY - minY);
-
         const chartPoints = points.map((point) => {
-            const x = padX + ((point.ms - minX) / xRange) * innerWidth;
+            const x = padX + ((point.dayMs - minX) / xRange) * innerWidth;
             const y = padY + ((maxY - toNonNegativeInt(point.trophies)) / yRange) * innerHeight;
             return {
-                x,
-                y,
+                x: x,
+                y: y,
                 dayKey: point.dayKey,
                 trophies: toNonNegativeInt(point.trophies),
             };
@@ -1050,75 +1056,255 @@
             .join(" ");
         const firstPoint = chartPoints[0];
         const lastPoint = chartPoints[chartPoints.length - 1];
+        const baselineY = padY + innerHeight;
         const areaPath = [
-            "M", firstPoint.x.toFixed(2), (padY + innerHeight).toFixed(2),
+            "M", firstPoint.x.toFixed(2), baselineY.toFixed(2),
             "L", firstPoint.x.toFixed(2), firstPoint.y.toFixed(2),
             linePath.slice(1),
-            "L", lastPoint.x.toFixed(2), (padY + innerHeight).toFixed(2),
+            "L", lastPoint.x.toFixed(2), baselineY.toFixed(2),
             "Z",
         ].join(" ");
+        const selectedIndex = chartPoints.length - 1;
+        const selectedPoint = chartPoints[selectedIndex];
+        const selectedDelta = computeLegendDelta(points, selectedIndex);
+        const tooltipLeftPct = Math.max(8, Math.min(92, (selectedPoint.x / width) * 100));
+        const deltaText = selectedDelta.available ? formatSignedNumber(selectedDelta.delta) : "\u2013";
 
-        const baseline1 = padY + innerHeight * 0.25;
-        const baseline2 = padY + innerHeight * 0.5;
-        const baseline3 = padY + innerHeight * 0.75;
-
+        const grid1 = padY + innerHeight * 0.25;
+        const grid2 = padY + innerHeight * 0.5;
+        const grid3 = padY + innerHeight * 0.75;
         const startDay = points[0].dayKey || "";
         const endDay = points[points.length - 1].dayKey || "";
-        const spanDays = Math.max(1, Math.round((maxX - minX) / DAY_MS));
 
         return {
             hasData: true,
+            points: points,
+            chartPoints: chartPoints,
+            selectedIndex: selectedIndex,
+            width: width,
             html: [
+                '<div class="profile-legend-trend__chart-shell">',
                 '<div class="profile-legend-trend__chart-wrap">',
-                '<svg class="profile-legend-trend__svg" viewBox="0 0 ', width, " ", height, '" role="img" aria-label="Local trophy trend chart">',
-                "<defs>",
-                '<linearGradient id="legendTrendArea" x1="0" y1="0" x2="0" y2="1">',
-                '<stop offset="0%" stop-color="rgba(56,189,248,0.34)"></stop>',
-                '<stop offset="100%" stop-color="rgba(56,189,248,0.04)"></stop>',
-                "</linearGradient>",
-                "</defs>",
-                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', baseline1.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', baseline1.toFixed(2), '"></line>',
-                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', baseline2.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', baseline2.toFixed(2), '"></line>',
-                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', baseline3.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', baseline3.toFixed(2), '"></line>',
+                '<svg class="profile-legend-trend__svg" viewBox="0 0 ', width, " ", height, '" role="img" aria-label="Legends Journey trophy trend">',
+                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', grid1.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', grid1.toFixed(2), '"></line>',
+                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', grid2.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', grid2.toFixed(2), '"></line>',
+                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', grid3.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', grid3.toFixed(2), '"></line>',
                 '<path class="profile-legend-trend__area" d="', areaPath, '"></path>',
                 '<path class="profile-legend-trend__line" d="', linePath, '"></path>',
-                '<circle class="profile-legend-trend__dot profile-legend-trend__dot--start" cx="', firstPoint.x.toFixed(2), '" cy="', firstPoint.y.toFixed(2), '" r="2.8"></circle>',
-                '<circle class="profile-legend-trend__dot profile-legend-trend__dot--end" cx="', lastPoint.x.toFixed(2), '" cy="', lastPoint.y.toFixed(2), '" r="3.6"></circle>',
+                '<line class="profile-legend-trend__cursor-line" data-legend-cursor-line="1" x1="', selectedPoint.x.toFixed(2), '" y1="', padY.toFixed(2), '" x2="', selectedPoint.x.toFixed(2), '" y2="', baselineY.toFixed(2), '"></line>',
+                '<circle class="profile-legend-trend__cursor-dot" data-legend-cursor-dot="1" cx="', selectedPoint.x.toFixed(2), '" cy="', selectedPoint.y.toFixed(2), '" r="4.4"></circle>',
+                '<rect class="profile-legend-trend__hitbox" data-legend-hitbox="1" x="0" y="0" width="', width, '" height="', height, '" fill="transparent"></rect>',
                 "</svg>",
                 '<div class="profile-legend-trend__axis"><span>', escapeHtml(startDay), '</span><span>', escapeHtml(endDay), "</span></div>",
+                '<div class="profile-legend-tooltip" data-legend-tooltip="1" style="left:', tooltipLeftPct.toFixed(2), '%;">',
+                '<div class="profile-legend-tooltip__row"><span class="profile-legend-tooltip__label">Final</span><span class="profile-legend-tooltip__value" data-legend-final="1">', escapeHtml(formatNumber(selectedPoint.trophies)), "</span></div>",
+                '<div class="profile-legend-tooltip__row"><span class="profile-legend-tooltip__label">&#177; Delta</span><span class="profile-legend-tooltip__value" data-legend-delta="1">', escapeHtml(deltaText), "</span></div>",
+                "</div>",
+                "</div>",
                 "</div>",
             ].join(""),
-            caption: "Tracked span: " + formatNumber(spanDays) + " " + pluralize(spanDays, "day", "days") + ".",
         };
     };
 
-    const renderLegendSeasonSnapshotCard = (labelRaw, seasonRaw) => {
-        const label = toStr(labelRaw).trim() || "Season";
-        const season = seasonRaw && typeof seasonRaw === "object" ? seasonRaw : null;
-        if (!season) {
-            return [
-                '<div class="profile-legend-season-card is-empty">',
-                '<div class="profile-legend-season-card__label">', escapeHtml(label), "</div>",
-                '<div class="profile-legend-season-card__value">No snapshot</div>',
-                '<div class="profile-legend-season-card__meta">Official profile did not return this season.</div>',
-                "</div>",
-            ].join("");
-        }
-        const trophies = season.trophies != null ? formatNumber(season.trophies) : "-";
-        const seasonId = toStr(season.id).trim();
-        const rank = season.rank != null ? ("Rank " + formatNumber(season.rank)) : "";
-        const legendTrophies = season.legendTrophies != null ? formatNumber(season.legendTrophies) : "";
-        const metaParts = [];
-        if (seasonId) metaParts.push("Season " + seasonId);
-        if (rank) metaParts.push(rank);
-        if (legendTrophies) metaParts.push("Legend " + legendTrophies);
+    const renderLegendWindowToggleButton = (daysRaw, enabledRaw, activeRaw) => {
+        const days = Math.max(1, toNonNegativeInt(daysRaw));
+        const enabled = !!enabledRaw;
+        const active = !!activeRaw;
         return [
-            '<div class="profile-legend-season-card">',
-            '<div class="profile-legend-season-card__label">', escapeHtml(label), "</div>",
-            '<div class="profile-legend-season-card__value">', escapeHtml(trophies), "</div>",
-            '<div class="profile-legend-season-card__meta">', escapeHtml(metaParts.length ? metaParts.join(" • ") : "Official season snapshot"), "</div>",
-            "</div>",
+            '<button type="button" class="profile-legend-trend__toggle',
+            active ? " is-active" : "",
+            '" data-legend-window="', days,
+            '" aria-pressed="', active ? "true" : "false",
+            '"',
+            enabled ? "" : ' disabled aria-disabled="true"',
+            ">", days, "</button>",
         ].join("");
+    };
+
+    const parseLegendPointsPayload = (payloadTextRaw) => {
+        const payloadText = toStr(payloadTextRaw).trim();
+        if (!payloadText) return [];
+        try {
+            const parsed = JSON.parse(payloadText);
+            return normalizeLocalHistoryPoints(Array.isArray(parsed) ? parsed : [], null);
+        } catch (err) {
+            return [];
+        }
+    };
+
+    const updateLegendChartSelection = (stageEl, chartState, selectedIndexRaw) => {
+        const stage = stageEl && stageEl.querySelector ? stageEl : null;
+        if (!stage || !chartState || !chartState.hasData) return;
+        const chartPoints = Array.isArray(chartState.chartPoints) ? chartState.chartPoints : [];
+        const points = Array.isArray(chartState.points) ? chartState.points : [];
+        if (!chartPoints.length || !points.length) return;
+        const selectedIndex = Math.max(0, Math.min(chartPoints.length - 1, toNonNegativeInt(selectedIndexRaw)));
+        const selectedPoint = chartPoints[selectedIndex];
+        const delta = computeLegendDelta(points, selectedIndex);
+        const tooltipLeftPct = Math.max(8, Math.min(92, (selectedPoint.x / chartState.width) * 100));
+
+        const finalEl = stage.querySelector("[data-legend-final='1']");
+        const deltaEl = stage.querySelector("[data-legend-delta='1']");
+        const tooltipEl = stage.querySelector("[data-legend-tooltip='1']");
+        const cursorLine = stage.querySelector("[data-legend-cursor-line='1']");
+        const cursorDot = stage.querySelector("[data-legend-cursor-dot='1']");
+
+        if (finalEl) finalEl.textContent = formatNumber(selectedPoint.trophies);
+        if (deltaEl) deltaEl.textContent = delta.available ? formatSignedNumber(delta.delta) : "\u2013";
+        if (tooltipEl && tooltipEl.style) tooltipEl.style.left = tooltipLeftPct.toFixed(2) + "%";
+        if (cursorLine) {
+            cursorLine.setAttribute("x1", selectedPoint.x.toFixed(2));
+            cursorLine.setAttribute("x2", selectedPoint.x.toFixed(2));
+        }
+        if (cursorDot) {
+            cursorDot.setAttribute("cx", selectedPoint.x.toFixed(2));
+            cursorDot.setAttribute("cy", selectedPoint.y.toFixed(2));
+        }
+    };
+
+    const bindLegendChartInteraction = (stageEl, chartState) => {
+        const stage = stageEl && stageEl.querySelector ? stageEl : null;
+        if (!stage || !chartState || !chartState.hasData) return;
+        const hitbox = stage.querySelector("[data-legend-hitbox='1']");
+        if (!hitbox) return;
+
+        const chartPoints = Array.isArray(chartState.chartPoints) ? chartState.chartPoints : [];
+        if (!chartPoints.length) return;
+        updateLegendChartSelection(stage, chartState, chartState.selectedIndex);
+
+        const pickIndexFromClientX = (clientXRaw) => {
+            const clientX = Number(clientXRaw);
+            if (!Number.isFinite(clientX)) return;
+            const rect = hitbox.getBoundingClientRect();
+            if (!rect || rect.width <= 0) return;
+            const relX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+            const targetX = (relX / rect.width) * chartState.width;
+            let bestIndex = 0;
+            let bestDistance = Number.POSITIVE_INFINITY;
+            for (let i = 0; i < chartPoints.length; i++) {
+                const distance = Math.abs(chartPoints[i].x - targetX);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestIndex = i;
+                }
+            }
+            updateLegendChartSelection(stage, chartState, bestIndex);
+        };
+
+        if (typeof window !== "undefined" && window.PointerEvent) {
+            let pointerDown = false;
+            hitbox.addEventListener("pointerdown", (event) => {
+                pointerDown = true;
+                if (hitbox.setPointerCapture && event.pointerId != null) {
+                    try { hitbox.setPointerCapture(event.pointerId); } catch (err) { /* noop */ }
+                }
+                pickIndexFromClientX(event.clientX);
+                if (event.pointerType && event.pointerType !== "mouse" && event.cancelable) event.preventDefault();
+            });
+            hitbox.addEventListener("pointermove", (event) => {
+                if (event.pointerType === "mouse" || pointerDown) {
+                    pickIndexFromClientX(event.clientX);
+                }
+                if (event.pointerType && event.pointerType !== "mouse" && pointerDown && event.cancelable) event.preventDefault();
+            });
+            hitbox.addEventListener("pointerenter", (event) => {
+                if (event.pointerType === "mouse") pickIndexFromClientX(event.clientX);
+            });
+            hitbox.addEventListener("pointerup", (event) => {
+                pointerDown = false;
+                pickIndexFromClientX(event.clientX);
+                if (hitbox.releasePointerCapture && event.pointerId != null) {
+                    try { hitbox.releasePointerCapture(event.pointerId); } catch (err) { /* noop */ }
+                }
+                if (event.pointerType && event.pointerType !== "mouse" && event.cancelable) event.preventDefault();
+            });
+            hitbox.addEventListener("pointercancel", () => {
+                pointerDown = false;
+            });
+            return;
+        }
+
+        hitbox.addEventListener("mousemove", (event) => {
+            pickIndexFromClientX(event.clientX);
+        });
+        hitbox.addEventListener("mousedown", (event) => {
+            pickIndexFromClientX(event.clientX);
+        });
+        hitbox.addEventListener("touchstart", (event) => {
+            const touch = event.touches && event.touches[0] ? event.touches[0] : null;
+            if (touch) pickIndexFromClientX(touch.clientX);
+            if (event.cancelable) event.preventDefault();
+        }, { passive: false });
+        hitbox.addEventListener("touchmove", (event) => {
+            const touch = event.touches && event.touches[0] ? event.touches[0] : null;
+            if (touch) pickIndexFromClientX(touch.clientX);
+            if (event.cancelable) event.preventDefault();
+        }, { passive: false });
+    };
+
+    const bindLegendsJourneySection = (sectionEl) => {
+        const section = sectionEl && sectionEl.querySelector ? sectionEl : null;
+        if (!section || section.dataset.legendJourneyBound === "1") return;
+        section.dataset.legendJourneyBound = "1";
+
+        const payloadEl = section.querySelector("[data-legend-points-json='1']");
+        const stageEl = section.querySelector("[data-legend-stage='1']");
+        const toggleButtons = Array.from(section.querySelectorAll("[data-legend-window]"));
+        if (!payloadEl || !stageEl || !toggleButtons.length) return;
+
+        const state = {
+            allPoints: parseLegendPointsPayload(payloadEl.textContent),
+            activeWindowDays: 0,
+        };
+        state.activeWindowDays = getLegendDefaultWindowDays(state.allPoints);
+
+        const rerender = () => {
+            const availability = getLegendWindowAvailability(state.allPoints);
+            const supportByDays = Object.create(null);
+            for (let i = 0; i < availability.length; i++) {
+                supportByDays[availability[i].days] = !!availability[i].supported;
+            }
+            if (state.activeWindowDays > 0 && !supportByDays[state.activeWindowDays]) {
+                state.activeWindowDays = getLegendDefaultWindowDays(state.allPoints);
+            }
+            const visiblePoints = getLegendTrendPoints(state.allPoints, state.activeWindowDays);
+            const trend = renderLegendTrendSparkline(visiblePoints);
+            stageEl.innerHTML = trend.html;
+            if (trend.hasData) bindLegendChartInteraction(stageEl, trend);
+
+            for (let i = 0; i < toggleButtons.length; i++) {
+                const button = toggleButtons[i];
+                const days = Math.max(1, toNonNegativeInt(button.dataset && button.dataset.legendWindow));
+                const supported = !!supportByDays[days];
+                const active = state.activeWindowDays > 0 && state.activeWindowDays === days;
+                button.disabled = !supported;
+                button.setAttribute("aria-disabled", supported ? "false" : "true");
+                button.setAttribute("aria-pressed", active ? "true" : "false");
+                button.classList.toggle("is-active", active);
+            }
+        };
+
+        for (let i = 0; i < toggleButtons.length; i++) {
+            const button = toggleButtons[i];
+            button.addEventListener("click", (event) => {
+                event.preventDefault();
+                if (button.disabled) return;
+                const days = Math.max(1, toNonNegativeInt(button.dataset && button.dataset.legendWindow));
+                if (!days) return;
+                state.activeWindowDays = days;
+                rerender();
+            });
+        }
+
+        rerender();
+    };
+
+    const initLegendsJourneySections = (containerRaw) => {
+        const container = containerRaw && containerRaw.querySelectorAll ? containerRaw : null;
+        if (!container) return;
+        container.querySelectorAll("[data-legends-journey='1']").forEach((section) => {
+            bindLegendsJourneySection(section);
+        });
     };
 
     const isLegendLeagueName = (nameRaw) => {
@@ -1127,11 +1313,31 @@
         return normalizeLeagueFamilyKey(text).indexOf("legend") >= 0 || normalizeLeagueMatchText(text).indexOf("legend") >= 0;
     };
 
+    const readLeagueNameForLegendCheck = (leagueRaw) => {
+        const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
+        if (!league) return toStr(leagueRaw).trim();
+        if (typeof league.name === "string") return league.name.trim();
+        if (!league.name || typeof league.name !== "object") return "";
+        const preferred = [league.name.en, league.name.english, league.name.default, league.name.value];
+        for (let i = 0; i < preferred.length; i++) {
+            const value = toStr(preferred[i]).trim();
+            if (value) return value;
+        }
+        const keys = Object.keys(league.name);
+        for (let i = 0; i < keys.length; i++) {
+            const value = toStr(league.name[keys[i]]).trim();
+            if (value) return value;
+        }
+        return "";
+    };
+
     const shouldShowLegendsJourney = (playerRaw) => {
         const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
         const legend = player.legendStatistics && typeof player.legendStatistics === "object" ? player.legendStatistics : null;
         if (legend) return true;
-        return isLegendLeagueName(player.league && player.league.name);
+        const leagueName = readLeagueNameForLegendCheck(player.league);
+        const leagueTierName = readLeagueNameForLegendCheck(player.leagueTier);
+        return isLegendLeagueName(leagueName) || isLegendLeagueName(leagueTierName);
     };
 
     const renderLegendsJourneySection = (playerRaw, tagRaw) => {
@@ -1139,80 +1345,42 @@
         if (!shouldShowLegendsJourney(player)) return "";
 
         const tag = normalizeClanTag(tagRaw);
-        const legend = player.legendStatistics && typeof player.legendStatistics === "object" ? player.legendStatistics : null;
         const localPoints = getLocalTrophyHistoryForTag(tag, lastRenderedData);
-        const trendPoints = getLegendTrendPoints(localPoints, 30);
-        const trend = renderLegendTrendSparkline(trendPoints);
-        const delta7 = computeLegendDelta(localPoints, 7);
-        const delta14 = computeLegendDelta(localPoints, 14);
-        const delta30 = computeLegendDelta(localPoints, 30);
+        const windowAvailability = getLegendWindowAvailability(localPoints);
+        const defaultWindowDays = getLegendDefaultWindowDays(localPoints);
+        const initialPoints = getLegendTrendPoints(localPoints, defaultWindowDays);
+        const trend = renderLegendTrendSparkline(initialPoints);
+        const payloadPoints = localPoints.map((point) => ({
+            dayKey: point.dayKey,
+            capturedAt: point.capturedAt,
+            trophies: point.trophies,
+            clanTag: point.clanTag,
+            league: point.leagueName ? { name: point.leagueName } : null,
+        }));
+        const payloadJson = JSON.stringify(payloadPoints).replace(/<\//g, "<\\/");
 
-        const latestLocalPoint = localPoints.length ? localPoints[localPoints.length - 1] : null;
-        const trendStatus = !localPoints.length
-            ? "Local day-by-day tracking has not started yet for this player."
-            : (localPoints.length < 2
-                ? "Tracking started recently. More daily snapshots are needed for stronger trend context."
-                : (trend.caption || ""));
-
-        const summaryCards = [
-            renderStatCard("Current trophies", formatNumber(player.trophies)),
-            renderStatCard("Best trophies", formatNumber(player.bestTrophies)),
-            renderStatCard("Current league", toStr(player.league && player.league.name).trim() || "Unranked"),
-            renderStatCard("Legend trophies", legend && legend.legendTrophies != null ? formatNumber(legend.legendTrophies) : "-", {
-                subText: legend ? "Official legend snapshot" : "No legendStatistics block",
-            }),
-            renderStatCard("Attack wins", formatNumber(player.attackWins)),
-            renderStatCard("Defense wins", formatNumber(player.defenseWins)),
-            renderStatCard("Latest local trophies", latestLocalPoint ? formatNumber(latestLocalPoint.trophies) : "-", {
-                subText: latestLocalPoint && latestLocalPoint.dayKey ? ("Tracked " + latestLocalPoint.dayKey) : "No local history yet",
-            }),
-        ].join("");
-
-        const seasonCards = [
-            renderLegendSeasonSnapshotCard("Current season", legend && legend.currentSeason),
-            renderLegendSeasonSnapshotCard("Previous season", legend && legend.previousSeason),
-            renderLegendSeasonSnapshotCard("Best season", legend && legend.bestSeason),
-        ].join("");
+        const toggleButtonsHtml = windowAvailability
+            .map((item) => renderLegendWindowToggleButton(item.days, item.supported, defaultWindowDays > 0 && defaultWindowDays === item.days))
+            .join("");
 
         const sectionBody = [
             '<div class="profile-section-grid">',
-            '<div class="profile-subsection profile-legend-journey">',
+            '<div class="profile-subsection profile-legend-journey" data-legends-journey="1">',
             '<div class="profile-subsection__title">Legends Journey</div>',
-            '<div class="profile-legend-journey__provenance">Season snapshots, best trophies, and wins are from official player data. Day-by-day trend and 7/14/30-day deltas are from local roster tracking snapshots.</div>',
-            '<div class="profile-stats-grid">', summaryCards, "</div>",
             '<div class="profile-legend-trend">',
-            '<div class="profile-legend-trend__head">',
-            '<div class="profile-legend-trend__title">Local trophy trend (last ~30 tracked days)</div>',
-            '<div class="profile-legend-trend__subtitle">', escapeHtml(trendStatus), "</div>",
+            '<div class="profile-legend-trend__controls" role="group" aria-label="Legends Journey windows">',
+            toggleButtonsHtml,
             "</div>",
-            trend.html,
-            '<div class="profile-legend-delta-grid">',
-            renderLegendDeltaCard(delta7),
-            renderLegendDeltaCard(delta14),
-            renderLegendDeltaCard(delta30),
+            '<div class="profile-legend-trend__stage" data-legend-stage="1">', trend.html, "</div>",
+            '<script type="application/json" data-legend-points-json="1">', payloadJson, "</script>",
             "</div>",
-            "</div>",
-            '<div class="profile-legend-season-grid">', seasonCards, "</div>",
             "</div>",
             "</div>",
         ].join("");
 
-        const summaryItems = [
-            renderSummaryItem("Current trophies", formatNumber(player.trophies)),
-            renderSummaryItem("30d delta", delta30.available ? formatSignedNumber(delta30.delta) : "Tracking", {
-                tone: delta30.available ? (delta30.delta > 0 ? "success" : (delta30.delta < 0 ? "alert" : "")) : "",
-                subText: delta30.available ? ((delta30.approximate ? "~" : "") + delta30.actualDays + "d ref") : "Local history sparse",
-            }),
-            renderSummaryItem("Legend snapshots", legend ? "Present" : "Unavailable", {
-                tone: legend ? "success" : "",
-            }),
-        ];
-
         return renderDisclosureSection({
             title: "Legends Journey",
-            subtitle: "Legend-focused journey built from official season snapshots plus local day-by-day tracking.",
-            source: "Official Clash data + local roster tracking",
-            summaryItems,
+            subtitle: "Recent trophy movement across tracked days.",
             bodyHtml: sectionBody,
             open: true,
             sectionClass: "profile-disclosure--legend",
@@ -2049,6 +2217,7 @@
 
         profileState.bodyEl.innerHTML = heroHtml + sections;
         syncProfileDisclosureState(profileState.bodyEl);
+        initLegendsJourneySections(profileState.bodyEl);
     };
 
     const runServerMethod = (methodName, args) =>
