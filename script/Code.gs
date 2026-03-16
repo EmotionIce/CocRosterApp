@@ -5,6 +5,8 @@ const ASSET_TEXT_CACHE_TTL_ROSTER_SECONDS = 30;
 const ASSET_TEXT_CACHE_TTL_STATIC_SECONDS = 600;
 const FILE_LOOKUP_CACHE_VERSION = "v1";
 const FILE_LOOKUP_CACHE_TTL_SECONDS = 30;
+const IMAGE_ASSET_CACHE_VERSION = "v1";
+const IMAGE_ASSET_CACHE_TTL_SECONDS = 600;
 const ACTIVE_ROSTER_FILENAME = "roster-data.json";
 const ACTIVE_ROSTER_JOB_LOCK_KEY = "ACTIVE_ROSTER_JOB_LOCK";
 const ACTIVE_ROSTER_JOB_LOCK_WAIT_MS = 30 * 1000;
@@ -31,6 +33,8 @@ function doGet(e) {
 	const p = e && e.parameter ? e.parameter : {};
 	const asset = p.asset ? String(p.asset) : "";
 	if (asset) return serveAsset_(asset);
+	const assetData = p.assetData ? String(p.assetData) : "";
+	if (assetData) return serveImageAssetData_(assetData);
 
 	if (p.debug === "1") {
 		const info = listFolderFiles_();
@@ -261,6 +265,178 @@ function getTownHallIconData(levelRaw) {
 		Logger.log("Unable to cache Town Hall icon for level %s: %s", level, cacheErr && cacheErr.message ? cacheErr.message : String(cacheErr));
 	}
 
+	return payload;
+}
+
+function normalizeImageAssetPath_(assetPathRaw) {
+	return String(assetPathRaw == null ? "" : assetPathRaw)
+		.trim()
+		.replace(/^[\/\\]+/, "")
+		.replace(/\.\./g, "")
+		.replace(/\\/g, "/")
+		.replace(/^drive\//i, "");
+}
+
+function pickMostRecentlyUpdatedFile_(filesRaw) {
+	const files = Array.isArray(filesRaw) ? filesRaw : [];
+	let newest = null;
+	let newestMs = 0;
+	for (let i = 0; i < files.length; i++) {
+		const file = files[i];
+		if (!file) continue;
+		const updatedMs = file.getLastUpdated ? file.getLastUpdated().getTime() : 0;
+		if (!newest || updatedMs >= newestMs) {
+			newest = file;
+			newestMs = updatedMs;
+		}
+	}
+	return newest;
+}
+
+function findFileByRelativePathCaseInsensitive_(pathRaw) {
+	const safePath = normalizeImageAssetPath_(pathRaw);
+	if (!safePath) return null;
+
+	const segments = safePath
+		.split("/")
+		.map((part) => String(part || "").trim())
+		.filter((part) => part);
+	if (!segments.length) return null;
+
+	const filenameLower = String(segments[segments.length - 1] || "").toLowerCase();
+	if (!filenameLower) return null;
+
+	let folders = [DriveApp.getFolderById(FOLDER_ID)];
+	for (let i = 0; i < segments.length - 1; i++) {
+		const folderNameLower = String(segments[i] || "").toLowerCase();
+		if (!folderNameLower) return null;
+		const nextFolders = [];
+		for (let j = 0; j < folders.length; j++) {
+			const it = folders[j].getFolders();
+			while (it.hasNext()) {
+				const child = it.next();
+				if (String(child.getName() || "").toLowerCase() === folderNameLower) nextFolders.push(child);
+			}
+		}
+		if (!nextFolders.length) return null;
+		folders = nextFolders;
+	}
+
+	const matches = [];
+	for (let i = 0; i < folders.length; i++) {
+		const it = folders[i].getFiles();
+		while (it.hasNext()) {
+			const file = it.next();
+			if (String(file.getName() || "").toLowerCase() === filenameLower) matches.push(file);
+		}
+	}
+	return pickMostRecentlyUpdatedFile_(matches);
+}
+
+function findFileByNameRecursivelyCaseInsensitive_(filenameRaw) {
+	const filenameLower = String(filenameRaw == null ? "" : filenameRaw)
+		.trim()
+		.toLowerCase();
+	if (!filenameLower) return null;
+
+	const root = DriveApp.getFolderById(FOLDER_ID);
+	const queue = [root];
+	const matches = [];
+	for (let index = 0; index < queue.length; index++) {
+		const folder = queue[index];
+		const filesIt = folder.getFiles();
+		while (filesIt.hasNext()) {
+			const file = filesIt.next();
+			if (String(file.getName() || "").toLowerCase() === filenameLower) {
+				matches.push(file);
+			}
+		}
+		const foldersIt = folder.getFolders();
+		while (foldersIt.hasNext()) queue.push(foldersIt.next());
+	}
+	return pickMostRecentlyUpdatedFile_(matches);
+}
+
+function findImageAssetFile_(assetPathRaw) {
+	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
+	if (!safeAssetPath) return { assetPath: "", file: null };
+
+	const baseName = safeAssetPath.split(/[\/\\]/).pop() || safeAssetPath;
+	const pathCandidates = [];
+	const seenCandidates = {};
+	const pushPathCandidate = (valueRaw) => {
+		const value = normalizeImageAssetPath_(valueRaw);
+		if (!value || seenCandidates[value]) return;
+		seenCandidates[value] = true;
+		pathCandidates.push(value);
+	};
+
+	pushPathCandidate(safeAssetPath);
+	pushPathCandidate(String(safeAssetPath).toLowerCase());
+	if (baseName) {
+		pushPathCandidate("assets/images/" + baseName);
+		pushPathCandidate("assets/Images/" + baseName);
+	}
+
+	for (let i = 0; i < pathCandidates.length; i++) {
+		const candidate = pathCandidates[i];
+		const file = findFileByRelativePath_(candidate) || findFileByRelativePathCaseInsensitive_(candidate);
+		if (file) return { assetPath: safeAssetPath, file: file };
+	}
+
+	const byName = findFirstFileByNameCandidates_([safeAssetPath, baseName]);
+	if (byName) return { assetPath: safeAssetPath, file: byName };
+
+	const deepByName = findFileByNameRecursivelyCaseInsensitive_(baseName);
+	if (deepByName) return { assetPath: safeAssetPath, file: deepByName };
+
+	return { assetPath: safeAssetPath, file: null };
+}
+
+function getImageAssetData(assetPathRaw) {
+	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
+	if (!safeAssetPath) {
+		return { ok: false, assetPath: "", dataUrl: "", fileName: "" };
+	}
+
+	if (!/\.(gif|png|jpe?g|we?bp)$/i.test(safeAssetPath)) {
+		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "" };
+	}
+
+	const cache = getScriptCacheSafe_();
+	const cacheKey = "imageAsset:" + IMAGE_ASSET_CACHE_VERSION + ":" + encodeURIComponent(safeAssetPath);
+	const cached = readStringFromCache_(cache, cacheKey);
+	if (cached) {
+		try {
+			const parsed = JSON.parse(cached);
+			if (parsed && parsed.ok && parsed.assetPath === safeAssetPath && parsed.dataUrl) {
+				return parsed;
+			}
+		} catch (err) {
+			Logger.log("Ignoring invalid image asset cache for path '%s': %s", safeAssetPath, err && err.message ? err.message : String(err));
+		}
+	}
+
+	const lookup = findImageAssetFile_(safeAssetPath);
+	const file = lookup && lookup.file ? lookup.file : null;
+	if (!file) {
+		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "" };
+	}
+
+	const blob = file.getBlob();
+	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
+	if (String(mimeType || "").indexOf("image/") !== 0) {
+		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: file.getName() };
+	}
+
+	const payload = {
+		ok: true,
+		assetPath: safeAssetPath,
+		fileName: file.getName(),
+		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
+	};
+
+	writeStringToCache_(cache, cacheKey, JSON.stringify(payload), IMAGE_ASSET_CACHE_TTL_SECONDS);
 	return payload;
 }
 
@@ -691,7 +867,56 @@ function replaceActiveRosterDataFile_(validatedRosterData, options) {
 
 function writePublishedRosterData_(rosterDataRaw) {
 	const publishedAt = new Date().toISOString();
-	const validated = withRosterLastUpdatedAt_(rosterDataRaw, publishedAt);
+	let validated = withRosterLastUpdatedAt_(rosterDataRaw, publishedAt);
+
+	// Protect against accidental metric loss when preview payload has no metrics.
+	const incomingMetricCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
+	if (incomingMetricCount < 1) {
+		try {
+			const activeData = readActiveRosterDataFromDrive_();
+			const activeMetricCount = countPlayerMetricsEntries_(activeData && activeData.playerMetrics);
+			if (activeMetricCount > 0) {
+				validated.playerMetrics = sanitizePlayerMetricsStore_(activeData.playerMetrics, publishedAt);
+				validated = validateRosterData_(validated);
+				Logger.log("publishRosterData: preserved existing playerMetrics (entries=%s) because incoming payload had none.", activeMetricCount);
+			}
+		} catch (err) {
+			Logger.log("publishRosterData: unable to preserve existing playerMetrics fallback: %s", errorMessage_(err));
+		}
+	}
+
+	// Best-effort live metrics capture so publish can recover leaderboard fields even if preview missed merges.
+	try {
+		const capture = captureConnectedClanMetrics_(validated, {
+			continueOnError: true,
+			metricsProfileMode: "always",
+		});
+		validated = validateRosterData_(validated);
+		if (capture && capture.errors && capture.errors.length) {
+			Logger.log(
+				"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s errors=%s firstError=%s",
+				capture.attemptedClans,
+				capture.capturedClans,
+				capture.recorded,
+				capture.updated,
+				capture.entryCount,
+				capture.errors.length,
+				capture.errors[0] && capture.errors[0].message ? capture.errors[0].message : "",
+			);
+		} else {
+			Logger.log(
+				"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s",
+				capture && capture.attemptedClans,
+				capture && capture.capturedClans,
+				capture && capture.recorded,
+				capture && capture.updated,
+				capture && capture.entryCount,
+			);
+		}
+	} catch (err) {
+		Logger.log("publishRosterData: best-effort metrics capture failed: %s", errorMessage_(err));
+	}
+
 	const folder = DriveApp.getFolderById(FOLDER_ID);
 	const archiveFolder = getArchiveFolder_();
 	moveLegacyHistoryFilesToArchive_(folder, archiveFolder);
@@ -705,6 +930,7 @@ function writePublishedRosterData_(rosterDataRaw) {
 	for (let i = 0; i < oldMetaFiles.length; i++) oldMetaFiles[i].setTrashed(true);
 
 	const counts = countRosterPayload_(validated);
+	const metricEntryCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
 	const meta = {
 		publishedAt: publishedAt,
 		lastUpdatedAt: publishedAt,
@@ -714,9 +940,10 @@ function writePublishedRosterData_(rosterDataRaw) {
 		rosterCount: Array.isArray(validated.rosters) ? validated.rosters.length : 0,
 		playerCount: counts.playerCount,
 		noteCount: counts.noteCount,
+		metricEntryCount: metricEntryCount,
 	};
 	archiveFolder.createFile("roster-data.last-import.json", JSON.stringify(meta, null, 2), "application/json");
-	Logger.log("publishRosterData ok folderId=%s archiveFolderId=%s rosters=%s players=%s notes=%s", FOLDER_ID, archiveFolder.getId(), meta.rosterCount, counts.playerCount, counts.noteCount);
+	Logger.log("publishRosterData ok folderId=%s archiveFolderId=%s rosters=%s players=%s notes=%s metricEntries=%s", FOLDER_ID, archiveFolder.getId(), meta.rosterCount, counts.playerCount, counts.noteCount, metricEntryCount);
 	markActiveDataWriteSuccess_(publishedAt);
 	return meta;
 }
@@ -1234,7 +1461,7 @@ function publishRosterData(rosterData, password) {
 	return withActiveRosterJobLock_("manual-publish", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
 		const meta = writePublishedRosterData_(rosterData);
 		markPublish_();
-		return { ok: true, publishedAt: meta.publishedAt, playerCount: meta.playerCount, noteCount: meta.noteCount };
+		return { ok: true, publishedAt: meta.publishedAt, playerCount: meta.playerCount, noteCount: meta.noteCount, metricEntryCount: meta.metricEntryCount };
 	});
 }
 
@@ -1262,6 +1489,41 @@ function serveAsset_(name) {
 		return ContentService.createTextOutput(text).setMimeType(mime);
 	} catch (err) {
 		return ContentService.createTextOutput("ASSET_ERROR for " + safeName + ":\n\n" + (err && (err.stack || err.message) ? err.stack || err.message : String(err))).setMimeType(ContentService.MimeType.TEXT);
+	}
+}
+
+function serveImageAssetData_(assetPathRaw) {
+	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
+	const fail = (reason) =>
+		ContentService.createTextOutput(JSON.stringify({
+			ok: false,
+			assetPath: safeAssetPath,
+			reason: String(reason || "unknown"),
+			mimeType: "",
+			dataBase64: "",
+			fileName: "",
+		})).setMimeType(ContentService.MimeType.JSON);
+	if (!safeAssetPath) return fail("empty-path");
+	if (!/\.(gif|png|jpe?g|we?bp)$/i.test(safeAssetPath)) return fail("invalid-extension");
+
+	try {
+		const lookup = findImageAssetFile_(safeAssetPath);
+		const file = lookup && lookup.file ? lookup.file : null;
+		if (!file) return fail("not-found");
+
+		const blob = file.getBlob();
+		const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
+		if (String(mimeType || "").indexOf("image/") !== 0) return fail("not-image");
+
+		return ContentService.createTextOutput(JSON.stringify({
+			ok: true,
+			assetPath: safeAssetPath,
+			fileName: file.getName(),
+			mimeType: mimeType,
+			dataBase64: Utilities.base64Encode(blob.getBytes()),
+		})).setMimeType(ContentService.MimeType.JSON);
+	} catch (err) {
+		return fail(err && err.message ? err.message : String(err));
 	}
 }
 
@@ -1538,6 +1800,11 @@ const PLAYER_METRICS_TROPHY_HISTORY_MAX_DAYS = 120;
 const PLAYER_METRICS_DONATION_MONTHS_MAX = 12;
 const PLAYER_METRICS_ENTRY_RETENTION_DAYS = 240;
 const PLAYER_METRICS_PLAYER_HOUSE_MAX_ELEMENTS = 8;
+const PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_VERSION = "v1";
+const PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_TTL_SECONDS = 300;
+const PLAYER_METRICS_PROFILE_ENRICH_MIN_MEMBER_COUNT = 8;
+const PLAYER_METRICS_PROFILE_ENRICH_MAX_NONZERO_RATIO = 0.2;
+const PLAYER_METRICS_PROFILE_ENRICH_MIN_UNRANKED_RATIO = 0.7;
 
 function parseRosterLockState_(raw) {
 	const text = String(raw == null ? "" : raw).trim();
@@ -1987,6 +2254,8 @@ function sanitizeMetricsSnapshotPayload_(snapshotRaw, fallbackTagRaw) {
 
 	const league = sanitizeMetricsLeagueSnapshot_(snapshot.league);
 	if (league) out.league = league;
+	const leagueTier = sanitizeMetricsLeagueSnapshot_(snapshot.leagueTier);
+	if (leagueTier) out.leagueTier = leagueTier;
 
 	const builderBaseLeague = sanitizeMetricsLeagueSnapshot_(snapshot.builderBaseLeague);
 	if (builderBaseLeague) out.builderBaseLeague = builderBaseLeague;
@@ -2027,7 +2296,9 @@ function mapApiMembersForMetricsSnapshot_(membersRaw) {
 			const mapPosition = Number(member.mapPosition);
 			if (isFinite(mapPosition)) snapshot.mapPosition = Math.max(0, Math.floor(mapPosition));
 		}
-		const league = sanitizeMetricsLeagueSnapshot_(member.league);
+		const leagueTier = sanitizeMetricsLeagueSnapshot_(member.leagueTier);
+		if (leagueTier) snapshot.leagueTier = leagueTier;
+		const league = sanitizeMetricsLeagueSnapshot_(member.league) || leagueTier;
 		if (league) snapshot.league = league;
 		const builderBaseLeague = sanitizeMetricsLeagueSnapshot_(member.builderBaseLeague);
 		if (builderBaseLeague) snapshot.builderBaseLeague = builderBaseLeague;
@@ -2036,6 +2307,221 @@ function mapApiMembersForMetricsSnapshot_(membersRaw) {
 		out.push(snapshot);
 	}
 	return out;
+}
+
+function buildPlayerMetricsProfileSnapshotCacheKey_(tagRaw) {
+	const tag = normalizeTag_(tagRaw);
+	if (!tag) return "";
+	return "playerMetricsProfileSnapshot:" + PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_VERSION + ":" + encodeURIComponent(tag);
+}
+
+function readCachedPlayerMetricsProfileSnapshot_(tagRaw) {
+	const tag = normalizeTag_(tagRaw);
+	if (!tag) return null;
+	const cache = getScriptCacheSafe_();
+	const cacheKey = buildPlayerMetricsProfileSnapshotCacheKey_(tag);
+	if (!cacheKey) return null;
+	const raw = readStringFromCache_(cache, cacheKey);
+	if (!raw) return null;
+	try {
+		const parsed = JSON.parse(raw);
+		return sanitizeMetricsSnapshotPayload_(parsed, tag);
+	} catch (err) {
+		return null;
+	}
+}
+
+function writeCachedPlayerMetricsProfileSnapshot_(tagRaw, snapshotRaw) {
+	const tag = normalizeTag_(tagRaw);
+	if (!tag) return;
+	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, tag);
+	if (!snapshot) return;
+	const cache = getScriptCacheSafe_();
+	const cacheKey = buildPlayerMetricsProfileSnapshotCacheKey_(tag);
+	if (!cacheKey) return;
+	writeStringToCache_(cache, cacheKey, JSON.stringify(snapshot), PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_TTL_SECONDS);
+}
+
+function buildMetricsSnapshotFromPlayerProfile_(profileRaw, fallbackTagRaw) {
+	const profile = profileRaw && typeof profileRaw === "object" ? profileRaw : {};
+	const tag = normalizeTag_(profile.tag || fallbackTagRaw);
+	if (!tag) return null;
+
+	const clan = profile.clan && typeof profile.clan === "object" ? profile.clan : {};
+	const th = readTownHallLevel_(profile);
+	const snapshot = {
+		tag: tag,
+		name: String(profile.name == null ? "" : profile.name),
+		trophies: toNonNegativeInt_(profile.trophies),
+		donations: toNonNegativeInt_(profile.donations),
+		donationsReceived: toNonNegativeInt_(profile.donationsReceived),
+		capturedAt: new Date().toISOString(),
+		clanTag: normalizeTag_(clan.tag),
+		league: sanitizeMetricsLeagueSnapshot_(profile.league),
+		leagueTier: sanitizeMetricsLeagueSnapshot_(profile.leagueTier),
+		builderBaseLeague: sanitizeMetricsLeagueSnapshot_(profile.builderBaseLeague),
+		playerHouse: sanitizeMetricsPlayerHouseSnapshot_(profile.playerHouse),
+		expLevel: toNonNegativeInt_(profile.expLevel),
+		builderBaseTrophies: toNonNegativeInt_(profile.builderBaseTrophies),
+		clanRank: toNonNegativeInt_(profile.clanRank),
+		previousClanRank: toNonNegativeInt_(profile.previousClanRank),
+	};
+	if (isFinite(th) && th > 0) {
+		snapshot.townHallLevel = Math.floor(th);
+		snapshot.th = Math.floor(th);
+	}
+	return sanitizeMetricsSnapshotPayload_(snapshot, tag);
+}
+
+function mergeMetricsSnapshotPreferAuthoritative_(fallbackRaw, authoritativeRaw) {
+	const fallback = sanitizeMetricsSnapshotPayload_(fallbackRaw, "");
+	const authoritative = sanitizeMetricsSnapshotPayload_(authoritativeRaw, fallback && fallback.tag);
+	if (!fallback) return authoritative;
+	if (!authoritative) return fallback;
+
+	const merged = sanitizeMetricsSnapshotPayload_(authoritative, fallback.tag) || fallback;
+	if ((merged.mapPosition == null || !isFinite(Number(merged.mapPosition))) && fallback.mapPosition != null) {
+		merged.mapPosition = toNonNegativeInt_(fallback.mapPosition);
+	}
+	if (!merged.clanTag && fallback.clanTag) merged.clanTag = fallback.clanTag;
+	if (!merged.capturedAt && fallback.capturedAt) merged.capturedAt = fallback.capturedAt;
+	return merged;
+}
+
+function isMetricsSnapshotLikelyIncomplete_(snapshotRaw) {
+	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, "");
+	if (!snapshot) return true;
+	const trophies = toNonNegativeInt_(snapshot.trophies);
+	const leagueName = String(snapshot && snapshot.league && snapshot.league.name != null ? snapshot.league.name : "").trim();
+	const family = resolveHomeLeagueAssetFamily_(leagueName);
+
+	if (!leagueName) return true;
+	if (trophies <= 0) return true;
+	if (family === "unranked" && trophies >= 400) return true;
+	if (family === "legend" && trophies > 0 && trophies < 4900) return true;
+	return false;
+}
+
+function shouldEnrichMetricsMembersWithProfiles_(membersRaw) {
+	const members = Array.isArray(membersRaw) ? membersRaw : [];
+	const total = members.length;
+	if (total < PLAYER_METRICS_PROFILE_ENRICH_MIN_MEMBER_COUNT) return false;
+
+	let nonZeroCount = 0;
+	let unrankedCount = 0;
+	let incompleteCount = 0;
+
+	for (let i = 0; i < members.length; i++) {
+		const snapshot = sanitizeMetricsSnapshotPayload_(members[i], "");
+		if (!snapshot) {
+			incompleteCount++;
+			continue;
+		}
+
+		const trophies = toNonNegativeInt_(snapshot.trophies);
+		if (trophies > 0) nonZeroCount++;
+		if (isMetricsSnapshotLikelyIncomplete_(snapshot)) incompleteCount++;
+
+			const leagueName = String(snapshot && snapshot.league && snapshot.league.name != null ? snapshot.league.name : "").trim();
+			const family = resolveHomeLeagueAssetFamily_(leagueName);
+			if (family === "unranked") unrankedCount++;
+			if (family === "unranked" && trophies >= 400) return true;
+			if (family === "legend" && trophies > 0 && trophies < 4900) return true;
+		}
+
+	const nonZeroRatio = total > 0 ? nonZeroCount / total : 0;
+	const unrankedRatio = total > 0 ? unrankedCount / total : 0;
+	const incompleteRatio = total > 0 ? incompleteCount / total : 0;
+	if (incompleteRatio >= 0.6) return true;
+	if (nonZeroRatio <= PLAYER_METRICS_PROFILE_ENRICH_MAX_NONZERO_RATIO && unrankedRatio >= PLAYER_METRICS_PROFILE_ENRICH_MIN_UNRANKED_RATIO) {
+		return true;
+	}
+	return false;
+}
+
+function fetchAuthoritativePlayerMetricsSnapshot_(tagRaw, runStateRaw) {
+	const tag = normalizeTag_(tagRaw);
+	if (!tag) return null;
+	const runState = runStateRaw && typeof runStateRaw === "object" ? runStateRaw : null;
+	if (runState) {
+		if (!runState.profileSnapshotByTag || typeof runState.profileSnapshotByTag !== "object") runState.profileSnapshotByTag = {};
+		if (!runState.profileSnapshotErrorByTag || typeof runState.profileSnapshotErrorByTag !== "object") runState.profileSnapshotErrorByTag = {};
+		if (runState.profileSnapshotByTag[tag]) return runState.profileSnapshotByTag[tag];
+		if (runState.profileSnapshotErrorByTag[tag]) return null;
+		if (runState.profileFetchBlocked) return null;
+	}
+
+	const cached = readCachedPlayerMetricsProfileSnapshot_(tag);
+	if (cached) {
+		if (runState) runState.profileSnapshotByTag[tag] = cached;
+		return cached;
+	}
+
+	try {
+		const profile = cocFetch_("/players/" + encodeTagForPath_(tag));
+		const snapshot = buildMetricsSnapshotFromPlayerProfile_(profile, tag);
+		if (!snapshot) return null;
+		writeCachedPlayerMetricsProfileSnapshot_(tag, snapshot);
+		if (runState) runState.profileSnapshotByTag[tag] = snapshot;
+		return snapshot;
+	} catch (err) {
+		if (runState) {
+			runState.profileSnapshotErrorByTag[tag] = true;
+			if (err && Number(err.statusCode) === 429) runState.profileFetchBlocked = true;
+		}
+		Logger.log("Unable to fetch authoritative player metrics snapshot for %s: %s", tag, errorMessage_(err));
+		return null;
+	}
+}
+
+function enrichMetricsMembersWithProfiles_(membersRaw, optionsRaw) {
+	const members = Array.isArray(membersRaw) ? membersRaw : [];
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const modeRaw = String(options.mode == null ? "auto" : options.mode)
+		.trim()
+		.toLowerCase();
+	const mode = modeRaw === "always" || modeRaw === "never" ? modeRaw : "auto";
+	if (!members.length || mode === "never") {
+		return { members: members, attempted: 0, enriched: 0, enabled: false };
+	}
+
+	const shouldEnrichAll = mode === "always" ? true : shouldEnrichMetricsMembersWithProfiles_(members);
+
+	const runState = options.runState && typeof options.runState === "object" ? options.runState : {};
+	const out = [];
+	let attempted = 0;
+	let enriched = 0;
+
+	for (let i = 0; i < members.length; i++) {
+		const baseline = sanitizeMetricsSnapshotPayload_(members[i], "");
+		if (!baseline) continue;
+		const tag = normalizeTag_(baseline.tag);
+			if (!tag) {
+				out.push(baseline);
+				continue;
+			}
+			const shouldFetchProfile = shouldEnrichAll || isMetricsSnapshotLikelyIncomplete_(baseline);
+			if (!shouldFetchProfile) {
+				out.push(baseline);
+				continue;
+			}
+			attempted++;
+			const authoritative = fetchAuthoritativePlayerMetricsSnapshot_(tag, runState);
+			if (!authoritative) {
+				out.push(baseline);
+				continue;
+		}
+		const merged = mergeMetricsSnapshotPreferAuthoritative_(baseline, authoritative);
+		out.push(merged || baseline);
+		enriched++;
+	}
+
+	return {
+		members: out.length ? out : members,
+		attempted: attempted,
+		enriched: enriched,
+		enabled: shouldEnrichAll || attempted > 0,
+	};
 }
 
 function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
@@ -2305,6 +2791,99 @@ function ensurePlayerMetricsStore_(rosterData) {
 	const sanitized = sanitizePlayerMetricsStore_(rosterData.playerMetrics, new Date().toISOString());
 	rosterData.playerMetrics = sanitized;
 	return sanitized;
+}
+
+function countPlayerMetricsEntries_(storeRaw) {
+	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};
+	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	const keys = Object.keys(byTag);
+	let count = 0;
+	for (let i = 0; i < keys.length; i++) {
+		if (normalizeTag_(keys[i])) count++;
+	}
+	return count;
+}
+
+function listConnectedClanTagsForMetrics_(rosterDataRaw, rosterIdFilterRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const rosterIdFilter = String(rosterIdFilterRaw == null ? "" : rosterIdFilterRaw).trim();
+	const seen = {};
+	const out = [];
+
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const rosterId = String(roster.id || "").trim();
+		if (rosterIdFilter && rosterId !== rosterIdFilter) continue;
+		const clanTag = normalizeTag_(roster.connectedClanTag);
+		if (!clanTag || seen[clanTag]) continue;
+		seen[clanTag] = true;
+		out.push(clanTag);
+	}
+
+	return out;
+}
+
+function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const rosterIdFilter = String(options.rosterId == null ? "" : options.rosterId).trim();
+	const continueOnError = options.continueOnError !== false;
+	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
+		.trim()
+		.toLowerCase();
+	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
+	if (!rosterData) {
+		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0 };
+	}
+
+	const clanTags = listConnectedClanTagsForMetrics_(rosterData, rosterIdFilter);
+	const runState = { seenClanTags: {}, profileSnapshotByTag: {}, profileSnapshotErrorByTag: {}, profileFetchBlocked: false };
+	const errors = [];
+	let capturedClans = 0;
+	let recorded = 0;
+	let updated = 0;
+	let profileEnriched = 0;
+	let profileAttempted = 0;
+
+	for (let i = 0; i < clanTags.length; i++) {
+		const clanTag = clanTags[i];
+		try {
+			const snapshot = fetchClanMembersSnapshot_(clanTag);
+			const enriched = enrichMetricsMembersWithProfiles_(snapshot && snapshot.metricsMembers, {
+				mode: metricsProfileMode,
+				runState: runState,
+			});
+			const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : snapshot && snapshot.metricsMembers;
+			profileEnriched += toNonNegativeInt_(enriched && enriched.enriched);
+			profileAttempted += toNonNegativeInt_(enriched && enriched.attempted);
+			const result = recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
+				capturedAt: snapshot && snapshot.capturedAt,
+				runState: runState,
+				source: "captureConnectedClanMetrics",
+			});
+			capturedClans++;
+			recorded += toNonNegativeInt_(result && result.recorded);
+			updated += toNonNegativeInt_(result && result.updated);
+		} catch (err) {
+			const message = errorMessage_(err);
+			errors.push({ clanTag: clanTag, message: message });
+			if (!continueOnError) throw err;
+		}
+	}
+
+	ensurePlayerMetricsStore_(rosterData);
+	return {
+		attemptedClans: clanTags.length,
+		capturedClans: capturedClans,
+		recorded: recorded,
+		updated: updated,
+		errors: errors,
+		entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
+		profileEnriched: profileEnriched,
+		profileAttempted: profileAttempted,
+		metricsProfileMode: metricsProfileMode,
+	};
 }
 
 function buildMetricsCaptureContext_(capturedAtRaw) {
@@ -4319,7 +4898,16 @@ function buildRosterPlayerSeedByTag_(rosterData) {
 function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const shouldRecordMetrics = options.recordMetrics !== false;
+	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
+		.trim()
+		.toLowerCase();
+	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : { seenClanTags: {} };
+	const metricsProfileRunState = shouldRecordMetrics
+		? metricsRunState.profileRunState && typeof metricsRunState.profileRunState === "object"
+			? metricsRunState.profileRunState
+			: (metricsRunState.profileRunState = {})
+		: null;
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const membersByRosterId = {};
 	const memberTagSetByRosterId = {};
@@ -4341,17 +4929,25 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedClanTagByRosterId[rosterId] = clanTag;
 
 		let members = membersByClanTag[clanTag];
-		if (!members) {
-			const clanSnapshot = fetchClanMembersSnapshot_(clanTag);
-			members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
-			membersByClanTag[clanTag] = members;
-			if (shouldRecordMetrics) {
-				recordClanMemberMetricsSnapshot_(rosterData, clanTag, clanSnapshot && clanSnapshot.metricsMembers, {
-					capturedAt: clanSnapshot && clanSnapshot.capturedAt,
-					runState: metricsRunState,
-					sourceRosterId: rosterId,
-					source: "buildLiveRosterOwnershipSnapshot",
-				});
+			if (!members) {
+				const clanSnapshot = fetchClanMembersSnapshot_(clanTag);
+				members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
+				membersByClanTag[clanTag] = members;
+				if (shouldRecordMetrics) {
+					const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
+						mode: metricsProfileMode,
+						runState: metricsProfileRunState,
+						clanTag: clanTag,
+						sourceRosterId: rosterId,
+						source: "buildLiveRosterOwnershipSnapshot",
+					});
+					const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
+					recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
+						capturedAt: clanSnapshot && clanSnapshot.capturedAt,
+						runState: metricsRunState,
+						sourceRosterId: rosterId,
+						source: "buildLiveRosterOwnershipSnapshot",
+					});
 			}
 		}
 		membersByRosterId[rosterId] = members;
@@ -5689,6 +6285,22 @@ function refreshRegularWarStatsCore_(rosterData, rosterId) {
 
 function refreshTrackingStatsCore_(rosterData, rosterId) {
 	const ctx = findRosterById_(rosterData, rosterId);
+	try {
+		const capture = captureConnectedClanMetrics_(ctx.rosterData, {
+			rosterId: ctx.rosterId,
+			continueOnError: true,
+		});
+		if (capture && capture.errors && capture.errors.length) {
+			Logger.log(
+				"refreshTrackingStatsCore metrics capture for roster '%s' had %s error(s), first=%s",
+				ctx.rosterId,
+				capture.errors.length,
+				capture.errors[0] && capture.errors[0].message ? capture.errors[0].message : "",
+			);
+		}
+	} catch (err) {
+		Logger.log("refreshTrackingStatsCore metrics capture failed for roster '%s': %s", ctx.rosterId, errorMessage_(err));
+	}
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
 	if (trackingMode === "regularWar") {
 		return refreshRegularWarStatsCore_(ctx.rosterData, ctx.rosterId);

@@ -337,6 +337,51 @@
     return cloneJson(state.lastRosterData);
   };
 
+  const parseIsoMs_ = (valueRaw) => {
+    const text = toStr(valueRaw).trim();
+    if (!text) return 0;
+    const ms = new Date(text).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  };
+
+  const mergePlayerMetricsStore_ = (currentRaw, incomingRaw) => {
+    const current = currentRaw && typeof currentRaw === "object" ? currentRaw : null;
+    const incoming = incomingRaw && typeof incomingRaw === "object" ? incomingRaw : null;
+    if (!incoming) return current ? cloneJson(current) : null;
+
+    const currentByTag = current && current.byTag && typeof current.byTag === "object" ? current.byTag : {};
+    const incomingByTag = incoming.byTag && typeof incoming.byTag === "object" ? incoming.byTag : {};
+    const incomingKeys = Object.keys(incomingByTag);
+    if (!incomingKeys.length) return current ? cloneJson(current) : cloneJson(incoming);
+
+    const currentHasTags = Object.keys(currentByTag).length > 0;
+    const currentUpdatedMs = parseIsoMs_(current && current.updatedAt);
+    const incomingUpdatedMs = parseIsoMs_(incoming && incoming.updatedAt);
+    const incomingIsOlder = currentHasTags && currentUpdatedMs > 0 && incomingUpdatedMs > 0 && incomingUpdatedMs < currentUpdatedMs;
+    if (incomingIsOlder) return cloneJson(current);
+
+    const merged = current ? cloneJson(current) : { schemaVersion: 1, updatedAt: "", byTag: {} };
+    if (!merged.byTag || typeof merged.byTag !== "object") merged.byTag = {};
+    for (let i = 0; i < incomingKeys.length; i++) {
+      const tag = incomingKeys[i];
+      merged.byTag[tag] = cloneJson(incomingByTag[tag]);
+    }
+
+    if (Number.isFinite(Number(incoming.schemaVersion))) {
+      merged.schemaVersion = Number(incoming.schemaVersion);
+    }
+
+    const incomingUpdatedAt = toStr(incoming.updatedAt).trim();
+    if (incomingUpdatedAt) {
+      const mergedUpdatedMs = parseIsoMs_(merged.updatedAt);
+      if (!mergedUpdatedMs || !incomingUpdatedMs || incomingUpdatedMs >= mergedUpdatedMs) {
+        merged.updatedAt = incomingUpdatedAt;
+      }
+    }
+
+    return merged;
+  };
+
   const applyMergedRosterPreview = (rosterIdRaw, nextRosterData, statusMsg) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) {
@@ -369,6 +414,13 @@
     }
     if (Array.isArray(nextRosterData.rosterOrder)) {
       mergedRosterData.rosterOrder = cloneJson(nextRosterData.rosterOrder);
+    }
+    if (typeof nextRosterData.lastUpdatedAt === "string") {
+      mergedRosterData.lastUpdatedAt = nextRosterData.lastUpdatedAt;
+    }
+    const mergedPlayerMetrics = mergePlayerMetricsStore_(mergedRosterData.playerMetrics, nextRosterData.playerMetrics);
+    if (mergedPlayerMetrics) {
+      mergedRosterData.playerMetrics = mergedPlayerMetrics;
     }
 
     state.lastRosterData = mergedRosterData;
@@ -3000,7 +3052,12 @@
         state.publishCooldownUntil = Date.now() + 10_000;
         const playerCount = publishResult && Number.isFinite(Number(publishResult.playerCount)) ? Number(publishResult.playerCount) : null;
         const noteCount = publishResult && Number.isFinite(Number(publishResult.noteCount)) ? Number(publishResult.noteCount) : null;
-        if (playerCount != null && noteCount != null) {
+        const metricEntryCount = publishResult && Number.isFinite(Number(publishResult.metricEntryCount))
+          ? Number(publishResult.metricEntryCount)
+          : null;
+        if (playerCount != null && noteCount != null && metricEntryCount != null) {
+          setStatus("Published successfully (" + playerCount + " players, " + noteCount + " notes, " + metricEntryCount + " metric entries).");
+        } else if (playerCount != null && noteCount != null) {
           setStatus("Published successfully (" + playerCount + " players, " + noteCount + " notes).");
         } else {
           setStatus("Published successfully.");

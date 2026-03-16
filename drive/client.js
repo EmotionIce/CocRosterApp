@@ -10,9 +10,11 @@
 
     let lastRenderedData = null;
     let searchUiBound = false;
+    let publicViewUiBound = false;
     let profileUiBound = false;
     let globalLastUpdatedTimerId = 0;
     let globalLastUpdatedTimerValue = "";
+    let landingRevealObserver = null;
     const missingSectionExpandedByRoster = Object.create(null);
 
     const profileCache = Object.create(null);
@@ -21,6 +23,8 @@
     const townHallIconPending = Object.create(null);
     const leagueIconCache = Object.create(null);
     const leagueIconPending = Object.create(null);
+    const landingAssetDataCache = Object.create(null);
+    const landingAssetDataPending = Object.create(null);
     const profileState = {
         root: null,
         titleEl: null,
@@ -36,6 +40,81 @@
         bodyPaddingRight: "",
     };
     const PROFILE_LEAGUE_DEBUG = typeof window !== "undefined" && window && window.ROSTER_DEBUG_LEAGUE_BADGE === true;
+    const PUBLIC_VIEW_STORAGE_KEY = "roster.publicViewState.v1";
+    const PUBLIC_VIEW_VALUES = {
+        rosters: "rosters",
+        leaderboard: "leaderboard",
+        landing: "landing",
+    };
+    const PUBLIC_PAGE_QUERY_VALUES = {
+        auto: "auto",
+        rosters: "rosters",
+        leaderboard: "leaderboard",
+        landing: "landing",
+    };
+    const PUBLIC_LANDING_DEFAULTS = {
+        bannerGifUrl: "/assets/images/banner.gif",
+        squareGifUrl: "/assets/images/square.gif",
+        discordInviteUrl: "https://discord.gg/turtlecoc",
+    };
+    const LEADERBOARD_SORT_MODE_VALUES = {
+        trophiesLeague: "trophiesLeague",
+        donations: "donations",
+        donationsReceived: "donationsReceived",
+        townHall: "townHall",
+    };
+    const LEADERBOARD_MONTH_MODE_VALUES = {
+        current: "current",
+        last: "last",
+    };
+    const LEADERBOARD_SORT_MODE_OPTIONS = [
+        { key: LEADERBOARD_SORT_MODE_VALUES.trophiesLeague, label: "Trophies / League" },
+        { key: LEADERBOARD_SORT_MODE_VALUES.donations, label: "Donations" },
+        { key: LEADERBOARD_SORT_MODE_VALUES.donationsReceived, label: "Donations received" },
+        { key: LEADERBOARD_SORT_MODE_VALUES.townHall, label: "Town Hall" },
+    ];
+    const ROLE_PRIORITY = {
+        main: 0,
+        sub: 1,
+        missing: 2,
+    };
+    const LEADERBOARD_EXACT_LEAGUE_ORDER = [
+        "Legend League",
+        "Electro 33",
+        "Electro 32",
+        "Electro 31",
+        "Dragon 30",
+        "Dragon 29",
+        "Dragon 28",
+        "Titan 27",
+        "Titan 26",
+        "Titan 25",
+        "P.E.K.K.A 24",
+        "P.E.K.K.A 23",
+        "P.E.K.K.A 22",
+        "Golem 21",
+        "Golem 20",
+        "Golem 19",
+        "Witch 18",
+        "Witch 17",
+        "Witch 16",
+        "Valkyrie 15",
+        "Valkyrie 14",
+        "Valkyrie 13",
+        "Wizard 12",
+        "Wizard 11",
+        "Wizard 10",
+        "Archer 9",
+        "Archer 8",
+        "Archer 7",
+        "Barbarian 6",
+        "Barbarian 5",
+        "Barbarian 4",
+        "Skeleton 3",
+        "Skeleton 2",
+        "Skeleton 1",
+        "Unranked",
+    ];
 
     const updateAdminLink = () => {
         const adminLink = $("#openAdminLink");
@@ -51,6 +130,122 @@
             const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
             adminLink.href = baseUrl + sep + "page=admin";
         }
+    };
+
+    const normalizeHttpUrl = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (!value) return "";
+        if (/^https?:\/\//i.test(value)) return value;
+        return "";
+    };
+
+    const sanitizeAssetPath = (valueRaw) =>
+        toStr(valueRaw)
+            .trim()
+            .replace(/^[\/\\]+/, "")
+            .replace(/\.\./g, "")
+            .replace(/\\/g, "/")
+            .replace(/^drive\//i, "");
+
+    const resolveLandingMediaSource = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (!value) return { kind: "none", value: "" };
+        if (/^https?:\/\//i.test(value) || /^data:image\//i.test(value)) {
+            return { kind: "url", value: value };
+        }
+        const assetPath = sanitizeAssetPath(value);
+        if (!assetPath) return { kind: "none", value: "" };
+        return { kind: "asset", value: assetPath };
+    };
+
+    const getScriptBaseUrl = () =>
+        toStr(
+            (typeof window !== "undefined" && (window.ROSTER_BASE_URL || window.BASE_URL))
+                ? (window.ROSTER_BASE_URL || window.BASE_URL)
+                : ""
+        ).trim();
+
+    const buildAssetDataEndpointUrl = (baseUrlRaw, assetPathRaw) => {
+        const assetPath = sanitizeAssetPath(assetPathRaw);
+        if (!assetPath) return "";
+        const baseUrl = toStr(baseUrlRaw).trim();
+        if (!baseUrl) return "";
+        const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
+        return baseUrl + sep + "assetData=" + encodeURIComponent(assetPath);
+    };
+
+    const getAssetDataEndpointCandidates = (assetPathRaw) => {
+        const assetPath = sanitizeAssetPath(assetPathRaw);
+        if (!assetPath) return [];
+        const baseCandidates = [];
+        const seen = Object.create(null);
+        const addBase = (baseRaw) => {
+            const base = toStr(baseRaw).trim();
+            if (!base || seen[base]) return;
+            seen[base] = true;
+            baseCandidates.push(base);
+        };
+
+        if (typeof window !== "undefined" && window.location) {
+            const currentBase = toStr(window.location.origin).trim() + toStr(window.location.pathname).trim();
+            addBase(currentBase);
+        }
+        addBase(getScriptBaseUrl());
+
+        const urls = [];
+        for (let i = 0; i < baseCandidates.length; i++) {
+            const endpoint = buildAssetDataEndpointUrl(baseCandidates[i], assetPath);
+            if (endpoint) urls.push(endpoint);
+        }
+        return urls;
+    };
+
+    const getPublicConfigFromData = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const configRoot = data.publicConfig && typeof data.publicConfig === "object" ? data.publicConfig : {};
+        const landingConfig = configRoot.landing && typeof configRoot.landing === "object" ? configRoot.landing : {};
+        const bannerGifUrl = toStr(
+            landingConfig.bannerGifUrl ||
+            configRoot.bannerGifUrl ||
+            PUBLIC_LANDING_DEFAULTS.bannerGifUrl
+        ).trim();
+        const squareGifUrl = toStr(
+            landingConfig.squareGifUrl ||
+            configRoot.squareGifUrl ||
+            PUBLIC_LANDING_DEFAULTS.squareGifUrl
+        ).trim();
+        const discordInviteUrl = normalizeHttpUrl(
+            landingConfig.discordInviteUrl ||
+            configRoot.discordInviteUrl ||
+            PUBLIC_LANDING_DEFAULTS.discordInviteUrl
+        );
+        return {
+            bannerGifUrl,
+            squareGifUrl,
+            discordInviteUrl,
+        };
+    };
+
+    const setDiscordLinkTarget = (anchor, url) => {
+        if (!anchor) return;
+        if (!url) {
+            anchor.removeAttribute("href");
+            anchor.setAttribute("aria-disabled", "true");
+            anchor.classList.add("is-disabled");
+            return;
+        }
+        anchor.href = url;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.removeAttribute("aria-disabled");
+        anchor.classList.remove("is-disabled");
+    };
+
+    const applyDiscordLinks = (urlRaw) => {
+        const url = normalizeHttpUrl(urlRaw);
+        setDiscordLinkTarget($("#openDiscordLink"), url);
+        setDiscordLinkTarget($("#landingHeroDiscordCta"), url);
+        setDiscordLinkTarget($("#landingBottomDiscordCta"), url);
     };
 
     const el = (tag, className, text) => {
@@ -84,6 +279,162 @@
 
     const getRosterTrackingMode = (rosterRaw) =>
         rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
+
+    const buildDefaultPublicViewState = () => ({
+        view: PUBLIC_VIEW_VALUES.landing,
+        leaderboard: {
+            rosterFilter: "all",
+            sortMode: LEADERBOARD_SORT_MODE_VALUES.trophiesLeague,
+            monthMode: LEADERBOARD_MONTH_MODE_VALUES.current,
+        },
+    });
+
+    const sanitizePublicViewValue = (valueRaw) => {
+        const value = toStr(valueRaw).trim().toLowerCase();
+        if (!value) return PUBLIC_VIEW_VALUES.landing;
+        if (value === PUBLIC_VIEW_VALUES.leaderboard) return PUBLIC_VIEW_VALUES.leaderboard;
+        if (value === PUBLIC_VIEW_VALUES.landing) return PUBLIC_VIEW_VALUES.landing;
+        return PUBLIC_VIEW_VALUES.rosters;
+    };
+
+    const sanitizeLeaderboardSortMode = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (Object.prototype.hasOwnProperty.call(LEADERBOARD_SORT_MODE_VALUES, value)) {
+            return LEADERBOARD_SORT_MODE_VALUES[value];
+        }
+        if (value === LEADERBOARD_SORT_MODE_VALUES.donations) return LEADERBOARD_SORT_MODE_VALUES.donations;
+        if (value === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) return LEADERBOARD_SORT_MODE_VALUES.donationsReceived;
+        if (value === LEADERBOARD_SORT_MODE_VALUES.townHall) return LEADERBOARD_SORT_MODE_VALUES.townHall;
+        return LEADERBOARD_SORT_MODE_VALUES.trophiesLeague;
+    };
+
+    const sanitizeLeaderboardMonthMode = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (value === LEADERBOARD_MONTH_MODE_VALUES.last) return LEADERBOARD_MONTH_MODE_VALUES.last;
+        return LEADERBOARD_MONTH_MODE_VALUES.current;
+    };
+
+    const sanitizeLeaderboardRosterFilter = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        return value ? value : "all";
+    };
+
+    const sanitizePublicViewState = (stateRaw) => {
+        const defaults = buildDefaultPublicViewState();
+        const state = stateRaw && typeof stateRaw === "object" ? stateRaw : {};
+        const leaderboard = state.leaderboard && typeof state.leaderboard === "object" ? state.leaderboard : {};
+        return {
+            view: sanitizePublicViewValue(state.view),
+            leaderboard: {
+                rosterFilter: sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter || defaults.leaderboard.rosterFilter),
+                sortMode: sanitizeLeaderboardSortMode(leaderboard.sortMode || defaults.leaderboard.sortMode),
+                monthMode: sanitizeLeaderboardMonthMode(leaderboard.monthMode || defaults.leaderboard.monthMode),
+            },
+        };
+    };
+
+    const readLocalStorageJson = (key) => {
+        if (!key || typeof window === "undefined" || !window.localStorage) return null;
+        try {
+            const raw = window.localStorage.getItem(key);
+            if (!raw) return null;
+            return JSON.parse(raw);
+        } catch (err) {
+            return null;
+        }
+    };
+
+    const writeLocalStorageJson = (key, value) => {
+        if (!key || typeof window === "undefined" || !window.localStorage) return;
+        try {
+            window.localStorage.setItem(key, JSON.stringify(value));
+        } catch (err) {
+            // ignore quota/storage errors
+        }
+    };
+
+    const loadPublicViewState = () => sanitizePublicViewState(readLocalStorageJson(PUBLIC_VIEW_STORAGE_KEY));
+
+    let publicViewState = loadPublicViewState();
+
+    const readPublicPageQueryValue = () => {
+        if (typeof window === "undefined" || !window.location) return "";
+        const query = toStr(window.location.search).trim();
+        if (!query) return "";
+        try {
+            const params = new URLSearchParams(query);
+            return toStr(params.get("page")).trim().toLowerCase();
+        } catch (err) {
+            return "";
+        }
+    };
+
+    const resolveLoadTimePublicView = () => {
+        if (typeof window !== "undefined" && window && window.ROSTER_ADMIN_MODE) {
+            return PUBLIC_VIEW_VALUES.rosters;
+        }
+        const pageQueryValue = readPublicPageQueryValue();
+        const savedView = sanitizePublicViewValue(publicViewState && publicViewState.view);
+        if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.landing) return PUBLIC_VIEW_VALUES.landing;
+        if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.rosters) return PUBLIC_VIEW_VALUES.rosters;
+        if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.leaderboard) return PUBLIC_VIEW_VALUES.leaderboard;
+        if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.auto || !pageQueryValue) {
+            return savedView || PUBLIC_VIEW_VALUES.landing;
+        }
+        return savedView || PUBLIC_VIEW_VALUES.landing;
+    };
+
+    const persistPublicViewState = () => {
+        publicViewState = sanitizePublicViewState(publicViewState);
+        writeLocalStorageJson(PUBLIC_VIEW_STORAGE_KEY, publicViewState);
+    };
+
+    const applyLoadTimePublicViewSelection = () => {
+        if (!publicViewState || typeof publicViewState !== "object") {
+            publicViewState = buildDefaultPublicViewState();
+        }
+        publicViewState.view = resolveLoadTimePublicView();
+        persistPublicViewState();
+    };
+
+    const isDonationSortMode = (sortModeRaw) => {
+        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
+        return sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived;
+    };
+
+    const getCurrentMonthKey = (dateRaw) => {
+        const date = dateRaw instanceof Date ? dateRaw : new Date();
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        return String(year) + "-" + month;
+    };
+
+    const getPreviousMonthKey = (dateRaw) => {
+        const date = dateRaw instanceof Date ? dateRaw : new Date();
+        const previous = new Date(date.getFullYear(), date.getMonth() - 1, 1);
+        return getCurrentMonthKey(previous);
+    };
+
+    const getPublicViewButtons = () => ({
+        landing: $("#openLandingViewBtn"),
+        rosters: $("#openRostersViewBtn"),
+        leaderboard: $("#openLeaderboardViewBtn"),
+    });
+
+    const getEffectivePublicView = () => {
+        if (typeof window !== "undefined" && window && window.ROSTER_ADMIN_MODE) {
+            return PUBLIC_VIEW_VALUES.rosters;
+        }
+        return sanitizePublicViewValue(publicViewState && publicViewState.view);
+    };
+
+    const syncPublicViewButtonsUi = () => {
+        const buttons = getPublicViewButtons();
+        const activeView = getEffectivePublicView();
+        if (buttons.landing) buttons.landing.classList.toggle("is-active", activeView === PUBLIC_VIEW_VALUES.landing);
+        if (buttons.rosters) buttons.rosters.classList.toggle("is-active", activeView === PUBLIC_VIEW_VALUES.rosters);
+        if (buttons.leaderboard) buttons.leaderboard.classList.toggle("is-active", activeView === PUBLIC_VIEW_VALUES.leaderboard);
+    };
 
     const getOrderedRostersFromData = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
@@ -493,11 +844,10 @@
     const findRosterPlayerByTag = (roster, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return null;
-        const trackingMode = getRosterTrackingMode(roster);
         const players = []
             .concat(Array.isArray(roster && roster.main) ? roster.main : [])
             .concat(Array.isArray(roster && roster.subs) ? roster.subs : [])
-            .concat(trackingMode === "regularWar" && Array.isArray(roster && roster.missing) ? roster.missing : []);
+            .concat(Array.isArray(roster && roster.missing) ? roster.missing : []);
         for (let i = 0; i < players.length; i++) {
             const player = normalizePlayer(players[i]);
             if (player.tag === tag) return player;
@@ -657,16 +1007,11 @@
             const missing = Array.isArray(roster && roster.missing) ? roster.missing : [];
             const trackingMode = getRosterTrackingMode(roster);
             const suggestionModel = trackingMode === "cwl" ? getRosterBenchSuggestionModel(roster) : null;
-            const sections = trackingMode === "regularWar"
-                ? [
-                    { role: "main", players: main },
-                    { role: "sub", players: subs },
-                    { role: "missing", players: missing },
-                ]
-                : [
-                    { role: "main", players: main },
-                    { role: "sub", players: subs },
-                ];
+            const sections = [
+                { role: "main", players: main },
+                { role: "sub", players: subs },
+                { role: "missing", players: missing },
+            ];
 
             for (let s = 0; s < sections.length; s++) {
                 const section = sections[s];
@@ -2236,6 +2581,63 @@
             runner[methodName](...(Array.isArray(args) ? args : []));
         });
 
+    const requestLandingAssetData = (assetPathRaw) => {
+        const assetPath = sanitizeAssetPath(assetPathRaw);
+        if (!assetPath) return Promise.resolve("");
+        if (Object.prototype.hasOwnProperty.call(landingAssetDataCache, assetPath)) {
+            return Promise.resolve(toStr(landingAssetDataCache[assetPath]).trim());
+        }
+        if (landingAssetDataPending[assetPath]) return landingAssetDataPending[assetPath];
+
+        landingAssetDataPending[assetPath] = (async () => {
+            let dataUrl = "";
+            const endpointUrls = getAssetDataEndpointCandidates(assetPath);
+            if (endpointUrls.length && typeof fetch === "function") {
+                for (let i = 0; i < endpointUrls.length; i++) {
+                    if (dataUrl) break;
+                    try {
+                        const response = await fetch(endpointUrls[i], {
+                            method: "GET",
+                            cache: "no-store",
+                            credentials: "same-origin",
+                        });
+                        if (!response || !response.ok) continue;
+                        const payload = await response.json();
+                        const mimeType = toStr(payload && payload.mimeType).trim();
+                        const dataBase64 = toStr(payload && payload.dataBase64).trim();
+                        if (payload && payload.ok && /^image\//i.test(mimeType) && dataBase64) {
+                            dataUrl = "data:" + mimeType + ";base64," + dataBase64;
+                        }
+                    } catch (err) {
+                        // try next candidate
+                    }
+                }
+            }
+
+            // Fallback for environments where fetch endpoint is blocked.
+            if (!dataUrl) {
+                try {
+                    const response = await runServerMethod("getImageAssetData", [assetPath]);
+                    dataUrl = response && response.ok && response.dataUrl
+                        ? toStr(response.dataUrl).trim()
+                        : "";
+                } catch (err) {
+                    dataUrl = "";
+                }
+            }
+
+            if (!dataUrl && typeof console !== "undefined" && console.warn) {
+                console.warn("Landing asset load failed:", assetPath);
+            }
+            landingAssetDataCache[assetPath] = dataUrl;
+            return dataUrl;
+        })().finally(() => {
+            delete landingAssetDataPending[assetPath];
+        });
+
+        return landingAssetDataPending[assetPath];
+    };
+
     const requestLeagueIcon = (playerRaw) => {
         const source = extractHomeLeagueBadgeSource(playerRaw);
         if (!source || !source.name) return;
@@ -2597,6 +2999,722 @@
         info.textContent =
             "Showing " + matchedPlayers + " matching " + pluralize(matchedPlayers, "player", "players") +
             " in " + matchedRosters + " " + pluralize(matchedRosters, "roster", "rosters") + ".";
+    };
+
+    const normalizeLeaderboardLeagueText = (valueRaw) => {
+        const raw = toStr(valueRaw).trim().toLowerCase();
+        if (!raw) return "";
+        const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+        return normalized
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    };
+
+    const normalizeLeaderboardLeagueCompact = (valueRaw) => {
+        const raw = toStr(valueRaw).trim().toLowerCase();
+        if (!raw) return "";
+        const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+        return normalized.replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
+    };
+
+    let leaderboardLeagueOrderConfigCache = null;
+
+    const getLeaderboardLeagueDisplayName = (valueRaw) => {
+        if (typeof valueRaw === "string") return valueRaw.trim();
+        const value = valueRaw && typeof valueRaw === "object" ? valueRaw : null;
+        if (!value) return "";
+        const byName = readLeagueDisplayName(value);
+        if (byName) return byName;
+        const candidates = [
+            value.leagueName,
+            value.displayName,
+            value.tierName,
+            value.label,
+            value.value,
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+            const text = toStr(candidates[i]).trim();
+            if (text) return text;
+        }
+        return "";
+    };
+
+    const getLeaderboardLeagueFamilyByName = (leagueNameRaw) => {
+        const text = normalizeLeaderboardLeagueText(leagueNameRaw);
+        const compact = normalizeLeaderboardLeagueCompact(leagueNameRaw);
+        if (!text && !compact) return "";
+        const hasWord = (word) => new RegExp("(^|\\s)" + String(word) + "(\\s|$)").test(text);
+        const hasCompact = (fragment) => compact.indexOf(String(fragment)) >= 0;
+        if (hasWord("legend") || hasCompact("legend")) return "legend";
+        if (hasWord("electro") || hasCompact("electro")) return "electro";
+        if (hasWord("dragon") || hasCompact("dragon")) return "dragon";
+        if (hasWord("titan") || hasCompact("titan")) return "titan";
+        if (hasWord("pekka") || hasCompact("pekka")) return "pekka";
+        if (hasWord("golem") || hasCompact("golem")) return "golem";
+        if (hasWord("witch") || hasCompact("witch")) return "witch";
+        if (hasWord("valkyrie") || hasCompact("valkyrie")) return "valkyrie";
+        if (hasWord("wizard") || hasCompact("wizard")) return "wizard";
+        if (hasWord("archer") || hasCompact("archer")) return "archer";
+        if (hasWord("barbarian") || hasCompact("barbarian")) return "barbarian";
+        if (hasWord("skeleton") || hasCompact("skeleton")) return "skeleton";
+        if (hasWord("unranked") || hasCompact("unranked")) return "unranked";
+        return "";
+    };
+
+    const parseLeaderboardLeagueTierNumber = (leagueNameRaw) => {
+        const text = normalizeLeaderboardLeagueText(leagueNameRaw);
+        const compact = normalizeLeaderboardLeagueCompact(leagueNameRaw);
+        const matches = text.match(/\b(\d{1,2})\b/g);
+        if (matches && matches.length) {
+            const last = Number(matches[matches.length - 1]);
+            if (Number.isFinite(last)) return Math.floor(last);
+        }
+        const compactMatch = compact.match(/(\d{1,2})(?!.*\d)/);
+        if (!compactMatch) return 0;
+        const value = Number(compactMatch[1]);
+        return Number.isFinite(value) ? Math.floor(value) : 0;
+    };
+
+    const buildLeaderboardLeagueRankKey = (familyRaw, tierRaw) => {
+        const family = toStr(familyRaw).trim().toLowerCase();
+        if (!family) return "";
+        if (family === "legend" || family === "unranked") return family;
+        const tier = toNonNegativeInt(tierRaw);
+        if (tier < 1) return "";
+        return family + ":" + tier;
+    };
+
+    const parseLeaderboardLeagueOrderEntryLabel = (labelRaw) => {
+        const label = toStr(labelRaw).trim();
+        if (!label) return null;
+        const family = getLeaderboardLeagueFamilyByName(label);
+        if (!family) return null;
+        if (family === "legend") return { family: "legend", tierValue: 34, label: label };
+        if (family === "unranked") return { family: "unranked", tierValue: 0, label: label };
+        const tierValue = parseLeaderboardLeagueTierNumber(label);
+        if (tierValue < 1) return null;
+        return { family: family, tierValue: tierValue, label: label };
+    };
+
+    const getLeaderboardLeagueOrderConfig = () => {
+        if (leaderboardLeagueOrderConfigCache) return leaderboardLeagueOrderConfigCache;
+        const rankByKey = Object.create(null);
+        const labelByKey = Object.create(null);
+        const validTiersByFamily = Object.create(null);
+        const orderedLabels = Array.isArray(LEADERBOARD_EXACT_LEAGUE_ORDER) ? LEADERBOARD_EXACT_LEAGUE_ORDER : [];
+
+        for (let i = 0; i < orderedLabels.length; i++) {
+            const parsed = parseLeaderboardLeagueOrderEntryLabel(orderedLabels[i]);
+            if (!parsed) continue;
+            const key = buildLeaderboardLeagueRankKey(parsed.family, parsed.tierValue);
+            if (!key) continue;
+            rankByKey[key] = i;
+            labelByKey[key] = parsed.label;
+            if (parsed.family !== "legend" && parsed.family !== "unranked") {
+                if (!validTiersByFamily[parsed.family]) validTiersByFamily[parsed.family] = Object.create(null);
+                validTiersByFamily[parsed.family][String(parsed.tierValue)] = true;
+            }
+        }
+
+        leaderboardLeagueOrderConfigCache = {
+            rankByKey: rankByKey,
+            labelByKey: labelByKey,
+            validTiersByFamily: validTiersByFamily,
+            fallbackRank: Math.max(0, orderedLabels.length - 1),
+        };
+        return leaderboardLeagueOrderConfigCache;
+    };
+
+    const readStructuredTierFromValue = (valueRaw, depthRaw) => {
+        const depth = toNonNegativeInt(depthRaw);
+        if (depth > 2) return null;
+        if (valueRaw == null) return null;
+
+        if (typeof valueRaw === "number" || typeof valueRaw === "string") {
+            const numeric = Number(valueRaw);
+            if (!Number.isFinite(numeric)) return null;
+            return Math.floor(numeric);
+        }
+
+        const value = valueRaw && typeof valueRaw === "object" ? valueRaw : null;
+        if (!value) return null;
+
+        const nestedKeys = [
+            "value",
+            "number",
+            "id",
+            "tier",
+            "tierNumber",
+            "tierValue",
+            "leagueTier",
+            "leagueTierNumber",
+            "rank",
+            "rankNumber",
+            "position",
+            "index",
+            "level",
+        ];
+        for (let i = 0; i < nestedKeys.length; i++) {
+            const nestedValue = value[nestedKeys[i]];
+            if (nestedValue == null || nestedValue === value) continue;
+            const parsed = readStructuredTierFromValue(nestedValue, depth + 1);
+            if (parsed != null) return parsed;
+        }
+
+        return null;
+    };
+
+    const readStructuredLeagueTierValue = (leagueRaw) => {
+        const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
+        if (!league) return 0;
+        const keys = [
+            "tier",
+            "tierNumber",
+            "tierValue",
+            "leagueTier",
+            "leagueTierNumber",
+            "division",
+            "divisionNumber",
+            "rank",
+            "rankNumber",
+            "position",
+            "number",
+            "index",
+            "level",
+            "id",
+        ];
+        for (let i = 0; i < keys.length; i++) {
+            const out = readStructuredTierFromValue(league[keys[i]], 0);
+            if (out == null) continue;
+            if (out === 0) return 0;
+            if (out >= 1 && out <= 33) return out;
+        }
+        return 0;
+    };
+
+    const readStructuredLeagueFamily = (leagueRaw) => {
+        const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
+        if (!league) return "";
+        const candidates = [
+            league.family,
+            league.leagueFamily,
+            league.tierFamily,
+            league.familyName,
+            league.group,
+            league.category,
+            league.type,
+            league.name,
+            league.displayName,
+            league.label,
+            league.value,
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+            const sourceValue = candidates[i];
+            const sourceText = sourceValue && typeof sourceValue === "object"
+                ? getLeaderboardLeagueDisplayName(sourceValue)
+                : sourceValue;
+            const family = getLeaderboardLeagueFamilyByName(sourceText);
+            if (family) return family;
+        }
+        return "";
+    };
+
+    const readLeaderboardLeagueDescriptorFromSource = (leagueRaw, sourceLabelRaw) => {
+        const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
+        if (!league) return null;
+        const name = getLeaderboardLeagueDisplayName(league);
+        const family = readStructuredLeagueFamily(league);
+        const tierValue = readStructuredLeagueTierValue(league);
+        if (!name && !family && tierValue < 1) return null;
+        return {
+            source: toStr(sourceLabelRaw).trim(),
+            name: name,
+            family: family,
+            tierValue: tierValue,
+        };
+    };
+
+    const resolveLeaderboardLeagueDescriptorFromSnapshot = (snapshotRaw) => {
+        const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+        const fromLeagueTier = readLeaderboardLeagueDescriptorFromSource(snapshot.leagueTier, "leagueTier");
+        const fromLeague = readLeaderboardLeagueDescriptorFromSource(snapshot.league, "league");
+        const fallbackName = getLeaderboardLeagueDisplayName(snapshot.leagueName || snapshot.leagueLabel || snapshot.leagueTierName);
+        const mergedName = toStr((fromLeagueTier && fromLeagueTier.name) || (fromLeague && fromLeague.name) || fallbackName).trim();
+        const mergedFamily =
+            toStr((fromLeagueTier && fromLeagueTier.family) || (fromLeague && fromLeague.family)).trim().toLowerCase()
+            || getLeaderboardLeagueFamilyByName(mergedName);
+        let mergedTierValue =
+            toNonNegativeInt(fromLeagueTier && fromLeagueTier.tierValue)
+            || toNonNegativeInt(fromLeague && fromLeague.tierValue);
+        if (!mergedTierValue && mergedFamily !== "legend" && mergedFamily !== "unranked") {
+            mergedTierValue = parseLeaderboardLeagueTierNumber(mergedName);
+        }
+        return {
+            source: (fromLeagueTier && fromLeagueTier.source) || (fromLeague && fromLeague.source) || (fallbackName ? "string" : ""),
+            name: mergedName,
+            family: mergedFamily,
+            tierValue: mergedTierValue,
+        };
+    };
+
+    const parseLeaderboardLeagueSortKey = (leagueInputRaw) => {
+        const config = getLeaderboardLeagueOrderConfig();
+        const leagueInput = leagueInputRaw && typeof leagueInputRaw === "object" && !Array.isArray(leagueInputRaw)
+            ? leagueInputRaw
+            : { name: leagueInputRaw };
+        const leagueName = toStr(leagueInput.name).trim();
+        let family = toStr(leagueInput.family).trim().toLowerCase();
+        let tierValue = toNonNegativeInt(leagueInput.tierValue);
+
+        if (!family) family = getLeaderboardLeagueFamilyByName(leagueName);
+        if (!tierValue && family !== "legend" && family !== "unranked") {
+            tierValue = parseLeaderboardLeagueTierNumber(leagueName);
+        }
+
+        if (family === "legend") {
+            const key = "legend";
+            return {
+                rank: Object.prototype.hasOwnProperty.call(config.rankByKey, key) ? config.rankByKey[key] : 0,
+                tierLabel: config.labelByKey[key] || "Legend League",
+                tierValue: 34,
+                family: "legend",
+                parsed: true,
+            };
+        }
+
+        if (family === "unranked" || (!leagueName && !family && tierValue < 1)) {
+            const key = "unranked";
+            return {
+                rank: Object.prototype.hasOwnProperty.call(config.rankByKey, key) ? config.rankByKey[key] : config.fallbackRank,
+                tierLabel: config.labelByKey[key] || "Unranked",
+                tierValue: 0,
+                family: "unranked",
+                parsed: family === "unranked",
+            };
+        }
+
+        const validTiers = family && config.validTiersByFamily[family] ? config.validTiersByFamily[family] : null;
+        const hasKnownTier = !!(validTiers && validTiers[String(tierValue)]);
+        if (hasKnownTier) {
+            const key = buildLeaderboardLeagueRankKey(family, tierValue);
+            return {
+                rank: config.rankByKey[key],
+                tierLabel: config.labelByKey[key] || leagueName || (family + " " + tierValue),
+                tierValue: tierValue,
+                family: family,
+                parsed: true,
+            };
+        }
+
+        return {
+            rank: config.fallbackRank,
+            tierLabel: leagueName || "Unranked",
+            tierValue: tierValue || 0,
+            family: family || "",
+            parsed: false,
+        };
+    };
+
+    const readMetricsLatestSnapshot = (entryRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        if (entry.latestSnapshot && typeof entry.latestSnapshot === "object") return entry.latestSnapshot;
+        if (entry.snapshot && typeof entry.snapshot === "object") return entry.snapshot;
+        return null;
+    };
+
+    const readMonthlyDonationLedger = (entryRaw, monthKeyRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        const monthKey = toStr(monthKeyRaw).trim();
+        if (!monthKey) return null;
+        const donationMonths = entry.donationMonths && typeof entry.donationMonths === "object" ? entry.donationMonths : null;
+        if (!donationMonths) return null;
+        if (donationMonths[monthKey] && typeof donationMonths[monthKey] === "object") return donationMonths[monthKey];
+        const keys = Object.keys(donationMonths);
+        for (let i = 0; i < keys.length; i++) {
+            if (toStr(keys[i]).trim() !== monthKey) continue;
+            const candidate = donationMonths[keys[i]];
+            if (candidate && typeof candidate === "object") return candidate;
+        }
+        return null;
+    };
+
+    const readMonthlyDonationTotals = (entryRaw, monthKeyRaw) => {
+        const ledger = readMonthlyDonationLedger(entryRaw, monthKeyRaw);
+        if (!ledger) {
+            return {
+                hasData: false,
+                donations: 0,
+                donationsReceived: 0,
+            };
+        }
+        return {
+            hasData: true,
+            donations: toNonNegativeInt(ledger.monthlyTotalDonations),
+            donationsReceived: toNonNegativeInt(ledger.monthlyTotalDonationsReceived),
+        };
+    };
+
+    const readSnapshotTownHallLevel = (snapshotRaw) => {
+        const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+        if (snapshot.townHallLevel != null) return toNonNegativeInt(snapshot.townHallLevel);
+        if (snapshot.th != null) return toNonNegativeInt(snapshot.th);
+        return 0;
+    };
+
+    const readSnapshotTrophies = (snapshotRaw) => {
+        const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+        if (snapshot.trophies != null) return toNonNegativeInt(snapshot.trophies);
+        return 0;
+    };
+
+    const compareAffiliationPriority = (leftRaw, rightRaw) => {
+        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
+        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
+        const leftRoleRank = Object.prototype.hasOwnProperty.call(ROLE_PRIORITY, left.role) ? ROLE_PRIORITY[left.role] : 99;
+        const rightRoleRank = Object.prototype.hasOwnProperty.call(ROLE_PRIORITY, right.role) ? ROLE_PRIORITY[right.role] : 99;
+        if (leftRoleRank !== rightRoleRank) return leftRoleRank - rightRoleRank;
+        const leftRosterIndex = Number.isFinite(left.rosterIndex) ? left.rosterIndex : Number.POSITIVE_INFINITY;
+        const rightRosterIndex = Number.isFinite(right.rosterIndex) ? right.rosterIndex : Number.POSITIVE_INFINITY;
+        if (leftRosterIndex !== rightRosterIndex) return leftRosterIndex - rightRosterIndex;
+        const leftTitle = toStr(left.rosterTitle).trim();
+        const rightTitle = toStr(right.rosterTitle).trim();
+        return leftTitle.localeCompare(rightTitle);
+    };
+
+    const formatAffiliationRoleLabel = (roleRaw) => {
+        const role = toStr(roleRaw).trim().toLowerCase();
+        if (role === "main") return "Main";
+        if (role === "missing") return "Temporarily missing";
+        return "Sub";
+    };
+
+    const compareLeaderboardName = (leftRaw, rightRaw) => {
+        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
+        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
+        const leftName = toStr(left.displayName).trim().toLowerCase();
+        const rightName = toStr(right.displayName).trim().toLowerCase();
+        if (leftName !== rightName) return leftName.localeCompare(rightName);
+        return toStr(left.tag).localeCompare(toStr(right.tag));
+    };
+
+    const buildLeaderboardEntriesModel = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const rosters = getOrderedRostersFromData(data);
+        const entryByTag = Object.create(null);
+        const currentMonthKey = getCurrentMonthKey(new Date());
+        const lastMonthKey = getPreviousMonthKey(new Date());
+        let hasLastMonthData = false;
+
+        const upsertAffiliation = (entry, roster, rosterIndex, roleRaw) => {
+            const rosterId = toStr(roster && roster.id).trim();
+            const rosterTitle = toStr(roster && roster.title).trim() || (rosterId || "Roster");
+            const role = toStr(roleRaw).trim().toLowerCase() || "sub";
+            const key = (rosterId || rosterTitle) + "|" + role;
+            if (entry.affiliationKeys[key]) return;
+            entry.affiliationKeys[key] = true;
+            entry.affiliations.push({
+                rosterId: rosterId,
+                rosterTitle: rosterTitle,
+                role: role,
+                rosterIndex: rosterIndex,
+            });
+            if (rosterId) entry.rosterIdSet[rosterId] = true;
+        };
+
+        const collectPlayers = (playersRaw, roster, rosterIndex, role) => {
+            const players = Array.isArray(playersRaw) ? playersRaw : [];
+            for (let i = 0; i < players.length; i++) {
+                const player = normalizePlayer(players[i]);
+                const tag = normalizeClanTag(player.tag);
+                if (!tag) continue;
+                let entry = entryByTag[tag];
+                if (!entry) {
+                    entry = {
+                        tag: tag,
+                        displayName: toStr(player.name).trim() || tag,
+                        th: toNonNegativeInt(player.th),
+                        affiliations: [],
+                        affiliationKeys: Object.create(null),
+                        rosterIdSet: Object.create(null),
+                    };
+                    entryByTag[tag] = entry;
+                }
+                if ((!entry.displayName || entry.displayName === "(no name)") && toStr(player.name).trim()) {
+                    entry.displayName = toStr(player.name).trim();
+                }
+                const playerTh = toNonNegativeInt(player.th);
+                if (playerTh > entry.th) entry.th = playerTh;
+                upsertAffiliation(entry, roster, rosterIndex, role);
+            }
+        };
+
+        for (let i = 0; i < rosters.length; i++) {
+            const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+            collectPlayers(roster.main, roster, i, "main");
+            collectPlayers(roster.subs, roster, i, "sub");
+            collectPlayers(roster.missing, roster, i, "missing");
+        }
+
+        const tags = Object.keys(entryByTag);
+        const entries = [];
+        for (let i = 0; i < tags.length; i++) {
+            const tag = tags[i];
+            const base = entryByTag[tag];
+            const affiliations = Array.isArray(base.affiliations) ? base.affiliations.slice().sort(compareAffiliationPriority) : [];
+            const primaryAffiliation = affiliations.length ? affiliations[0] : null;
+            const metricsEntry = getPlayerMetricsEntry(tag, data);
+            const latestSnapshot = readMetricsLatestSnapshot(metricsEntry);
+            const snapshotName = toStr(latestSnapshot && latestSnapshot.name).trim();
+            const baseDisplayName = toStr(base.displayName).trim();
+            const displayName = (baseDisplayName && baseDisplayName !== "(no name)") ? baseDisplayName : (snapshotName || tag);
+            const snapshotTh = readSnapshotTownHallLevel(latestSnapshot);
+            const th = base.th > 0 ? base.th : snapshotTh;
+            let trophies = readSnapshotTrophies(latestSnapshot);
+            if (trophies <= 0) {
+                const history = getLocalTrophyHistoryForTag(tag, data);
+                if (history.length) trophies = toNonNegativeInt(history[history.length - 1].trophies);
+            }
+            const leagueSource = resolveLeaderboardLeagueDescriptorFromSnapshot(latestSnapshot);
+            const leagueSort = parseLeaderboardLeagueSortKey(leagueSource);
+            const currentMonthTotals = readMonthlyDonationTotals(metricsEntry, currentMonthKey);
+            const lastMonthTotals = readMonthlyDonationTotals(metricsEntry, lastMonthKey);
+            if (lastMonthTotals.hasData) hasLastMonthData = true;
+
+            entries.push({
+                tag: tag,
+                displayName: displayName,
+                th: th,
+                trophies: trophies,
+                leagueName: toStr(leagueSource.name).trim(),
+                leagueSort: leagueSort,
+                primaryAffiliation: primaryAffiliation,
+                primaryAffiliationLabel: primaryAffiliation
+                    ? (primaryAffiliation.rosterTitle + " • " + formatAffiliationRoleLabel(primaryAffiliation.role))
+                    : "No roster",
+                affiliations: affiliations,
+                rosterIdSet: base.rosterIdSet,
+                donationTotals: {
+                    current: currentMonthTotals,
+                    last: lastMonthTotals,
+                },
+            });
+        }
+
+        return {
+            entries: entries,
+            rosters: rosters,
+            currentMonthKey: currentMonthKey,
+            lastMonthKey: lastMonthKey,
+            hasLastMonthData: hasLastMonthData,
+        };
+    };
+
+    const filterLeaderboardEntriesByRoster = (entriesRaw, rosterFilterRaw) => {
+        const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+        const rosterFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
+        if (!rosterFilter || rosterFilter === "all") return entries.slice();
+        return entries.filter((entry) => !!(entry && entry.rosterIdSet && entry.rosterIdSet[rosterFilter]));
+    };
+
+    const formatLeaderboardAffiliationLabel = (affiliationRaw) => {
+        const affiliation = affiliationRaw && typeof affiliationRaw === "object" ? affiliationRaw : null;
+        if (!affiliation) return "No roster";
+        const rosterTitle = toStr(affiliation.rosterTitle).trim() || toStr(affiliation.rosterId).trim() || "Roster";
+        return rosterTitle + " • " + formatAffiliationRoleLabel(affiliation.role);
+    };
+
+    const resolveLeaderboardCardAffiliation = (entryRaw, rosterFilterRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        const rosterFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
+        const sortedAffiliations = Array.isArray(entry.affiliations)
+            ? entry.affiliations.slice().sort(compareAffiliationPriority)
+            : [];
+        if (rosterFilter && rosterFilter !== "all") {
+            for (let i = 0; i < sortedAffiliations.length; i++) {
+                const affiliation = sortedAffiliations[i] && typeof sortedAffiliations[i] === "object"
+                    ? sortedAffiliations[i]
+                    : null;
+                const rosterId = toStr(affiliation && affiliation.rosterId).trim();
+                if (rosterId && rosterId === rosterFilter) return affiliation;
+            }
+        }
+        if (entry.primaryAffiliation && typeof entry.primaryAffiliation === "object") return entry.primaryAffiliation;
+        return sortedAffiliations.length ? sortedAffiliations[0] : null;
+    };
+
+    const compareLeaderboardFallback = (leftRaw, rightRaw) => {
+        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
+        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
+        const trophiesDiff = toNonNegativeInt(right.trophies) - toNonNegativeInt(left.trophies);
+        if (trophiesDiff !== 0) return trophiesDiff;
+        return compareLeaderboardName(left, right);
+    };
+
+    const sortLeaderboardEntries = (entriesRaw, sortModeRaw, monthModeRaw) => {
+        const entries = Array.isArray(entriesRaw) ? entriesRaw.slice() : [];
+        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
+        const monthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
+        const monthKey = monthMode === LEADERBOARD_MONTH_MODE_VALUES.last ? "last" : "current";
+
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.trophiesLeague) {
+            entries.sort((left, right) => {
+                const leftLeagueRank = Number.isFinite(left && left.leagueSort && left.leagueSort.rank) ? left.leagueSort.rank : 99;
+                const rightLeagueRank = Number.isFinite(right && right.leagueSort && right.leagueSort.rank) ? right.leagueSort.rank : 99;
+                if (leftLeagueRank !== rightLeagueRank) return leftLeagueRank - rightLeagueRank;
+                return compareLeaderboardFallback(left, right);
+            });
+            return entries;
+        }
+
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
+            entries.sort((left, right) => {
+                const leftMonth = left && left.donationTotals && left.donationTotals[monthKey] ? left.donationTotals[monthKey] : {};
+                const rightMonth = right && right.donationTotals && right.donationTotals[monthKey] ? right.donationTotals[monthKey] : {};
+                const leftValue = sortMode === LEADERBOARD_SORT_MODE_VALUES.donations
+                    ? toNonNegativeInt(leftMonth.donations)
+                    : toNonNegativeInt(leftMonth.donationsReceived);
+                const rightValue = sortMode === LEADERBOARD_SORT_MODE_VALUES.donations
+                    ? toNonNegativeInt(rightMonth.donations)
+                    : toNonNegativeInt(rightMonth.donationsReceived);
+                if (rightValue !== leftValue) return rightValue - leftValue;
+                return compareLeaderboardFallback(left, right);
+            });
+            return entries;
+        }
+
+        entries.sort((left, right) => {
+            const leftTh = toNonNegativeInt(left && left.th);
+            const rightTh = toNonNegativeInt(right && right.th);
+            if (rightTh !== leftTh) return rightTh - leftTh;
+            return compareLeaderboardFallback(left, right);
+        });
+        return entries;
+    };
+
+    const buildLeaderboardPrimaryMetricLabel = (entryRaw, sortModeRaw, monthModeRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
+        const monthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
+        const monthKey = monthMode === LEADERBOARD_MONTH_MODE_VALUES.last ? "last" : "current";
+        const monthTotals = entry.donationTotals && entry.donationTotals[monthKey] ? entry.donationTotals[monthKey] : {};
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations) {
+            return formatNumber(monthTotals.donations) + " donations";
+        }
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
+            return formatNumber(monthTotals.donationsReceived) + " received";
+        }
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.townHall) {
+            return "TH " + (toNonNegativeInt(entry.th) > 0 ? toStr(toNonNegativeInt(entry.th)) : "-");
+        }
+        return formatNumber(entry.trophies) + " trophies";
+    };
+
+    const buildLeaderboardSecondaryMetricLabel = (entryRaw, sortModeRaw, monthModeRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
+        const monthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
+        const monthKey = monthMode === LEADERBOARD_MONTH_MODE_VALUES.last ? "last" : "current";
+        const monthTotals = entry.donationTotals && entry.donationTotals[monthKey] ? entry.donationTotals[monthKey] : {};
+        const leagueLabel = toStr(entry.leagueSort && entry.leagueSort.tierLabel).trim() || toStr(entry.leagueName).trim() || "Unranked";
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations) {
+            return "Received: " + formatNumber(monthTotals.donationsReceived);
+        }
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
+            return "Donations: " + formatNumber(monthTotals.donations);
+        }
+        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.townHall) {
+            return formatNumber(entry.trophies) + " trophies • " + leagueLabel;
+        }
+        return leagueLabel;
+    };
+
+    const renderLeaderboardCard = (entryRaw, optionsRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const sortMode = sanitizeLeaderboardSortMode(options.sortMode);
+        const monthMode = sanitizeLeaderboardMonthMode(options.monthMode);
+        const rosterFilter = sanitizeLeaderboardRosterFilter(options.rosterFilter);
+        const displayAffiliation = resolveLeaderboardCardAffiliation(entry, rosterFilter);
+        const wrap = el("div", "player leaderboard-player");
+        wrap.dataset.tag = normalizeClanTag(entry.tag);
+        wrap.dataset.rosterId = toStr(displayAffiliation && displayAffiliation.rosterId).trim();
+        wrap.dataset.playerProfileTrigger = "1";
+        wrap.setAttribute("role", "button");
+        wrap.setAttribute("tabindex", "0");
+
+        const top = el("div", "player-top");
+
+        const left = el("div", "player-left");
+        const ident = el("div", "player-ident");
+        ident.appendChild(el("div", "leaderboard-player__name", toStr(entry.displayName).trim() || toStr(entry.tag)));
+        ident.appendChild(el("div", "leaderboard-player__affiliation", formatLeaderboardAffiliationLabel(displayAffiliation)));
+        left.appendChild(ident);
+        top.appendChild(left);
+
+        const right = el("div", "player-right");
+        right.appendChild(el("span", "player-th", "TH " + (toNonNegativeInt(entry.th) > 0 ? toStr(toNonNegativeInt(entry.th)) : "-")));
+        top.appendChild(right);
+
+        const metric = el("div", "leaderboard-player__metric", buildLeaderboardPrimaryMetricLabel(entry, sortMode, monthMode));
+        const secondary = el("div", "leaderboard-player__secondary", buildLeaderboardSecondaryMetricLabel(entry, sortMode, monthMode));
+        const bottom = el("div", "player-bottom");
+        bottom.appendChild(el("span", "player-tag", toStr(entry.tag)));
+        if (Array.isArray(entry.affiliations) && entry.affiliations.length > 1) {
+            bottom.appendChild(el("span", "badge", entry.affiliations.length + " rosters"));
+        }
+
+        wrap.appendChild(top);
+        wrap.appendChild(metric);
+        wrap.appendChild(secondary);
+        wrap.appendChild(bottom);
+        return wrap;
+    };
+
+    const createChipButton = (labelRaw, active, onClick, disabled) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "chip-btn" + (active ? " is-active" : "");
+        button.textContent = toStr(labelRaw);
+        if (disabled) button.disabled = true;
+        if (typeof onClick === "function" && !disabled) {
+            button.addEventListener("click", onClick);
+        }
+        return button;
+    };
+
+    const ensureLeaderboardStateValidity = (modelRaw) => {
+        const model = modelRaw && typeof modelRaw === "object" ? modelRaw : {};
+        const rosters = Array.isArray(model.rosters) ? model.rosters : [];
+        const rosterIds = Object.create(null);
+        for (let i = 0; i < rosters.length; i++) {
+            const rosterId = toStr(rosters[i] && rosters[i].id).trim();
+            if (!rosterId) continue;
+            rosterIds[rosterId] = true;
+        }
+        let changed = false;
+        if (!publicViewState || typeof publicViewState !== "object") {
+            publicViewState = buildDefaultPublicViewState();
+            changed = true;
+        }
+        const leaderboard = publicViewState.leaderboard && typeof publicViewState.leaderboard === "object"
+            ? publicViewState.leaderboard
+            : (publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard);
+        const rosterFilter = sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter);
+        if (rosterFilter !== "all" && !rosterIds[rosterFilter]) {
+            leaderboard.rosterFilter = "all";
+            changed = true;
+        }
+        if (leaderboard.monthMode === LEADERBOARD_MONTH_MODE_VALUES.last && !model.hasLastMonthData) {
+            leaderboard.monthMode = LEADERBOARD_MONTH_MODE_VALUES.current;
+            changed = true;
+        }
+        leaderboard.sortMode = sanitizeLeaderboardSortMode(leaderboard.sortMode);
+        leaderboard.monthMode = sanitizeLeaderboardMonthMode(leaderboard.monthMode);
+        leaderboard.rosterFilter = sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter);
+        publicViewState.leaderboard = leaderboard;
+        if (changed) persistPublicViewState();
     };
 
     const renderRosterSuggestionBanner = (roster, suggestionModel) => {
@@ -3095,25 +4213,245 @@
         return card;
     };
 
-    const render = (data) => {
+    const getPublicViewContainers = () => ({
+        landing: $("#publicViewLanding"),
+        rosters: $("#publicViewRosters"),
+        leaderboard: $("#publicViewLeaderboard"),
+    });
+
+    const syncPublicViewVisibility = (viewRaw) => {
+        const activeView = sanitizePublicViewValue(viewRaw);
+        const containers = getPublicViewContainers();
+        if (containers.landing) containers.landing.classList.toggle("hidden", activeView !== PUBLIC_VIEW_VALUES.landing);
+        if (containers.rosters) containers.rosters.classList.toggle("hidden", activeView !== PUBLIC_VIEW_VALUES.rosters);
+        if (containers.leaderboard) containers.leaderboard.classList.toggle("hidden", activeView !== PUBLIC_VIEW_VALUES.leaderboard);
+        const shell = $(".public-shell");
+        if (shell) shell.setAttribute("data-active-view", activeView);
+    };
+
+    const setLandingMediaSlot = (slotId, imageId, urlRaw) => {
+        const slot = $("#" + slotId);
+        const image = $("#" + imageId);
+        if (!slot || !image) return;
+
+        const safeUrl = toStr(urlRaw).trim();
+        const showPlaceholder = () => {
+            slot.classList.remove("is-loading");
+            slot.classList.add("is-placeholder");
+            image.classList.add("hidden");
+        };
+
+        if (!safeUrl) {
+            image.onload = null;
+            image.onerror = null;
+            image.removeAttribute("src");
+            image.dataset.loadedSrc = "";
+            showPlaceholder();
+            return;
+        }
+
+        if (image.dataset.loadedSrc === safeUrl && !slot.classList.contains("is-placeholder")) {
+            return;
+        }
+
+        slot.classList.add("is-loading");
+        image.classList.add("hidden");
+        image.onload = () => {
+            slot.classList.remove("is-loading");
+            slot.classList.remove("is-placeholder");
+            image.classList.remove("hidden");
+            image.dataset.loadedSrc = safeUrl;
+        };
+        image.onerror = () => {
+            image.onload = null;
+            image.onerror = null;
+            image.removeAttribute("src");
+            image.dataset.loadedSrc = "";
+            showPlaceholder();
+        };
+        image.src = safeUrl;
+    };
+
+    const setLandingMediaSlotSource = (slotId, imageId, sourceRaw) => {
+        const slot = $("#" + slotId);
+        const image = $("#" + imageId);
+        if (!slot || !image) return;
+
+        const source = resolveLandingMediaSource(sourceRaw);
+        const sourceKey = source.kind + ":" + source.value;
+        slot.dataset.assetSourceKey = sourceKey;
+
+        if (source.kind === "none") {
+            setLandingMediaSlot(slotId, imageId, "");
+            return;
+        }
+
+        if (source.kind === "url") {
+            setLandingMediaSlot(slotId, imageId, source.value);
+            return;
+        }
+
+        slot.classList.add("is-loading");
+        image.classList.add("hidden");
+        requestLandingAssetData(source.value).then((dataUrl) => {
+            if (slot.dataset.assetSourceKey !== sourceKey) return;
+            setLandingMediaSlot(slotId, imageId, dataUrl);
+        });
+    };
+
+    const countUniqueTagsAcrossRosterRoles = (rosterRaw) => {
+        const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+        const pool = []
+            .concat(Array.isArray(roster.main) ? roster.main : [])
+            .concat(Array.isArray(roster.subs) ? roster.subs : [])
+            .concat(Array.isArray(roster.missing) ? roster.missing : []);
+        const seen = Object.create(null);
+        let count = 0;
+        for (let i = 0; i < pool.length; i++) {
+            const tag = normalizeClanTag(pool[i] && pool[i].tag);
+            if (!tag || seen[tag]) continue;
+            seen[tag] = true;
+            count++;
+        }
+        return count;
+    };
+
+    const renderLandingClanFamily = (dataRaw) => {
+        const target = $("#landingClanFamilyGrid");
+        if (!target) return;
+        clearNode(target);
+
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const rosters = getOrderedRostersFromData(data);
+        if (!rosters.length) {
+            const empty = el("div", "landing-family-empty", "No clan roster data available yet.");
+            target.appendChild(empty);
+            return;
+        }
+
+        for (let i = 0; i < rosters.length; i++) {
+            const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+            const card = el("article", "landing-family-card");
+            card.setAttribute("data-landing-reveal", "1");
+
+            const title = el("h3", "landing-family-card__title", toStr(roster.title).trim() || "Unnamed roster");
+            const members = countUniqueTagsAcrossRosterRoles(roster);
+            const memberValue = el("div", "landing-family-card__value", formatNumber(members));
+            const memberLabel = el("div", "landing-family-card__label", "Unique members");
+            const trackingMode = getRosterTrackingMode(roster) === "regularWar" ? "Regular war" : "CWL";
+            const meta = el("div", "landing-family-card__meta", trackingMode);
+
+            card.appendChild(title);
+            card.appendChild(memberValue);
+            card.appendChild(memberLabel);
+            card.appendChild(meta);
+            target.appendChild(card);
+        }
+    };
+
+    const refreshLandingRevealTargets = () => {
+        const landingRoot = $("#publicViewLanding");
+        if (!landingRoot) return;
+        const revealTargets = Array.prototype.slice.call(landingRoot.querySelectorAll("[data-landing-reveal]"));
+        if (!revealTargets.length) return;
+
+        if (typeof window === "undefined" || !window.IntersectionObserver) {
+            for (let i = 0; i < revealTargets.length; i++) {
+                revealTargets[i].classList.add("is-visible");
+            }
+            return;
+        }
+
+        if (!landingRevealObserver) {
+            landingRevealObserver = new window.IntersectionObserver((entries) => {
+                for (let i = 0; i < entries.length; i++) {
+                    const entry = entries[i];
+                    if (!entry || !entry.target) continue;
+                    if (!entry.isIntersecting && entry.intersectionRatio <= 0) continue;
+                    entry.target.classList.add("is-visible");
+                    if (landingRevealObserver) landingRevealObserver.unobserve(entry.target);
+                }
+            }, {
+                threshold: 0.12,
+                rootMargin: "0px 0px -8% 0px",
+            });
+        }
+
+        for (let i = 0; i < revealTargets.length; i++) {
+            const node = revealTargets[i];
+            if (node.classList.contains("is-visible")) continue;
+            if (node.getAttribute("data-landing-reveal-observed") === "1") continue;
+            node.setAttribute("data-landing-reveal-observed", "1");
+            landingRevealObserver.observe(node);
+        }
+    };
+
+    const renderLandingView = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const config = getPublicConfigFromData(data);
+        applyDiscordLinks(config.discordInviteUrl);
+        setLandingMediaSlotSource("landingBannerSlot", "landingBannerImage", config.bannerGifUrl);
+        setLandingMediaSlotSource("landingSquareSlot", "landingSquareImage", config.squareGifUrl);
+        renderLandingClanFamily(data);
+        refreshLandingRevealTargets();
+    };
+
+    const setPublicView = (viewRaw) => {
+        const nextView = sanitizePublicViewValue(viewRaw);
+        if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
+        if (publicViewState.view === nextView) {
+            syncPublicViewButtonsUi();
+            syncPublicViewVisibility(nextView);
+            return;
+        }
+        publicViewState.view = nextView;
+        persistPublicViewState();
+        syncPublicViewButtonsUi();
+        syncPublicViewVisibility(nextView);
+        if (lastRenderedData) render(lastRenderedData);
+    };
+
+    const setLeaderboardRosterFilter = (rosterFilterRaw) => {
+        const nextFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
+        if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
+        if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
+            publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
+        }
+        if (publicViewState.leaderboard.rosterFilter === nextFilter) return;
+        publicViewState.leaderboard.rosterFilter = nextFilter;
+        persistPublicViewState();
+        if (lastRenderedData) render(lastRenderedData);
+    };
+
+    const setLeaderboardSortMode = (sortModeRaw) => {
+        const nextSortMode = sanitizeLeaderboardSortMode(sortModeRaw);
+        if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
+        if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
+            publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
+        }
+        if (publicViewState.leaderboard.sortMode === nextSortMode) return;
+        publicViewState.leaderboard.sortMode = nextSortMode;
+        persistPublicViewState();
+        if (lastRenderedData) render(lastRenderedData);
+    };
+
+    const setLeaderboardMonthMode = (monthModeRaw) => {
+        const nextMonthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
+        if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
+        if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
+            publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
+        }
+        if (publicViewState.leaderboard.monthMode === nextMonthMode) return;
+        publicViewState.leaderboard.monthMode = nextMonthMode;
+        persistPublicViewState();
+        if (lastRenderedData) render(lastRenderedData);
+    };
+
+    const renderRostersView = (dataRaw) => {
         const target = $("#rosters");
         if (!target) return;
-
-        const safeData = data && typeof data === "object" ? data : {};
-        const allRosters = getOrderedRostersFromData(safeData);
-        lastRenderedData = Object.assign({}, safeData, {
-            rosters: allRosters,
-            rosterOrder: buildRosterOrderFromRosters(allRosters),
-        });
-
-        const pageTitleHeading = $("#pageTitleHeading");
-        const pageTitleText = toStr(safeData.pageTitle).trim();
-        if (pageTitleText) {
-            document.title = pageTitleText;
-            if (pageTitleHeading) pageTitleHeading.textContent = pageTitleText;
-        }
-        renderGlobalLastUpdated(safeData);
-
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const allRosters = Array.isArray(data.rosters) ? data.rosters : getOrderedRostersFromData(data);
         const searchInput = $("#rosterSearchInput");
         const rawQuery = searchInput ? toStr(searchInput.value) : "";
         const filtered = filterRostersByQuery(allRosters, rawQuery);
@@ -3122,10 +4460,10 @@
         const hideSuggestions = isSearchMode && !isAdminMode;
 
         target.textContent = "";
-        for (const r of filtered.rosters) {
-            target.appendChild(renderRosterCard(r, {
+        for (let i = 0; i < filtered.rosters.length; i++) {
+            target.appendChild(renderRosterCard(filtered.rosters[i], {
                 showEmptySections: !isSearchMode,
-                hideSuggestions,
+                hideSuggestions: hideSuggestions,
                 expandMissingByDefault: isSearchMode,
             }));
         }
@@ -3149,11 +4487,180 @@
                 matchedRosters: filtered.rosters.length,
             });
         }
+    };
+
+    const renderLeaderboardView = (dataRaw) => {
+        const target = $("#leaderboard");
+        if (!target) return;
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const model = buildLeaderboardEntriesModel(data);
+        ensureLeaderboardStateValidity(model);
+
+        const leaderboardState = publicViewState && publicViewState.leaderboard && typeof publicViewState.leaderboard === "object"
+            ? publicViewState.leaderboard
+            : buildDefaultPublicViewState().leaderboard;
+        const rosterFilter = sanitizeLeaderboardRosterFilter(leaderboardState.rosterFilter);
+        const sortMode = sanitizeLeaderboardSortMode(leaderboardState.sortMode);
+        const isDonationSort = isDonationSortMode(sortMode);
+        const monthMode = isDonationSort
+            ? sanitizeLeaderboardMonthMode(leaderboardState.monthMode)
+            : LEADERBOARD_MONTH_MODE_VALUES.current;
+
+        const filteredEntries = filterLeaderboardEntriesByRoster(model.entries, rosterFilter);
+        const sortedEntries = sortLeaderboardEntries(filteredEntries, sortMode, monthMode);
+
+        target.textContent = "";
+        const controlsCard = el("div", "card leaderboard-controls");
+
+        const filterRow = el("div", "leaderboard-controls__row");
+        filterRow.appendChild(el("div", "leaderboard-controls__label", "Roster filter"));
+        const filterChipRow = el("div", "chip-scroll");
+        filterChipRow.appendChild(createChipButton("All", rosterFilter === "all", () => {
+            setLeaderboardRosterFilter("all");
+        }));
+        for (let i = 0; i < model.rosters.length; i++) {
+            const roster = model.rosters[i] && typeof model.rosters[i] === "object" ? model.rosters[i] : {};
+            const rosterId = toStr(roster.id).trim();
+            if (!rosterId) continue;
+            const rosterTitle = toStr(roster.title).trim() || rosterId;
+            filterChipRow.appendChild(createChipButton(rosterTitle, rosterFilter === rosterId, () => {
+                setLeaderboardRosterFilter(rosterId);
+            }));
+        }
+        filterRow.appendChild(filterChipRow);
+        controlsCard.appendChild(filterRow);
+
+        const sortRow = el("div", "leaderboard-controls__row");
+        sortRow.appendChild(el("div", "leaderboard-controls__label", "Sort"));
+        const sortChipRow = el("div", "chip-scroll");
+        for (let i = 0; i < LEADERBOARD_SORT_MODE_OPTIONS.length; i++) {
+            const option = LEADERBOARD_SORT_MODE_OPTIONS[i];
+            sortChipRow.appendChild(createChipButton(option.label, sortMode === option.key, () => {
+                setLeaderboardSortMode(option.key);
+            }));
+        }
+        sortRow.appendChild(sortChipRow);
+        controlsCard.appendChild(sortRow);
+
+        if (isDonationSort) {
+            const monthRow = el("div", "leaderboard-controls__row");
+            monthRow.appendChild(el("div", "leaderboard-controls__label", "Month"));
+            const monthChipRow = el("div", "chip-scroll");
+            monthChipRow.appendChild(createChipButton(
+                "Current month",
+                monthMode === LEADERBOARD_MONTH_MODE_VALUES.current,
+                () => setLeaderboardMonthMode(LEADERBOARD_MONTH_MODE_VALUES.current),
+            ));
+            monthChipRow.appendChild(createChipButton(
+                "Show last month",
+                monthMode === LEADERBOARD_MONTH_MODE_VALUES.last,
+                () => setLeaderboardMonthMode(LEADERBOARD_MONTH_MODE_VALUES.last),
+                !model.hasLastMonthData,
+            ));
+            monthRow.appendChild(monthChipRow);
+            controlsCard.appendChild(monthRow);
+        }
+
+        target.appendChild(controlsCard);
+
+        if (!sortedEntries.length) {
+            const emptyCard = el("div", "card");
+            emptyCard.appendChild(el("div", "empty", rosterFilter === "all" ? "No players available for leaderboard." : "No players found for this roster filter."));
+            target.appendChild(emptyCard);
+            return;
+        }
+
+        const list = el("div", "leaderboard-list");
+        for (let i = 0; i < sortedEntries.length; i++) {
+            list.appendChild(renderLeaderboardCard(sortedEntries[i], {
+                sortMode: sortMode,
+                monthMode: monthMode,
+                rosterFilter: rosterFilter,
+            }));
+        }
+        target.appendChild(list);
+    };
+
+    const renderPublicApp = (data) => {
+        const rostersTarget = $("#rosters");
+        const leaderboardTarget = $("#leaderboard");
+        const landingView = $("#publicViewLanding");
+        if (!rostersTarget || !leaderboardTarget || !landingView) return;
+
+        const safeData = data && typeof data === "object" ? data : {};
+        const allRosters = getOrderedRostersFromData(safeData);
+        lastRenderedData = Object.assign({}, safeData, {
+            rosters: allRosters,
+            rosterOrder: buildRosterOrderFromRosters(allRosters),
+        });
+
+        const pageTitleHeading = $("#pageTitleHeading");
+        const pageTitleText = toStr(safeData.pageTitle).trim();
+        if (pageTitleText) {
+            document.title = pageTitleText;
+            if (pageTitleHeading) pageTitleHeading.textContent = pageTitleText;
+        }
+        const publicConfig = getPublicConfigFromData(lastRenderedData);
+        applyDiscordLinks(publicConfig.discordInviteUrl);
+
+        const activeView = getEffectivePublicView();
+        syncPublicViewButtonsUi();
+        syncPublicViewVisibility(activeView);
+
+        if (activeView === PUBLIC_VIEW_VALUES.landing) {
+            const freshnessCard = $("#globalLastUpdated");
+            if (freshnessCard) freshnessCard.classList.add("hidden");
+            clearGlobalLastUpdatedTimer();
+            renderLandingView(lastRenderedData);
+        } else if (activeView === PUBLIC_VIEW_VALUES.leaderboard) {
+            renderGlobalLastUpdated(safeData);
+            renderLeaderboardView(lastRenderedData);
+        } else {
+            renderGlobalLastUpdated(safeData);
+            renderRostersView(lastRenderedData);
+        }
 
         syncProfileModalFromRender();
 
         const loading = $("#loading");
         if (loading) loading.remove();
+    };
+
+    const render = renderPublicApp;
+
+    const bindPublicViewUi = () => {
+        if (publicViewUiBound) return;
+        publicViewUiBound = true;
+        const buttons = getPublicViewButtons();
+        if (buttons.landing) {
+            buttons.landing.addEventListener("click", () => {
+                setPublicView(PUBLIC_VIEW_VALUES.landing);
+            });
+        }
+        if (buttons.rosters) {
+            buttons.rosters.addEventListener("click", () => {
+                setPublicView(PUBLIC_VIEW_VALUES.rosters);
+            });
+        }
+        if (buttons.leaderboard) {
+            buttons.leaderboard.addEventListener("click", () => {
+                setPublicView(PUBLIC_VIEW_VALUES.leaderboard);
+            });
+        }
+        const landingHeroRostersCta = $("#landingHeroRostersCta");
+        if (landingHeroRostersCta) {
+            landingHeroRostersCta.addEventListener("click", () => {
+                setPublicView(PUBLIC_VIEW_VALUES.rosters);
+            });
+        }
+        const landingBottomLeaderboardCta = $("#landingBottomLeaderboardCta");
+        if (landingBottomLeaderboardCta) {
+            landingBottomLeaderboardCta.addEventListener("click", () => {
+                setPublicView(PUBLIC_VIEW_VALUES.leaderboard);
+            });
+        }
+        syncPublicViewButtonsUi();
+        syncPublicViewVisibility(getEffectivePublicView());
     };
 
     const bindSearchUi = () => {
@@ -3194,7 +4701,10 @@
         openProfileModal(context, null);
     };
 
+    applyLoadTimePublicViewSelection();
     updateAdminLink();
+    applyDiscordLinks(PUBLIC_LANDING_DEFAULTS.discordInviteUrl);
+    bindPublicViewUi();
     bindSearchUi();
     bindProfileUi();
 

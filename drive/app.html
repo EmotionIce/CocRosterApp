@@ -1,29 +1,121 @@
-﻿<div class="container">
-  <header>
-    <h1 id="pageTitleHeading">CWL Roster Overview</h1>
-    <a id="openAdminLink" class="header-btn" href="__ADMIN_URL__">Admin Panel</a>
-  </header>
-
-  <div class="card search-card">
-    <div class="search-top">
-      <label for="rosterSearchInput" class="search-label">Search by name or tag</label>
-      <button id="clearRosterSearchBtn" class="search-clear hidden" type="button">Clear</button>
+﻿<div class="container public-shell">
+  <header class="public-header">
+    <div class="public-brand">
+      <div class="public-brand__eyebrow">TURTLE Clan Family</div>
+      <h1 id="pageTitleHeading">CWL Roster Overview</h1>
     </div>
-    <input id="rosterSearchInput" class="search-input" type="search" placeholder="e.g. PlayerName or #TAG123"
-      autocomplete="off" />
-    <div id="rosterSearchInfo" class="search-info">Showing all players.</div>
-  </div>
+    <nav class="public-nav" aria-label="Public navigation">
+      <button id="openLandingViewBtn" class="public-nav__item public-nav__item--toggle is-active" type="button">Home</button>
+      <button id="openRostersViewBtn" class="public-nav__item public-nav__item--toggle" type="button">Rosters</button>
+      <button id="openLeaderboardViewBtn" class="public-nav__item public-nav__item--toggle" type="button">Leaderboard</button>
+      <a id="openDiscordLink" class="public-nav__item" href="#" target="_blank" rel="noopener noreferrer">Discord</a>
+      <a id="openAdminLink" class="public-nav__item" href="__ADMIN_URL__">Admin Panel</a>
+    </nav>
+  </header>
 
   <div id="globalLastUpdated" class="card global-last-updated hidden" aria-live="polite">
     <div class="global-last-updated__label">Last updated</div>
     <div id="globalLastUpdatedValue" class="global-last-updated__value">-</div>
   </div>
 
+  <section id="publicViewLanding" class="public-view public-view--landing">
+    <section class="landing-hero" data-landing-reveal>
+      <div class="landing-hero__media">
+        <figure id="landingBannerSlot" class="landing-media-slot landing-media-slot--banner is-placeholder">
+          <img id="landingBannerImage" class="landing-media-slot__img hidden" alt="TURTLE banner animation" loading="lazy"
+            decoding="async" />
+          <figcaption class="landing-media-slot__placeholder">TURTLE banner preview</figcaption>
+        </figure>
+        <figure id="landingSquareSlot" class="landing-media-slot landing-media-slot--square is-placeholder">
+          <img id="landingSquareImage" class="landing-media-slot__img hidden" alt="TURTLE icon animation" loading="lazy"
+            decoding="async" />
+          <figcaption class="landing-media-slot__placeholder">TURTLE icon preview</figcaption>
+        </figure>
+      </div>
+      <div class="landing-hero__copy">
+        <p class="landing-eyebrow">Recruiting now</p>
+        <h2>Build with a focused war family that values consistency, coaching, and growth.</h2>
+        <p>
+          TURTLE is scaling with disciplined war planning, active donations, and clear progression paths. If you want
+          a competitive home with structured support, start here.
+        </p>
+        <div class="landing-hero__actions">
+          <a id="landingHeroDiscordCta" class="landing-cta landing-cta--primary" href="#" target="_blank"
+            rel="noopener noreferrer">Join TURTLE on Discord</a>
+          <button id="landingHeroRostersCta" class="landing-cta landing-cta--secondary" type="button">Explore
+            Roster Positions</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="landing-section landing-family" data-landing-reveal>
+      <div class="landing-section__head">
+        <p class="landing-eyebrow">Clan family</p>
+        <h2>Live roster footprints across every active group</h2>
+      </div>
+      <div id="landingClanFamilyGrid" class="landing-family-grid"></div>
+    </section>
+
+    <section class="landing-section" data-landing-reveal>
+      <p class="landing-eyebrow">Why join</p>
+      <h2>Prepared wars, reliable teammates, and practical improvement loops.</h2>
+      <p>
+        Placeholder copy: highlight coaching style, donation pace, war standards, and long-term progression support
+        across all skill levels.
+      </p>
+    </section>
+
+    <section class="landing-section" data-landing-reveal>
+      <p class="landing-eyebrow">Our clans</p>
+      <h2>Multiple rosters with coordinated standards and shared leadership.</h2>
+      <p>
+        Placeholder copy: describe each roster lane, expected activity, and where players should start based on
+        availability and goals.
+      </p>
+    </section>
+
+    <section class="landing-section" data-landing-reveal>
+      <p class="landing-eyebrow">How to join</p>
+      <h2>Introduce yourself, share your tag, and get assigned quickly.</h2>
+      <p>
+        Placeholder copy: explain the onboarding checklist, what screenshots to provide, and how trial placements are
+        handled.
+      </p>
+    </section>
+
+    <section class="landing-section landing-discord" data-landing-reveal>
+      <p class="landing-eyebrow">Discord CTA</p>
+      <h2>Ready to run with TURTLE?</h2>
+      <p>Jump into Discord, meet leadership, and get your next war role.</p>
+      <div class="landing-hero__actions">
+        <a id="landingBottomDiscordCta" class="landing-cta landing-cta--primary" href="#" target="_blank"
+          rel="noopener noreferrer">Open Discord Invite</a>
+        <button id="landingBottomLeaderboardCta" class="landing-cta landing-cta--secondary" type="button">Open
+          Leaderboard</button>
+      </div>
+    </section>
+  </section>
+
+  <section id="publicViewRosters" class="public-view public-view--rosters hidden">
+    <div id="rosterSearchCard" class="card search-card">
+      <div class="search-top">
+        <label for="rosterSearchInput" class="search-label">Search by name or tag</label>
+        <button id="clearRosterSearchBtn" class="search-clear hidden" type="button">Clear</button>
+      </div>
+      <input id="rosterSearchInput" class="search-input" type="search" placeholder="e.g. PlayerName or #TAG123"
+        autocomplete="off" />
+      <div id="rosterSearchInfo" class="search-info">Showing all players.</div>
+    </div>
+    <div id="rosters"></div>
+  </section>
+
+  <section id="publicViewLeaderboard" class="public-view public-view--leaderboard hidden">
+    <div id="leaderboard"></div>
+  </section>
+
   <div id="loading" class="card">
     <div class="empty">Loading...</div>
   </div>
-
-  <div id="rosters"></div>
 
   <div id="load-error" class="card hidden"></div>
 </div>
