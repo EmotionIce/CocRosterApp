@@ -365,6 +365,101 @@ h3{
   text-transform: uppercase;
 }
 
+.roster-section--collapsible{
+  margin-top: 12px;
+}
+
+.roster-section-toggle{
+  width: 100%;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.02);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.roster-section-toggle:hover{
+  background: rgba(148,163,184,.08);
+}
+
+.roster-section-toggle:focus-visible{
+  outline: none;
+  border-color: rgba(96,165,250,.72);
+  box-shadow: 0 0 0 3px rgba(59,130,246,.18);
+}
+
+.roster-section-toggle.is-static{
+  cursor: default;
+}
+
+.roster-section-toggle.is-static:hover{
+  background: rgba(255,255,255,.02);
+}
+
+.roster-section-toggle.is-static:focus-visible{
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.roster-section-toggle__lead{
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.roster-section-toggle__title{
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+.roster-section-toggle__tail{
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.roster-section-toggle__hint{
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.roster-section-toggle__caret{
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+  margin-right: 2px;
+}
+
+.roster-section-toggle[aria-expanded="true"] .roster-section-toggle__caret{
+  transform: rotate(225deg);
+}
+
+.roster-section-toggle.is-static .roster-section-toggle__caret{
+  display: none;
+}
+
+.roster-section-body{
+  margin-top: 8px;
+}
+
 a{ color: inherit; text-decoration: none; }
 
 /* Hide table view completely (kept in HTML for compatibility) */
@@ -1904,6 +1999,219 @@ body.profile-modal-open{
   color: var(--muted);
 }
 
+.profile-disclosure--legend{
+  border-color: rgba(56,189,248,.28);
+  background:
+    radial-gradient(620px 240px at 0% 0%, rgba(56,189,248,.09), transparent 62%),
+    radial-gradient(520px 220px at 100% 0%, rgba(251,191,36,.07), transparent 65%),
+    rgba(15,23,42,.50);
+}
+
+.profile-disclosure--legend.is-open{
+  border-color: rgba(56,189,248,.40);
+}
+
+.profile-legend-journey{
+  gap: 14px;
+}
+
+.profile-legend-journey__provenance{
+  font-size: 12px;
+  line-height: 1.45;
+  color: #bfdbfe;
+  border: 1px solid rgba(56,189,248,.18);
+  border-left: 3px solid rgba(56,189,248,.55);
+  border-radius: 12px;
+  background: rgba(8,15,29,.42);
+  padding: 10px 12px;
+}
+
+.profile-legend-trend{
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(56,189,248,.20);
+  background: rgba(2,6,23,.56);
+}
+
+.profile-legend-trend__head{
+  display: grid;
+  gap: 3px;
+}
+
+.profile-legend-trend__title{
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: #cbd5e1;
+  font-weight: 800;
+}
+
+.profile-legend-trend__subtitle{
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.profile-legend-trend__chart-wrap{
+  display: grid;
+  gap: 8px;
+}
+
+.profile-legend-trend__svg{
+  width: 100%;
+  height: auto;
+  max-height: 140px;
+  display: block;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(15,23,42,.72), rgba(8,15,29,.74));
+  border: 1px solid rgba(148,163,184,.16);
+}
+
+.profile-legend-trend__grid{
+  stroke: rgba(148,163,184,.18);
+  stroke-width: 1;
+}
+
+.profile-legend-trend__area{
+  fill: url(#legendTrendArea);
+}
+
+.profile-legend-trend__line{
+  fill: none;
+  stroke: #38bdf8;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.profile-legend-trend__dot{
+  fill: #38bdf8;
+}
+
+.profile-legend-trend__dot--start{
+  fill: rgba(56,189,248,.65);
+}
+
+.profile-legend-trend__dot--end{
+  fill: #fbbf24;
+  stroke: rgba(15,23,42,.9);
+  stroke-width: 1.2;
+}
+
+.profile-legend-trend__axis{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.profile-legend-trend__empty,
+.profile-legend-trend__single-point{
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px dashed rgba(148,163,184,.35);
+  background: rgba(8,15,29,.34);
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.profile-legend-delta-grid{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+  gap: 8px;
+}
+
+.profile-legend-delta-card{
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(148,163,184,.20);
+  background: rgba(8,15,29,.46);
+}
+
+.profile-legend-delta-card.is-up{
+  border-color: rgba(34,197,94,.34);
+  background: rgba(20,83,45,.24);
+}
+
+.profile-legend-delta-card.is-down{
+  border-color: rgba(248,113,113,.34);
+  background: rgba(127,29,29,.24);
+}
+
+.profile-legend-delta-card.is-flat{
+  border-color: rgba(148,163,184,.28);
+  background: rgba(30,41,59,.42);
+}
+
+.profile-legend-delta-card.is-empty{
+  opacity: .85;
+}
+
+.profile-legend-delta-card__label{
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.profile-legend-delta-card__value{
+  font-size: 20px;
+  line-height: 1.1;
+  font-weight: 850;
+}
+
+.profile-legend-delta-card__meta{
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.3;
+}
+
+.profile-legend-season-grid{
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+}
+
+.profile-legend-season-card{
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148,163,184,.20);
+  background: rgba(8,15,29,.40);
+}
+
+.profile-legend-season-card.is-empty{
+  opacity: .82;
+}
+
+.profile-legend-season-card__label{
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--muted);
+}
+
+.profile-legend-season-card__value{
+  font-size: 22px;
+  line-height: 1.05;
+  font-weight: 850;
+}
+
+.profile-legend-season-card__meta{
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
 @media (max-width: 780px){
   .profile-modal__body{
     padding: 14px 14px 18px;
@@ -1934,6 +2242,10 @@ body.profile-modal-open{
   .profile-summary-item{
     flex-basis: calc(50% - 3px);
   }
+
+  .profile-legend-season-grid{
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px){
@@ -1944,6 +2256,10 @@ body.profile-modal-open{
 
   .profile-summary-item{
     flex-basis: calc(50% - 3px);
+  }
+
+  .profile-legend-delta-grid{
+    grid-template-columns: 1fr;
   }
 
   .profile-disclosure__summary{

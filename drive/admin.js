@@ -4,20 +4,20 @@
 
   const state = {
     password: "",
-    rows: null,
-    accounts: null,
     lastRosterData: null,
-    lastReport: null,
     publishCooldownUntil: 0,
     bulkRefreshBusy: false,
-    clanSyncStatusByRoster: {},
-    cwlStatusByRoster: {},
+    rosterStatusByRoster: {},
     benchMarksByRoster: {},
     swapInMarksByRoster: {},
     suggestionNotesByRoster: {},
     pendingProfileReopen: null,
     autoRefreshSettings: null,
     autoRefreshBusy: false,
+    importSession: null,
+    importCompareBusy: false,
+    importApplyBusy: false,
+    importLoadWarning: null,
   };
 
   const setStatus = (msg) => {
@@ -39,22 +39,25 @@
     el.style.color = isError ? "#fca5a5" : "#6b7280";
   };
 
-  const setClanSyncStatus = (rosterIdRaw, msg, isError) => {
+  const setRosterStatus = (rosterIdRaw, msg, isError) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return;
-    state.clanSyncStatusByRoster[rosterId] = {
+    state.rosterStatusByRoster[rosterId] = {
       msg: msg || "",
       isError: !!isError,
     };
   };
 
+  const setClanSyncStatus = (rosterIdRaw, msg, isError) => {
+    setRosterStatus(rosterIdRaw, msg, isError);
+  };
+
   const setCwlStatus = (rosterIdRaw, msg, isError) => {
-    const rosterId = toStr(rosterIdRaw).trim();
-    if (!rosterId) return;
-    state.cwlStatusByRoster[rosterId] = {
-      msg: msg || "",
-      isError: !!isError,
-    };
+    setRosterStatus(rosterIdRaw, msg, isError);
+  };
+
+  const clearRosterStatuses = () => {
+    state.rosterStatusByRoster = {};
   };
 
   const setLoginStatus = (msg) => {
@@ -100,16 +103,6 @@
   };
 
   const runExclusiveRosterPoolRefresh = createAsyncMutex();
-
-  const parseOverrides = () => {
-    const raw = toStr($("#overridesJson") && $("#overridesJson").value).trim();
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw);
-    } catch (err) {
-      throw new Error("Overrides JSON is not valid: " + (err && err.message ? err.message : String(err)));
-    }
-  };
 
   const normalizeTag = (tag) => {
     const t = toStr(tag).trim().toUpperCase();
@@ -164,6 +157,68 @@
   const getRosters = () => {
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return [];
     return state.lastRosterData.rosters;
+  };
+
+  const normalizeRosterOrderInData_ = (rosterDataRaw) => {
+    const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+    if (!rosterData || !Array.isArray(rosterData.rosters)) return [];
+
+    const rosters = rosterData.rosters;
+    const rosterIndexesById = {};
+    for (let i = 0; i < rosters.length; i++) {
+      const rosterId = toStr(rosters[i] && rosters[i].id).trim();
+      if (!rosterId) continue;
+      if (!rosterIndexesById[rosterId]) rosterIndexesById[rosterId] = [];
+      rosterIndexesById[rosterId].push(i);
+    }
+
+    const consumedIndexes = {};
+    const orderedRosters = [];
+    const pushRosterIndex = (index) => {
+      if (!Number.isInteger(index) || consumedIndexes[index]) return;
+      consumedIndexes[index] = true;
+      orderedRosters.push(rosters[index]);
+    };
+
+    const rawRosterOrder = Array.isArray(rosterData.rosterOrder) ? rosterData.rosterOrder : [];
+    for (let i = 0; i < rawRosterOrder.length; i++) {
+      const rosterId = toStr(rawRosterOrder[i]).trim();
+      if (!rosterId) continue;
+      const queue = rosterIndexesById[rosterId];
+      if (!queue || !queue.length) continue;
+      pushRosterIndex(queue.shift());
+    }
+
+    for (let i = 0; i < rosters.length; i++) {
+      pushRosterIndex(i);
+    }
+    rosterData.rosters = orderedRosters;
+
+    const normalizedRosterOrder = [];
+    const seen = {};
+    for (const roster of orderedRosters) {
+      const rosterId = toStr(roster && roster.id).trim();
+      if (!rosterId || seen[rosterId]) continue;
+      seen[rosterId] = true;
+      normalizedRosterOrder.push(rosterId);
+    }
+    rosterData.rosterOrder = normalizedRosterOrder;
+    return normalizedRosterOrder;
+  };
+
+  const syncRosterOrderFromCurrentArray_ = (rosterDataRaw) => {
+    const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+    if (!rosterData || !Array.isArray(rosterData.rosters)) return [];
+    const out = [];
+    const seen = {};
+    for (const roster of rosterData.rosters) {
+      const rosterId = toStr(roster && roster.id).trim();
+      if (!rosterId || seen[rosterId]) continue;
+      seen[rosterId] = true;
+      out.push(rosterId);
+    }
+    rosterData.rosterOrder = out;
+    return out;
   };
 
   const refreshRefreshAllUi = () => {
@@ -312,8 +367,12 @@
     if (Number.isFinite(Number(nextRosterData.schemaVersion))) {
       mergedRosterData.schemaVersion = Number(nextRosterData.schemaVersion);
     }
+    if (Array.isArray(nextRosterData.rosterOrder)) {
+      mergedRosterData.rosterOrder = cloneJson(nextRosterData.rosterOrder);
+    }
 
     state.lastRosterData = mergedRosterData;
+    normalizeRosterOrderInData_(state.lastRosterData);
     reindexAllRosters();
     renderPreviewFromState();
     markReportStale();
@@ -347,7 +406,7 @@
   };
 
   const persistClanSyncTagInputs = () => {
-    const inputs = Array.from(document.querySelectorAll('#clanSyncTable [data-clan-sync-tag-input="1"]'));
+    const inputs = Array.from(document.querySelectorAll('#connectedRostersTable [data-clan-sync-tag-input="1"]'));
     for (const input of inputs) {
       const rosterId = toStr(input && input.dataset && input.dataset.rosterId).trim();
       const roster = getRosterById(rosterId);
@@ -553,7 +612,7 @@
 
     if (!hasLoadedPreview) {
       setAddPreviewRosterPanelOpen(false);
-      if (hint) hint.textContent = "Load active config or generate preview first.";
+      if (hint) hint.textContent = "Load active config first.";
       return;
     }
 
@@ -580,7 +639,7 @@
       addBtn.disabled = true;
       if (toggleBtn) toggleBtn.disabled = true;
       setAddPlayerPanelOpen(false);
-      if (hint) hint.textContent = "Load active config or generate preview first.";
+      if (hint) hint.textContent = "Load active config first.";
       return;
     }
 
@@ -782,29 +841,33 @@
       refreshAddPreviewRosterUi();
       refreshAddPlayerUi();
       refreshRefreshAllUi();
-      renderClanSyncTable();
-      renderCwlPerfTable();
+      renderConnectedRostersTable();
+      renderImportUi();
       applyBenchMarks_();
       return;
     }
+    normalizeRosterOrderInData_(state.lastRosterData);
     syncSuggestionStateFromRosterData_();
     window.renderRosterData(state.lastRosterData);
     refreshAddPreviewRosterUi();
     refreshAddPlayerUi();
     refreshRefreshAllUi();
-    renderClanSyncTable();
-    renderCwlPerfTable();
+    renderConnectedRostersTable();
+    renderImportUi();
     applyBenchMarks_();
   };
 
-  const markReportStale = () => {
-    state.lastReport = null;
-    const report = $("#report");
-    if (report) report.textContent = "Manual preview edits were applied. Regenerate preview to refresh report.";
-    show("#reportWrap", true);
+  const markReportStale = (reasonRaw) => {
+    const reason = toStr(reasonRaw).trim() || "Preview changed. Re-run compare with preview before applying XLSX updates.";
+    if (!state.importSession || !state.importSession.comparison) return;
+    state.importSession.stale = true;
+    state.importSession.staleReason = reason;
+    renderImportUi();
   };
 
   const applyPreviewMutation = (msg) => {
+    syncRosterOrderFromCurrentArray_(state.lastRosterData);
+    normalizeRosterOrderInData_(state.lastRosterData);
     reindexAllRosters();
     clearSavedBenchSuggestionsFromPreview_();
     clearSuggestionMarks_();
@@ -1037,7 +1100,6 @@
       missing: [],
     });
 
-    syncRosterSpecsFromRosterData(state.lastRosterData);
     applyPreviewMutation(title + " added.");
   };
 
@@ -1052,15 +1114,37 @@
     if (rosterIndex < 0) throw new Error("Roster not found: " + rosterId);
 
     const removedRoster = rosters.splice(rosterIndex, 1)[0] || {};
-    delete state.clanSyncStatusByRoster[rosterId];
-    delete state.cwlStatusByRoster[rosterId];
+    delete state.rosterStatusByRoster[rosterId];
     clearSuggestionMarksForRoster_(rosterId);
-
-    syncRosterSpecsFromRosterData(state.lastRosterData);
 
     const rosterTitle = toStr(removedRoster.title).trim();
     const rosterLabel = rosterTitle ? (rosterTitle + " (" + rosterId + ")") : rosterId;
     applyPreviewMutation(rosterLabel + " removed. Publish to apply this change to live data.");
+  };
+
+  const moveRosterInPreview = (rosterIdRaw, directionRaw) => {
+    const rosters = getRosters();
+    if (!rosters.length) throw new Error("No roster preview is loaded.");
+
+    const rosterId = toStr(rosterIdRaw).trim();
+    if (!rosterId) throw new Error("Roster ID is required.");
+
+    const direction = Number(directionRaw);
+    if (direction !== -1 && direction !== 1) throw new Error("Invalid roster move direction.");
+
+    const currentIndex = rosters.findIndex((r) => toStr(r && r.id).trim() === rosterId);
+    if (currentIndex < 0) throw new Error("Roster not found: " + rosterId);
+
+    const nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= rosters.length) return false;
+
+    const movedRoster = rosters.splice(currentIndex, 1)[0];
+    rosters.splice(nextIndex, 0, movedRoster);
+    syncRosterOrderFromCurrentArray_(state.lastRosterData);
+
+    const rosterLabel = formatRosterDisplayLabel(rosterId) || rosterId;
+    applyPreviewMutation(rosterLabel + " moved to position " + (nextIndex + 1) + ".");
+    return true;
   };
 
   const mkPlayerActionButton = (label, extraClass) => {
@@ -1497,132 +1581,524 @@
     return wrap;
   };
 
-  const addRosterRow = (spec) => {
-    const tbody = $("#rosterTable tbody");
-    if (!tbody) return;
+  const setImportActionStatus = (msg, isError) => {
+    const el = $("#importActionStatus");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.color = isError ? "#fca5a5" : "#6b7280";
+  };
 
-    const tr = document.createElement("tr");
+  const buildImportSessionLabel = (sessionRaw) => {
+    const session = sessionRaw && typeof sessionRaw === "object" ? sessionRaw : null;
+    if (!session) return "";
+    const fileName = toStr(session.fileName).trim();
+    const sheetName = toStr(session.sheetName).trim();
+    if (fileName && sheetName) return fileName + " (sheet '" + sheetName + "')";
+    if (fileName) return fileName;
+    if (sheetName) return "sheet '" + sheetName + "'";
+    return "previous import session";
+  };
 
-    const mkInput = (value, type = "text") => {
-      const input = document.createElement("input");
-      input.className = "admin-input";
-      input.type = type;
-      input.value = value == null ? "" : String(value);
-      return input;
+  const clearImportLoadWarning = () => {
+    state.importLoadWarning = null;
+  };
+
+  const setImportLoadFailureWarning = (failedFileNameRaw, err) => {
+    const failedFileName = toStr(failedFileNameRaw).trim();
+    const activeSessionLabel = buildImportSessionLabel(state.importSession);
+    const filePart = failedFileName ? (" '" + failedFileName + "'") : "";
+    const leading = "Failed to load the new XLSX file" + filePart + ".";
+    const message = state.importSession
+      ? (leading + " Your previous import session is still active, so Compare / Apply still use the earlier imported file: " + activeSessionLabel + ".")
+      : (leading + " No previous import session is active.");
+    state.importLoadWarning = {
+      message,
+      failedFileName,
+      activeSessionLabel,
+      error: toErrorMessage(err),
     };
+  };
 
-    const mkSelect = (value) => {
-      const sel = document.createElement("select");
-      sel.className = "admin-select";
-      for (const opt of ["competitive", "standard", "relaxed"]) {
-        const o = document.createElement("option");
-        o.value = opt;
-        o.textContent = opt;
-        if (String(value).toLowerCase() === opt) o.selected = true;
-        sel.appendChild(o);
-      }
-      return sel;
+  const renderImportLoadWarning = () => {
+    const el = $("#importLoadWarning");
+    if (!el) return;
+    const warning = state.importLoadWarning && typeof state.importLoadWarning === "object" ? state.importLoadWarning : null;
+    const message = toStr(warning && warning.message).trim();
+    if (!message) {
+      el.classList.add("hidden");
+      el.textContent = "";
+      el.removeAttribute("title");
+      return;
+    }
+    el.textContent = message;
+    const detail = toStr(warning && warning.error).trim();
+    if (detail) el.title = detail;
+    else el.removeAttribute("title");
+    el.classList.remove("hidden");
+  };
+
+  const getImportAllowedClanKeysFromUi = () => {
+    const checks = Array.from(document.querySelectorAll('[data-allowed-clan-checkbox="1"]'));
+    return checks
+      .filter((box) => !!(box && box.checked))
+      .map((box) => toStr(box && box.value).trim())
+      .filter(Boolean);
+  };
+
+  const readImportFiltersFromUi = () => ({
+    excludeWarOut: !!($("#excludeWarOut") && $("#excludeWarOut").checked),
+    requireDiscord: !!($("#requireDiscord") && $("#requireDiscord").checked),
+    allowedClanKeys: getImportAllowedClanKeysFromUi(),
+  });
+
+  const getDefaultImportFilters = () => {
+    const previous = state.importSession && state.importSession.filters ? state.importSession.filters : {};
+    return {
+      excludeWarOut: previous.excludeWarOut !== false,
+      requireDiscord: !!previous.requireDiscord,
+      allowedClanKeys: Array.isArray(previous.allowedClanKeys) ? previous.allowedClanKeys.slice() : [],
     };
-
-    const tdId = document.createElement("td");
-    const tdTitle = document.createElement("td");
-    const tdMain = document.createElement("td");
-    const tdSubs = document.createElement("td");
-    const tdDiff = document.createElement("td");
-    const tdDel = document.createElement("td");
-
-    const idInput = mkInput(spec && spec.id ? spec.id : "R1");
-    const titleInput = mkInput(spec && spec.title ? spec.title : "Roster 1");
-    const mainInput = mkInput(spec && spec.mainCount != null ? spec.mainCount : 15, "number");
-    const subInput = mkInput(spec && spec.subCount != null ? spec.subCount : 5, "number");
-    const diffSel = mkSelect(spec && spec.difficulty ? spec.difficulty : "competitive");
-
-    const delBtn = document.createElement("button");
-    delBtn.className = "btn secondary";
-    delBtn.type = "button";
-    delBtn.textContent = "Remove";
-    delBtn.onclick = () => tr.remove();
-
-    tdId.appendChild(idInput);
-    tdTitle.appendChild(titleInput);
-    tdMain.appendChild(mainInput);
-    tdSubs.appendChild(subInput);
-    tdDiff.appendChild(diffSel);
-    tdDel.appendChild(delBtn);
-
-    tr.appendChild(tdId);
-    tr.appendChild(tdTitle);
-    tr.appendChild(tdMain);
-    tr.appendChild(tdSubs);
-    tr.appendChild(tdDiff);
-    tr.appendChild(tdDel);
-
-    tbody.appendChild(tr);
   };
 
-  const readRosterSpecs = () => {
-    const tbody = $("#rosterTable tbody");
-    if (!tbody) return [];
-    const rows = Array.from(tbody.querySelectorAll("tr"));
-    return rows.map((tr) => {
-      const inputs = tr.querySelectorAll("input,select");
-      const id = inputs[0] ? inputs[0].value : "";
-      const title = inputs[1] ? inputs[1].value : "";
-      const mainCount = inputs[2] ? parseInt(inputs[2].value, 10) : 0;
-      const subCount = inputs[3] ? parseInt(inputs[3].value, 10) : 0;
-      const difficulty = inputs[4] ? inputs[4].value : "standard";
-      return { id, title, mainCount, subCount, difficulty };
-    });
-  };
-
-  const syncRosterSpecsFromRosterData = (rosterData) => {
-    const tbody = $("#rosterTable tbody");
-    if (!tbody) return;
-
-    const prevSpecs = readRosterSpecs();
-    const prevDifficultyById = {};
-    for (const s of prevSpecs) {
-      const id = toStr(s && s.id).trim();
-      const diff = toStr(s && s.difficulty).trim().toLowerCase();
-      if (!id) continue;
-      if (diff === "competitive" || diff === "standard" || diff === "relaxed") {
-        prevDifficultyById[id] = diff;
-      }
-    }
-
-    const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-    tbody.textContent = "";
-
-    for (let i = 0; i < rosters.length; i++) {
-      const r = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-      const id = toStr(r.id).trim() || ("R" + (i + 1));
-      const title = toStr(r.title).trim() || ("Roster " + (i + 1));
-      const mainCount = Array.isArray(r.main) ? r.main.length : 0;
-      const subCount = Array.isArray(r.subs) ? r.subs.length : 0;
-
-      const dataDifficulty = toStr(r.difficulty).trim().toLowerCase();
-      const difficulty = (dataDifficulty === "competitive" || dataDifficulty === "standard" || dataDifficulty === "relaxed")
-        ? dataDifficulty
-        : (prevDifficultyById[id] || "standard");
-
-      addRosterRow({ id, title, mainCount, subCount, difficulty });
-    }
-  };
-
-  const readFilters = () => {
-    const excludeWarOut = !!($("#excludeWarOut") && $("#excludeWarOut").checked);
-    const requireDiscord = !!($("#requireDiscord") && $("#requireDiscord").checked);
-    const allowedRaw = toStr($("#allowedClans") && $("#allowedClans").value).trim();
-    const allowedClans = allowedRaw ? allowedRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
-    return { excludeWarOut, requireDiscord, allowedClans };
-  };
-
-  const loadXlsx = async (file) => {
+  const loadXlsxImportSession = async (file) => {
     if (!file) throw new Error("No XLSX file selected.");
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: "array" });
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    const sheetNames = Array.isArray(wb && wb.SheetNames) ? wb.SheetNames : [];
+    const sheetName = toStr(sheetNames[0]).trim();
+    if (!sheetName) throw new Error("Workbook has no sheet.");
+    const sheet = wb.Sheets[sheetName];
+    if (!sheet) throw new Error("Workbook sheet could not be read.");
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+    const parsed = window.RosterGenerator.parseXlsxRowsTolerant(rows);
+    const importedClanValues = window.RosterGenerator.extractImportedClanValues(parsed.accounts);
+    const suggestedMapping = window.RosterGenerator.suggestClanMappings({
+      importedClanValues,
+      rosterData: state.lastRosterData,
+    });
+
+    const defaults = getDefaultImportFilters();
+    const importedClanKeySet = {};
+    for (const entry of importedClanValues) {
+      const key = toStr(entry && entry.key).trim();
+      if (key) importedClanKeySet[key] = true;
+    }
+    defaults.allowedClanKeys = (defaults.allowedClanKeys || []).filter((key) => importedClanKeySet[key]);
+
+    const previousMapping = state.importSession && state.importSession.mapping && typeof state.importSession.mapping === "object"
+      ? state.importSession.mapping
+      : {};
+    const mergedMapping = Object.assign({}, suggestedMapping, previousMapping);
+    const normalizedMapping = window.RosterGenerator.normalizeImportMapping(
+      mergedMapping,
+      importedClanValues,
+      state.lastRosterData
+    );
+
+    return {
+      fileName: toStr(file && file.name).trim(),
+      sheetName,
+      totalRowsRead: Number.isFinite(Number(parsed.totalRows)) ? Number(parsed.totalRows) : rows.length,
+      accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+      invalidRows: Array.isArray(parsed.invalidRows) ? parsed.invalidRows : [],
+      ignoredRows: Array.isArray(parsed.ignoredRows) ? parsed.ignoredRows : [],
+      importedClanValues,
+      mapping: normalizedMapping,
+      filters: defaults,
+      comparison: null,
+      stale: false,
+      staleReason: "",
+    };
+  };
+
+  const alignImportMappingWithPreview = () => {
+    if (!state.importSession) return false;
+    const session = state.importSession;
+    const importedClanValues = Array.isArray(session.importedClanValues) ? session.importedClanValues : [];
+    const suggested = window.RosterGenerator.suggestClanMappings({
+      importedClanValues,
+      rosterData: state.lastRosterData,
+    });
+    const merged = Object.assign({}, suggested, session.mapping && typeof session.mapping === "object" ? session.mapping : {});
+    const normalized = window.RosterGenerator.normalizeImportMapping(merged, importedClanValues, state.lastRosterData);
+    const changed = jsonPretty(normalized) !== jsonPretty(session.mapping || {});
+    session.mapping = normalized;
+    return changed;
+  };
+
+  const invalidateImportComparison = (reasonRaw) => {
+    if (!state.importSession || !state.importSession.comparison) return;
+    state.importSession.stale = true;
+    state.importSession.staleReason = toStr(reasonRaw).trim() || "Preview changed. Re-run compare with preview.";
+  };
+
+  const renderImportSummary = () => {
+    const wrap = $("#importSummaryWrap");
+    const linesEl = $("#importSummaryLines");
+    const noDataEl = $("#importNoDataMsg");
+    const debugDetails = $("#importDebugDetails");
+    const debugPre = $("#importDebugPre");
+
+    if (!wrap || !linesEl || !noDataEl || !debugDetails || !debugPre) return;
+    const session = state.importSession;
+    if (!session) {
+      wrap.classList.add("hidden");
+      linesEl.textContent = "";
+      noDataEl.classList.add("hidden");
+      debugDetails.classList.add("hidden");
+      debugPre.textContent = "";
+      return;
+    }
+
+    wrap.classList.remove("hidden");
+    linesEl.textContent = "";
+
+    const addLine = (text) => {
+      const row = document.createElement("div");
+      row.textContent = text;
+      linesEl.appendChild(row);
+    };
+
+    const compare = session.comparison;
+    if (!compare || !compare.summary) {
+      addLine("Sheet used: " + (session.sheetName || "first sheet"));
+      addLine("Rows read: " + (Number.isFinite(Number(session.totalRowsRead)) ? Number(session.totalRowsRead) : 0));
+      addLine("Normalized members parsed: " + (Array.isArray(session.accounts) ? session.accounts.length : 0));
+      addLine("Invalid rows: " + (Array.isArray(session.invalidRows) ? session.invalidRows.length : 0));
+      addLine("Run Compare with preview to build update buckets.");
+      noDataEl.classList.add("hidden");
+      debugDetails.classList.add("hidden");
+      debugPre.textContent = "";
+      return;
+    }
+
+    const summary = compare.summary;
+    addLine("Sheet used: " + (summary.sheetName || session.sheetName || "first sheet"));
+    addLine("Rows read: " + (Number.isFinite(Number(summary.totalRowsRead)) ? Number(summary.totalRowsRead) : 0));
+    addLine("Normalized members parsed: " + (Number.isFinite(Number(summary.normalizedMembersParsed)) ? Number(summary.normalizedMembersParsed) : 0));
+    addLine("Matched unchanged: " + (Number.isFinite(Number(summary.matchedUnchanged)) ? Number(summary.matchedUnchanged) : 0));
+    addLine("Matched with updates: " + (Number.isFinite(Number(summary.matchedWithUpdates)) ? Number(summary.matchedWithUpdates) : 0));
+    addLine("New addable: " + (Number.isFinite(Number(summary.newAddable)) ? Number(summary.newAddable) : 0));
+    addLine("Review-only: " + (Number.isFinite(Number(summary.reviewOnly)) ? Number(summary.reviewOnly) : 0));
+    addLine("Ignored (war out): " + (Number.isFinite(Number(summary.ignoredWarOut)) ? Number(summary.ignoredWarOut) : 0));
+    addLine("Ignored (clan not allowed): " + (Number.isFinite(Number(summary.ignoredClanNotAllowed)) ? Number(summary.ignoredClanNotAllowed) : 0));
+    addLine("Ignored (missing Discord): " + (Number.isFinite(Number(summary.ignoredMissingDiscord)) ? Number(summary.ignoredMissingDiscord) : 0));
+    addLine("Invalid rows: " + (Number.isFinite(Number(summary.invalidRows)) ? Number(summary.invalidRows) : 0));
+    addLine("Final actionable total: " + (Number.isFinite(Number(summary.actionableTotal)) ? Number(summary.actionableTotal) : 0));
+
+    if (session.stale) {
+      addLine("Status: stale - " + (session.staleReason || "Preview changed. Re-run compare with preview."));
+    }
+
+    noDataEl.classList.toggle("hidden", !(summary && summary.noDataToAdd));
+    debugDetails.classList.remove("hidden");
+    debugPre.textContent = jsonPretty({
+      summary,
+      filters: compare.filters,
+      mapping: compare.mapping,
+      buckets: compare.buckets,
+      stale: session.stale,
+      staleReason: session.staleReason,
+    });
+  };
+
+  const renderAllowedClansFilter = () => {
+    const wrap = $("#allowedClansWrap");
+    if (!wrap) return;
+    wrap.textContent = "";
+
+    const session = state.importSession;
+    const clans = session && Array.isArray(session.importedClanValues) ? session.importedClanValues : [];
+    const selectedSet = {};
+    const selected = session && session.filters && Array.isArray(session.filters.allowedClanKeys)
+      ? session.filters.allowedClanKeys
+      : [];
+    for (const key of selected) selectedSet[toStr(key).trim()] = true;
+
+    if (!clans.length) {
+      const empty = document.createElement("div");
+      empty.className = "small muted";
+      empty.textContent = "Import a file to load clan filters.";
+      wrap.appendChild(empty);
+      return;
+    }
+
+    for (const clanEntry of clans) {
+      const key = toStr(clanEntry && clanEntry.key).trim();
+      if (!key) continue;
+      const label = toStr(clanEntry && clanEntry.label).trim() || "(blank clan)";
+      const count = Number.isFinite(Number(clanEntry && clanEntry.count)) ? Number(clanEntry.count) : 0;
+
+      const chip = document.createElement("label");
+      chip.className = "chip-option";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = key;
+      checkbox.checked = !!selectedSet[key];
+      checkbox.dataset.allowedClanCheckbox = "1";
+      checkbox.addEventListener("change", () => {
+        if (!state.importSession) return;
+        state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());
+        invalidateImportComparison("Filters changed. Re-run compare with preview.");
+        renderImportUi();
+      });
+
+      const text = document.createElement("span");
+      text.textContent = label + " (" + count + ")";
+      chip.appendChild(checkbox);
+      chip.appendChild(text);
+      wrap.appendChild(chip);
+    }
+  };
+
+  const buildRosterOptionLabel = (roster) => {
+    const id = toStr(roster && roster.id).trim();
+    const title = toStr(roster && roster.title).trim();
+    return title ? (title + " (" + id + ")") : id;
+  };
+
+  const renderClanMappingTable = () => {
+    const tbody = $("#clanMappingTable tbody");
+    if (!tbody) return;
+    tbody.textContent = "";
+
+    const session = state.importSession;
+    const clans = session && Array.isArray(session.importedClanValues) ? session.importedClanValues : [];
+    if (!clans.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "small muted";
+      td.textContent = "Import a file to build clan mapping.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+
+    const rosters = getRosters().filter((roster) => toStr(roster && roster.id).trim());
+
+    for (const clanEntry of clans) {
+      const key = toStr(clanEntry && clanEntry.key).trim();
+      if (!key) continue;
+      const label = toStr(clanEntry && clanEntry.label).trim() || "(blank clan)";
+      const count = Number.isFinite(Number(clanEntry && clanEntry.count)) ? Number(clanEntry.count) : 0;
+
+      const tr = document.createElement("tr");
+      const tdClan = document.createElement("td");
+      tdClan.textContent = label;
+      const tdCount = document.createElement("td");
+      tdCount.textContent = String(count);
+      const tdMapping = document.createElement("td");
+
+      const select = document.createElement("select");
+      select.className = "admin-select mapping-table-select";
+      select.dataset.importClanKey = key;
+
+      const unmapped = document.createElement("option");
+      unmapped.value = "";
+      unmapped.textContent = "Review only (unmapped)";
+      select.appendChild(unmapped);
+
+      for (const roster of rosters) {
+        const id = toStr(roster && roster.id).trim();
+        if (!id) continue;
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = buildRosterOptionLabel(roster);
+        select.appendChild(option);
+      }
+
+      const selectedRoster = toStr(session.mapping && session.mapping[key]).trim();
+      select.value = selectedRoster;
+      select.addEventListener("change", () => {
+        if (!state.importSession) return;
+        state.importSession.mapping = state.importSession.mapping && typeof state.importSession.mapping === "object"
+          ? state.importSession.mapping
+          : {};
+        state.importSession.mapping[key] = toStr(select.value).trim();
+        state.importSession.mapping = window.RosterGenerator.normalizeImportMapping(
+          state.importSession.mapping,
+          state.importSession.importedClanValues,
+          state.lastRosterData
+        );
+        invalidateImportComparison("Mapping changed. Re-run compare with preview.");
+        renderImportUi();
+      });
+
+      tdMapping.appendChild(select);
+      tr.appendChild(tdClan);
+      tr.appendChild(tdCount);
+      tr.appendChild(tdMapping);
+      tbody.appendChild(tr);
+    }
+  };
+
+  const refreshImportActionsUi = () => {
+    const compareBtn = $("#compareImportBtn");
+    const applyBtn = $("#applyImportBtn");
+    const stalePill = $("#importStalePill");
+    const session = state.importSession;
+    const hasPreview = !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters));
+    const hasParsed = !!(session && Array.isArray(session.accounts));
+    const hasComparison = !!(session && session.comparison && session.comparison.summary);
+    const actionableTotal = hasComparison && Number.isFinite(Number(session.comparison.summary.actionableTotal))
+      ? Number(session.comparison.summary.actionableTotal)
+      : 0;
+
+    if (compareBtn) {
+      compareBtn.disabled = !hasPreview || !hasParsed || state.importCompareBusy || state.importApplyBusy || state.bulkRefreshBusy;
+      compareBtn.textContent = state.importCompareBusy ? "Comparing..." : "Compare with preview";
+    }
+
+    if (applyBtn) {
+      applyBtn.disabled = !hasComparison || session.stale || actionableTotal < 1 || state.importApplyBusy || state.importCompareBusy || state.bulkRefreshBusy;
+      applyBtn.textContent = state.importApplyBusy ? "Applying..." : "Apply updates";
+    }
+
+    if (stalePill) {
+      stalePill.classList.toggle("hidden", !(session && session.stale));
+      stalePill.textContent = session && session.stale
+        ? "Compare is stale"
+        : "Compare is stale";
+    }
+  };
+
+  const renderXlsxMeta = () => {
+    const meta = $("#xlsxMeta");
+    if (!meta) return;
+    const session = state.importSession;
+    if (!session) {
+      meta.textContent = "Import a member list workbook. The first sheet will be used.";
+      return;
+    }
+    const parsedCount = Array.isArray(session.accounts) ? session.accounts.length : 0;
+    const invalidCount = Array.isArray(session.invalidRows) ? session.invalidRows.length : 0;
+    const ignoredCount = Array.isArray(session.ignoredRows) ? session.ignoredRows.length : 0;
+    const fileName = toStr(session.fileName).trim();
+    const filePrefix = fileName ? (fileName + " - ") : "";
+    meta.textContent = filePrefix + "using sheet '" + (session.sheetName || "first sheet") + "', rows read " + session.totalRowsRead + ", parsed " + parsedCount + ", invalid " + invalidCount + ", blank rows " + ignoredCount + ".";
+  };
+
+  const renderImportUi = () => {
+    const mappingChanged = alignImportMappingWithPreview();
+    if (mappingChanged) {
+      invalidateImportComparison("Import mapping changed because preview rosters changed. Re-run compare with preview.");
+    }
+    renderImportLoadWarning();
+    renderXlsxMeta();
+    renderAllowedClansFilter();
+    renderClanMappingTable();
+    renderImportSummary();
+    refreshImportActionsUi();
+  };
+
+  const runImportComparison = async () => {
+    if (state.bulkRefreshBusy) {
+      throw new Error("Wait for refresh all to finish before running compare.");
+    }
+    if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
+      throw new Error("Load active config first.");
+    }
+    if (!state.importSession || !Array.isArray(state.importSession.accounts)) {
+      throw new Error("Import an XLSX file first.");
+    }
+
+    state.importCompareBusy = true;
+    setImportActionStatus("Comparing import against preview...", false);
+    renderImportUi();
+    try {
+      state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());
+      state.importSession.mapping = window.RosterGenerator.normalizeImportMapping(
+        state.importSession.mapping,
+        state.importSession.importedClanValues,
+        state.lastRosterData
+      );
+
+      state.importSession.comparison = window.RosterGenerator.buildImportComparison({
+        rosterData: state.lastRosterData,
+        accounts: state.importSession.accounts,
+        invalidRows: state.importSession.invalidRows,
+        ignoredRows: state.importSession.ignoredRows,
+        importedClanValues: state.importSession.importedClanValues,
+        mapping: state.importSession.mapping,
+        filters: state.importSession.filters,
+        sheetName: state.importSession.sheetName,
+        totalRowsRead: state.importSession.totalRowsRead,
+      });
+      state.importSession.stale = false;
+      state.importSession.staleReason = "";
+
+      const summary = state.importSession.comparison && state.importSession.comparison.summary
+        ? state.importSession.comparison.summary
+        : null;
+      if (summary && summary.noDataToAdd) {
+        setImportActionStatus("No data to add.", false);
+      } else {
+        const actionable = summary && Number.isFinite(Number(summary.actionableTotal))
+          ? Number(summary.actionableTotal)
+          : 0;
+        setImportActionStatus("Comparison complete: " + actionable + " actionable change(s).", false);
+      }
+    } finally {
+      state.importCompareBusy = false;
+      renderImportUi();
+    }
+  };
+
+  const applyImportComparison = async () => {
+    if (state.bulkRefreshBusy) {
+      throw new Error("Wait for refresh all to finish before applying import updates.");
+    }
+    if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
+      throw new Error("Load active config first.");
+    }
+    if (!state.importSession || !state.importSession.comparison || !state.importSession.comparison.summary) {
+      throw new Error("Run compare first.");
+    }
+    if (state.importSession.stale) {
+      throw new Error("Comparison is stale. Re-run compare with preview.");
+    }
+
+    const actionable = Number.isFinite(Number(state.importSession.comparison.summary.actionableTotal))
+      ? Number(state.importSession.comparison.summary.actionableTotal)
+      : 0;
+    if (actionable < 1) {
+      throw new Error("No data to add.");
+    }
+
+    state.importApplyBusy = true;
+    setImportActionStatus("Applying updates...", false);
+    renderImportUi();
+    try {
+      const applied = window.RosterGenerator.applyImportComparison({
+        rosterData: state.lastRosterData,
+        comparison: state.importSession.comparison,
+      });
+      if (!applied || !applied.rosterData || !Array.isArray(applied.rosterData.rosters)) {
+        throw new Error("Import apply returned invalid roster data.");
+      }
+
+      state.lastRosterData = applied.rosterData;
+      normalizeRosterOrderInData_(state.lastRosterData);
+      reindexAllRosters();
+      clearSuggestionMarks_();
+      renderPreviewFromState();
+      const publishBtn = $("#publishBtn");
+      if (publishBtn) publishBtn.disabled = false;
+
+      const appliedSummary = applied.applied && typeof applied.applied === "object" ? applied.applied : {};
+      const updatedCount = Number.isFinite(Number(appliedSummary.updatedCount)) ? Number(appliedSummary.updatedCount) : 0;
+      const addedCount = Number.isFinite(Number(appliedSummary.addedCount)) ? Number(appliedSummary.addedCount) : 0;
+      setImportActionStatus("Applied updates: " + updatedCount + " updated, " + addedCount + " added.", false);
+      setStatus("Import updates applied to preview.");
+
+      await runImportComparison();
+    } finally {
+      state.importApplyBusy = false;
+      renderImportUi();
+    }
   };
 
   const loadActiveRosterData = () =>
@@ -1662,6 +2138,7 @@
       throw new Error("Sync returned invalid roster data.");
     }
     state.lastRosterData = nextRosterData;
+    normalizeRosterOrderInData_(state.lastRosterData);
     reindexAllRosters();
     clearSuggestionMarks_();
     renderPreviewFromState();
@@ -1671,8 +2148,8 @@
     if (statusMsg) setStatus(statusMsg);
   };
 
-  const renderClanSyncTable = () => {
-    const tbody = $("#clanSyncTable tbody");
+  const renderConnectedRostersTable = () => {
+    const tbody = $("#connectedRostersTable tbody");
     if (!tbody) return;
 
     const rosters = getRosters();
@@ -1681,26 +2158,53 @@
     if (!rosters.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 5;
+      td.colSpan = 6;
       td.className = "small muted";
-      td.textContent = "Load active config or generate preview first.";
+      td.textContent = "Load active config first.";
       tr.appendChild(td);
       tbody.appendChild(tr);
       return;
     }
 
-    for (const roster of rosters) {
+    for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
+      const roster = rosters[rosterIndex];
       const r = roster && typeof roster === "object" ? roster : {};
       ensureRosterArrays(r);
       const rosterId = toStr(r.id).trim();
       if (!rosterId) continue;
       const rosterTitle = toStr(r.title).trim();
       const label = rosterTitle ? (rosterTitle + " (" + rosterId + ")") : rosterId;
+      const trackingMode = getRosterTrackingMode(r);
 
       const tr = document.createElement("tr");
 
       const tdRoster = document.createElement("td");
       tdRoster.textContent = label;
+
+      const tdOrder = document.createElement("td");
+      const orderControls = document.createElement("div");
+      orderControls.className = "roster-order-controls";
+
+      const moveUpBtn = document.createElement("button");
+      moveUpBtn.type = "button";
+      moveUpBtn.className = "clan-sync-btn secondary";
+      moveUpBtn.textContent = "Up";
+      moveUpBtn.title = "Move roster up";
+
+      const moveDownBtn = document.createElement("button");
+      moveDownBtn.type = "button";
+      moveDownBtn.className = "clan-sync-btn secondary";
+      moveDownBtn.textContent = "Down";
+      moveDownBtn.title = "Move roster down";
+
+      const orderPos = document.createElement("span");
+      orderPos.className = "roster-order-pos";
+      orderPos.textContent = (rosterIndex + 1) + "/" + rosters.length;
+
+      orderControls.appendChild(moveUpBtn);
+      orderControls.appendChild(moveDownBtn);
+      orderControls.appendChild(orderPos);
+      tdOrder.appendChild(orderControls);
 
       const tdTracking = document.createElement("td");
       const trackingSelect = document.createElement("select");
@@ -1715,7 +2219,7 @@
         option.textContent = opt.label;
         trackingSelect.appendChild(option);
       });
-      trackingSelect.value = getRosterTrackingMode(r);
+      trackingSelect.value = trackingMode;
       tdTracking.appendChild(trackingSelect);
 
       const tdTag = document.createElement("td");
@@ -1743,198 +2247,10 @@
       syncPoolBtn.className = "clan-sync-btn";
       syncPoolBtn.textContent = "Sync roster pool";
 
-      const syncTodayBtn = document.createElement("button");
-      syncTodayBtn.type = "button";
-      syncTodayBtn.className = "clan-sync-btn";
-      syncTodayBtn.textContent = getRosterTrackingMode(r) === "regularWar" ? "Sync current war lineup" : "Sync today lineup";
-
-      actions.appendChild(testBtn);
-      actions.appendChild(syncPoolBtn);
-      actions.appendChild(syncTodayBtn);
-      tdActions.appendChild(actions);
-
-      const tdStatus = document.createElement("td");
-      tdStatus.className = "small muted";
-
-      const applyRowStatus = () => {
-        const saved = state.clanSyncStatusByRoster[rosterId];
-        if (!saved || !saved.msg) {
-          tdStatus.textContent = "";
-          tdStatus.style.color = "#6b7280";
-          return;
-        }
-        tdStatus.textContent = saved.msg;
-        tdStatus.style.color = saved.isError ? "#fca5a5" : "#6b7280";
-      };
-
-      const setRowStatus = (msg, isError) => {
-        setClanSyncStatus(rosterId, msg, isError);
-        applyRowStatus();
-      };
-      applyRowStatus();
-
-      const setBusy = (busy) => {
-        const disabled = !!busy || state.bulkRefreshBusy;
-        trackingSelect.disabled = disabled;
-        tagInput.disabled = disabled;
-        testBtn.disabled = disabled;
-        syncPoolBtn.disabled = disabled;
-        syncTodayBtn.disabled = disabled;
-      };
-
-      const persistConnectedTag = () => {
-        const normalized = normalizeTag(tagInput.value);
-        tagInput.value = normalized;
-        if (toStr(r.connectedClanTag).trim() !== normalized) {
-          r.connectedClanTag = normalized;
-          const publishBtn = $("#publishBtn");
-          if (publishBtn) publishBtn.disabled = false;
-          setStatus("Connected clan tag updated for " + rosterId + ".");
-        }
-      };
-
-      tagInput.addEventListener("change", persistConnectedTag);
-      tagInput.addEventListener("blur", persistConnectedTag);
-      trackingSelect.addEventListener("change", () => {
-        const nextMode = trackingSelect.value === "regularWar" ? "regularWar" : "cwl";
-        const prevMode = getRosterTrackingMode(r);
-        if (nextMode === prevMode) return;
-        r.trackingMode = nextMode;
-        ensureRosterArrays(r);
-        clearSavedBenchSuggestionsForRoster_(rosterId);
-        clearSuggestionMarksForRoster_(rosterId);
-        if (nextMode === "cwl") {
-          r.missing = [];
-        } else if (!Array.isArray(r.missing)) {
-          r.missing = [];
-        }
-        reindexRoster(r);
-        const publishBtn = $("#publishBtn");
-        if (publishBtn) publishBtn.disabled = false;
-        setStatus("Tracking mode updated for " + rosterId + ".");
-        renderPreviewFromState();
-      });
-
-      const ensureReady = () => {
-        if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-          throw new Error("No roster preview is loaded.");
-        }
-        if (!state.password) {
-          throw new Error("Unlock admin first.");
-        }
-        if (state.bulkRefreshBusy) {
-          throw new Error("Refresh all is already running.");
-        }
-        persistConnectedTag();
-        if (!toStr(r.connectedClanTag).trim()) {
-          throw new Error("Connected clan tag is required.");
-        }
-      };
-
-      testBtn.onclick = async () => {
-        try {
-          ensureReady();
-          setBusy(true);
-          setRowStatus("Testing...", false);
-          const res = await runServerMethod("testClanConnection", [state.lastRosterData, rosterId, state.password]);
-          const memberCount = Number.isFinite(Number(res && res.memberCount)) ? Number(res.memberCount) : 0;
-          setRowStatus("memberCount " + memberCount, false);
-        } catch (err) {
-          setRowStatus(toErrorMessage(err), true);
-        } finally {
-          setBusy(false);
-        }
-      };
-
-      syncPoolBtn.onclick = async () => {
-        try {
-          ensureReady();
-          setBusy(true);
-          setRowStatus("Syncing roster pool...", false);
-          const res = await runServerMethod("syncClanRosterPool", [state.lastRosterData, rosterId, state.password]);
-          setRowStatus(formatRosterPoolStatus(res && res.result), false);
-          applyServerSyncedPreview(res && res.rosterData, "Roster pool synced for " + rosterId + ".");
-        } catch (err) {
-          setRowStatus(toErrorMessage(err), true);
-        } finally {
-          setBusy(false);
-        }
-      };
-
-      syncTodayBtn.onclick = async () => {
-        try {
-          ensureReady();
-          const mode = getRosterTrackingMode(r);
-          setBusy(true);
-          setRowStatus(mode === "regularWar" ? "Syncing current war lineup..." : "Syncing today lineup...", false);
-          const res = await runServerMethod("syncClanTodayLineup", [state.lastRosterData, rosterId, state.password]);
-          const result = res && res.result ? res.result : {};
-          const msg = toStr(result.message).trim();
-          const statusText = formatTodayLineupStatus(result);
-          setRowStatus(statusText, false);
-          if (mode === "cwl" && msg.toLowerCase() === "no current cwl war found") {
-            setStatus("No current CWL war found for " + rosterId + ".");
-          } else {
-            applyServerSyncedPreview(
-              res && res.rosterData,
-              mode === "regularWar"
-                ? "Current war lineup synced for " + rosterId + "."
-                : "Today lineup synced for " + rosterId + "."
-            );
-          }
-        } catch (err) {
-          setRowStatus(toErrorMessage(err), true);
-        } finally {
-          setBusy(false);
-        }
-      };
-
-      setBusy(false);
-
-      tr.appendChild(tdRoster);
-      tr.appendChild(tdTracking);
-      tr.appendChild(tdTag);
-      tr.appendChild(tdActions);
-      tr.appendChild(tdStatus);
-      tbody.appendChild(tr);
-    }
-  };
-
-  const renderCwlPerfTable = () => {
-    const tbody = $("#cwlPerfTable tbody");
-    if (!tbody) return;
-
-    const rosters = getRosters();
-    tbody.textContent = "";
-
-    if (!rosters.length) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 3;
-      td.className = "small muted";
-      td.textContent = "Load active config or generate preview first.";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-      return;
-    }
-
-    for (const roster of rosters) {
-      const r = roster && typeof roster === "object" ? roster : {};
-      ensureRosterArrays(r);
-      const rosterId = toStr(r.id).trim();
-      if (!rosterId) continue;
-      const rosterTitle = toStr(r.title).trim();
-      const label = rosterTitle ? (rosterTitle + " (" + rosterId + ")") : rosterId;
-      const trackingMode = getRosterTrackingMode(r);
-
-      const tr = document.createElement("tr");
-
-      const tdRoster = document.createElement("td");
-      tdRoster.textContent = label;
-
-      const tdActions = document.createElement("td");
-      const actions = document.createElement("div");
-      actions.className = "clan-sync-actions";
+      const syncLineupBtn = document.createElement("button");
+      syncLineupBtn.type = "button";
+      syncLineupBtn.className = "clan-sync-btn";
+      syncLineupBtn.textContent = trackingMode === "regularWar" ? "Sync current war lineup" : "Sync lineup";
 
       const refreshBtn = document.createElement("button");
       refreshBtn.type = "button";
@@ -1952,6 +2268,9 @@
       clearBtn.className = "clan-sync-btn secondary";
       clearBtn.textContent = "Clear marks";
 
+      actions.appendChild(testBtn);
+      actions.appendChild(syncPoolBtn);
+      actions.appendChild(syncLineupBtn);
       actions.appendChild(refreshBtn);
       actions.appendChild(suggestBtn);
       actions.appendChild(clearBtn);
@@ -1961,7 +2280,7 @@
       tdStatus.className = "small muted";
 
       const applyRowStatus = () => {
-        const saved = state.cwlStatusByRoster[rosterId];
+        const saved = state.rosterStatusByRoster[rosterId];
         if (!saved || !saved.msg) {
           tdStatus.textContent = "";
           tdStatus.style.color = "#6b7280";
@@ -1972,19 +2291,82 @@
       };
 
       const setRowStatus = (msg, isError) => {
-        setCwlStatus(rosterId, msg, isError);
+        setRosterStatus(rosterId, msg, isError);
         applyRowStatus();
       };
       applyRowStatus();
 
       const setBusy = (busy) => {
         const disabled = !!busy || state.bulkRefreshBusy;
+        moveUpBtn.disabled = disabled || rosterIndex === 0;
+        moveDownBtn.disabled = disabled || rosterIndex >= rosters.length - 1;
+        trackingSelect.disabled = disabled;
+        tagInput.disabled = disabled;
+        testBtn.disabled = disabled;
+        syncPoolBtn.disabled = disabled;
+        syncLineupBtn.disabled = disabled;
         refreshBtn.disabled = disabled;
         suggestBtn.disabled = disabled || trackingMode !== "cwl";
         clearBtn.disabled = disabled;
       };
 
-      const ensureReady = () => {
+      const persistConnectedTag = () => {
+        const normalized = normalizeTag(tagInput.value);
+        tagInput.value = normalized;
+        if (toStr(r.connectedClanTag).trim() !== normalized) {
+          r.connectedClanTag = normalized;
+          const publishBtn = $("#publishBtn");
+          if (publishBtn) publishBtn.disabled = false;
+          setStatus("Connected clan tag updated for " + rosterId + ".");
+          markReportStale("Preview changed after updating connected clan tags.");
+        }
+      };
+
+      tagInput.addEventListener("change", persistConnectedTag);
+      tagInput.addEventListener("blur", persistConnectedTag);
+
+      moveUpBtn.onclick = () => {
+        try {
+          if (!moveRosterInPreview(rosterId, -1)) {
+            setStatus("Roster is already at the top.");
+          }
+        } catch (err) {
+          alert("Move roster failed: " + toErrorMessage(err));
+        }
+      };
+
+      moveDownBtn.onclick = () => {
+        try {
+          if (!moveRosterInPreview(rosterId, 1)) {
+            setStatus("Roster is already at the bottom.");
+          }
+        } catch (err) {
+          alert("Move roster failed: " + toErrorMessage(err));
+        }
+      };
+
+      trackingSelect.addEventListener("change", () => {
+        const nextMode = trackingSelect.value === "regularWar" ? "regularWar" : "cwl";
+        const prevMode = getRosterTrackingMode(r);
+        if (nextMode === prevMode) return;
+        r.trackingMode = nextMode;
+        ensureRosterArrays(r);
+        clearSavedBenchSuggestionsForRoster_(rosterId);
+        clearSuggestionMarksForRoster_(rosterId);
+        if (nextMode === "cwl") {
+          r.missing = [];
+        } else if (!Array.isArray(r.missing)) {
+          r.missing = [];
+        }
+        reindexRoster(r);
+        const publishBtn = $("#publishBtn");
+        if (publishBtn) publishBtn.disabled = false;
+        setStatus("Tracking mode updated for " + rosterId + ".");
+        markReportStale("Preview changed after tracking mode update. Re-run compare with preview.");
+        renderPreviewFromState();
+      });
+
+      const ensureServerReady = () => {
         if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
           throw new Error("No roster preview is loaded.");
         }
@@ -1994,13 +2376,74 @@
         if (state.bulkRefreshBusy) {
           throw new Error("Refresh all is already running.");
         }
+        persistConnectedTag();
+        if (!toStr(r.connectedClanTag).trim()) {
+          throw new Error("Connected clan tag is required.");
+        }
+      };
+
+      testBtn.onclick = async () => {
+        try {
+          ensureServerReady();
+          setBusy(true);
+          setRowStatus("Testing...", false);
+          const res = await runServerMethod("testClanConnection", [state.lastRosterData, rosterId, state.password]);
+          const memberCount = Number.isFinite(Number(res && res.memberCount)) ? Number(res.memberCount) : 0;
+          setRowStatus("memberCount " + memberCount, false);
+        } catch (err) {
+          setRowStatus(toErrorMessage(err), true);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      syncPoolBtn.onclick = async () => {
+        try {
+          ensureServerReady();
+          setBusy(true);
+          setRowStatus("Syncing roster pool...", false);
+          const res = await runServerMethod("syncClanRosterPool", [state.lastRosterData, rosterId, state.password]);
+          setRowStatus(formatRosterPoolStatus(res && res.result), false);
+          applyServerSyncedPreview(res && res.rosterData, "Roster pool synced for " + rosterId + ".");
+        } catch (err) {
+          setRowStatus(toErrorMessage(err), true);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      syncLineupBtn.onclick = async () => {
+        try {
+          ensureServerReady();
+          const mode = getRosterTrackingMode(r);
+          setBusy(true);
+          setRowStatus(mode === "regularWar" ? "Syncing current war lineup..." : "Syncing lineup...", false);
+          const res = await runServerMethod("syncClanTodayLineup", [state.lastRosterData, rosterId, state.password]);
+          const result = res && res.result ? res.result : {};
+          const msg = toStr(result.message).trim();
+          setRowStatus(formatTodayLineupStatus(result), false);
+          if (mode === "cwl" && msg.toLowerCase() === "no current cwl war found") {
+            setStatus("No current CWL war found for " + rosterId + ".");
+          } else {
+            applyServerSyncedPreview(
+              res && res.rosterData,
+              mode === "regularWar"
+                ? "Current war lineup synced for " + rosterId + "."
+                : "Lineup synced for " + rosterId + "."
+            );
+          }
+        } catch (err) {
+          setRowStatus(toErrorMessage(err), true);
+        } finally {
+          setBusy(false);
+        }
       };
 
       refreshBtn.onclick = async () => {
         try {
-          ensureReady();
+          ensureServerReady();
           setBusy(true);
-          setRowStatus("Refreshing...", false);
+          setRowStatus("Refreshing tracking stats...", false);
           const res = await runServerMethod("refreshTrackingStats", [state.lastRosterData, rosterId, state.password]);
           setRowStatus(formatTrackingRefreshStatus(res && res.result), false);
           applyServerSyncedPreview(res && res.rosterData, "Tracking stats refreshed for " + rosterId + ".");
@@ -2014,16 +2457,20 @@
       suggestBtn.onclick = async () => {
         if (trackingMode !== "cwl") return;
         try {
-          ensureReady();
+          ensureServerReady();
           setBusy(true);
           setRowStatus("Suggesting...", false);
           const res = await runServerMethod("computeBenchSuggestions", [state.lastRosterData, rosterId, state.password]);
           if (res && res.rosterData && Array.isArray(res.rosterData.rosters)) {
             state.lastRosterData = res.rosterData;
+            normalizeRosterOrderInData_(state.lastRosterData);
             reindexAllRosters();
           }
           const summary = applySuggestionResponseToState(rosterId, res);
           renderPreviewFromState();
+          markReportStale("Preview changed after bench suggestions. Re-run compare with preview.");
+          const publishBtn = $("#publishBtn");
+          if (publishBtn) publishBtn.disabled = false;
           setRowStatus(formatSuggestionStatus(summary), false);
         } catch (err) {
           setRowStatus(toErrorMessage(err), true);
@@ -2038,22 +2485,33 @@
         renderPreviewFromState();
         const publishBtn = $("#publishBtn");
         if (publishBtn) publishBtn.disabled = false;
+        markReportStale("Preview changed after clearing marks. Re-run compare with preview.");
         setRowStatus("saved suggestions cleared", false);
       };
 
       setBusy(false);
-
       tr.appendChild(tdRoster);
+      tr.appendChild(tdOrder);
+      tr.appendChild(tdTracking);
+      tr.appendChild(tdTag);
       tr.appendChild(tdActions);
       tr.appendChild(tdStatus);
       tbody.appendChild(tr);
     }
   };
 
+  const renderClanSyncTable = () => {
+    renderConnectedRostersTable();
+  };
+
+  const renderCwlPerfTable = () => {
+    renderConnectedRostersTable();
+  };
+
   const refreshAdminWorkflowUi = () => {
     refreshRefreshAllUi();
-    renderClanSyncTable();
-    renderCwlPerfTable();
+    renderConnectedRostersTable();
+    renderImportUi();
     applyBenchMarks_();
   };
 
@@ -2062,7 +2520,7 @@
       throw new Error("Refresh all is already running.");
     }
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-      throw new Error("Load active config or generate preview first.");
+      throw new Error("Load active config first.");
     }
     if (!state.password) {
       throw new Error("Unlock admin first.");
@@ -2235,39 +2693,8 @@
     window.ROSTER_GET_ADMIN_PASSWORD = () => state.password || "";
     window.ROSTER_OPEN_PLAYER_EDIT = openPlayerEditPanel;
 
-    addRosterRow({ id: "R1", title: "Roster", mainCount: 15, subCount: 5, difficulty: "competitive" });
-
     renderPreviewFromState();
-
-    const importBody = $("#importWorkflowBody");
-    const toggleImportWorkflowBtn = $("#toggleImportWorkflowBtn");
-    if (importBody && toggleImportWorkflowBtn) {
-      const setImportCollapsed = (collapsed) => {
-        importBody.classList.toggle("hidden", collapsed);
-        toggleImportWorkflowBtn.textContent = collapsed ? "Expand" : "Collapse";
-        toggleImportWorkflowBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      };
-      setImportCollapsed(true);
-      toggleImportWorkflowBtn.onclick = () => {
-        const isCollapsed = importBody.classList.contains("hidden");
-        setImportCollapsed(!isCollapsed);
-      };
-    }
-
-    const overridesBody = $("#overridesSectionBody");
-    const toggleOverridesBtn = $("#toggleOverridesBtn");
-    if (overridesBody && toggleOverridesBtn) {
-      const setOverridesCollapsed = (collapsed) => {
-        overridesBody.classList.toggle("hidden", collapsed);
-        toggleOverridesBtn.textContent = collapsed ? "Expand" : "Collapse";
-        toggleOverridesBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      };
-      setOverridesCollapsed(true);
-      toggleOverridesBtn.onclick = () => {
-        const isCollapsed = overridesBody.classList.contains("hidden");
-        setOverridesCollapsed(!isCollapsed);
-      };
-    }
+    renderImportUi();
 
     const toggleAddPlayerPanelBtn = $("#toggleAddPlayerPanelBtn");
     const toggleAddPreviewRosterPanelBtn = $("#toggleAddPreviewRosterPanelBtn");
@@ -2288,36 +2715,6 @@
         const panel = $("#addPlayerPanel");
         const isOpen = !!(panel && !panel.classList.contains("hidden"));
         setAddPlayerPanelOpen(!isOpen);
-      };
-    }
-
-    const clanSyncBody = $("#clanSyncBody");
-    const toggleClanSyncBtn = $("#toggleClanSyncBtn");
-    if (clanSyncBody && toggleClanSyncBtn) {
-      const setClanSyncCollapsed = (collapsed) => {
-        clanSyncBody.classList.toggle("hidden", collapsed);
-        toggleClanSyncBtn.textContent = collapsed ? "Expand" : "Collapse";
-        toggleClanSyncBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      };
-      setClanSyncCollapsed(true);
-      toggleClanSyncBtn.onclick = () => {
-        const isCollapsed = clanSyncBody.classList.contains("hidden");
-        setClanSyncCollapsed(!isCollapsed);
-      };
-    }
-
-    const cwlPerfBody = $("#cwlPerfBody");
-    const toggleCwlPerfBtn = $("#toggleCwlPerfBtn");
-    if (cwlPerfBody && toggleCwlPerfBtn) {
-      const setCwlPerfCollapsed = (collapsed) => {
-        cwlPerfBody.classList.toggle("hidden", collapsed);
-        toggleCwlPerfBtn.textContent = collapsed ? "Expand" : "Collapse";
-        toggleCwlPerfBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      };
-      setCwlPerfCollapsed(true);
-      toggleCwlPerfBtn.onclick = () => {
-        const isCollapsed = cwlPerfBody.classList.contains("hidden");
-        setCwlPerfCollapsed(!isCollapsed);
       };
     }
 
@@ -2344,7 +2741,7 @@
 
         show("#adminPanel", true);
         setLoginStatus("Unlocked.");
-        refreshRefreshAllUi();
+        refreshAdminWorkflowUi();
         try {
           await loadAutoRefreshSettings();
         } catch (settingsErr) {
@@ -2404,10 +2801,22 @@
     }
     renderAutoRefreshUi();
 
-    $("#addRosterBtn").onclick = () => {
-      const idx = (Date.now() % 1000);
-      addRosterRow({ id: "R" + idx, title: "Roster " + idx, mainCount: 15, subCount: 5, difficulty: "standard" });
+    const excludeWarOutInput = $("#excludeWarOut");
+    const requireDiscordInput = $("#requireDiscord");
+    const handleImportFilterChange = () => {
+      if (!state.importSession) return;
+      state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());
+      invalidateImportComparison("Filters changed. Re-run compare with preview.");
+      renderImportUi();
     };
+    if (excludeWarOutInput) {
+      excludeWarOutInput.checked = true;
+      excludeWarOutInput.addEventListener("change", handleImportFilterChange);
+    }
+    if (requireDiscordInput) {
+      requireDiscordInput.checked = false;
+      requireDiscordInput.addEventListener("change", handleImportFilterChange);
+    }
 
     $("#addPlayerBtn").onclick = () => {
       const rosterSelect = $("#addPlayerRoster");
@@ -2473,14 +2882,12 @@
           throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
         }
 
-        syncRosterSpecsFromRosterData(rosterData);
         const pageTitleInput = $("#pageTitle");
         if (pageTitleInput) pageTitleInput.value = toStr(rosterData.pageTitle).trim() || "Roster Overview";
 
         state.lastRosterData = rosterData;
-        state.lastReport = null;
-        state.clanSyncStatusByRoster = {};
-        state.cwlStatusByRoster = {};
+        normalizeRosterOrderInData_(state.lastRosterData);
+        clearRosterStatuses();
         state.benchMarksByRoster = {};
         state.swapInMarksByRoster = {};
         state.suggestionNotesByRoster = {};
@@ -2488,11 +2895,14 @@
         setAddPreviewRosterStatus("", false);
         setAddPlayerStatus("", false);
 
-        renderPreviewFromState();
+        if (state.importSession) {
+          alignImportMappingWithPreview();
+          invalidateImportComparison("Preview changed after loading active config. Re-run compare with preview.");
+        }
 
-        $("#report").textContent = "Loaded active roster-data.json from server.";
-        show("#reportWrap", true);
-        $("#publishBtn").disabled = false;
+        renderPreviewFromState();
+        const publishBtn = $("#publishBtn");
+        if (publishBtn) publishBtn.disabled = false;
         setStatus("Active config loaded.");
       } catch (err) {
         setStatus("");
@@ -2500,82 +2910,77 @@
       }
     };
 
-    $("#xlsxInput").onchange = async (e) => {
-      try {
-        const f = e && e.target && e.target.files ? e.target.files[0] : null;
-        setStatus("Reading XLSX...");
-        const rows = await loadXlsx(f);
-        state.rows = rows;
+    const xlsxInput = $("#xlsxInput");
+    if (xlsxInput) {
+      xlsxInput.onchange = async (e) => {
+        const file = e && e.target && e.target.files ? e.target.files[0] : null;
+        if (!file) return;
+        const failedFileName = toStr(file && file.name).trim();
+        try {
+          setStatus("Reading XLSX...");
+          const nextSession = await loadXlsxImportSession(file);
+          state.importSession = nextSession;
+          clearImportLoadWarning();
 
-        const accounts = window.RosterGenerator.normalizeAccountsFromXlsxRows(rows);
-        state.accounts = accounts;
+          if (excludeWarOutInput) excludeWarOutInput.checked = !!nextSession.filters.excludeWarOut;
+          if (requireDiscordInput) requireDiscordInput.checked = !!nextSession.filters.requireDiscord;
 
-        if (accounts.length > 200) {
-          setStatus("Imported " + accounts.length + " players (above recommended limit: 200).");
-        } else {
-          setStatus("Imported " + accounts.length + " players.");
+          renderImportUi();
+          const parsed = Array.isArray(nextSession.accounts) ? nextSession.accounts.length : 0;
+          setImportActionStatus("Import loaded. Run compare with preview.", false);
+          setStatus("Imported " + parsed + " member row(s) from sheet '" + (nextSession.sheetName || "first sheet") + "'.");
+        } catch (err) {
+          setImportLoadFailureWarning(failedFileName, err);
+          const keepActive = !!state.importSession;
+          setStatus(keepActive
+            ? "Failed to load new XLSX. Previous import session remains active."
+            : "Failed to load XLSX.");
+          setImportActionStatus(keepActive
+            ? "Load failed. Previous import session remains active."
+            : "Load failed. No import session is active.", true);
+          renderImportUi();
+          alert("Failed to load XLSX: " + toErrorMessage(err));
         }
-      } catch (err) {
-        setStatus("");
-        alert(toErrorMessage(err));
-      }
-    };
+      };
+    }
 
-    $("#previewBtn").onclick = async () => {
-      try {
-        if (!state.accounts) throw new Error("Import an XLSX file first.");
-        if (state.accounts.length === 0) throw new Error("XLSX import is empty.");
-        if (state.accounts.length > 250) throw new Error("Too many players (" + state.accounts.length + "). Please reduce the XLSX input.");
+    const compareImportBtn = $("#compareImportBtn");
+    if (compareImportBtn) {
+      compareImportBtn.onclick = async () => {
+        try {
+          await runImportComparison();
+        } catch (err) {
+          setImportActionStatus("", false);
+          alert("Compare failed: " + toErrorMessage(err));
+          renderImportUi();
+        }
+      };
+    }
 
-        const rosterSpecs = readRosterSpecs();
-        const filters = readFilters();
-        const overrides = parseOverrides();
-
-        const pageTitle = toStr($("#pageTitle") && $("#pageTitle").value).trim() || "Roster Overview";
-
-        setStatus("Generating...");
-        const res = window.RosterGenerator.generateRosterData({
-          pageTitle,
-          schemaVersion: 1,
-          rosterSpecs,
-          accounts: state.accounts,
-          filters,
-          overrides,
-        });
-
-        state.lastRosterData = res.rosterData;
-        state.lastReport = res.report;
-        state.clanSyncStatusByRoster = {};
-        state.cwlStatusByRoster = {};
-        state.benchMarksByRoster = {};
-        state.swapInMarksByRoster = {};
-        state.suggestionNotesByRoster = {};
-        reindexAllRosters();
-        setAddPreviewRosterStatus("", false);
-        setAddPlayerStatus("", false);
-
-        renderPreviewFromState();
-
-        $("#report").textContent = jsonPretty(res.report);
-        show("#reportWrap", true);
-
-        $("#publishBtn").disabled = false;
-        setStatus("Preview ready.");
-      } catch (err) {
-        $("#publishBtn").disabled = true;
-        setStatus("");
-        alert(toErrorMessage(err));
-      }
-    };
+    const applyImportBtn = $("#applyImportBtn");
+    if (applyImportBtn) {
+      applyImportBtn.onclick = async () => {
+        try {
+          await applyImportComparison();
+        } catch (err) {
+          setImportActionStatus("", false);
+          alert("Apply failed: " + toErrorMessage(err));
+          renderImportUi();
+        }
+      };
+    }
 
     $("#publishBtn").onclick = async () => {
       try {
-        if (!state.lastRosterData) throw new Error("Generate a preview first.");
+        if (!state.lastRosterData) throw new Error("Load active config first.");
         const now = Date.now();
         if (now < state.publishCooldownUntil) throw new Error("Publish cooldown: please wait a few seconds.");
 
         const pw = (state.password || toStr($("#pw") && $("#pw").value)).trim();
         if (!pw) throw new Error("Password is missing.");
+
+        syncRosterOrderFromCurrentArray_(state.lastRosterData);
+        normalizeRosterOrderInData_(state.lastRosterData);
 
         $("#publishBtn").disabled = true;
         setStatus("Publishing...");

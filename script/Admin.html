@@ -428,6 +428,21 @@
       gap: 6px;
     }
 
+    .roster-order-controls {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .roster-order-pos {
+      font-size: 11px;
+      color: #94a3b8;
+      font-weight: 700;
+      min-width: 52px;
+      text-align: right;
+    }
+
     .clan-sync-btn {
       display: inline-flex;
       align-items: center;
@@ -496,6 +511,73 @@
       line-height: 1.35;
       color: #94a3b8;
       white-space: pre-line;
+    }
+
+    .chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.82);
+      font-size: 12px;
+      color: #e5e7eb;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .chip-option input {
+      margin: 0;
+      accent-color: #22c55e;
+    }
+
+    .mapping-table-select {
+      min-width: 220px;
+    }
+
+    .import-summary-lines {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+
+    .import-load-warning {
+      border: 1px solid #f59e0b;
+      border-left: 4px solid #f97316;
+      border-radius: 8px;
+      background: rgba(120, 53, 15, 0.42);
+      color: #ffedd5;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.4;
+      padding: 10px 12px;
+    }
+
+    .import-strong {
+      color: #e5e7eb;
+      font-weight: 700;
+    }
+
+    .import-debug {
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.62);
+      padding: 8px;
+    }
+
+    .import-debug summary {
+      cursor: pointer;
+      color: #cbd5e1;
+      font-weight: 700;
+      user-select: none;
     }
 
     @media (max-width: 640px) {
@@ -567,7 +649,7 @@
       <div class="admin-grid">
         <div class="workflow-block">
           <div class="section-head">
-            <div class="workflow-title">Current roster workflow</div>
+            <div class="workflow-title">Live preview</div>
             <span class="pill">active data</span>
           </div>
 
@@ -592,151 +674,103 @@
           </div>
 
           <div class="small muted">
-            Use this for the currently published roster. Load it, make manual preview edits, then publish.
-          </div>
-
-          <div class="workflow-block">
-            <div class="section-head">
-              <div style="font-weight:700;">Clan Sync</div>
-              <button id="toggleClanSyncBtn" class="collapse-btn" type="button" aria-expanded="false"
-                aria-controls="clanSyncBody">Expand</button>
-            </div>
-            <div id="clanSyncBody" class="hidden">
-              <div class="small muted">Manual sync via Official Clash API through RoyaleAPI proxy.</div>
-              <div style="overflow:auto; margin-top:10px;">
-                <table class="admin-table" id="clanSyncTable">
-                  <thead>
-                    <tr>
-                      <th style="min-width:180px;">Roster</th>
-                      <th style="min-width:160px;">Tracking</th>
-                      <th style="min-width:180px;">Connected clan tag</th>
-                      <th style="min-width:340px;">Actions</th>
-                      <th style="min-width:220px;">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <div class="workflow-block">
-            <div class="section-head">
-              <div style="font-weight:700;">Tracking stats</div>
-              <button id="toggleCwlPerfBtn" class="collapse-btn" type="button" aria-expanded="false"
-                aria-controls="cwlPerfBody">Expand</button>
-            </div>
-            <div id="cwlPerfBody" class="hidden">
-              <div class="small muted">Refresh tracking stats for each roster, run CWL-only bench suggestions, or clear
-                preview marks.
-              </div>
-              <div style="overflow:auto; margin-top:10px;">
-                <table class="admin-table" id="cwlPerfTable">
-                  <thead>
-                    <tr>
-                      <th style="min-width:220px;">Roster</th>
-                      <th style="min-width:360px;">Actions</th>
-                      <th style="min-width:220px;">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody></tbody>
-                </table>
-              </div>
-            </div>
+            Load the published roster into preview, run roster operations or manual edits, then publish.
           </div>
         </div>
 
         <div class="workflow-block">
           <div class="section-head">
-            <div class="workflow-title">Import new XLSX workflow</div>
-            <button id="toggleImportWorkflowBtn" class="collapse-btn" type="button" aria-expanded="false"
-              aria-controls="importWorkflowBody">Expand</button>
+            <div class="workflow-title">Connected rosters</div>
+            <span class="pill">roster management</span>
           </div>
-
-          <div id="importWorkflowBody" class="hidden">
-            <div class="admin-grid">
-              <div class="admin-row">
-                <label for="xlsxInput">XLSX import</label>
-                <input id="xlsxInput" type="file" class="admin-input" accept=".xlsx" />
-              </div>
-
-              <div>
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-                  <div style="font-weight:700;">Roster specs</div>
-                  <button id="addRosterBtn" class="btn secondary" type="button">Add roster</button>
-                </div>
-                <div class="small muted" style="margin-top:6px;">
-                  Allocation fills higher difficulty first (competitive → standard → relaxed).
-                </div>
-
-                <div style="overflow:auto; margin-top:10px;">
-                  <table class="admin-table" id="rosterTable">
-                    <thead>
-                      <tr>
-                        <th style="min-width:90px;">ID</th>
-                        <th style="min-width:220px;">Title</th>
-                        <th style="min-width:110px;">Main</th>
-                        <th style="min-width:110px;">Subs</th>
-                        <th style="min-width:160px;">Difficulty</th>
-                        <th style="min-width:90px;"></th>
-                      </tr>
-                    </thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div>
-                <div style="font-weight:700;">Filters</div>
-                <div class="admin-grid" style="margin-top:10px;">
-                  <div class="admin-row">
-                    <label for="excludeWarOut">Exclude war out</label>
-                    <input id="excludeWarOut" type="checkbox" checked />
-                  </div>
-                  <div class="admin-row">
-                    <label for="allowedClans">Allowed clans</label>
-                    <input id="allowedClans" class="admin-input" placeholder="Comma-separated, empty = all" />
-                  </div>
-                  <div class="admin-row">
-                    <label for="requireDiscord">Require Discord name</label>
-                    <input id="requireDiscord" type="checkbox" />
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <div class="section-head">
-                  <div style="font-weight:700;">Overrides (optional)</div>
-                  <button id="toggleOverridesBtn" class="collapse-btn" type="button" aria-expanded="true"
-                    aria-controls="overridesSectionBody">Collapse</button>
-                </div>
-                <div id="overridesSectionBody">
-                  <div class="small muted" style="margin-top:6px;">Tags must include #. JSON only.</div>
-                  <div class="admin-grid" style="margin-top:10px;">
-                    <div class="admin-row">
-                      <label for="overridesJson">Overrides JSON</label>
-                      <textarea id="overridesJson" class="admin-textarea"
-                        placeholder='{"excluded":["#ABC123"],"pinned":{"#DEF456":{"rosterId":"R1","role":"main","slot":3}}}'></textarea>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="admin-actions">
-                <button id="previewBtn" class="btn secondary" type="button">Generate preview</button>
-              </div>
-
-              <div class="small">
-                Max recommended players per import: <span class="pill">200</span>
-                <span class="muted">to avoid timeouts.</span>
-              </div>
-            </div>
+          <div class="small muted">
+            Per roster workflow: test connection, sync roster pool, sync lineup, refresh tracking stats, suggest bench
+            (CWL only), or clear marks.
+          </div>
+          <div style="overflow:auto; margin-top:6px;">
+            <table class="admin-table" id="connectedRostersTable">
+              <thead>
+                <tr>
+                  <th style="min-width:190px;">Roster</th>
+                  <th style="min-width:150px;">Display order</th>
+                  <th style="min-width:170px;">Tracking mode</th>
+                  <th style="min-width:190px;">Connected clan tag</th>
+                  <th style="min-width:440px;">Actions</th>
+                  <th style="min-width:230px;">Status</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
 
-        <div id="reportWrap" class="hidden">
-          <div style="font-weight:700; margin-top:6px;">Generation report</div>
-          <pre id="report" class="small"></pre>
+        <div class="workflow-block">
+          <div class="section-head">
+            <div class="workflow-title">Member list update (XLSX)</div>
+            <span id="importStalePill" class="pill hidden">Compare is stale</span>
+          </div>
+          <div class="small muted">
+            XLSX import is additive only. It compares imported members against the current preview and only applies safe
+            updates and addable new members. Missing rows never remove existing players.
+          </div>
+
+          <div class="admin-row">
+            <label for="xlsxInput">Member file (.xlsx)</label>
+            <input id="xlsxInput" type="file" class="admin-input" accept=".xlsx" />
+          </div>
+          <div id="importLoadWarning" class="import-load-warning hidden" role="alert" aria-live="polite"></div>
+          <div id="xlsxMeta" class="small muted"></div>
+
+          <div class="workflow-block">
+            <div style="font-weight:700;">Filters</div>
+            <div class="admin-grid" style="margin-top:4px;">
+              <div class="admin-row">
+                <label for="excludeWarOut">Exclude war out</label>
+                <input id="excludeWarOut" type="checkbox" checked />
+              </div>
+              <div class="admin-row">
+                <label for="requireDiscord">Require Discord name</label>
+                <input id="requireDiscord" type="checkbox" />
+              </div>
+            </div>
+            <div class="small muted">Allowed clans from this import. No selection means all clans are allowed.</div>
+            <div id="allowedClansWrap" class="chip-list"></div>
+          </div>
+
+          <div class="workflow-block">
+            <div style="font-weight:700;">Clan to roster mapping</div>
+            <div class="small muted">
+              Map imported clan values to current preview rosters. Unmapped members stay review-only.
+            </div>
+            <div style="overflow:auto;">
+              <table class="admin-table" id="clanMappingTable">
+                <thead>
+                  <tr>
+                    <th style="min-width:220px;">Imported clan</th>
+                    <th style="min-width:90px;">Count</th>
+                    <th style="min-width:280px;">Mapped roster</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="admin-actions">
+            <button id="compareImportBtn" class="btn secondary" type="button" disabled>Compare with preview</button>
+            <button id="applyImportBtn" class="btn" type="button" disabled>Apply updates</button>
+            <span id="importActionStatus" class="small muted"></span>
+          </div>
+
+          <div id="importSummaryWrap" class="workflow-block hidden">
+            <div style="font-weight:700;">Import summary</div>
+            <div id="importSummaryLines" class="import-summary-lines"></div>
+            <div id="importNoDataMsg" class="import-strong hidden">No data to add.</div>
+            <details id="importDebugDetails" class="import-debug hidden">
+              <summary>Raw details</summary>
+              <pre id="importDebugPre" class="small"></pre>
+            </details>
+          </div>
         </div>
       </div>
     </div>
@@ -756,7 +790,7 @@
       <div id="addPreviewRosterPanel" class="workflow-block hidden" style="margin-bottom:10px;">
         <div class="section-head">
           <div style="font-weight:700;">Add roster to loaded preview</div>
-          <span id="addPreviewRosterHint" class="small muted">Load active config or generate preview first.</span>
+          <span id="addPreviewRosterHint" class="small muted">Load active config first.</span>
         </div>
 
         <div class="admin-grid">
@@ -790,7 +824,7 @@
       <div id="addPlayerPanel" class="workflow-block hidden" style="margin-bottom:10px;">
         <div class="section-head">
           <div style="font-weight:700;">Add player to loaded preview</div>
-          <span id="addPlayerHint" class="small muted">Load active config or generate preview first.</span>
+          <span id="addPlayerHint" class="small muted">Load active config first.</span>
         </div>
 
         <div class="admin-grid">

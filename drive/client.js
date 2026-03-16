@@ -3,6 +3,7 @@
     const toStr = (v) => (v == null ? "" : String(v));
     const pluralize = (count, singular, plural) => (count === 1 ? singular : plural);
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
+    const DAY_MS = 24 * 60 * 60 * 1000;
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
         : { format: (value) => String(value) };
@@ -10,6 +11,9 @@
     let lastRenderedData = null;
     let searchUiBound = false;
     let profileUiBound = false;
+    let globalLastUpdatedTimerId = 0;
+    let globalLastUpdatedTimerValue = "";
+    const missingSectionExpandedByRoster = Object.create(null);
 
     const profileCache = Object.create(null);
     const profilePending = Object.create(null);
@@ -80,6 +84,55 @@
 
     const getRosterTrackingMode = (rosterRaw) =>
         rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
+
+    const getOrderedRostersFromData = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const rosters = Array.isArray(data.rosters) ? data.rosters : [];
+        if (!rosters.length) return [];
+
+        const rosterIndexesById = Object.create(null);
+        for (let i = 0; i < rosters.length; i++) {
+            const rosterId = toStr(rosters[i] && rosters[i].id).trim();
+            if (!rosterId) continue;
+            if (!rosterIndexesById[rosterId]) rosterIndexesById[rosterId] = [];
+            rosterIndexesById[rosterId].push(i);
+        }
+
+        const consumedIndexes = Object.create(null);
+        const ordered = [];
+        const pushRosterIndex = (index) => {
+            if (!Number.isInteger(index) || consumedIndexes[index]) return;
+            consumedIndexes[index] = true;
+            ordered.push(rosters[index]);
+        };
+
+        const rosterOrder = Array.isArray(data.rosterOrder) ? data.rosterOrder : [];
+        for (let i = 0; i < rosterOrder.length; i++) {
+            const rosterId = toStr(rosterOrder[i]).trim();
+            if (!rosterId) continue;
+            const queue = rosterIndexesById[rosterId];
+            if (!queue || !queue.length) continue;
+            pushRosterIndex(queue.shift());
+        }
+
+        for (let i = 0; i < rosters.length; i++) {
+            pushRosterIndex(i);
+        }
+        return ordered;
+    };
+
+    const buildRosterOrderFromRosters = (rostersRaw) => {
+        const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
+        const order = [];
+        const seen = Object.create(null);
+        for (let i = 0; i < rosters.length; i++) {
+            const rosterId = toStr(rosters[i] && rosters[i].id).trim();
+            if (!rosterId || seen[rosterId]) continue;
+            seen[rosterId] = true;
+            order.push(rosterId);
+        }
+        return order;
+    };
 
     const toNonNegativeInt = (value) => {
         const num = Number(value);
@@ -417,6 +470,7 @@
         if (loading) loading.remove();
         const freshnessCard = $("#globalLastUpdated");
         if (freshnessCard) freshnessCard.classList.add("hidden");
+        clearGlobalLastUpdatedTimer();
     };
 
     const normalizePlayer = (p) => {
@@ -753,6 +807,418 @@
         '<div class="profile-notice' + (tone ? (" profile-notice--" + tone) : "") + '"><div class="profile-notice__label">' +
         escapeHtml(label) + '</div><div class="profile-notice__text">' + escapeHtml(text) + "</div></div>";
 
+    const formatSignedNumber = (valueRaw) => {
+        const value = Number(valueRaw);
+        if (!Number.isFinite(value)) return "-";
+        if (value === 0) return "0";
+        return (value > 0 ? "+" : "") + formatNumber(Math.abs(value));
+    };
+
+    const isValidDayKey = (valueRaw) => /^\d{4}-\d{2}-\d{2}$/.test(toStr(valueRaw).trim());
+
+    const parseTimeMs = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (!value) return 0;
+        const ms = new Date(value).getTime();
+        return Number.isFinite(ms) ? ms : 0;
+    };
+
+    const getPlayerMetricsEntry = (tagRaw, dataRaw) => {
+        const tag = normalizeClanTag(tagRaw);
+        if (!tag) return null;
+        const bareTag = tag.charAt(0) === "#" ? tag.slice(1) : tag;
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
+        const metrics = data && data.playerMetrics && typeof data.playerMetrics === "object" ? data.playerMetrics : null;
+        const byTag = metrics && metrics.byTag && typeof metrics.byTag === "object" ? metrics.byTag : null;
+        if (!byTag) return null;
+        const candidates = [byTag[tag], byTag[bareTag]];
+        for (let i = 0; i < candidates.length; i++) {
+            const candidate = candidates[i];
+            if (candidate && typeof candidate === "object") return candidate;
+        }
+        return null;
+    };
+
+    const normalizeLocalHistoryPoints = (historyRaw, latestSnapshotRaw) => {
+        const pointsByDay = Object.create(null);
+        const history = Array.isArray(historyRaw) ? historyRaw : [];
+
+        const pushPoint = (rawPoint) => {
+            const point = rawPoint && typeof rawPoint === "object" ? rawPoint : {};
+            const trophies = toNonNegativeInt(point.trophies);
+            const capturedMs = parseTimeMs(point.capturedAt);
+            let dayKey = toStr(point.dayKey).trim();
+            if (!isValidDayKey(dayKey) && capturedMs > 0) dayKey = new Date(capturedMs).toISOString().slice(0, 10);
+            if (!isValidDayKey(dayKey)) return;
+            const ms = capturedMs > 0 ? capturedMs : new Date(dayKey + "T12:00:00Z").getTime();
+            if (!Number.isFinite(ms)) return;
+            const normalized = {
+                dayKey,
+                ms,
+                trophies,
+                capturedAt: capturedMs > 0 ? new Date(capturedMs).toISOString() : "",
+                clanTag: normalizeClanTag(point.clanTag),
+                leagueName: toStr(point.league && point.league.name).trim(),
+            };
+            const existing = pointsByDay[dayKey];
+            if (!existing || normalized.ms >= existing.ms) {
+                pointsByDay[dayKey] = normalized;
+            }
+        };
+
+        for (let i = 0; i < history.length; i++) {
+            pushPoint(history[i]);
+        }
+
+        const latestSnapshot = latestSnapshotRaw && typeof latestSnapshotRaw === "object" ? latestSnapshotRaw : null;
+        if (latestSnapshot && latestSnapshot.trophies != null) {
+            const latestCapturedMs = parseTimeMs(latestSnapshot.capturedAt);
+            pushPoint({
+                dayKey: latestCapturedMs > 0 ? new Date(latestCapturedMs).toISOString().slice(0, 10) : "",
+                capturedAt: latestSnapshot.capturedAt,
+                trophies: latestSnapshot.trophies,
+                clanTag: latestSnapshot.clanTag,
+                league: latestSnapshot.league,
+            });
+        }
+
+        return Object.keys(pointsByDay)
+            .sort()
+            .map((dayKey) => pointsByDay[dayKey]);
+    };
+
+    const getLocalTrophyHistoryForTag = (tagRaw, dataRaw) => {
+        const entry = getPlayerMetricsEntry(tagRaw, dataRaw);
+        if (!entry) return [];
+        const history = Array.isArray(entry.trophyHistoryDaily)
+            ? entry.trophyHistoryDaily
+            : (Array.isArray(entry.trophyHistory) ? entry.trophyHistory : []);
+        return normalizeLocalHistoryPoints(history, entry.latestSnapshot);
+    };
+
+    const getLegendTrendPoints = (pointsRaw, windowDays) => {
+        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
+        if (!points.length) return [];
+        const days = Math.max(1, toNonNegativeInt(windowDays) || 30);
+        const latest = points[points.length - 1];
+        const cutoffMs = latest.ms - days * DAY_MS;
+        return points.filter((point) => point && Number.isFinite(point.ms) && point.ms >= cutoffMs);
+    };
+
+    const findNearestComparisonPoint = (pointsRaw, targetMs, latestMs) => {
+        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
+        let best = null;
+        let bestDiff = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < points.length; i++) {
+            const point = points[i] && typeof points[i] === "object" ? points[i] : null;
+            if (!point || !Number.isFinite(point.ms)) continue;
+            if (point.ms >= latestMs) continue;
+            const diff = Math.abs(point.ms - targetMs);
+            if (diff < bestDiff) {
+                best = point;
+                bestDiff = diff;
+            }
+        }
+        return best;
+    };
+
+    const computeLegendDelta = (pointsRaw, daysAgoRaw) => {
+        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
+        const daysAgo = Math.max(1, toNonNegativeInt(daysAgoRaw));
+        if (points.length < 2) {
+            return {
+                daysAgo,
+                available: false,
+                message: "Tracking started recently",
+            };
+        }
+        const latest = points[points.length - 1];
+        if (!latest || !Number.isFinite(latest.ms)) {
+            return {
+                daysAgo,
+                available: false,
+                message: "Tracking started recently",
+            };
+        }
+        const targetMs = latest.ms - daysAgo * DAY_MS;
+        const comparison = findNearestComparisonPoint(points, targetMs, latest.ms);
+        if (!comparison) {
+            return {
+                daysAgo,
+                available: false,
+                message: "Tracking started recently",
+            };
+        }
+        const delta = toNonNegativeInt(latest.trophies) - toNonNegativeInt(comparison.trophies);
+        const actualDays = Math.max(1, Math.round((latest.ms - comparison.ms) / DAY_MS));
+        return {
+            daysAgo,
+            available: true,
+            delta,
+            latest,
+            comparison,
+            actualDays,
+            approximate: Math.abs(actualDays - daysAgo) > 1,
+        };
+    };
+
+    const renderLegendDeltaCard = (deltaRaw) => {
+        const delta = deltaRaw && typeof deltaRaw === "object" ? deltaRaw : {};
+        const label = toNonNegativeInt(delta.daysAgo) + "d";
+        if (!delta.available) {
+            return [
+                '<div class="profile-legend-delta-card is-empty">',
+                '<div class="profile-legend-delta-card__label">', escapeHtml(label), "</div>",
+                '<div class="profile-legend-delta-card__value">-</div>',
+                '<div class="profile-legend-delta-card__meta">', escapeHtml(delta.message || "Tracking started recently"), "</div>",
+                "</div>",
+            ].join("");
+        }
+        const toneClass = delta.delta > 0 ? " is-up" : (delta.delta < 0 ? " is-down" : " is-flat");
+        const comparisonText = delta.comparison && delta.comparison.dayKey ? delta.comparison.dayKey : "";
+        const metaText = comparisonText
+            ? ((delta.approximate ? "~" : "") + delta.actualDays + "d ref • " + comparisonText)
+            : ((delta.approximate ? "~" : "") + delta.actualDays + "d ref");
+        return [
+            '<div class="profile-legend-delta-card', toneClass, '">',
+            '<div class="profile-legend-delta-card__label">', escapeHtml(label), "</div>",
+            '<div class="profile-legend-delta-card__value">', escapeHtml(formatSignedNumber(delta.delta)), "</div>",
+            '<div class="profile-legend-delta-card__meta">', escapeHtml(metaText), "</div>",
+            "</div>",
+        ].join("");
+    };
+
+    const renderLegendTrendSparkline = (pointsRaw) => {
+        const points = Array.isArray(pointsRaw) ? pointsRaw : [];
+        if (!points.length) {
+            return {
+                hasData: false,
+                html: '<div class="profile-legend-trend__empty">No local trophy history yet.</div>',
+                caption: "Tracking has not started for this player yet.",
+            };
+        }
+
+        if (points.length === 1) {
+            const only = points[0];
+            return {
+                hasData: true,
+                html: '<div class="profile-legend-trend__single-point">Only one tracked day so far (' + escapeHtml(only.dayKey) + ").</div>",
+                caption: "Tracking started recently.",
+            };
+        }
+
+        const width = 360;
+        const height = 116;
+        const padX = 12;
+        const padY = 12;
+        const innerWidth = width - padX * 2;
+        const innerHeight = height - padY * 2;
+
+        const minX = points[0].ms;
+        const maxX = points[points.length - 1].ms;
+        const xRange = Math.max(1, maxX - minX);
+
+        let minY = Number.POSITIVE_INFINITY;
+        let maxY = Number.NEGATIVE_INFINITY;
+        for (let i = 0; i < points.length; i++) {
+            const trophies = toNonNegativeInt(points[i] && points[i].trophies);
+            if (trophies < minY) minY = trophies;
+            if (trophies > maxY) maxY = trophies;
+        }
+        if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+            return {
+                hasData: false,
+                html: '<div class="profile-legend-trend__empty">No local trophy history yet.</div>',
+                caption: "Tracking has not started for this player yet.",
+            };
+        }
+        const yRange = Math.max(1, maxY - minY);
+
+        const chartPoints = points.map((point) => {
+            const x = padX + ((point.ms - minX) / xRange) * innerWidth;
+            const y = padY + ((maxY - toNonNegativeInt(point.trophies)) / yRange) * innerHeight;
+            return {
+                x,
+                y,
+                dayKey: point.dayKey,
+                trophies: toNonNegativeInt(point.trophies),
+            };
+        });
+
+        const linePath = chartPoints
+            .map((point, index) => (index === 0 ? "M" : "L") + point.x.toFixed(2) + " " + point.y.toFixed(2))
+            .join(" ");
+        const firstPoint = chartPoints[0];
+        const lastPoint = chartPoints[chartPoints.length - 1];
+        const areaPath = [
+            "M", firstPoint.x.toFixed(2), (padY + innerHeight).toFixed(2),
+            "L", firstPoint.x.toFixed(2), firstPoint.y.toFixed(2),
+            linePath.slice(1),
+            "L", lastPoint.x.toFixed(2), (padY + innerHeight).toFixed(2),
+            "Z",
+        ].join(" ");
+
+        const baseline1 = padY + innerHeight * 0.25;
+        const baseline2 = padY + innerHeight * 0.5;
+        const baseline3 = padY + innerHeight * 0.75;
+
+        const startDay = points[0].dayKey || "";
+        const endDay = points[points.length - 1].dayKey || "";
+        const spanDays = Math.max(1, Math.round((maxX - minX) / DAY_MS));
+
+        return {
+            hasData: true,
+            html: [
+                '<div class="profile-legend-trend__chart-wrap">',
+                '<svg class="profile-legend-trend__svg" viewBox="0 0 ', width, " ", height, '" role="img" aria-label="Local trophy trend chart">',
+                "<defs>",
+                '<linearGradient id="legendTrendArea" x1="0" y1="0" x2="0" y2="1">',
+                '<stop offset="0%" stop-color="rgba(56,189,248,0.34)"></stop>',
+                '<stop offset="100%" stop-color="rgba(56,189,248,0.04)"></stop>',
+                "</linearGradient>",
+                "</defs>",
+                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', baseline1.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', baseline1.toFixed(2), '"></line>',
+                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', baseline2.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', baseline2.toFixed(2), '"></line>',
+                '<line class="profile-legend-trend__grid" x1="', padX, '" y1="', baseline3.toFixed(2), '" x2="', (padX + innerWidth), '" y2="', baseline3.toFixed(2), '"></line>',
+                '<path class="profile-legend-trend__area" d="', areaPath, '"></path>',
+                '<path class="profile-legend-trend__line" d="', linePath, '"></path>',
+                '<circle class="profile-legend-trend__dot profile-legend-trend__dot--start" cx="', firstPoint.x.toFixed(2), '" cy="', firstPoint.y.toFixed(2), '" r="2.8"></circle>',
+                '<circle class="profile-legend-trend__dot profile-legend-trend__dot--end" cx="', lastPoint.x.toFixed(2), '" cy="', lastPoint.y.toFixed(2), '" r="3.6"></circle>',
+                "</svg>",
+                '<div class="profile-legend-trend__axis"><span>', escapeHtml(startDay), '</span><span>', escapeHtml(endDay), "</span></div>",
+                "</div>",
+            ].join(""),
+            caption: "Tracked span: " + formatNumber(spanDays) + " " + pluralize(spanDays, "day", "days") + ".",
+        };
+    };
+
+    const renderLegendSeasonSnapshotCard = (labelRaw, seasonRaw) => {
+        const label = toStr(labelRaw).trim() || "Season";
+        const season = seasonRaw && typeof seasonRaw === "object" ? seasonRaw : null;
+        if (!season) {
+            return [
+                '<div class="profile-legend-season-card is-empty">',
+                '<div class="profile-legend-season-card__label">', escapeHtml(label), "</div>",
+                '<div class="profile-legend-season-card__value">No snapshot</div>',
+                '<div class="profile-legend-season-card__meta">Official profile did not return this season.</div>',
+                "</div>",
+            ].join("");
+        }
+        const trophies = season.trophies != null ? formatNumber(season.trophies) : "-";
+        const seasonId = toStr(season.id).trim();
+        const rank = season.rank != null ? ("Rank " + formatNumber(season.rank)) : "";
+        const legendTrophies = season.legendTrophies != null ? formatNumber(season.legendTrophies) : "";
+        const metaParts = [];
+        if (seasonId) metaParts.push("Season " + seasonId);
+        if (rank) metaParts.push(rank);
+        if (legendTrophies) metaParts.push("Legend " + legendTrophies);
+        return [
+            '<div class="profile-legend-season-card">',
+            '<div class="profile-legend-season-card__label">', escapeHtml(label), "</div>",
+            '<div class="profile-legend-season-card__value">', escapeHtml(trophies), "</div>",
+            '<div class="profile-legend-season-card__meta">', escapeHtml(metaParts.length ? metaParts.join(" • ") : "Official season snapshot"), "</div>",
+            "</div>",
+        ].join("");
+    };
+
+    const isLegendLeagueName = (nameRaw) => {
+        const text = toStr(nameRaw).trim();
+        if (!text) return false;
+        return normalizeLeagueFamilyKey(text).indexOf("legend") >= 0 || normalizeLeagueMatchText(text).indexOf("legend") >= 0;
+    };
+
+    const shouldShowLegendsJourney = (playerRaw) => {
+        const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+        const legend = player.legendStatistics && typeof player.legendStatistics === "object" ? player.legendStatistics : null;
+        if (legend) return true;
+        return isLegendLeagueName(player.league && player.league.name);
+    };
+
+    const renderLegendsJourneySection = (playerRaw, tagRaw) => {
+        const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+        if (!shouldShowLegendsJourney(player)) return "";
+
+        const tag = normalizeClanTag(tagRaw);
+        const legend = player.legendStatistics && typeof player.legendStatistics === "object" ? player.legendStatistics : null;
+        const localPoints = getLocalTrophyHistoryForTag(tag, lastRenderedData);
+        const trendPoints = getLegendTrendPoints(localPoints, 30);
+        const trend = renderLegendTrendSparkline(trendPoints);
+        const delta7 = computeLegendDelta(localPoints, 7);
+        const delta14 = computeLegendDelta(localPoints, 14);
+        const delta30 = computeLegendDelta(localPoints, 30);
+
+        const latestLocalPoint = localPoints.length ? localPoints[localPoints.length - 1] : null;
+        const trendStatus = !localPoints.length
+            ? "Local day-by-day tracking has not started yet for this player."
+            : (localPoints.length < 2
+                ? "Tracking started recently. More daily snapshots are needed for stronger trend context."
+                : (trend.caption || ""));
+
+        const summaryCards = [
+            renderStatCard("Current trophies", formatNumber(player.trophies)),
+            renderStatCard("Best trophies", formatNumber(player.bestTrophies)),
+            renderStatCard("Current league", toStr(player.league && player.league.name).trim() || "Unranked"),
+            renderStatCard("Legend trophies", legend && legend.legendTrophies != null ? formatNumber(legend.legendTrophies) : "-", {
+                subText: legend ? "Official legend snapshot" : "No legendStatistics block",
+            }),
+            renderStatCard("Attack wins", formatNumber(player.attackWins)),
+            renderStatCard("Defense wins", formatNumber(player.defenseWins)),
+            renderStatCard("Latest local trophies", latestLocalPoint ? formatNumber(latestLocalPoint.trophies) : "-", {
+                subText: latestLocalPoint && latestLocalPoint.dayKey ? ("Tracked " + latestLocalPoint.dayKey) : "No local history yet",
+            }),
+        ].join("");
+
+        const seasonCards = [
+            renderLegendSeasonSnapshotCard("Current season", legend && legend.currentSeason),
+            renderLegendSeasonSnapshotCard("Previous season", legend && legend.previousSeason),
+            renderLegendSeasonSnapshotCard("Best season", legend && legend.bestSeason),
+        ].join("");
+
+        const sectionBody = [
+            '<div class="profile-section-grid">',
+            '<div class="profile-subsection profile-legend-journey">',
+            '<div class="profile-subsection__title">Legends Journey</div>',
+            '<div class="profile-legend-journey__provenance">Season snapshots, best trophies, and wins are from official player data. Day-by-day trend and 7/14/30-day deltas are from local roster tracking snapshots.</div>',
+            '<div class="profile-stats-grid">', summaryCards, "</div>",
+            '<div class="profile-legend-trend">',
+            '<div class="profile-legend-trend__head">',
+            '<div class="profile-legend-trend__title">Local trophy trend (last ~30 tracked days)</div>',
+            '<div class="profile-legend-trend__subtitle">', escapeHtml(trendStatus), "</div>",
+            "</div>",
+            trend.html,
+            '<div class="profile-legend-delta-grid">',
+            renderLegendDeltaCard(delta7),
+            renderLegendDeltaCard(delta14),
+            renderLegendDeltaCard(delta30),
+            "</div>",
+            "</div>",
+            '<div class="profile-legend-season-grid">', seasonCards, "</div>",
+            "</div>",
+            "</div>",
+        ].join("");
+
+        const summaryItems = [
+            renderSummaryItem("Current trophies", formatNumber(player.trophies)),
+            renderSummaryItem("30d delta", delta30.available ? formatSignedNumber(delta30.delta) : "Tracking", {
+                tone: delta30.available ? (delta30.delta > 0 ? "success" : (delta30.delta < 0 ? "alert" : "")) : "",
+                subText: delta30.available ? ((delta30.approximate ? "~" : "") + delta30.actualDays + "d ref") : "Local history sparse",
+            }),
+            renderSummaryItem("Legend snapshots", legend ? "Present" : "Unavailable", {
+                tone: legend ? "success" : "",
+            }),
+        ];
+
+        return renderDisclosureSection({
+            title: "Legends Journey",
+            subtitle: "Legend-focused journey built from official season snapshots plus local day-by-day tracking.",
+            source: "Official Clash data + local roster tracking",
+            summaryItems,
+            bodyHtml: sectionBody,
+            open: true,
+            sectionClass: "profile-disclosure--legend",
+        });
+    };
+
     const renderProfileLoadingScreen = (context, displayName, tag) => {
         const rosterTitle = toStr(context && context.rosterTitle).trim();
         const placement = buildPlacementLabel(context);
@@ -810,18 +1276,78 @@
         return Number.isNaN(date.getTime()) ? text : date.toLocaleString();
     };
 
+    const formatGlobalRelativeTimestamp = (value) => {
+        const text = toStr(value).trim();
+        if (!text) return "";
+        const date = new Date(text);
+        const timeMs = date.getTime();
+        if (!Number.isFinite(timeMs)) return "";
+
+        const diffMs = Date.now() - timeMs;
+        if (!Number.isFinite(diffMs)) return "";
+        if (diffMs <= 0) return "just now";
+
+        const minuteMs = 60 * 1000;
+        const hourMs = 60 * minuteMs;
+        const dayMs = 24 * hourMs;
+
+        const days = Math.floor(diffMs / dayMs);
+        const hours = Math.floor((diffMs % dayMs) / hourMs);
+        const minutes = Math.floor((diffMs % hourMs) / minuteMs);
+
+        if (days > 0) {
+            return days + " " + pluralize(days, "day", "days") + (hours > 0 ? (" " + hours + "h") : "") + " ago";
+        }
+        if (hours > 0) {
+            return hours + "h" + (minutes > 0 ? (" " + minutes + "min") : "") + " ago";
+        }
+        if (minutes > 0) return minutes + "min ago";
+        return "just now";
+    };
+
+    const clearGlobalLastUpdatedTimer = () => {
+        if (!globalLastUpdatedTimerId || typeof window === "undefined" || !window.clearInterval) return;
+        window.clearInterval(globalLastUpdatedTimerId);
+        globalLastUpdatedTimerId = 0;
+        globalLastUpdatedTimerValue = "";
+    };
+
+    const renderGlobalLastUpdatedValue = (valueEl, valueRaw) => {
+        if (!valueEl) return;
+        const value = toStr(valueRaw).trim();
+        if (!value) {
+            valueEl.textContent = "-";
+            valueEl.removeAttribute("title");
+            return;
+        }
+        const relativeLabel = formatGlobalRelativeTimestamp(value);
+        valueEl.textContent = relativeLabel || value;
+        valueEl.title = formatProfileTimestamp(value) || value;
+    };
+
     const renderGlobalLastUpdated = (dataRaw) => {
         const card = $("#globalLastUpdated");
         const valueEl = $("#globalLastUpdatedValue");
-        if (!card || !valueEl) return;
+        if (!card || !valueEl) {
+            clearGlobalLastUpdatedTimer();
+            return;
+        }
         const value = toStr(dataRaw && dataRaw.lastUpdatedAt).trim();
         if (!value) {
             card.classList.add("hidden");
-            valueEl.textContent = "-";
+            clearGlobalLastUpdatedTimer();
+            renderGlobalLastUpdatedValue(valueEl, "");
             return;
         }
         card.classList.remove("hidden");
-        valueEl.textContent = formatProfileTimestamp(value) || value;
+        renderGlobalLastUpdatedValue(valueEl, value);
+        if (typeof window === "undefined" || !window.setInterval) return;
+        if (globalLastUpdatedTimerId && globalLastUpdatedTimerValue === value) return;
+        clearGlobalLastUpdatedTimer();
+        globalLastUpdatedTimerValue = value;
+        globalLastUpdatedTimerId = window.setInterval(() => {
+            renderGlobalLastUpdatedValue(valueEl, globalLastUpdatedTimerValue);
+        }, 60 * 1000);
     };
 
     const normalizeLeagueFamilyKey = (value) => {
@@ -1098,8 +1624,8 @@
                 regularWar.currentWarUnavailableReason === "privateWarLog"
                     ? renderNotice("Live war data", "Unavailable because the clan war log is private.", "alert")
                     : "",
-                regularWar.aggregateUnavailableReason === "privateWarLog"
-                    ? renderNotice("Aggregate stats", "Not refreshed because the clan war log is private.", "alert")
+                regularWar.aggregateStatusMessage
+                    ? renderNotice("Aggregate status", regularWar.aggregateStatusMessage, "info")
                     : "",
                 regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0
                     ? renderNotice("Pending", formatNumber(regularWar.current.attacksRemaining) + " " + pluralize(regularWar.current.attacksRemaining, "attack", "attacks") + " left in current war", "alert")
@@ -1437,13 +1963,7 @@
             }).join("") + "</div></details>"
             : "";
 
-        const legend = player.legendStatistics && typeof player.legendStatistics === "object" ? player.legendStatistics : null;
-        const legendCards = legend ? [
-            legend.legendTrophies != null ? renderStatCard("Legend trophies", formatNumber(legend.legendTrophies)) : "",
-            legend.currentSeason ? renderStatCard("Current season", formatNumber(legend.currentSeason.trophies), { subText: (legend.currentSeason.id ? ("Season " + legend.currentSeason.id) : "") + (legend.currentSeason.rank != null ? ((legend.currentSeason.id ? " • " : "") + "Rank " + formatNumber(legend.currentSeason.rank)) : "") }) : "",
-            legend.previousSeason ? renderStatCard("Previous season", formatNumber(legend.previousSeason.trophies), { subText: (legend.previousSeason.id ? ("Season " + legend.previousSeason.id) : "") + (legend.previousSeason.rank != null ? ((legend.previousSeason.id ? " • " : "") + "Rank " + formatNumber(legend.previousSeason.rank)) : "") }) : "",
-            legend.bestSeason ? renderStatCard("Best season", formatNumber(legend.bestSeason.trophies), { subText: (legend.bestSeason.id ? ("Season " + legend.bestSeason.id) : "") + (legend.bestSeason.rank != null ? ((legend.bestSeason.id ? " • " : "") + "Rank " + formatNumber(legend.bestSeason.rank)) : "") }) : "",
-        ].filter(Boolean).join("") : "";
+        const legendsJourneySection = renderLegendsJourneySection(player, tag);
 
         const playerHouse = player.playerHouse && typeof player.playerHouse === "object" ? player.playerHouse : null;
         const houseCards = playerHouse ? Object.keys(playerHouse).map((key) => {
@@ -1452,7 +1972,7 @@
         }).join("") + ((Array.isArray(playerHouse.elements) ? playerHouse.elements : []).map((item) =>
             renderMetaCard(titleCase(item && item.type || "Element"), item && (item.name != null ? item.name : item.id))
         ).join("")) : "";
-        const hasAccountExtras = hasLabels || hasAchievements || !!legendCards || !!houseCards;
+        const hasAccountExtras = hasLabels || hasAchievements || !!houseCards;
 
         const sections = [
             renderDisclosureSection({
@@ -1471,6 +1991,7 @@
                 bodyHtml: trackingRosterBodyHtml,
                 open: false,
             }),
+            legendsJourneySection,
             renderDisclosureSection({
                 title: "Official snapshot",
                 subtitle: "Primary official totals for profile, activity, and contribution.",
@@ -1517,12 +2038,10 @@
                 summaryItems: [
                     renderSummaryItem("Labels", formatNumber(labels.length)),
                     renderSummaryItem("Achievements", formatNumber(achievements.length)),
-                    renderSummaryItem("Legend", legend ? "Present" : "Absent", { tone: legend ? "success" : "" }),
                 ],
                 bodyHtml: '<div class="profile-section-grid profile-section-grid--two">' +
                     (hasLabels ? ('<div class="profile-subsection"><div class="profile-subsection__title">Labels</div><div class="profile-label-list">' + labelsHtml + "</div></div>") : "") +
                     (hasAchievements ? ('<div class="profile-subsection"><div class="profile-subsection__title">Achievements</div>' + achievementsHtml + "</div></div>") : "") +
-                    (legendCards ? ('<div class="profile-subsection"><div class="profile-subsection__title">Legend statistics</div><div class="profile-stats-grid">' + legendCards + "</div></div>") : "") +
                     (houseCards ? ('<div class="profile-subsection"><div class="profile-subsection__title">Player House</div><div class="profile-meta-grid">' + houseCards + "</div></div>") : "") +
                     "</div>",
             }) : "",
@@ -2116,9 +2635,42 @@
         return wrap;
     };
 
-    const renderRosterSection = (label, players, { role, trackingMode, rosterId, rosterTitle, cwlStats, regularWarStats, warPerformance, suggestionModel, hideSuggestions }) => {
+    const getMissingSectionStateKey = (rosterIdRaw, rosterTitleRaw) => {
+        const rosterId = toStr(rosterIdRaw).trim();
+        if (rosterId) return "id:" + rosterId;
+        const rosterTitle = toStr(rosterTitleRaw).trim();
+        return rosterTitle ? ("title:" + rosterTitle) : "unknown";
+    };
+
+    const getMissingSectionExpandedState = (rosterIdRaw, rosterTitleRaw, defaultExpanded) => {
+        const key = getMissingSectionStateKey(rosterIdRaw, rosterTitleRaw);
+        if (Object.prototype.hasOwnProperty.call(missingSectionExpandedByRoster, key)) {
+            return !!missingSectionExpandedByRoster[key];
+        }
+        return !!defaultExpanded;
+    };
+
+    const setMissingSectionExpandedState = (rosterIdRaw, rosterTitleRaw, expanded) => {
+        const key = getMissingSectionStateKey(rosterIdRaw, rosterTitleRaw);
+        missingSectionExpandedByRoster[key] = !!expanded;
+    };
+
+    const renderRosterSection = (label, players, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const role = options.role;
+        const trackingMode = options.trackingMode;
+        const rosterId = options.rosterId;
+        const rosterTitle = options.rosterTitle;
+        const cwlStats = options.cwlStats;
+        const regularWarStats = options.regularWarStats;
+        const warPerformance = options.warPerformance;
+        const suggestionModel = options.suggestionModel;
+        const hideSuggestions = !!options.hideSuggestions;
+        const hideHeading = !!options.hideHeading;
         const frag = document.createDocumentFragment();
-        frag.appendChild(el("h3", "", label));
+        if (!hideHeading) {
+            frag.appendChild(el("h3", "", label));
+        }
 
         const list = el("div", "roster-list");
         for (let i = 0; i < players.length; i++) {
@@ -2140,10 +2692,79 @@
         return frag;
     };
 
+    const renderCollapsibleMissingRosterSection = (label, players, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const listPlayers = Array.isArray(players) ? players : [];
+        const count = listPlayers.length;
+        const rosterId = toStr(options.rosterId).trim();
+        const rosterTitle = toStr(options.rosterTitle).trim();
+        const hasPlayers = count > 0;
+        const initialExpanded = hasPlayers && getMissingSectionExpandedState(
+            rosterId,
+            rosterTitle,
+            !!options.defaultExpanded
+        );
+
+        const section = el("section", "roster-section roster-section--collapsible");
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "roster-section-toggle";
+        toggle.setAttribute("aria-expanded", hasPlayers && initialExpanded ? "true" : "false");
+        if (!hasPlayers) {
+            toggle.classList.add("is-static");
+            toggle.setAttribute("aria-disabled", "true");
+            toggle.disabled = true;
+        }
+
+        const lead = el("span", "roster-section-toggle__lead");
+        lead.appendChild(el("span", "roster-section-toggle__title", label));
+        lead.appendChild(el("span", "badge", count + " " + pluralize(count, "player", "players")));
+
+        const tail = el("span", "roster-section-toggle__tail");
+        const hint = el("span", "roster-section-toggle__hint", hasPlayers ? (initialExpanded ? "Hide" : "Show") : "None");
+        const caret = el("span", "roster-section-toggle__caret");
+        caret.setAttribute("aria-hidden", "true");
+        tail.appendChild(hint);
+        tail.appendChild(caret);
+
+        toggle.appendChild(lead);
+        toggle.appendChild(tail);
+        section.appendChild(toggle);
+
+        if (!hasPlayers) return section;
+
+        const body = el("div", "roster-section-body");
+        body.hidden = !initialExpanded;
+        body.appendChild(renderRosterSection(label, listPlayers, {
+            role: options.role,
+            trackingMode: options.trackingMode,
+            rosterId: options.rosterId,
+            rosterTitle: options.rosterTitle,
+            cwlStats: options.cwlStats,
+            regularWarStats: options.regularWarStats,
+            warPerformance: options.warPerformance,
+            suggestionModel: options.suggestionModel,
+            hideSuggestions: options.hideSuggestions,
+            hideHeading: true,
+        }));
+        section.appendChild(body);
+
+        toggle.addEventListener("click", () => {
+            const nextExpanded = toggle.getAttribute("aria-expanded") !== "true";
+            toggle.setAttribute("aria-expanded", nextExpanded ? "true" : "false");
+            hint.textContent = nextExpanded ? "Hide" : "Show";
+            body.hidden = !nextExpanded;
+            setMissingSectionExpandedState(rosterId, rosterTitle, nextExpanded);
+        });
+
+        return section;
+    };
+
     const renderRosterCard = (roster, opts) => {
         const options = opts && typeof opts === "object" ? opts : {};
         const showEmptySections = options.showEmptySections !== false;
         const hideSuggestions = !!options.hideSuggestions;
+        const expandMissingByDefault = !!options.expandMissingByDefault;
         const trackingMode = getRosterTrackingMode(roster);
         const mainPlayers = Array.isArray(roster && roster.main) ? roster.main : [];
         const subPlayers = Array.isArray(roster && roster.subs) ? roster.subs : [];
@@ -2156,9 +2777,9 @@
             ? regularWarData.aggregateMeta
             : {};
         const regularWarLiveUnavailable = toStr(regularWarCurrentMeta.unavailableReason).trim() === "privateWarLog";
-        const regularWarAggregateStale = toStr(regularWarAggregateMeta.unavailableReason).trim() === "privateWarLog";
         const regularWarLiveStatusMessage = toStr(regularWarCurrentMeta.statusMessage).trim();
         const regularWarAggregateStatusMessage = toStr(regularWarAggregateMeta.statusMessage).trim();
+        const regularWarAggregateHasNotice = !!regularWarAggregateStatusMessage;
 
         const card = el("div", "card");
         const head = el("div", "roster-head");
@@ -2185,8 +2806,8 @@
             if (regularWarLiveUnavailable) {
                 meta.appendChild(el("span", "badge", "Live war refresh unavailable"));
             }
-            if (regularWarAggregateStale) {
-                meta.appendChild(el("span", "badge", "Aggregate stats may be stale"));
+            if (regularWarAggregateHasNotice) {
+                meta.appendChild(el("span", "badge", "Aggregate status notice"));
             }
         }
 
@@ -2214,15 +2835,15 @@
         head.appendChild(h2);
         head.appendChild(meta);
         card.appendChild(head);
-        if (trackingMode === "regularWar" && (regularWarLiveUnavailable || regularWarAggregateStale)) {
+        if (trackingMode === "regularWar" && (regularWarLiveUnavailable || regularWarAggregateHasNotice)) {
             const warning = el("div", "roster-data-warning");
             warning.appendChild(el("div", "roster-data-warning__title", "Live war data warning"));
             const warningParts = [];
             if (regularWarLiveUnavailable) {
                 warningParts.push(regularWarLiveStatusMessage || "Fresh live war data could not be fetched because the clan war log is private.");
             }
-            if (regularWarAggregateStale) {
-                warningParts.push(regularWarAggregateStatusMessage || "Long-term regular-war aggregate updates could not be refreshed.");
+            if (regularWarAggregateHasNotice) {
+                warningParts.push(regularWarAggregateStatusMessage);
             }
             warningParts.push("Showing last known roster and war values; some data may be stale.");
             warning.appendChild(el("div", "roster-data-warning__text", warningParts.join(" ")));
@@ -2260,7 +2881,7 @@
                 }));
             }
             if (showEmptySections || missingPlayers.length) {
-                card.appendChild(renderRosterSection("Temporarily missing", missingPlayers, {
+                card.appendChild(renderCollapsibleMissingRosterSection("Temporarily missing", missingPlayers, {
                     role: "missing",
                     trackingMode,
                     rosterId: roster.id,
@@ -2270,6 +2891,7 @@
                     warPerformance: roster && roster.warPerformance,
                     suggestionModel,
                     hideSuggestions,
+                    defaultExpanded: expandMissingByDefault,
                 }));
             }
         } else {
@@ -2309,12 +2931,20 @@
         if (!target) return;
 
         const safeData = data && typeof data === "object" ? data : {};
-        lastRenderedData = safeData;
+        const allRosters = getOrderedRostersFromData(safeData);
+        lastRenderedData = Object.assign({}, safeData, {
+            rosters: allRosters,
+            rosterOrder: buildRosterOrderFromRosters(allRosters),
+        });
 
-        if (safeData.pageTitle) document.title = toStr(safeData.pageTitle);
+        const pageTitleHeading = $("#pageTitleHeading");
+        const pageTitleText = toStr(safeData.pageTitle).trim();
+        if (pageTitleText) {
+            document.title = pageTitleText;
+            if (pageTitleHeading) pageTitleHeading.textContent = pageTitleText;
+        }
         renderGlobalLastUpdated(safeData);
 
-        const allRosters = Array.isArray(safeData.rosters) ? safeData.rosters : [];
         const searchInput = $("#rosterSearchInput");
         const rawQuery = searchInput ? toStr(searchInput.value) : "";
         const filtered = filterRostersByQuery(allRosters, rawQuery);
@@ -2327,6 +2957,7 @@
             target.appendChild(renderRosterCard(r, {
                 showEmptySections: !isSearchMode,
                 hideSuggestions,
+                expandMissingByDefault: isSearchMode,
             }));
         }
 
