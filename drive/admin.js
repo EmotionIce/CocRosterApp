@@ -110,6 +110,8 @@
     return t.startsWith("#") ? t : ("#" + t);
   };
 
+  const isValidCocTag = (tagRaw) => /^#[PYLQGRJCUV0289]{3,15}$/.test(normalizeTag(tagRaw));
+
   const getRosterTrackingMode = (rosterRaw) =>
     rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
 
@@ -344,6 +346,20 @@
     return Number.isFinite(ms) ? ms : 0;
   };
 
+  const getMetricEntryEvidenceMs_ = (entryRaw) => {
+    const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+    const lastSeen = entry.lastSeen && typeof entry.lastSeen === "object" ? entry.lastSeen : {};
+    const latestSnapshot = entry.latestSnapshot && typeof entry.latestSnapshot === "object" ? entry.latestSnapshot : {};
+    let best = 0;
+    const keepBest = (valueRaw) => {
+      const ms = parseIsoMs_(valueRaw);
+      if (ms > best) best = ms;
+    };
+    keepBest(lastSeen.at);
+    keepBest(latestSnapshot.capturedAt);
+    return best;
+  };
+
   const mergePlayerMetricsStore_ = (currentRaw, incomingRaw) => {
     const current = currentRaw && typeof currentRaw === "object" ? currentRaw : null;
     const incoming = incomingRaw && typeof incomingRaw === "object" ? incomingRaw : null;
@@ -354,29 +370,37 @@
     const incomingKeys = Object.keys(incomingByTag);
     if (!incomingKeys.length) return current ? cloneJson(current) : cloneJson(incoming);
 
-    const currentHasTags = Object.keys(currentByTag).length > 0;
-    const currentUpdatedMs = parseIsoMs_(current && current.updatedAt);
-    const incomingUpdatedMs = parseIsoMs_(incoming && incoming.updatedAt);
-    const incomingIsOlder = currentHasTags && currentUpdatedMs > 0 && incomingUpdatedMs > 0 && incomingUpdatedMs < currentUpdatedMs;
-    if (incomingIsOlder) return cloneJson(current);
-
     const merged = current ? cloneJson(current) : { schemaVersion: 1, updatedAt: "", byTag: {} };
     if (!merged.byTag || typeof merged.byTag !== "object") merged.byTag = {};
     for (let i = 0; i < incomingKeys.length; i++) {
       const tag = incomingKeys[i];
-      merged.byTag[tag] = cloneJson(incomingByTag[tag]);
+      const currentEntry = currentByTag[tag];
+      const incomingEntry = incomingByTag[tag];
+      if (!currentEntry) {
+        merged.byTag[tag] = cloneJson(incomingEntry);
+        continue;
+      }
+      const currentEntryMs = getMetricEntryEvidenceMs_(currentEntry);
+      const incomingEntryMs = getMetricEntryEvidenceMs_(incomingEntry);
+      if (!currentEntryMs || incomingEntryMs >= currentEntryMs) {
+        merged.byTag[tag] = cloneJson(incomingEntry);
+      }
     }
 
     if (Number.isFinite(Number(incoming.schemaVersion))) {
       merged.schemaVersion = Number(incoming.schemaVersion);
     }
 
+    const currentUpdatedMs = parseIsoMs_(current && current.updatedAt);
+    const incomingUpdatedMs = parseIsoMs_(incoming && incoming.updatedAt);
     const incomingUpdatedAt = toStr(incoming.updatedAt).trim();
     if (incomingUpdatedAt) {
       const mergedUpdatedMs = parseIsoMs_(merged.updatedAt);
-      if (!mergedUpdatedMs || !incomingUpdatedMs || incomingUpdatedMs >= mergedUpdatedMs) {
+      if (!mergedUpdatedMs || (incomingUpdatedMs > 0 && incomingUpdatedMs >= mergedUpdatedMs)) {
         merged.updatedAt = incomingUpdatedAt;
       }
+    } else if (!toStr(merged.updatedAt).trim() && currentUpdatedMs > 0) {
+      merged.updatedAt = toStr(current.updatedAt).trim();
     }
 
     return merged;
@@ -469,6 +493,19 @@
     }
   };
 
+  const formatMemberTrackingStatus = (memberTrackingRaw) => {
+    const data = memberTrackingRaw && typeof memberTrackingRaw === "object" ? memberTrackingRaw : {};
+    const recorded = Number.isFinite(Number(data.recorded)) ? Number(data.recorded) : 0;
+    const updated = Number.isFinite(Number(data.updated)) ? Number(data.updated) : 0;
+    const profileEnriched = Number.isFinite(Number(data.profileEnriched)) ? Number(data.profileEnriched) : 0;
+    const attemptedClans = Number.isFinite(Number(data.attemptedClans)) ? Number(data.attemptedClans) : 0;
+    const capturedClans = Number.isFinite(Number(data.capturedClans)) ? Number(data.capturedClans) : 0;
+    const errors = Array.isArray(data.errors) ? data.errors : [];
+    const base = "memberTracking recorded " + recorded + ", updated " + updated + (profileEnriched > 0 ? (", profileEnriched " + profileEnriched) : "") + (attemptedClans > 0 ? (", clans " + capturedClans + "/" + attemptedClans) : "");
+    if (!errors.length) return base;
+    return base + ", errors " + errors.length;
+  };
+
   const formatRosterPoolStatus = (result) => {
     const data = result && typeof result === "object" ? result : {};
     const mode = toStr(data.mode).trim() === "regularWar" ? "regularWar" : "cwl";
@@ -476,13 +513,14 @@
     const removed = Number.isFinite(Number(data.removed)) ? Number(data.removed) : 0;
     const updated = Number.isFinite(Number(data.updated)) ? Number(data.updated) : 0;
     const sourceUsed = toStr(data.sourceUsed).trim() || "members";
+    const memberTrackingText = data.memberTracking ? (", " + formatMemberTrackingStatus(data.memberTracking)) : "";
     if (mode === "regularWar") {
       const movedToMissing = Number.isFinite(Number(data.movedToMissing)) ? Number(data.movedToMissing) : 0;
       const restored = Number.isFinite(Number(data.restored)) ? Number(data.restored) : 0;
       const retainedMissing = Number.isFinite(Number(data.retainedMissing)) ? Number(data.retainedMissing) : 0;
-      return "added " + added + ", removed " + removed + ", updated " + updated + ", movedToMissing " + movedToMissing + ", restored " + restored + ", retainedMissing " + retainedMissing + ", sourceUsed " + sourceUsed;
+      return "added " + added + ", removed " + removed + ", updated " + updated + ", movedToMissing " + movedToMissing + ", restored " + restored + ", retainedMissing " + retainedMissing + ", sourceUsed " + sourceUsed + memberTrackingText;
     }
-    return "added " + added + ", removed " + removed + ", updated " + updated + ", sourceUsed " + sourceUsed;
+    return "added " + added + ", removed " + removed + ", updated " + updated + ", sourceUsed " + sourceUsed + memberTrackingText;
   };
 
   const formatTodayLineupStatus = (result) => {
@@ -507,25 +545,26 @@
     const mode = toStr(data.mode).trim() === "regularWar" ? "regularWar" : "cwl";
     const warsProcessed = Number.isFinite(Number(data.warsProcessed)) ? Number(data.warsProcessed) : 0;
     const playersTracked = Number.isFinite(Number(data.playersTracked)) ? Number(data.playersTracked) : 0;
+    const memberTrackingText = data.memberTracking ? (", " + formatMemberTrackingStatus(data.memberTracking)) : "";
     if (mode === "regularWar") {
       const currentUnavailable = toStr(data.currentWarUnavailableReason).trim() === "privateWarLog";
       const aggregateUnavailable = toStr(data.aggregateUnavailableReason).trim() === "privateWarLog";
       if (currentUnavailable && aggregateUnavailable) {
-        return "live war unavailable, aggregate stale (private war log)";
+        return "live war unavailable, aggregate stale (private war log)" + memberTrackingText;
       }
       if (currentUnavailable) {
-        return "live war unavailable (private war log), aggregate refreshed";
+        return "live war unavailable (private war log), aggregate refreshed" + memberTrackingText;
       }
       if (aggregateUnavailable) {
-        return "live war ok, aggregate stale (private war log)";
+        return "live war ok, aggregate stale (private war log)" + memberTrackingText;
       }
       const currentWarState = toStr(data.currentWarState).trim().toLowerCase() || "notinwar";
       const warLogAvailable = !!data.warLogAvailable;
       const teamSize = Number.isFinite(Number(data.teamSize)) ? Number(data.teamSize) : 0;
       const attacksPerMember = Number.isFinite(Number(data.attacksPerMember)) ? Number(data.attacksPerMember) : 0;
-      return "state " + currentWarState + ", playersTracked " + playersTracked + ", warsProcessed " + warsProcessed + ", warLogAvailable " + (warLogAvailable ? "yes" : "no") + ", teamSize " + teamSize + ", attacksPerMember " + attacksPerMember;
+      return "state " + currentWarState + ", playersTracked " + playersTracked + ", warsProcessed " + warsProcessed + ", warLogAvailable " + (warLogAvailable ? "yes" : "no") + ", teamSize " + teamSize + ", attacksPerMember " + attacksPerMember + memberTrackingText;
     }
-    return "warsProcessed " + warsProcessed + ", playersTracked " + playersTracked;
+    return "warsProcessed " + warsProcessed + ", playersTracked " + playersTracked + memberTrackingText;
   };
 
   const applySuggestionTagsToState_ = (rosterIdRaw, benchTagsRaw, swapInTagsRaw, pairsRaw) => {
@@ -1025,6 +1064,9 @@
 
     const nextTag = normalizeTag(draft && draft.tag);
     if (!nextTag) throw new Error("Tag is required.");
+    if (!isValidCocTag(nextTag)) {
+      throw new Error("Tag is invalid. Allowed tag alphabet: P,Y,L,Q,G,R,J,C,U,V,0,2,8,9.");
+    }
 
     if (nextTag !== currentTag && findPlayerLocationByTag(nextTag)) {
       throw new Error("Another player already uses this tag: " + nextTag);
@@ -1100,6 +1142,9 @@
 
     const tag = normalizeTag(draft && draft.tag);
     if (!tag) throw new Error("Tag is required.");
+    if (!isValidCocTag(tag)) {
+      throw new Error("Tag is invalid. Allowed tag alphabet: P,Y,L,Q,G,R,J,C,U,V,0,2,8,9.");
+    }
     if (findPlayerLocationByTag(tag)) {
       throw new Error("Another player already uses this tag: " + tag);
     }
@@ -1135,6 +1180,9 @@
 
     if (!rosterId) throw new Error("Roster ID is required.");
     if (!title) throw new Error("Roster title is required.");
+    if (connectedClanTag && !isValidCocTag(connectedClanTag)) {
+      throw new Error("Connected clan tag is invalid. Allowed tag alphabet: P,Y,L,Q,G,R,J,C,U,V,0,2,8,9.");
+    }
 
     const rosters = getRosters();
     if (rosters.some((r) => toStr(r && r.id).trim() === rosterId)) {
@@ -2432,6 +2480,9 @@
         if (!toStr(r.connectedClanTag).trim()) {
           throw new Error("Connected clan tag is required.");
         }
+        if (!isValidCocTag(r.connectedClanTag)) {
+          throw new Error("Connected clan tag is invalid for " + rosterId + ". Allowed tag alphabet: P,Y,L,Q,G,R,J,C,U,V,0,2,8,9.");
+        }
       };
 
       testBtn.onclick = async () => {
@@ -2615,8 +2666,12 @@
 
       const requireConnectedClanTag = () => {
         const currentRoster = requireCurrentRoster();
-        if (!normalizeTag(currentRoster.connectedClanTag)) {
+        const connectedClanTag = normalizeTag(currentRoster.connectedClanTag);
+        if (!connectedClanTag) {
           throw new Error("Connected clan tag is required.");
+        }
+        if (!isValidCocTag(connectedClanTag)) {
+          throw new Error("Connected clan tag is invalid. Allowed tag alphabet: P,Y,L,Q,G,R,J,C,U,V,0,2,8,9.");
         }
         return currentRoster;
       };
@@ -2723,10 +2778,14 @@
     setStatus("Refresh all running: 0/" + totalRosters + " rosters complete.");
     let issues = [];
     try {
-      const issueLists = await Promise.all(
-        rosters.map((roster) => runRefreshAllRosterPipeline(toStr(roster && roster.id).trim()))
-      );
-      issues = issueLists.reduce((all, list) => all.concat(Array.isArray(list) ? list : []), []);
+      for (let i = 0; i < rosters.length; i++) {
+        const rosterId = toStr(rosters[i] && rosters[i].id).trim();
+        if (!rosterId) continue;
+        const rosterIssues = await runRefreshAllRosterPipeline(rosterId);
+        if (Array.isArray(rosterIssues) && rosterIssues.length) {
+          issues = issues.concat(rosterIssues);
+        }
+      }
     } finally {
       state.bulkRefreshBusy = false;
       refreshAdminWorkflowUi();

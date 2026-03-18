@@ -34,7 +34,7 @@ function doGet(e) {
 	const asset = p.asset ? String(p.asset) : "";
 	if (asset) return serveAsset_(asset);
 	const assetData = p.assetData ? String(p.assetData) : "";
-	if (assetData) return serveImageAssetData_(assetData);
+	if (assetData) return serveMediaAssetData_(assetData);
 
 	if (p.debug === "1") {
 		const info = listFolderFiles_();
@@ -393,50 +393,90 @@ function findImageAssetFile_(assetPathRaw) {
 	return { assetPath: safeAssetPath, file: null };
 }
 
-function getImageAssetData(assetPathRaw) {
+function isSupportedMediaAssetExtension_(assetPathRaw) {
+	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
+	return /\.(gif|png|jpe?g|we?bp|webm|mp4|ogv)$/i.test(safeAssetPath);
+}
+
+function isSupportedMediaMimeType_(mimeTypeRaw) {
+	const mimeType = String(mimeTypeRaw == null ? "" : mimeTypeRaw).trim().toLowerCase();
+	if (!mimeType) return false;
+	return String(mimeType).indexOf("image/") === 0 || String(mimeType).indexOf("video/") === 0;
+}
+
+function getMediaAssetData(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	if (!safeAssetPath) {
-		return { ok: false, assetPath: "", dataUrl: "", fileName: "" };
+		return { ok: false, assetPath: "", dataUrl: "", fileName: "", mimeType: "" };
 	}
 
-	if (!/\.(gif|png|jpe?g|we?bp)$/i.test(safeAssetPath)) {
-		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "" };
+	if (!isSupportedMediaAssetExtension_(safeAssetPath)) {
+		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "", mimeType: "" };
 	}
 
 	const cache = getScriptCacheSafe_();
-	const cacheKey = "imageAsset:" + IMAGE_ASSET_CACHE_VERSION + ":" + encodeURIComponent(safeAssetPath);
+	const cacheKey = "mediaAsset:" + IMAGE_ASSET_CACHE_VERSION + ":" + encodeURIComponent(safeAssetPath);
 	const cached = readStringFromCache_(cache, cacheKey);
 	if (cached) {
 		try {
 			const parsed = JSON.parse(cached);
-			if (parsed && parsed.ok && parsed.assetPath === safeAssetPath && parsed.dataUrl) {
+			if (parsed && parsed.ok && parsed.assetPath === safeAssetPath && parsed.dataUrl && isSupportedMediaMimeType_(parsed.mimeType)) {
 				return parsed;
 			}
 		} catch (err) {
-			Logger.log("Ignoring invalid image asset cache for path '%s': %s", safeAssetPath, err && err.message ? err.message : String(err));
+			Logger.log("Ignoring invalid media asset cache for path '%s': %s", safeAssetPath, err && err.message ? err.message : String(err));
 		}
 	}
 
 	const lookup = findImageAssetFile_(safeAssetPath);
 	const file = lookup && lookup.file ? lookup.file : null;
 	if (!file) {
-		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "" };
+		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "", mimeType: "" };
 	}
 
 	const blob = file.getBlob();
 	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
-	if (String(mimeType || "").indexOf("image/") !== 0) {
-		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: file.getName() };
+	if (!isSupportedMediaMimeType_(mimeType)) {
+		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: file.getName(), mimeType: String(mimeType || "") };
 	}
 
 	const payload = {
 		ok: true,
 		assetPath: safeAssetPath,
 		fileName: file.getName(),
+		mimeType: mimeType,
 		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
 	};
 
 	writeStringToCache_(cache, cacheKey, JSON.stringify(payload), IMAGE_ASSET_CACHE_TTL_SECONDS);
+	return payload;
+}
+
+function getImageAssetData(assetPathRaw) {
+	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
+	if (!safeAssetPath) {
+		return { ok: false, assetPath: "", dataUrl: "", fileName: "", mimeType: "" };
+	}
+
+	const payload = getMediaAssetData(safeAssetPath);
+	if (!payload || !payload.ok) {
+		return {
+			ok: false,
+			assetPath: safeAssetPath,
+			dataUrl: "",
+			fileName: payload && payload.fileName ? payload.fileName : "",
+			mimeType: payload && payload.mimeType ? payload.mimeType : "",
+		};
+	}
+	if (String(payload.mimeType || "").indexOf("image/") !== 0) {
+		return {
+			ok: false,
+			assetPath: safeAssetPath,
+			dataUrl: "",
+			fileName: payload.fileName || "",
+			mimeType: payload.mimeType || "",
+		};
+	}
 	return payload;
 }
 
@@ -885,36 +925,92 @@ function writePublishedRosterData_(rosterDataRaw) {
 		}
 	}
 
-	// Best-effort live metrics capture so publish can recover leaderboard fields even if preview missed merges.
-	try {
-		const capture = captureConnectedClanMetrics_(validated, {
-			continueOnError: true,
-			metricsProfileMode: "always",
-		});
-		validated = validateRosterData_(validated);
-		if (capture && capture.errors && capture.errors.length) {
+	const lowCoverageRosters = incomingMetricCount > 0 ? listRostersNeedingMetricsCoverageRepair_(validated, PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH) : [];
+	if (lowCoverageRosters.length > 0) {
+		Logger.log(
+			"publishRosterData: detected %s roster(s) below metrics coverage threshold %.2f; running targeted recapture.",
+			lowCoverageRosters.length,
+			PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH,
+		);
+	}
+
+	// Do publish-time capture when payload has no metrics, or when one/more rosters have low metrics coverage.
+	const shouldRunPublishMetricsCapture = incomingMetricCount < 1 || lowCoverageRosters.length > 0;
+	if (shouldRunPublishMetricsCapture) {
+		try {
+			const rosters = Array.isArray(validated && validated.rosters) ? validated.rosters : [];
+			const rosterCaptureQueue = [];
+			if (incomingMetricCount < 1) {
+				for (let i = 0; i < rosters.length; i++) {
+					const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+					const rosterId = String(roster.id == null ? "" : roster.id).trim();
+					const clanTag = normalizeTag_(roster.connectedClanTag);
+					if (!rosterId || !clanTag) continue;
+					rosterCaptureQueue.push({ rosterId: rosterId, clanTag: clanTag, reason: "emptyMetricsStore" });
+				}
+			} else {
+				for (let i = 0; i < lowCoverageRosters.length; i++) {
+					const item = lowCoverageRosters[i] && typeof lowCoverageRosters[i] === "object" ? lowCoverageRosters[i] : {};
+					const rosterId = String(item.rosterId == null ? "" : item.rosterId).trim();
+					if (!rosterId) continue;
+					rosterCaptureQueue.push({ rosterId: rosterId, clanTag: normalizeTag_(item.clanTag), reason: "lowCoverage" });
+				}
+			}
+
+			let attemptedClans = 0;
+			let capturedClans = 0;
+			let recorded = 0;
+			let updated = 0;
+			let profileAttempted = 0;
+			let profileEnriched = 0;
+			const errors = [];
+
+			for (let i = 0; i < rosterCaptureQueue.length; i++) {
+				const item = rosterCaptureQueue[i] && typeof rosterCaptureQueue[i] === "object" ? rosterCaptureQueue[i] : {};
+				const rosterId = String(item.rosterId == null ? "" : item.rosterId).trim();
+				const clanTag = normalizeTag_(item.clanTag);
+				if (!rosterId) continue;
+				attemptedClans++;
+				try {
+					const capture = captureMemberTrackingForRoster_(validated, rosterId, {
+						continueOnError: true,
+						metricsProfileMode: "always",
+					});
+					if (capture) {
+						capturedClans += toNonNegativeInt_(capture.capturedClans) > 0 ? 1 : 0;
+						recorded += toNonNegativeInt_(capture.recorded);
+						updated += toNonNegativeInt_(capture.updated);
+						profileAttempted += toNonNegativeInt_(capture.profileAttempted);
+						profileEnriched += toNonNegativeInt_(capture.profileEnriched);
+						if (Array.isArray(capture.errors) && capture.errors.length) {
+							for (let j = 0; j < capture.errors.length; j++) {
+								errors.push(capture.errors[j]);
+							}
+						}
+					}
+				} catch (err) {
+					errors.push({ clanTag: clanTag, message: errorMessage_(err) });
+				}
+			}
+
+			validated = validateRosterData_(validated);
 			Logger.log(
-				"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s errors=%s firstError=%s",
-				capture.attemptedClans,
-				capture.capturedClans,
-				capture.recorded,
-				capture.updated,
-				capture.entryCount,
-				capture.errors.length,
-				capture.errors[0] && capture.errors[0].message ? capture.errors[0].message : "",
+				"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s profileAttempted=%s profileEnriched=%s errors=%s repairedRosters=%s",
+				attemptedClans,
+				capturedClans,
+				recorded,
+				updated,
+				countPlayerMetricsEntries_(validated && validated.playerMetrics),
+				profileAttempted,
+				profileEnriched,
+				errors.length,
+				lowCoverageRosters.length,
 			);
-		} else {
-			Logger.log(
-				"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s",
-				capture && capture.attemptedClans,
-				capture && capture.capturedClans,
-				capture && capture.recorded,
-				capture && capture.updated,
-				capture && capture.entryCount,
-			);
+		} catch (err) {
+			Logger.log("publishRosterData: fallback metrics capture failed: %s", errorMessage_(err));
 		}
-	} catch (err) {
-		Logger.log("publishRosterData: best-effort metrics capture failed: %s", errorMessage_(err));
+	} else {
+		Logger.log("publishRosterData: skipped live metrics capture because incoming payload already has %s metric entries.", incomingMetricCount);
 	}
 
 	const folder = DriveApp.getFolderById(FOLDER_ID);
@@ -1492,7 +1588,7 @@ function serveAsset_(name) {
 	}
 }
 
-function serveImageAssetData_(assetPathRaw) {
+function serveMediaAssetData_(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	const fail = (reason) =>
 		ContentService.createTextOutput(JSON.stringify({
@@ -1504,7 +1600,7 @@ function serveImageAssetData_(assetPathRaw) {
 			fileName: "",
 		})).setMimeType(ContentService.MimeType.JSON);
 	if (!safeAssetPath) return fail("empty-path");
-	if (!/\.(gif|png|jpe?g|we?bp)$/i.test(safeAssetPath)) return fail("invalid-extension");
+	if (!isSupportedMediaAssetExtension_(safeAssetPath)) return fail("invalid-extension");
 
 	try {
 		const lookup = findImageAssetFile_(safeAssetPath);
@@ -1513,7 +1609,7 @@ function serveImageAssetData_(assetPathRaw) {
 
 		const blob = file.getBlob();
 		const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
-		if (String(mimeType || "").indexOf("image/") !== 0) return fail("not-image");
+		if (!isSupportedMediaMimeType_(mimeType)) return fail("not-media");
 
 		return ContentService.createTextOutput(JSON.stringify({
 			ok: true,
@@ -1525,6 +1621,10 @@ function serveImageAssetData_(assetPathRaw) {
 	} catch (err) {
 		return fail(err && err.message ? err.message : String(err));
 	}
+}
+
+function serveImageAssetData_(assetPathRaw) {
+	return serveMediaAssetData_(assetPathRaw);
 }
 
 function findFileByName_(filename) {
@@ -1805,6 +1905,7 @@ const PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_TTL_SECONDS = 300;
 const PLAYER_METRICS_PROFILE_ENRICH_MIN_MEMBER_COUNT = 8;
 const PLAYER_METRICS_PROFILE_ENRICH_MAX_NONZERO_RATIO = 0.2;
 const PLAYER_METRICS_PROFILE_ENRICH_MIN_UNRANKED_RATIO = 0.7;
+const PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH = 0.9;
 
 function parseRosterLockState_(raw) {
 	const text = String(raw == null ? "" : raw).trim();
@@ -1911,6 +2012,10 @@ function getRosterTrackingMode_(rosterRaw) {
 function isValidPlayerTag_(tagRaw) {
 	const tag = normalizeTag_(tagRaw);
 	return /^#[PYLQGRJCUV0289]{3,15}$/.test(tag);
+}
+
+function isValidClanTag_(tagRaw) {
+	return isValidPlayerTag_(tagRaw);
 }
 
 function encodeTagForPath_(tagRaw) {
@@ -2032,10 +2137,13 @@ function findFileByRelativePath_(pathRaw) {
 }
 
 function inferAssetMimeType_(filename, providedMimeType) {
-	const mimeType = String(providedMimeType || "").trim();
-	if (mimeType) return mimeType;
+	const mimeType = String(providedMimeType || "").trim().toLowerCase();
+	if (mimeType && mimeType !== "application/octet-stream") return mimeType;
 
 	const lowerName = String(filename || "").toLowerCase();
+	if (/\.webm$/i.test(lowerName)) return "video/webm";
+	if (/\.mp4$/i.test(lowerName)) return "video/mp4";
+	if (/\.ogv$/i.test(lowerName)) return "video/ogg";
 	if (/\.we?bp$/i.test(lowerName)) return "image/webp";
 	if (/\.png$/i.test(lowerName)) return "image/png";
 	if (/\.jpe?g$/i.test(lowerName)) return "image/jpeg";
@@ -2804,6 +2912,53 @@ function countPlayerMetricsEntries_(storeRaw) {
 	return count;
 }
 
+function listRostersNeedingMetricsCoverageRepair_(rosterDataRaw, minCoverageRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const store = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : {};
+	const byTagRaw = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	const byTag = {};
+	const keys = Object.keys(byTagRaw);
+	for (let i = 0; i < keys.length; i++) {
+		const normalized = normalizeTag_(keys[i]);
+		if (!normalized) continue;
+		byTag[normalized] = byTagRaw[keys[i]];
+	}
+
+	const minCoverage = Math.max(0, Math.min(1, Number(minCoverageRaw)));
+	const out = [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const rosterId = String(roster.id == null ? "" : roster.id).trim();
+		if (!rosterId) continue;
+
+		const connectedClanTag = normalizeTag_(roster.connectedClanTag);
+		const players = collectRosterPoolPlayers_(roster);
+		const seen = {};
+		let total = 0;
+		let matched = 0;
+		for (let j = 0; j < players.length; j++) {
+			const tag = normalizeTag_(players[j] && players[j].tag);
+			if (!tag || seen[tag]) continue;
+			seen[tag] = true;
+			total++;
+			if (byTag[tag] && typeof byTag[tag] === "object") matched++;
+		}
+
+		if (total < 1) continue;
+		const coverage = matched / total;
+		if (coverage >= minCoverage) continue;
+		out.push({
+			rosterId: rosterId,
+			clanTag: connectedClanTag,
+			totalTags: total,
+			matchedTags: matched,
+			coverage: coverage,
+		});
+	}
+	return out;
+}
+
 function listConnectedClanTagsForMetrics_(rosterDataRaw, rosterIdFilterRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -2838,7 +2993,13 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	}
 
 	const clanTags = listConnectedClanTagsForMetrics_(rosterData, rosterIdFilter);
-	const runState = { seenClanTags: {}, profileSnapshotByTag: {}, profileSnapshotErrorByTag: {}, profileFetchBlocked: false };
+	const runState = options.runState && typeof options.runState === "object"
+		? options.runState
+		: { seenClanTags: {}, profileSnapshotByTag: {}, profileSnapshotErrorByTag: {}, profileFetchBlocked: false };
+	if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
+	if (!runState.profileSnapshotByTag || typeof runState.profileSnapshotByTag !== "object") runState.profileSnapshotByTag = {};
+	if (!runState.profileSnapshotErrorByTag || typeof runState.profileSnapshotErrorByTag !== "object") runState.profileSnapshotErrorByTag = {};
+	if (typeof runState.profileFetchBlocked !== "boolean") runState.profileFetchBlocked = false;
 	const errors = [];
 	let capturedClans = 0;
 	let recorded = 0;
@@ -2883,6 +3044,119 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 		profileEnriched: profileEnriched,
 		profileAttempted: profileAttempted,
 		metricsProfileMode: metricsProfileMode,
+	};
+}
+
+function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (!rosterData || !rosterId) {
+		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0, profileAttempted: 0, profileEnriched: 0, metricsProfileMode: "always", usedProfileFallback: true };
+	}
+
+	const ctx = findRosterById_(rosterData, rosterId);
+	const roster = ctx && ctx.roster ? ctx.roster : null;
+	if (!roster) {
+		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0, profileAttempted: 0, profileEnriched: 0, metricsProfileMode: "always", usedProfileFallback: true };
+	}
+
+	const connectedClanTag = normalizeTag_(roster.connectedClanTag);
+	const players = collectRosterPoolPlayers_(roster);
+	const profileRunState = options.profileRunState && typeof options.profileRunState === "object" ? options.profileRunState : {};
+	const snapshotsByClanTag = {};
+	const seenTags = {};
+	const errors = [];
+	let profileAttempted = 0;
+	let profileEnriched = 0;
+
+	for (let i = 0; i < players.length; i++) {
+		const tag = normalizeTag_(players[i] && players[i].tag);
+		if (!tag || seenTags[tag] || !isValidPlayerTag_(tag)) continue;
+		seenTags[tag] = true;
+		profileAttempted++;
+
+		const snapshot = fetchAuthoritativePlayerMetricsSnapshot_(tag, profileRunState);
+		if (!snapshot) {
+			errors.push({ clanTag: connectedClanTag || "", message: "Unable to fetch player profile snapshot for " + tag + "." });
+			continue;
+		}
+
+		profileEnriched++;
+		const clanTag = normalizeTag_(snapshot.clanTag) || connectedClanTag || "#0";
+		const normalizedSnapshot = sanitizeMetricsSnapshotPayload_(Object.assign({}, snapshot, { clanTag: clanTag }), tag);
+		if (!normalizedSnapshot) continue;
+		if (!snapshotsByClanTag[clanTag]) snapshotsByClanTag[clanTag] = [];
+		snapshotsByClanTag[clanTag].push(normalizedSnapshot);
+	}
+
+	let recorded = 0;
+	let updated = 0;
+	const clanTags = Object.keys(snapshotsByClanTag);
+	for (let i = 0; i < clanTags.length; i++) {
+		const clanTag = clanTags[i];
+		const snapshots = snapshotsByClanTag[clanTag];
+		if (!Array.isArray(snapshots) || !snapshots.length) continue;
+		const result = recordClanMemberMetricsSnapshot_(ctx.rosterData, clanTag, snapshots, {
+			source: "captureRosterPoolProfileMetrics",
+		});
+		recorded += toNonNegativeInt_(result && result.recorded);
+		updated += toNonNegativeInt_(result && result.updated);
+	}
+
+	ensurePlayerMetricsStore_(ctx.rosterData);
+	return {
+		attemptedClans: clanTags.length,
+		capturedClans: clanTags.length,
+		recorded: recorded,
+		updated: updated,
+		errors: errors,
+		entryCount: countPlayerMetricsEntries_(ctx.rosterData.playerMetrics),
+		profileAttempted: profileAttempted,
+		profileEnriched: profileEnriched,
+		metricsProfileMode: "always",
+		usedProfileFallback: true,
+	};
+}
+
+function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (!rosterData || !rosterId) {
+		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0 };
+	}
+	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
+		.trim()
+		.toLowerCase();
+	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
+	const primary = captureConnectedClanMetrics_(rosterData, {
+		rosterId: rosterId,
+		continueOnError: options.continueOnError !== false,
+		metricsProfileMode: metricsProfileMode,
+		runState: options.runState,
+	});
+	if (metricsProfileMode !== "always") return primary;
+
+	// When strict profile mode is requested, also refresh directly from player profiles
+	// so metrics still update even if clan-member snapshots are incomplete or unavailable.
+	const fallback = captureRosterPoolProfileMetrics_(rosterData, rosterId, {
+		profileRunState: options.runState && options.runState.profileRunState,
+	});
+
+	return {
+		attemptedClans: toNonNegativeInt_(primary && primary.attemptedClans) + toNonNegativeInt_(fallback && fallback.attemptedClans),
+		capturedClans: toNonNegativeInt_(primary && primary.capturedClans) + toNonNegativeInt_(fallback && fallback.capturedClans),
+		recorded: toNonNegativeInt_(primary && primary.recorded) + toNonNegativeInt_(fallback && fallback.recorded),
+		updated: toNonNegativeInt_(primary && primary.updated) + toNonNegativeInt_(fallback && fallback.updated),
+		errors: []
+			.concat(primary && Array.isArray(primary.errors) ? primary.errors : [])
+			.concat(fallback && Array.isArray(fallback.errors) ? fallback.errors : []),
+		entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
+		profileAttempted: toNonNegativeInt_(primary && primary.profileAttempted) + toNonNegativeInt_(fallback && fallback.profileAttempted),
+		profileEnriched: toNonNegativeInt_(primary && primary.profileEnriched) + toNonNegativeInt_(fallback && fallback.profileEnriched),
+		metricsProfileMode: "always",
+		usedProfileFallback: true,
 	};
 }
 
@@ -4665,6 +4939,9 @@ function findRosterForClanSync_(rosterData, rosterIdRaw) {
 	if (!connectedClanTag) {
 		throw new Error("Connected clan tag is missing for roster '" + ctx.rosterId + "'.");
 	}
+	if (!isValidClanTag_(connectedClanTag)) {
+		throw new Error("Connected clan tag is invalid for roster '" + ctx.rosterId + "': " + connectedClanTag + ".");
+	}
 	roster.connectedClanTag = connectedClanTag;
 	ctx.trackingMode = getRosterTrackingMode_(roster);
 	ctx.clanTag = connectedClanTag;
@@ -4916,6 +5193,8 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const connectedClanTagByRosterId = {};
 	const connectedRosterIds = [];
 	const membersByClanTag = {};
+	const memberTrackingByRosterId = {};
+	const memberTrackingByClanTag = {};
 
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
@@ -4929,26 +5208,42 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedClanTagByRosterId[rosterId] = clanTag;
 
 		let members = membersByClanTag[clanTag];
-			if (!members) {
-				const clanSnapshot = fetchClanMembersSnapshot_(clanTag);
-				members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
-				membersByClanTag[clanTag] = members;
-				if (shouldRecordMetrics) {
-					const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
-						mode: metricsProfileMode,
-						runState: metricsProfileRunState,
-						clanTag: clanTag,
-						sourceRosterId: rosterId,
-						source: "buildLiveRosterOwnershipSnapshot",
-					});
-					const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
-					recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
-						capturedAt: clanSnapshot && clanSnapshot.capturedAt,
-						runState: metricsRunState,
-						sourceRosterId: rosterId,
-						source: "buildLiveRosterOwnershipSnapshot",
-					});
+		if (!members) {
+			const clanSnapshot = fetchClanMembersSnapshot_(clanTag);
+			members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
+			membersByClanTag[clanTag] = members;
+			if (shouldRecordMetrics) {
+				const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
+					mode: metricsProfileMode,
+					runState: metricsProfileRunState,
+					clanTag: clanTag,
+					sourceRosterId: rosterId,
+					source: "buildLiveRosterOwnershipSnapshot",
+				});
+				const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
+				const metricsRecord = recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
+					capturedAt: clanSnapshot && clanSnapshot.capturedAt,
+					runState: metricsRunState,
+					sourceRosterId: rosterId,
+					source: "buildLiveRosterOwnershipSnapshot",
+				});
+				memberTrackingByClanTag[clanTag] = {
+					clanTag: clanTag,
+					capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
+					attemptedClans: 1,
+					capturedClans: 1,
+					recorded: toNonNegativeInt_(metricsRecord && metricsRecord.recorded),
+					updated: toNonNegativeInt_(metricsRecord && metricsRecord.updated),
+					errors: [],
+					entryCount: countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics),
+					profileEnriched: toNonNegativeInt_(enriched && enriched.enriched),
+					profileAttempted: toNonNegativeInt_(enriched && enriched.attempted),
+					metricsProfileMode: metricsProfileMode,
+				};
 			}
+		}
+		if (memberTrackingByClanTag[clanTag]) {
+			memberTrackingByRosterId[rosterId] = memberTrackingByClanTag[clanTag];
 		}
 		membersByRosterId[rosterId] = members;
 
@@ -4971,6 +5266,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		liveMemberByTag: liveMemberByTag,
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
 		connectedRosterIds: connectedRosterIds,
+		memberTrackingByRosterId: memberTrackingByRosterId,
 		seedPlayerByTag: buildRosterPlayerSeedByTag_(rosterData),
 	};
 }
@@ -5847,6 +6143,7 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const ownershipSnapshot = options.ownershipSnapshot && typeof options.ownershipSnapshot === "object" ? options.ownershipSnapshot : buildLiveRosterOwnershipSnapshot_(ctx.rosterData);
+	const memberTrackingByRosterId = ownershipSnapshot && ownershipSnapshot.memberTrackingByRosterId && typeof ownershipSnapshot.memberTrackingByRosterId === "object" ? ownershipSnapshot.memberTrackingByRosterId : {};
 	const nowIso = new Date().toISOString();
 	let result = null;
 	const source = resolveRosterPoolSource_(ctx.clanTag, ctx.rosterId, ownershipSnapshot);
@@ -5854,6 +6151,9 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 		result = applyRegularWarRosterPoolSync_(ctx.rosterData, ctx.roster, source.members, nowIso, ownershipSnapshot);
 	} else {
 		result = applyRosterPoolSync_(ctx.rosterData, ctx.roster, source.members, source.sourceUsed, ownershipSnapshot, nowIso);
+	}
+	if (result && typeof result === "object") {
+		result.memberTracking = memberTrackingByRosterId[ctx.rosterId] && typeof memberTrackingByRosterId[ctx.rosterId] === "object" ? memberTrackingByRosterId[ctx.rosterId] : null;
 	}
 	updateWarPerformanceMembership_(ctx.roster, nowIso);
 	const outRosterData = validateRosterData_(ctx.rosterData);
@@ -6285,10 +6585,11 @@ function refreshRegularWarStatsCore_(rosterData, rosterId) {
 
 function refreshTrackingStatsCore_(rosterData, rosterId) {
 	const ctx = findRosterById_(rosterData, rosterId);
+	let capture = null;
 	try {
-		const capture = captureConnectedClanMetrics_(ctx.rosterData, {
-			rosterId: ctx.rosterId,
+		capture = captureMemberTrackingForRoster_(ctx.rosterData, ctx.rosterId, {
 			continueOnError: true,
+			metricsProfileMode: "always",
 		});
 		if (capture && capture.errors && capture.errors.length) {
 			Logger.log(
@@ -6302,10 +6603,31 @@ function refreshTrackingStatsCore_(rosterData, rosterId) {
 		Logger.log("refreshTrackingStatsCore metrics capture failed for roster '%s': %s", ctx.rosterId, errorMessage_(err));
 	}
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
-	if (trackingMode === "regularWar") {
-		return refreshRegularWarStatsCore_(ctx.rosterData, ctx.rosterId);
+	let refresh = null;
+	try {
+		refresh = trackingMode === "regularWar" ? refreshRegularWarStatsCore_(ctx.rosterData, ctx.rosterId) : refreshCwlStatsCore_(ctx.rosterData, ctx.rosterId);
+	} catch (err) {
+		// Keep member metrics updates even when optional war endpoints are blocked by private war logs.
+		if (capture && isPrivateWarLogError_(err)) {
+			Logger.log("refreshTrackingStatsCore war refresh skipped for roster '%s' because war log is private: %s", ctx.rosterId, errorMessage_(err));
+			return {
+				ok: true,
+				rosterData: validateRosterData_(ctx.rosterData),
+				result: {
+					mode: trackingMode,
+					warDataSkipped: true,
+					currentWarUnavailableReason: "privateWarLog",
+					message: "war data unavailable: private war log",
+					memberTracking: capture,
+				},
+			};
+		}
+		throw err;
 	}
-	return refreshCwlStatsCore_(ctx.rosterData, ctx.rosterId);
+	if (capture && refresh && refresh.result && typeof refresh.result === "object") {
+		refresh.result.memberTracking = capture;
+	}
+	return refresh;
 }
 
 function refreshCwlStatsInternal_(rosterData, rosterId) {

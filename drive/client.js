@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
     const $ = (sel) => document.querySelector(sel);
     const toStr = (v) => (v == null ? "" : String(v));
     const pluralize = (count, singular, plural) => (count === 1 ? singular : plural);
@@ -15,6 +15,9 @@
     let globalLastUpdatedTimerId = 0;
     let globalLastUpdatedTimerValue = "";
     let landingRevealObserver = null;
+    let landingScrollEffectsBound = false;
+    let landingScrollRafId = 0;
+    let landingSquareStoryActiveStep = -1;
     const missingSectionExpandedByRoster = Object.create(null);
 
     const profileCache = Object.create(null);
@@ -23,8 +26,9 @@
     const townHallIconPending = Object.create(null);
     const leagueIconCache = Object.create(null);
     const leagueIconPending = Object.create(null);
-    const landingAssetDataCache = Object.create(null);
-    const landingAssetDataPending = Object.create(null);
+    const landingMediaAssetCache = Object.create(null);
+    const landingMediaAssetPending = Object.create(null);
+    const landingMediaLoadTokens = Object.create(null);
     const profileState = {
         root: null,
         titleEl: null,
@@ -53,9 +57,31 @@
         landing: "landing",
     };
     const PUBLIC_LANDING_DEFAULTS = {
-        bannerGifUrl: "/assets/images/banner.gif",
-        squareGifUrl: "/assets/images/square.gif",
+        bannerMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=banner_qhln0h&profile=cld-looping",
+        squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_jperx8&profile=cld-looping",
         discordInviteUrl: "https://discord.gg/turtlecoc",
+    };
+    const LANDING_MEDIA_REMOTE_LOAD_TIMEOUT_MS = 9000;
+    const LANDING_MEDIA_LOCAL_LOAD_TIMEOUT_MS = 7000;
+    const LANDING_MEDIA_FALLBACK_CANDIDATES = {
+        banner: [
+            "assets/images/banner-static.webm",
+            "assets/images/banner_static.webm",
+            "assets/images/banner.webm",
+            "assets/images/banner-static.webp",
+            "assets/images/banner.webp",
+            "assets/images/banner-static.png",
+            "assets/images/banner.png",
+        ],
+        square: [
+            "assets/images/square-static.webm",
+            "assets/images/square_static.webm",
+            "assets/images/square.webm",
+            "assets/images/square-static.webp",
+            "assets/images/square.webp",
+            "assets/images/square-static.png",
+            "assets/images/square.png",
+        ],
     };
     const LEADERBOARD_SORT_MODE_VALUES = {
         trophiesLeague: "trophiesLeague",
@@ -139,89 +165,53 @@
         return "";
     };
 
-    const sanitizeAssetPath = (valueRaw) =>
-        toStr(valueRaw)
-            .trim()
-            .replace(/^[\/\\]+/, "")
-            .replace(/\.\./g, "")
-            .replace(/\\/g, "/")
-            .replace(/^drive\//i, "");
+    const pickFirstHttpUrl = (...values) => {
+        for (let i = 0; i < values.length; i++) {
+            const normalized = normalizeHttpUrl(values[i]);
+            if (normalized) return normalized;
+        }
+        return "";
+    };
 
     const resolveLandingMediaSource = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return { kind: "none", value: "" };
-        if (/^https?:\/\//i.test(value) || /^data:image\//i.test(value)) {
+        if (/^https?:\/\//i.test(value) || /^data:(image|video)\//i.test(value)) {
             return { kind: "url", value: value };
         }
-        const assetPath = sanitizeAssetPath(value);
-        if (!assetPath) return { kind: "none", value: "" };
-        return { kind: "asset", value: assetPath };
-    };
-
-    const getScriptBaseUrl = () =>
-        toStr(
-            (typeof window !== "undefined" && (window.ROSTER_BASE_URL || window.BASE_URL))
-                ? (window.ROSTER_BASE_URL || window.BASE_URL)
-                : ""
-        ).trim();
-
-    const buildAssetDataEndpointUrl = (baseUrlRaw, assetPathRaw) => {
-        const assetPath = sanitizeAssetPath(assetPathRaw);
-        if (!assetPath) return "";
-        const baseUrl = toStr(baseUrlRaw).trim();
-        if (!baseUrl) return "";
-        const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
-        return baseUrl + sep + "assetData=" + encodeURIComponent(assetPath);
-    };
-
-    const getAssetDataEndpointCandidates = (assetPathRaw) => {
-        const assetPath = sanitizeAssetPath(assetPathRaw);
-        if (!assetPath) return [];
-        const baseCandidates = [];
-        const seen = Object.create(null);
-        const addBase = (baseRaw) => {
-            const base = toStr(baseRaw).trim();
-            if (!base || seen[base]) return;
-            seen[base] = true;
-            baseCandidates.push(base);
-        };
-
-        if (typeof window !== "undefined" && window.location) {
-            const currentBase = toStr(window.location.origin).trim() + toStr(window.location.pathname).trim();
-            addBase(currentBase);
-        }
-        addBase(getScriptBaseUrl());
-
-        const urls = [];
-        for (let i = 0; i < baseCandidates.length; i++) {
-            const endpoint = buildAssetDataEndpointUrl(baseCandidates[i], assetPath);
-            if (endpoint) urls.push(endpoint);
-        }
-        return urls;
+        return { kind: "none", value: "" };
     };
 
     const getPublicConfigFromData = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const configRoot = data.publicConfig && typeof data.publicConfig === "object" ? data.publicConfig : {};
         const landingConfig = configRoot.landing && typeof configRoot.landing === "object" ? configRoot.landing : {};
-        const bannerGifUrl = toStr(
-            landingConfig.bannerGifUrl ||
-            configRoot.bannerGifUrl ||
-            PUBLIC_LANDING_DEFAULTS.bannerGifUrl
-        ).trim();
-        const squareGifUrl = toStr(
-            landingConfig.squareGifUrl ||
-            configRoot.squareGifUrl ||
-            PUBLIC_LANDING_DEFAULTS.squareGifUrl
-        ).trim();
+        const bannerMediaUrl = pickFirstHttpUrl(
+            landingConfig.bannerMediaUrl,
+            landingConfig.bannerUrl,
+            landingConfig.bannerGifUrl,
+            configRoot.bannerMediaUrl,
+            configRoot.bannerUrl,
+            configRoot.bannerGifUrl,
+            PUBLIC_LANDING_DEFAULTS.bannerMediaUrl
+        );
+        const squareMediaUrl = pickFirstHttpUrl(
+            landingConfig.squareMediaUrl,
+            landingConfig.squareUrl,
+            landingConfig.squareGifUrl,
+            configRoot.squareMediaUrl,
+            configRoot.squareUrl,
+            configRoot.squareGifUrl,
+            PUBLIC_LANDING_DEFAULTS.squareMediaUrl
+        );
         const discordInviteUrl = normalizeHttpUrl(
             landingConfig.discordInviteUrl ||
             configRoot.discordInviteUrl ||
             PUBLIC_LANDING_DEFAULTS.discordInviteUrl
         );
         return {
-            bannerGifUrl,
-            squareGifUrl,
+            bannerMediaUrl,
+            squareMediaUrl,
             discordInviteUrl,
         };
     };
@@ -502,6 +492,12 @@
         const num = Number(value);
         if (!Number.isFinite(num)) return 0;
         return Math.max(0, Math.min(1, num));
+    };
+
+    const clampSignedUnit = (value) => {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return 0;
+        return Math.max(-1, Math.min(1, num));
     };
 
     const formatNumber = (value) => {
@@ -2581,63 +2577,6 @@
             runner[methodName](...(Array.isArray(args) ? args : []));
         });
 
-    const requestLandingAssetData = (assetPathRaw) => {
-        const assetPath = sanitizeAssetPath(assetPathRaw);
-        if (!assetPath) return Promise.resolve("");
-        if (Object.prototype.hasOwnProperty.call(landingAssetDataCache, assetPath)) {
-            return Promise.resolve(toStr(landingAssetDataCache[assetPath]).trim());
-        }
-        if (landingAssetDataPending[assetPath]) return landingAssetDataPending[assetPath];
-
-        landingAssetDataPending[assetPath] = (async () => {
-            let dataUrl = "";
-            const endpointUrls = getAssetDataEndpointCandidates(assetPath);
-            if (endpointUrls.length && typeof fetch === "function") {
-                for (let i = 0; i < endpointUrls.length; i++) {
-                    if (dataUrl) break;
-                    try {
-                        const response = await fetch(endpointUrls[i], {
-                            method: "GET",
-                            cache: "no-store",
-                            credentials: "same-origin",
-                        });
-                        if (!response || !response.ok) continue;
-                        const payload = await response.json();
-                        const mimeType = toStr(payload && payload.mimeType).trim();
-                        const dataBase64 = toStr(payload && payload.dataBase64).trim();
-                        if (payload && payload.ok && /^image\//i.test(mimeType) && dataBase64) {
-                            dataUrl = "data:" + mimeType + ";base64," + dataBase64;
-                        }
-                    } catch (err) {
-                        // try next candidate
-                    }
-                }
-            }
-
-            // Fallback for environments where fetch endpoint is blocked.
-            if (!dataUrl) {
-                try {
-                    const response = await runServerMethod("getImageAssetData", [assetPath]);
-                    dataUrl = response && response.ok && response.dataUrl
-                        ? toStr(response.dataUrl).trim()
-                        : "";
-                } catch (err) {
-                    dataUrl = "";
-                }
-            }
-
-            if (!dataUrl && typeof console !== "undefined" && console.warn) {
-                console.warn("Landing asset load failed:", assetPath);
-            }
-            landingAssetDataCache[assetPath] = dataUrl;
-            return dataUrl;
-        })().finally(() => {
-            delete landingAssetDataPending[assetPath];
-        });
-
-        return landingAssetDataPending[assetPath];
-    };
-
     const requestLeagueIcon = (playerRaw) => {
         const source = extractHomeLeagueBadgeSource(playerRaw);
         if (!source || !source.name) return;
@@ -4227,84 +4166,441 @@
         if (containers.leaderboard) containers.leaderboard.classList.toggle("hidden", activeView !== PUBLIC_VIEW_VALUES.leaderboard);
         const shell = $(".public-shell");
         if (shell) shell.setAttribute("data-active-view", activeView);
+        if (activeView === PUBLIC_VIEW_VALUES.landing) {
+            queueLandingScrollEffectsFrame();
+        } else if (typeof document !== "undefined" && document.documentElement) {
+            document.documentElement.style.setProperty("--landing-scroll-progress", "0");
+        }
     };
 
-    const setLandingMediaSlot = (slotId, imageId, urlRaw) => {
-        const slot = $("#" + slotId);
-        const image = $("#" + imageId);
-        if (!slot || !image) return;
+    const normalizeLandingAssetPath = (assetPathRaw) =>
+        toStr(assetPathRaw)
+            .trim()
+            .replace(/^[\/\\]+/, "")
+            .replace(/\.\./g, "")
+            .replace(/\\/g, "/")
+            .replace(/^drive\//i, "");
 
-        const safeUrl = toStr(urlRaw).trim();
-        const showPlaceholder = () => {
-            slot.classList.remove("is-loading");
-            slot.classList.add("is-placeholder");
-            image.classList.add("hidden");
-        };
-
-        if (!safeUrl) {
-            image.onload = null;
-            image.onerror = null;
-            image.removeAttribute("src");
-            image.dataset.loadedSrc = "";
-            showPlaceholder();
-            return;
-        }
-
-        if (image.dataset.loadedSrc === safeUrl && !slot.classList.contains("is-placeholder")) {
-            return;
-        }
-
-        slot.classList.add("is-loading");
-        image.classList.add("hidden");
-        image.onload = () => {
-            slot.classList.remove("is-loading");
-            slot.classList.remove("is-placeholder");
-            image.classList.remove("hidden");
-            image.dataset.loadedSrc = safeUrl;
-        };
-        image.onerror = () => {
-            image.onload = null;
-            image.onerror = null;
-            image.removeAttribute("src");
-            image.dataset.loadedSrc = "";
-            showPlaceholder();
-        };
-        image.src = safeUrl;
+    const getLandingMediaLoadToken = (slotIdRaw) => {
+        const slotId = toStr(slotIdRaw).trim();
+        if (!slotId) return 0;
+        const value = Number(landingMediaLoadTokens[slotId]);
+        if (!Number.isFinite(value) || value < 1) return 0;
+        return Math.floor(value);
     };
 
-    const setLandingMediaSlotSource = (slotId, imageId, sourceRaw) => {
-        const slot = $("#" + slotId);
-        const image = $("#" + imageId);
-        if (!slot || !image) return;
+    const beginLandingMediaLoad = (slotIdRaw) => {
+        const slotId = toStr(slotIdRaw).trim();
+        if (!slotId) return 0;
+        const nextToken = getLandingMediaLoadToken(slotId) + 1;
+        landingMediaLoadTokens[slotId] = nextToken;
+        return nextToken;
+    };
 
-        const source = resolveLandingMediaSource(sourceRaw);
-        const sourceKey = source.kind + ":" + source.value;
-        slot.dataset.assetSourceKey = sourceKey;
+    const isLandingMediaLoadActive = (slotIdRaw, tokenRaw) => {
+        const slotId = toStr(slotIdRaw).trim();
+        if (!slotId) return false;
+        return getLandingMediaLoadToken(slotId) === Number(tokenRaw);
+    };
 
-        if (source.kind === "none") {
-            setLandingMediaSlot(slotId, imageId, "");
-            return;
+    const clearLandingMediaHost = (host, keepNode) => {
+        if (!host) return;
+        const children = Array.prototype.slice.call(host.childNodes || []);
+        for (let i = 0; i < children.length; i++) {
+            const node = children[i];
+            if (!node || node === keepNode) continue;
+            if (node && node.tagName === "VIDEO") {
+                try { node.pause(); } catch (err) { }
+                node.removeAttribute("src");
+                try { node.load(); } catch (err) { }
+            } else if (node && node.removeAttribute) {
+                node.removeAttribute("src");
+            }
+            if (node.parentNode === host) host.removeChild(node);
         }
+        if (!keepNode) {
+            host.classList.add("hidden");
+            host.dataset.loadedSource = "";
+        }
+    };
+
+    const setLandingMediaPlaceholder = (slot, host, isLoading) => {
+        if (!slot || !host) return;
+        slot.classList.toggle("is-loading", !!isLoading);
+        slot.classList.add("is-placeholder");
+        clearLandingMediaHost(host);
+    };
+
+    const showLandingMediaElement = (slot, host, mediaNode, sourceKey) => {
+        if (!slot || !host || !mediaNode) return;
+        clearLandingMediaHost(host, mediaNode);
+        if (mediaNode.parentNode !== host) host.appendChild(mediaNode);
+        host.classList.remove("hidden");
+        host.dataset.loadedSource = toStr(sourceKey).trim();
+        slot.classList.remove("is-loading");
+        slot.classList.remove("is-placeholder");
+    };
+
+    const normalizeLandingFallbackCandidates = (candidatesRaw) => {
+        const candidates = Array.isArray(candidatesRaw) ? candidatesRaw : [];
+        const out = [];
+        const seen = Object.create(null);
+        for (let i = 0; i < candidates.length; i++) {
+            const candidate = normalizeLandingAssetPath(candidates[i]);
+            if (!candidate || seen[candidate]) continue;
+            seen[candidate] = true;
+            out.push(candidate);
+        }
+        return out;
+    };
+
+    const getLandingMediaAssetData = (assetPathRaw) => {
+        const assetPath = normalizeLandingAssetPath(assetPathRaw);
+        if (!assetPath) return Promise.resolve(null);
+        if (landingMediaAssetCache[assetPath]) return Promise.resolve(landingMediaAssetCache[assetPath]);
+        if (landingMediaAssetPending[assetPath]) return landingMediaAssetPending[assetPath];
+
+        landingMediaAssetPending[assetPath] = runServerMethod("getMediaAssetData", [assetPath])
+            .then((response) => {
+                const mimeType = toStr(response && response.mimeType).trim().toLowerCase();
+                const dataUrl = toStr(response && response.dataUrl).trim();
+                if (!response || !response.ok || !mimeType || !dataUrl) return null;
+                if (mimeType.indexOf("image/") !== 0 && mimeType.indexOf("video/") !== 0) return null;
+                const entry = {
+                    assetPath: assetPath,
+                    fileName: toStr(response.fileName).trim(),
+                    mimeType: mimeType,
+                    dataUrl: dataUrl,
+                };
+                landingMediaAssetCache[assetPath] = entry;
+                return entry;
+            })
+            .catch(() => null)
+            .finally(() => {
+                delete landingMediaAssetPending[assetPath];
+            });
+
+        return landingMediaAssetPending[assetPath];
+    };
+
+    const loadLandingRemoteIframe = (slotId, loadToken, slot, host, remoteUrlRaw, mediaLabelRaw) =>
+        new Promise((resolve) => {
+            const remoteUrl = toStr(remoteUrlRaw).trim();
+            if (!remoteUrl) {
+                resolve(false);
+                return;
+            }
+            if (!isLandingMediaLoadActive(slotId, loadToken)) {
+                resolve(false);
+                return;
+            }
+
+            clearLandingMediaHost(host);
+            const iframe = document.createElement("iframe");
+            iframe.className = "landing-media-slot__media-item landing-media-slot__media-item--iframe";
+            iframe.title = toStr(mediaLabelRaw).trim() || "Landing media";
+            iframe.setAttribute("allow", "autoplay; fullscreen; encrypted-media; picture-in-picture");
+            iframe.setAttribute("allowfullscreen", "true");
+            iframe.setAttribute("loading", "eager");
+            iframe.setAttribute("referrerpolicy", "origin-when-cross-origin");
+
+            let settled = false;
+            let timeoutId = 0;
+            const cleanup = () => {
+                iframe.onload = null;
+                iframe.onerror = null;
+                if (timeoutId) {
+                    window.clearTimeout(timeoutId);
+                    timeoutId = 0;
+                }
+            };
+            const finish = (ok) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (!isLandingMediaLoadActive(slotId, loadToken)) {
+                    iframe.removeAttribute("src");
+                    if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                    resolve(false);
+                    return;
+                }
+                if (!ok) {
+                    iframe.removeAttribute("src");
+                    if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                    resolve(false);
+                    return;
+                }
+                showLandingMediaElement(slot, host, iframe, "remote:" + remoteUrl);
+                resolve(true);
+            };
+
+            timeoutId = window.setTimeout(() => finish(false), LANDING_MEDIA_REMOTE_LOAD_TIMEOUT_MS);
+            iframe.onload = () => finish(true);
+            iframe.onerror = () => finish(false);
+            host.appendChild(iframe);
+            host.classList.remove("hidden");
+            iframe.src = remoteUrl;
+        });
+
+    const getCloudinaryDirectVideoUrl = (remoteUrlRaw) => {
+        const remoteUrl = toStr(remoteUrlRaw).trim();
+        if (!remoteUrl || typeof URL === "undefined") return "";
+        try {
+            const parsed = new URL(remoteUrl);
+            const host = toStr(parsed.hostname).trim().toLowerCase();
+            const path = toStr(parsed.pathname).trim().toLowerCase();
+            if (host !== "player.cloudinary.com" || path.indexOf("/embed") < 0) return "";
+            const cloudName = toStr(parsed.searchParams.get("cloud_name")).trim();
+            const publicIdRaw = toStr(parsed.searchParams.get("public_id")).trim();
+            if (!cloudName || !publicIdRaw) return "";
+            const safePublicId = publicIdRaw
+                .split("/")
+                .map((part) => encodeURIComponent(toStr(part).trim()))
+                .filter((part) => !!part)
+                .join("/");
+            if (!safePublicId) return "";
+            return "https://res.cloudinary.com/" + encodeURIComponent(cloudName) + "/video/upload/f_auto,q_auto/" + safePublicId;
+        } catch (err) {
+            return "";
+        }
+    };
+
+    const loadLandingRemoteVideoUrl = (slotId, loadToken, slot, host, mediaUrlRaw, mediaLabelRaw) =>
+        new Promise((resolve) => {
+            const mediaUrl = toStr(mediaUrlRaw).trim();
+            if (!mediaUrl) {
+                resolve(false);
+                return;
+            }
+            if (!isLandingMediaLoadActive(slotId, loadToken)) {
+                resolve(false);
+                return;
+            }
+
+            const video = document.createElement("video");
+            video.className = "landing-media-slot__media-item landing-media-slot__media-item--video";
+            video.autoplay = true;
+            video.muted = true;
+            video.defaultMuted = true;
+            video.loop = true;
+            video.playsInline = true;
+            video.preload = "auto";
+            video.controls = false;
+            video.setAttribute("playsinline", "true");
+            video.setAttribute("aria-label", toStr(mediaLabelRaw).trim() || "Landing media");
+
+            let settled = false;
+            let timeoutId = 0;
+            const cleanup = () => {
+                video.onloadeddata = null;
+                video.oncanplay = null;
+                video.onerror = null;
+                if (timeoutId) {
+                    window.clearTimeout(timeoutId);
+                    timeoutId = 0;
+                }
+            };
+            const disposeVideo = () => {
+                try { video.pause(); } catch (err) { }
+                video.removeAttribute("src");
+                try { video.load(); } catch (err) { }
+            };
+            const finish = (ok) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (!ok || !isLandingMediaLoadActive(slotId, loadToken)) {
+                    disposeVideo();
+                    resolve(false);
+                    return;
+                }
+                const playPromise = video.play();
+                if (playPromise && typeof playPromise.catch === "function") {
+                    playPromise.catch(() => { });
+                }
+                showLandingMediaElement(slot, host, video, "remote-video:" + mediaUrl);
+                resolve(true);
+            };
+
+            timeoutId = window.setTimeout(() => finish(false), LANDING_MEDIA_REMOTE_LOAD_TIMEOUT_MS);
+            video.onloadeddata = () => finish(true);
+            video.oncanplay = () => finish(true);
+            video.onerror = () => finish(false);
+            video.src = mediaUrl;
+            try { video.load(); } catch (err) { }
+            if (video.readyState >= 2) finish(true);
+        });
+
+    const loadLandingRemoteMedia = async (slotId, loadToken, slot, host, remoteUrlRaw, mediaLabelRaw) => {
+        const remoteUrl = toStr(remoteUrlRaw).trim();
+        if (!remoteUrl) return false;
+        const directCloudinaryVideoUrl = getCloudinaryDirectVideoUrl(remoteUrl);
+        if (directCloudinaryVideoUrl) {
+            const loadedVideo = await loadLandingRemoteVideoUrl(
+                slotId,
+                loadToken,
+                slot,
+                host,
+                directCloudinaryVideoUrl,
+                mediaLabelRaw
+            );
+            if (loadedVideo) return true;
+        }
+        return loadLandingRemoteIframe(slotId, loadToken, slot, host, remoteUrl, mediaLabelRaw);
+    };
+
+    const createLandingLocalMediaNode = (assetRaw, mediaLabelRaw) => {
+        const asset = assetRaw && typeof assetRaw === "object" ? assetRaw : {};
+        const mimeType = toStr(asset.mimeType).trim().toLowerCase();
+        const mediaLabel = toStr(mediaLabelRaw).trim() || "Landing media";
+        if (mimeType.indexOf("video/") === 0) {
+            const video = document.createElement("video");
+            video.className = "landing-media-slot__media-item landing-media-slot__media-item--video";
+            video.autoplay = true;
+            video.muted = true;
+            video.defaultMuted = true;
+            video.loop = true;
+            video.playsInline = true;
+            video.preload = "auto";
+            video.controls = false;
+            video.setAttribute("playsinline", "true");
+            video.setAttribute("aria-label", mediaLabel);
+            return { kind: "video", node: video };
+        }
+        if (mimeType.indexOf("image/") === 0) {
+            const image = document.createElement("img");
+            image.className = "landing-media-slot__media-item landing-media-slot__media-item--image";
+            image.alt = mediaLabel;
+            image.decoding = "async";
+            return { kind: "image", node: image };
+        }
+        return null;
+    };
+
+    const loadLandingLocalMediaAsset = (slotId, loadToken, slot, host, assetRaw, mediaLabelRaw) =>
+        new Promise((resolve) => {
+            const asset = assetRaw && typeof assetRaw === "object" ? assetRaw : {};
+            const dataUrl = toStr(asset.dataUrl).trim();
+            const candidate = createLandingLocalMediaNode(asset, mediaLabelRaw);
+            if (!candidate || !candidate.node || !dataUrl) {
+                resolve(false);
+                return;
+            }
+            const node = candidate.node;
+
+            let settled = false;
+            let timeoutId = 0;
+            const cleanup = () => {
+                node.onload = null;
+                node.onerror = null;
+                node.onloadeddata = null;
+                node.oncanplay = null;
+                if (timeoutId) {
+                    window.clearTimeout(timeoutId);
+                    timeoutId = 0;
+                }
+            };
+            const disposeNode = () => {
+                if (node.tagName === "VIDEO") {
+                    try { node.pause(); } catch (err) { }
+                    node.removeAttribute("src");
+                    try { node.load(); } catch (err) { }
+                } else {
+                    node.removeAttribute("src");
+                }
+            };
+            const finish = (ok) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (!ok || !isLandingMediaLoadActive(slotId, loadToken)) {
+                    disposeNode();
+                    resolve(false);
+                    return;
+                }
+                if (candidate.kind === "video" && typeof node.play === "function") {
+                    const playPromise = node.play();
+                    if (playPromise && typeof playPromise.catch === "function") {
+                        playPromise.catch(() => { });
+                    }
+                }
+                showLandingMediaElement(slot, host, node, "local:" + toStr(asset.assetPath).trim());
+                resolve(true);
+            };
+
+            timeoutId = window.setTimeout(() => finish(false), LANDING_MEDIA_LOCAL_LOAD_TIMEOUT_MS);
+            if (candidate.kind === "video") {
+                node.onloadeddata = () => finish(true);
+                node.oncanplay = () => finish(true);
+                node.onerror = () => finish(false);
+                node.src = dataUrl;
+                try { node.load(); } catch (err) { }
+                if (node.readyState >= 2) finish(true);
+                return;
+            }
+
+            node.onload = () => finish(true);
+            node.onerror = () => finish(false);
+            node.src = dataUrl;
+            if (node.complete && node.naturalWidth > 0) finish(true);
+        });
+
+    const setLandingMediaSlotSource = (optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const slotId = toStr(options.slotId).trim();
+        const mediaHostId = toStr(options.mediaHostId).trim();
+        const source = resolveLandingMediaSource(options.mediaUrl);
+        const mediaLabel = toStr(options.mediaLabel).trim() || "Landing media";
+        const fallbackCandidates = normalizeLandingFallbackCandidates(options.fallbackCandidates);
+
+        const slot = slotId ? $("#" + slotId) : null;
+        const host = mediaHostId ? $("#" + mediaHostId) : null;
+        if (!slot || !host) return;
 
         if (source.kind === "url") {
-            setLandingMediaSlot(slotId, imageId, source.value);
-            return;
+            const loadedSource = toStr(host.dataset.loadedSource).trim();
+            if (loadedSource === ("remote:" + source.value) && !slot.classList.contains("is-placeholder")) {
+                slot.classList.remove("is-loading");
+                return;
+            }
         }
 
-        slot.classList.add("is-loading");
-        image.classList.add("hidden");
-        requestLandingAssetData(source.value).then((dataUrl) => {
-            if (slot.dataset.assetSourceKey !== sourceKey) return;
-            setLandingMediaSlot(slotId, imageId, dataUrl);
+        const loadToken = beginLandingMediaLoad(slotId);
+        const finishWithPlaceholder = () => {
+            if (!isLandingMediaLoadActive(slotId, loadToken)) return;
+            setLandingMediaPlaceholder(slot, host, false);
+        };
+        const tryLocalFallbacks = async () => {
+            for (let i = 0; i < fallbackCandidates.length; i++) {
+                if (!isLandingMediaLoadActive(slotId, loadToken)) return false;
+                const asset = await getLandingMediaAssetData(fallbackCandidates[i]);
+                if (!isLandingMediaLoadActive(slotId, loadToken)) return false;
+                if (!asset) continue;
+                const loaded = await loadLandingLocalMediaAsset(slotId, loadToken, slot, host, asset, mediaLabel);
+                if (loaded) return true;
+            }
+            return false;
+        };
+
+        setLandingMediaPlaceholder(slot, host, true);
+        (async () => {
+            if (source.kind === "url") {
+                const remoteLoaded = await loadLandingRemoteMedia(slotId, loadToken, slot, host, source.value, mediaLabel);
+                if (remoteLoaded || !isLandingMediaLoadActive(slotId, loadToken)) return;
+            }
+            const localLoaded = await tryLocalFallbacks();
+            if (localLoaded || !isLandingMediaLoadActive(slotId, loadToken)) return;
+            finishWithPlaceholder();
+        })().catch(() => {
+            finishWithPlaceholder();
         });
     };
 
-    const countUniqueTagsAcrossRosterRoles = (rosterRaw) => {
+    const countUniqueTagsAcrossActiveRosterRoles = (rosterRaw) => {
         const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
         const pool = []
             .concat(Array.isArray(roster.main) ? roster.main : [])
-            .concat(Array.isArray(roster.subs) ? roster.subs : [])
-            .concat(Array.isArray(roster.missing) ? roster.missing : []);
+            .concat(Array.isArray(roster.subs) ? roster.subs : []);
         const seen = Object.create(null);
         let count = 0;
         for (let i = 0; i < pool.length; i++) {
@@ -4318,16 +4614,20 @@
 
     const renderLandingClanFamily = (dataRaw) => {
         const target = $("#landingClanFamilyGrid");
+        const familyMeta = $("#landingFamilyMeta");
         if (!target) return;
         clearNode(target);
 
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const rosters = getOrderedRostersFromData(data);
         if (!rosters.length) {
-            const empty = el("div", "landing-family-empty", "No clan roster data available yet.");
+            const empty = el("div", "landing-family-empty", "Clan roster data will appear here once synced.");
             target.appendChild(empty);
+            if (familyMeta) familyMeta.textContent = "Roster data is syncing. Clan lineup will populate automatically.";
             return;
         }
+
+        let totalMembers = 0;
 
         for (let i = 0; i < rosters.length; i++) {
             const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
@@ -4335,9 +4635,10 @@
             card.setAttribute("data-landing-reveal", "1");
 
             const title = el("h3", "landing-family-card__title", toStr(roster.title).trim() || "Unnamed roster");
-            const members = countUniqueTagsAcrossRosterRoles(roster);
+            const members = countUniqueTagsAcrossActiveRosterRoles(roster);
+            totalMembers += members;
             const memberValue = el("div", "landing-family-card__value", formatNumber(members));
-            const memberLabel = el("div", "landing-family-card__label", "Unique members");
+            const memberLabel = el("div", "landing-family-card__label", "Players in roster");
             const trackingMode = getRosterTrackingMode(roster) === "regularWar" ? "Regular war" : "CWL";
             const meta = el("div", "landing-family-card__meta", trackingMode);
 
@@ -4347,6 +4648,59 @@
             card.appendChild(meta);
             target.appendChild(card);
         }
+
+        if (familyMeta) {
+            familyMeta.textContent = String(formatNumber(rosters.length)) + " clans, " + String(formatNumber(totalMembers)) + " tracked players across the family.";
+        }
+    };
+
+    const setLandingSquareStoryStep = (storyRoot, stepIndexRaw) => {
+        const story = storyRoot || $("#publicViewLanding [data-landing-square-story]");
+        if (!story) return;
+        const steps = story.querySelectorAll("[data-landing-square-step]");
+        if (!steps.length) return;
+        const maxStep = steps.length - 1;
+        const stepIndex = Math.max(0, Math.min(maxStep, Number(stepIndexRaw) || 0));
+        if (landingSquareStoryActiveStep === stepIndex) return;
+        landingSquareStoryActiveStep = stepIndex;
+        for (let i = 0; i < steps.length; i++) {
+            const node = steps[i];
+            const isActive = i === stepIndex;
+            node.classList.toggle("is-active", isActive);
+            node.setAttribute("aria-current", isActive ? "true" : "false");
+        }
+    };
+
+    const applyLandingSquareStoryEffects = (landingRoot, optionsRaw) => {
+        const root = landingRoot || $("#publicViewLanding");
+        if (!root) return;
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const reduceMotion = !!options.reduceMotion;
+        const viewportHeight = Math.max(1, Number(options.viewportHeight) || 1);
+        const story = root.querySelector("[data-landing-square-story]");
+        if (!story) {
+            landingSquareStoryActiveStep = -1;
+            return;
+        }
+
+        if (reduceMotion) {
+            story.style.setProperty("--landing-square-progress", "0");
+            setLandingSquareStoryStep(story, 0);
+            return;
+        }
+
+        const rect = story.getBoundingClientRect();
+        const scrollRange = Math.max(1, rect.height - (viewportHeight * 0.44));
+        const rawProgress = clamp01(((viewportHeight * 0.38) - rect.top) / scrollRange);
+        const easedProgress = rawProgress < 0.5
+            ? (2 * rawProgress * rawProgress)
+            : (1 - (Math.pow((-2 * rawProgress) + 2, 2) / 2));
+        story.style.setProperty("--landing-square-progress", easedProgress.toFixed(4));
+
+        let stepIndex = 0;
+        if (rawProgress >= 0.48) stepIndex = 2;
+        else if (rawProgress >= 0.2) stepIndex = 1;
+        setLandingSquareStoryStep(story, stepIndex);
     };
 
     const refreshLandingRevealTargets = () => {
@@ -4386,14 +4740,101 @@
         }
     };
 
+    const applyLandingScrollEffectsFrame = () => {
+        landingScrollRafId = 0;
+        if (typeof window === "undefined" || typeof document === "undefined") return;
+
+        const docEl = document.documentElement;
+        if (!docEl) return;
+
+        const landingRoot = $("#publicViewLanding");
+        if (!landingRoot || landingRoot.classList.contains("hidden")) {
+            docEl.style.setProperty("--landing-scroll-progress", "0");
+            landingSquareStoryActiveStep = -1;
+            return;
+        }
+
+        const reduceMotion = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reduceMotion) {
+            docEl.style.setProperty("--landing-scroll-progress", "0");
+            const heroStatic = landingRoot.querySelector(".landing-hero");
+            if (heroStatic) heroStatic.style.setProperty("--landing-hero-depth", "0");
+            const staticTargets = landingRoot.querySelectorAll("[data-landing-reveal]");
+            for (let i = 0; i < staticTargets.length; i++) {
+                staticTargets[i].style.setProperty("--landing-depth", "0");
+            }
+            applyLandingSquareStoryEffects(landingRoot, {
+                reduceMotion: true,
+                viewportHeight: 1,
+            });
+            return;
+        }
+
+        const viewportHeight = Math.max(window.innerHeight || 0, 1);
+        const scrollTop = Math.max(0, window.pageYOffset || window.scrollY || 0);
+        const maxScroll = Math.max(1, (docEl.scrollHeight || 1) - viewportHeight);
+        const progress = clamp01(scrollTop / maxScroll);
+        docEl.style.setProperty("--landing-scroll-progress", progress.toFixed(4));
+
+        const heroNode = landingRoot.querySelector(".landing-hero");
+        if (heroNode) {
+            const heroRect = heroNode.getBoundingClientRect();
+            const heroCenterOffset = ((heroRect.top + (heroRect.height * 0.5)) - (viewportHeight * 0.5)) / viewportHeight;
+            heroNode.style.setProperty("--landing-hero-depth", clampSignedUnit(heroCenterOffset).toFixed(4));
+        }
+
+        const revealTargets = landingRoot.querySelectorAll("[data-landing-reveal]");
+        for (let i = 0; i < revealTargets.length; i++) {
+            const node = revealTargets[i];
+            if (!node) continue;
+            const rect = node.getBoundingClientRect();
+            const centerOffset = ((rect.top + (rect.height * 0.5)) - (viewportHeight * 0.5)) / viewportHeight;
+            node.style.setProperty("--landing-depth", clampSignedUnit(centerOffset).toFixed(4));
+        }
+
+        applyLandingSquareStoryEffects(landingRoot, {
+            reduceMotion: false,
+            viewportHeight: viewportHeight,
+        });
+    };
+
+    const queueLandingScrollEffectsFrame = () => {
+        if (typeof window === "undefined") return;
+        if (landingScrollRafId) return;
+        landingScrollRafId = window.requestAnimationFrame(applyLandingScrollEffectsFrame);
+    };
+
+    const bindLandingScrollEffects = () => {
+        if (landingScrollEffectsBound || typeof window === "undefined") return;
+        landingScrollEffectsBound = true;
+        const queue = () => queueLandingScrollEffectsFrame();
+        window.addEventListener("scroll", queue, { passive: true });
+        window.addEventListener("resize", queue);
+        window.addEventListener("orientationchange", queue);
+        queueLandingScrollEffectsFrame();
+    };
+
     const renderLandingView = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const config = getPublicConfigFromData(data);
         applyDiscordLinks(config.discordInviteUrl);
-        setLandingMediaSlotSource("landingBannerSlot", "landingBannerImage", config.bannerGifUrl);
-        setLandingMediaSlotSource("landingSquareSlot", "landingSquareImage", config.squareGifUrl);
+        setLandingMediaSlotSource({
+            slotId: "landingBannerSlot",
+            mediaHostId: "landingBannerMediaHost",
+            mediaUrl: config.bannerMediaUrl,
+            mediaLabel: "TURTLE banner animation",
+            fallbackCandidates: LANDING_MEDIA_FALLBACK_CANDIDATES.banner,
+        });
+        setLandingMediaSlotSource({
+            slotId: "landingSquareSlot",
+            mediaHostId: "landingSquareMediaHost",
+            mediaUrl: config.squareMediaUrl,
+            mediaLabel: "TURTLE icon animation",
+            fallbackCandidates: LANDING_MEDIA_FALLBACK_CANDIDATES.square,
+        });
         renderLandingClanFamily(data);
         refreshLandingRevealTargets();
+        queueLandingScrollEffectsFrame();
     };
 
     const setPublicView = (viewRaw) => {
@@ -4585,7 +5026,9 @@
         const rostersTarget = $("#rosters");
         const leaderboardTarget = $("#leaderboard");
         const landingView = $("#publicViewLanding");
-        if (!rostersTarget || !leaderboardTarget || !landingView) return;
+        const isAdminMode = typeof window !== "undefined" && window && window.ROSTER_ADMIN_MODE === true;
+        if (!rostersTarget) return;
+        if (!isAdminMode && (!leaderboardTarget || !landingView)) return;
 
         const safeData = data && typeof data === "object" ? data : {};
         const allRosters = getOrderedRostersFromData(safeData);
@@ -4607,12 +5050,12 @@
         syncPublicViewButtonsUi();
         syncPublicViewVisibility(activeView);
 
-        if (activeView === PUBLIC_VIEW_VALUES.landing) {
+        if (activeView === PUBLIC_VIEW_VALUES.landing && landingView) {
             const freshnessCard = $("#globalLastUpdated");
             if (freshnessCard) freshnessCard.classList.add("hidden");
             clearGlobalLastUpdatedTimer();
             renderLandingView(lastRenderedData);
-        } else if (activeView === PUBLIC_VIEW_VALUES.leaderboard) {
+        } else if (activeView === PUBLIC_VIEW_VALUES.leaderboard && leaderboardTarget) {
             renderGlobalLastUpdated(safeData);
             renderLeaderboardView(lastRenderedData);
         } else {
@@ -4704,6 +5147,7 @@
     applyLoadTimePublicViewSelection();
     updateAdminLink();
     applyDiscordLinks(PUBLIC_LANDING_DEFAULTS.discordInviteUrl);
+    bindLandingScrollEffects();
     bindPublicViewUi();
     bindSearchUi();
     bindProfileUi();
