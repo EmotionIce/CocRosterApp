@@ -4,6 +4,7 @@
     const pluralize = (count, singular, plural) => (count === 1 ? singular : plural);
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
     const DAY_MS = 24 * 60 * 60 * 1000;
+    const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
         : { format: (value) => String(value) };
@@ -249,6 +250,49 @@
         if (!node) return node;
         while (node.firstChild) node.removeChild(node.firstChild);
         return node;
+    };
+
+    const markBootTiming = (labelRaw, detailsRaw) => {
+        const label = toStr(labelRaw).trim();
+        if (!label) return;
+        const markName = "roster.boot." + label;
+        try {
+            if (typeof performance !== "undefined" && performance && typeof performance.mark === "function") {
+                performance.mark(markName);
+            }
+        } catch (err) {
+            // Ignore timing API errors.
+        }
+        if (typeof console !== "undefined" && console && typeof console.debug === "function") {
+            const details = detailsRaw && typeof detailsRaw === "object" ? detailsRaw : null;
+            if (details && Object.keys(details).length) console.debug("[RosterBoot]", label, details);
+            else console.debug("[RosterBoot]", label);
+        }
+    };
+
+    const measureBootTiming = (measureLabelRaw, startLabelRaw, endLabelRaw) => {
+        const measureLabel = toStr(measureLabelRaw).trim();
+        const startLabel = toStr(startLabelRaw).trim();
+        const endLabel = toStr(endLabelRaw).trim();
+        if (!measureLabel || !startLabel || !endLabel) return;
+        try {
+            if (typeof performance === "undefined" || !performance || typeof performance.measure !== "function") return;
+            const measureName = "roster.boot.measure." + measureLabel;
+            const startMark = "roster.boot." + startLabel;
+            const endMark = "roster.boot." + endLabel;
+            performance.measure(measureName, startMark, endMark);
+            if (typeof console !== "undefined" && console && typeof console.debug === "function" && typeof performance.getEntriesByName === "function") {
+                const entries = performance.getEntriesByName(measureName);
+                if (entries && entries.length) {
+                    const latest = entries[entries.length - 1];
+                    if (latest && Number.isFinite(latest.duration)) {
+                        console.debug("[RosterBoot]", measureLabel + " durationMs=", Math.round(latest.duration));
+                    }
+                }
+            }
+        } catch (err) {
+            // Ignore timing API errors.
+        }
     };
 
     const escapeHtml = (value) =>
@@ -4837,12 +4881,61 @@
         queueLandingScrollEffectsFrame();
     };
 
+    const removeGlobalLoadingCard = () => {
+        const loading = $("#loading");
+        if (loading) loading.remove();
+    };
+
+    const renderRostersLoadingState = () => {
+        const target = $("#rosters");
+        if (!target) return;
+        target.textContent = "";
+        const card = el("div", "card");
+        card.appendChild(el("div", "empty", "Loading roster data..."));
+        target.appendChild(card);
+
+        const searchInput = $("#rosterSearchInput");
+        updateSearchInfo({
+            query: searchInput ? toStr(searchInput.value).trim().toLowerCase() : "",
+            totalPlayers: 0,
+            totalRosters: 0,
+            matchedPlayers: 0,
+            matchedRosters: 0,
+        });
+    };
+
+    const renderLeaderboardLoadingState = () => {
+        const target = $("#leaderboard");
+        if (!target) return;
+        target.textContent = "";
+        const card = el("div", "card");
+        card.appendChild(el("div", "empty", "Loading leaderboard data..."));
+        target.appendChild(card);
+    };
+
+    const renderDataPendingViewState = (viewRaw) => {
+        const activeView = sanitizePublicViewValue(viewRaw);
+        const freshnessCard = $("#globalLastUpdated");
+        if (freshnessCard) freshnessCard.classList.add("hidden");
+        clearGlobalLastUpdatedTimer();
+
+        if (activeView === PUBLIC_VIEW_VALUES.leaderboard) {
+            renderLeaderboardLoadingState();
+        } else if (activeView === PUBLIC_VIEW_VALUES.rosters) {
+            renderRostersLoadingState();
+        } else {
+            renderLandingView({});
+        }
+        removeGlobalLoadingCard();
+    };
+
     const setPublicView = (viewRaw) => {
         const nextView = sanitizePublicViewValue(viewRaw);
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
         if (publicViewState.view === nextView) {
             syncPublicViewButtonsUi();
             syncPublicViewVisibility(nextView);
+            if (!lastRenderedData) renderDataPendingViewState(nextView);
             return;
         }
         publicViewState.view = nextView;
@@ -4850,6 +4943,7 @@
         syncPublicViewButtonsUi();
         syncPublicViewVisibility(nextView);
         if (lastRenderedData) render(lastRenderedData);
+        else renderDataPendingViewState(nextView);
     };
 
     const setLeaderboardRosterFilter = (rosterFilterRaw) => {
@@ -5127,12 +5221,116 @@
             clearBtn.addEventListener("click", () => {
                 searchInput.value = "";
                 if (lastRenderedData) render(lastRenderedData);
+                else updateSearchInfo({ query: "" });
                 searchInput.focus();
             });
         }
     };
 
     const loadRosterDataViaServer = () => runServerMethod("getRosterData", []);
+
+    const assertValidRosterPayload = (dataRaw, sourceLabelRaw) => {
+        const sourceLabel = toStr(sourceLabelRaw).trim() || "Roster source";
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
+        if (!data || Array.isArray(data) || !Array.isArray(data.rosters)) {
+            throw new Error(sourceLabel + " returned invalid roster payload.");
+        }
+        return data;
+    };
+
+    const buildScriptAssetUrl = (assetNameRaw) => {
+        const assetName = toStr(assetNameRaw).trim();
+        if (!assetName) return "";
+
+        let baseUrl = toStr(
+            (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
+                ? (window.ROSTER_BASE_URL || window.BASE_URL)
+                : ""
+        ).trim();
+
+        if (!baseUrl && typeof window !== "undefined" && window && window.location) {
+            const origin = toStr(window.location.origin).trim();
+            const pathname = toStr(window.location.pathname).trim();
+            if (origin && pathname) baseUrl = origin + pathname;
+            else baseUrl = pathname;
+        }
+        if (!baseUrl) return "";
+
+        const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
+        return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
+    };
+
+    const loadRosterDataViaAssetRoute = async () => {
+        if (typeof fetch !== "function") {
+            throw new Error("window.fetch is unavailable for asset hydration.");
+        }
+        const url = buildScriptAssetUrl(ACTIVE_ROSTER_ASSET_NAME);
+        if (!url) {
+            throw new Error("Unable to resolve asset URL for " + ACTIVE_ROSTER_ASSET_NAME + ".");
+        }
+        const response = await fetch(url, {
+            method: "GET",
+            cache: "no-store",
+            credentials: "same-origin",
+        });
+        if (!response || !response.ok) {
+            throw new Error("Asset fetch failed (" + (response ? response.status : "unknown") + ").");
+        }
+
+        const rawText = await response.text();
+        const text = toStr(rawText);
+        if (!text.trim()) {
+            throw new Error("Asset fetch returned an empty roster payload.");
+        }
+
+        try {
+            return JSON.parse(text);
+        } catch (err) {
+            throw new Error("Asset fetch returned invalid JSON: " + ((err && err.message) ? err.message : String(err)));
+        }
+    };
+
+    const readInlineBootstrapData = () => {
+        if (typeof window === "undefined" || !window) return null;
+        const inlineData = window.__ROSTER_DATA__;
+        if (!inlineData || typeof inlineData !== "object" || Array.isArray(inlineData)) return null;
+        if (!Array.isArray(inlineData.rosters)) return null;
+        return inlineData;
+    };
+
+    const loadRosterDataWithFallback = async () => {
+        const inlineData = readInlineBootstrapData();
+        if (inlineData) {
+            return {
+                source: "inline",
+                data: assertValidRosterPayload(inlineData, "Inline bootstrap"),
+            };
+        }
+
+        let assetError = null;
+        try {
+            const assetData = await loadRosterDataViaAssetRoute();
+            return {
+                source: "asset",
+                data: assertValidRosterPayload(assetData, "Asset route"),
+            };
+        } catch (err) {
+            assetError = err;
+            if (typeof console !== "undefined" && console && typeof console.debug === "function") {
+                console.debug("[RosterBoot] asset-hydration failed, using getRosterData fallback.", err && (err.message || err.stack) ? (err.message || err.stack) : String(err));
+            }
+        }
+
+        const serverData = await loadRosterDataViaServer();
+        const validated = assertValidRosterPayload(serverData, "Server getRosterData fallback");
+        if (assetError && typeof console !== "undefined" && console && typeof console.debug === "function") {
+            console.debug("[RosterBoot] server fallback succeeded after asset failure.");
+        }
+        return {
+            source: "server-fallback",
+            data: validated,
+        };
+    };
 
     window.renderRosterData = render;
     window.showRosterError = showError;
@@ -5144,6 +5342,7 @@
         openProfileModal(context, null);
     };
 
+    markBootTiming("shell-boot-start");
     applyLoadTimePublicViewSelection();
     updateAdminLink();
     applyDiscordLinks(PUBLIC_LANDING_DEFAULTS.discordInviteUrl);
@@ -5151,23 +5350,21 @@
     bindPublicViewUi();
     bindSearchUi();
     bindProfileUi();
+    const initialView = getEffectivePublicView();
+    renderDataPendingViewState(initialView);
+    markBootTiming("initial-shell-visible", { view: initialView });
+    measureBootTiming("shell-visible", "shell-boot-start", "initial-shell-visible");
 
     if (!window.ROSTER_CLIENT_DISABLE_AUTOLOAD) {
         (async () => {
+            markBootTiming("roster-fetch-start");
             try {
-                const inlineData =
-                    typeof window !== "undefined" &&
-                    window.__ROSTER_DATA__ &&
-                    typeof window.__ROSTER_DATA__ === "object" &&
-                    !Array.isArray(window.__ROSTER_DATA__) &&
-                    Array.isArray(window.__ROSTER_DATA__.rosters)
-                        ? window.__ROSTER_DATA__
-                        : null;
-                const data = inlineData || await loadRosterDataViaServer();
-                if (!data || !Array.isArray(data.rosters)) {
-                    throw new Error("Roster data is invalid. Expected: { rosters: [...] }");
-                }
-                render(data);
+                const loaded = await loadRosterDataWithFallback();
+                markBootTiming("roster-fetch-complete", { source: loaded.source });
+                measureBootTiming("roster-fetch", "roster-fetch-start", "roster-fetch-complete");
+                render(loaded.data);
+                markBootTiming("full-data-render-complete", { source: loaded.source });
+                measureBootTiming("full-data-render", "shell-boot-start", "full-data-render-complete");
             } catch (err) {
                 showError("Roster app crashed while loading roster-data.json.", err);
             }

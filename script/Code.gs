@@ -55,13 +55,16 @@ function doGet(e) {
 
 	const appHtml = getAssetText_("app.html").replace(/__ADMIN_URL__/g, baseUrl + "?page=admin");
 	const clientJs = getAssetText_("client.js");
+	const shouldInlineRosterData = /^(1|true|yes|on)$/i.test(String(p.inlineRosterData || p.inlineRoster || p.inline || "").trim());
 	let inlineRosterData = null;
-	const rosterDataText = getAssetText_(ACTIVE_ROSTER_FILENAME);
-	if (rosterDataText) {
-		try {
-			inlineRosterData = JSON.parse(rosterDataText);
-		} catch (err) {
-			Logger.log("Unable to parse %s for inline bootstrap: %s", ACTIVE_ROSTER_FILENAME, err && (err.message || err.stack) ? err.message || err.stack : String(err));
+	if (shouldInlineRosterData) {
+		const rosterDataText = getAssetText_(ACTIVE_ROSTER_FILENAME);
+		if (rosterDataText) {
+			try {
+				inlineRosterData = JSON.parse(rosterDataText);
+			} catch (err) {
+				Logger.log("Unable to parse %s for inline bootstrap: %s", ACTIVE_ROSTER_FILENAME, err && (err.message || err.stack) ? err.message || err.stack : String(err));
+			}
 		}
 	}
 	const html = buildIndexHtml_({
@@ -840,7 +843,7 @@ function replaceActiveRosterDataFile_(validatedRosterData, options) {
 	const archiveFolder = opts.archiveFolder && typeof opts.archiveFolder === "object" ? opts.archiveFolder : null;
 	const backupEnabled = !!archiveFolder;
 	const backupNameStem = String(opts.backupNameStem == null ? "roster-data" : opts.backupNameStem).trim() || "roster-data";
-	const payloadText = JSON.stringify(validated, null, 2);
+	const payloadText = JSON.stringify(validated);
 	const oldFiles = findFilesByNameInFolder_(folder, ACTIVE_ROSTER_FILENAME);
 	const tempResult = createVerifiedTempActiveRosterDataFile_(folder, payloadText);
 	const tempFile = tempResult.file;
@@ -1566,22 +1569,34 @@ function serveAsset_(name) {
 	const safeName = String(name)
 		.replace(/^[\/\\]+/, "")
 		.replace(/\.\./g, "");
-	try {
-		const file = findFileByName_(safeName);
+	const ext = (safeName.split(".").pop() || "").toLowerCase();
+	const isTextAsset = /^(css|html|js|json|map|svg|txt)$/i.test(ext);
+	let mime = ContentService.MimeType.TEXT;
+	if (ext === "js") mime = ContentService.MimeType.JAVASCRIPT;
+	if (ext === "json") mime = ContentService.MimeType.JSON;
+	if (ext === "html") mime = ContentService.MimeType.HTML;
+	// css stays TEXT (fine)
 
+	try {
+		if (isTextAsset) {
+			const text = getAssetText_(safeName);
+			if (text !== "") {
+				return ContentService.createTextOutput(text).setMimeType(mime);
+			}
+			// Distinguish between "missing file" and "empty text file".
+			const maybeFile = findFileByName_(safeName);
+			if (!maybeFile) {
+				return ContentService.createTextOutput("404 - asset not found: " + safeName).setMimeType(ContentService.MimeType.TEXT);
+			}
+			return ContentService.createTextOutput("").setMimeType(mime);
+		}
+
+		const file = findFileByName_(safeName);
 		if (!file) {
 			return ContentService.createTextOutput("404 - asset not found: " + safeName).setMimeType(ContentService.MimeType.TEXT);
 		}
 
-		const ext = (safeName.split(".").pop() || "").toLowerCase();
 		const text = file.getBlob().getDataAsString("UTF-8");
-
-		let mime = ContentService.MimeType.TEXT;
-		if (ext === "js") mime = ContentService.MimeType.JAVASCRIPT;
-		if (ext === "json") mime = ContentService.MimeType.JSON;
-		if (ext === "html") mime = ContentService.MimeType.HTML;
-		// css stays TEXT (fine)
-
 		return ContentService.createTextOutput(text).setMimeType(mime);
 	} catch (err) {
 		return ContentService.createTextOutput("ASSET_ERROR for " + safeName + ":\n\n" + (err && (err.stack || err.message) ? err.stack || err.message : String(err))).setMimeType(ContentService.MimeType.TEXT);
