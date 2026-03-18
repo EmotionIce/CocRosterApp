@@ -1884,6 +1884,8 @@
     addLine("Ignored (war out): " + (Number.isFinite(Number(summary.ignoredWarOut)) ? Number(summary.ignoredWarOut) : 0));
     addLine("Ignored (clan not allowed): " + (Number.isFinite(Number(summary.ignoredClanNotAllowed)) ? Number(summary.ignoredClanNotAllowed) : 0));
     addLine("Ignored (missing Discord): " + (Number.isFinite(Number(summary.ignoredMissingDiscord)) ? Number(summary.ignoredMissingDiscord) : 0));
+    addLine("Matched rows missing imported Discord: " + (Number.isFinite(Number(summary.matchedWithoutImportedDiscord)) ? Number(summary.matchedWithoutImportedDiscord) : 0));
+    addLine("Matched rows missing Discord in source + preview: " + (Number.isFinite(Number(summary.matchedWithoutAnyDiscord)) ? Number(summary.matchedWithoutAnyDiscord) : 0));
     addLine("Invalid rows: " + (Number.isFinite(Number(summary.invalidRows)) ? Number(summary.invalidRows) : 0));
     addLine("Final actionable total: " + (Number.isFinite(Number(summary.actionableTotal)) ? Number(summary.actionableTotal) : 0));
 
@@ -2139,7 +2141,13 @@
         const actionable = summary && Number.isFinite(Number(summary.actionableTotal))
           ? Number(summary.actionableTotal)
           : 0;
-        setImportActionStatus("Comparison complete: " + actionable + " actionable change(s).", false);
+        const missingBoth = summary && Number.isFinite(Number(summary.matchedWithoutAnyDiscord))
+          ? Number(summary.matchedWithoutAnyDiscord)
+          : 0;
+        const suffix = missingBoth > 0
+          ? (" " + missingBoth + " matched member(s) have no Discord in both import and preview.")
+          : "";
+        setImportActionStatus("Comparison complete: " + actionable + " actionable change(s)." + suffix, false);
       }
     } finally {
       state.importCompareBusy = false;

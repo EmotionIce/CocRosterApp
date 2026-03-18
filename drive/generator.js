@@ -1,23 +1,46 @@
 (() => {
   const toStr = (v) => (v == null ? "" : String(v));
   const isObj = (v) => v != null && typeof v === "object" && !Array.isArray(v);
+  const normalizeWhitespace = (raw) => toStr(raw).replace(/\s+/g, " ").trim();
+  const normalizeColumnKey = (raw) => toStr(raw).trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+  const buildColumnLookup = (row) => {
+    const out = {};
+    if (!row || typeof row !== "object") return out;
+    const keys = Object.keys(row);
+    for (const key of keys) {
+      const normalized = normalizeColumnKey(key);
+      if (!normalized || out[normalized] != null) continue;
+      out[normalized] = key;
+    }
+    return out;
+  };
 
   const pick = (row, names) => {
+    if (!row || typeof row !== "object") return undefined;
+
     for (const n of names) {
-      if (row && Object.prototype.hasOwnProperty.call(row, n)) return row[n];
+      if (Object.prototype.hasOwnProperty.call(row, n)) return row[n];
     }
-    if (row && typeof row === "object") {
-      const keys = Object.keys(row);
-      for (const n of names) {
-        const wanted = String(n).toLowerCase();
-        const key = keys.find((k) => String(k).toLowerCase() === wanted);
-        if (key != null) return row[key];
-      }
+
+    const keyLookup = buildColumnLookup(row);
+    for (const n of names) {
+      const key = keyLookup[normalizeColumnKey(n)];
+      if (key != null) return row[key];
     }
     return undefined;
   };
 
-  const normalizeWhitespace = (raw) => toStr(raw).replace(/\s+/g, " ").trim();
+  const pickFirstNonEmpty = (row, names) => {
+    let firstPresent;
+    for (const name of names) {
+      const value = pick(row, [name]);
+      if (value === undefined) continue;
+      if (firstPresent === undefined) firstPresent = value;
+      if (normalizeWhitespace(value)) return value;
+    }
+    return firstPresent;
+  };
 
   const normalizeTag = (tag) => {
     const t = normalizeWhitespace(tag).toUpperCase();
@@ -32,8 +55,15 @@
     if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
     const s = normalizeWhitespace(v);
     if (!s) return null;
-    if (!/^-?\d+$/.test(s)) return null;
-    const n = parseInt(s, 10);
+    if (/^-?\d+$/.test(s)) {
+      const n = parseInt(s, 10);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    // Accept text-like integers exported as decimal strings such as "16.0" or "16,0".
+    const decimalLike = s.replace(",", ".");
+    if (!/^-?\d+\.0+$/.test(decimalLike)) return null;
+    const n = parseInt(decimalLike, 10);
     return Number.isFinite(n) ? n : null;
   };
 
@@ -108,12 +138,12 @@
       const row = rows[i] && typeof rows[i] === "object" ? rows[i] : {};
       const rowNumber = i + 2;
 
-      const nameRaw = pick(row, ["NAME", "Name", "Player Name"]);
-      const tagRaw = pick(row, ["TAG", "Tag", "Player Tag"]);
-      const thRaw = pick(row, ["Town-Hall", "Town Hall", "TownHall", "Townhall", "TH"]);
-      const clanRaw = pick(row, ["CLAN", "Clan"]);
-      const warPrefRaw = pick(row, ["War Preference", "WarPref", "War preference"]);
-      const discordRaw = pick(row, ["Username", "Discord", "DISCORD", "Discord/Username", "Discord Username"]);
+      const nameRaw = pickFirstNonEmpty(row, ["NAME", "Name", "Player Name"]);
+      const tagRaw = pickFirstNonEmpty(row, ["TAG", "Tag", "Player Tag"]);
+      const thRaw = pickFirstNonEmpty(row, ["Town-Hall", "Town Hall", "TownHall", "Townhall", "TH"]);
+      const clanRaw = pickFirstNonEmpty(row, ["CLAN", "Clan"]);
+      const warPrefRaw = pickFirstNonEmpty(row, ["War Preference", "WarPref", "War preference"]);
+      const discordRaw = pickFirstNonEmpty(row, ["Username", "Discord Username", "Discord/Username", "Discord", "DISCORD", "Discord Handle", "Discord User"]);
 
       const name = normalizeWhitespace(nameRaw);
       const tag = normalizeTag(tagRaw);
@@ -409,6 +439,9 @@
     const ignoredWarOut = [];
     const ignoredClanNotAllowed = [];
     const ignoredMissingDiscord = [];
+    const matchedMissingDiscord = [];
+    let matchedWithoutImportedDiscord = 0;
+    let matchedWithoutAnyDiscord = 0;
 
     for (const accountRaw of accounts) {
       const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
@@ -441,6 +474,8 @@
       const existing = previewIndex.byTag[tag];
       if (existing) {
         const updates = buildSafeMatchedUpdates(existing.player, account);
+        const currentDiscord = sanitizeDiscordCandidate(existing.player && existing.player.discord);
+        const importedDiscord = sanitizeDiscordCandidate(account.discord);
         const entry = {
           rowNumber: account.rowNumber,
           tag,
@@ -451,16 +486,31 @@
           role: existing.role,
           current: {
             name: normalizeWhitespace(existing.player && existing.player.name),
-            discord: normalizeWhitespace(existing.player && existing.player.discord),
+            discord: currentDiscord,
             th: parseIntStrict(existing.player && existing.player.th),
           },
           imported: {
             name: normalizeWhitespace(account.name),
-            discord: normalizeWhitespace(account.discord),
+            discord: importedDiscord,
             th: parseIntStrict(account.th),
           },
           updates,
         };
+
+        if (!importedDiscord) {
+          matchedWithoutImportedDiscord++;
+          if (!currentDiscord) matchedWithoutAnyDiscord++;
+          matchedMissingDiscord.push({
+            rowNumber: account.rowNumber,
+            tag,
+            clan: clanLabel,
+            clanKey,
+            rosterId: existing.rosterId,
+            rosterTitle: existing.rosterTitle,
+            currentDiscord,
+            reason: currentDiscord ? "missing Discord in import row" : "missing Discord in import row and preview",
+          });
+        }
 
         if (Object.keys(updates).length) {
           matchedWithUpdates.push(entry);
@@ -524,6 +574,8 @@
       ignoredWarOut: ignoredWarOut.length,
       ignoredClanNotAllowed: ignoredClanNotAllowed.length,
       ignoredMissingDiscord: ignoredMissingDiscord.length,
+      matchedWithoutImportedDiscord,
+      matchedWithoutAnyDiscord,
       ignoredBlankRows: ignoredRowsFromParse.length,
       invalidRows: invalidRows.length,
       actionableTotal,
@@ -541,6 +593,7 @@
         matchedWithUpdates,
         newAddable,
         reviewOnly,
+        matchedMissingDiscord,
         ignored: {
           warOut: ignoredWarOut,
           clanNotAllowed: ignoredClanNotAllowed,
