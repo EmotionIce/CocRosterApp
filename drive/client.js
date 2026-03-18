@@ -5,11 +5,14 @@
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
     const DAY_MS = 24 * 60 * 60 * 1000;
     const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
+    const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
+    const ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS = 14 * DAY_MS;
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
         : { format: (value) => String(value) };
 
     let lastRenderedData = null;
+    let lastRenderedRosterFreshnessKey = "";
     let searchUiBound = false;
     let publicViewUiBound = false;
     let profileUiBound = false;
@@ -19,6 +22,9 @@
     let landingScrollEffectsBound = false;
     let landingScrollRafId = 0;
     let landingSquareStoryActiveStep = -1;
+    let landingMediaCanStart = false;
+    let landingMediaDeferredStartScheduled = false;
+    let rosterHydrationInFlight = false;
     const missingSectionExpandedByRoster = Object.create(null);
 
     const profileCache = Object.create(null);
@@ -846,6 +852,33 @@
         return "";
     };
 
+    const showShellLoadingNotice = (viewRaw) => {
+        const notice = $("#shellLoadingNotice");
+        if (!notice) return;
+        const titleEl = $("#shellLoadingNoticeTitle");
+        const textEl = $("#shellLoadingNoticeText");
+        const view = sanitizePublicViewValue(viewRaw);
+        if (titleEl) titleEl.textContent = "Loading live roster data";
+        if (textEl) {
+            if (view === PUBLIC_VIEW_VALUES.rosters) {
+                textEl.textContent = "Roster cards are visible now. Fresh player data is still syncing.";
+            } else if (view === PUBLIC_VIEW_VALUES.leaderboard) {
+                textEl.textContent = "Leaderboard shell is ready. Latest stats are still syncing.";
+            } else {
+                textEl.textContent = "Home is ready. Fresh clan data is still syncing in the background.";
+            }
+        }
+        notice.classList.remove("hidden");
+        notice.setAttribute("aria-hidden", "false");
+    };
+
+    const hideShellLoadingNotice = () => {
+        const notice = $("#shellLoadingNotice");
+        if (!notice) return;
+        notice.classList.add("hidden");
+        notice.setAttribute("aria-hidden", "true");
+    };
+
     const showError = (title, err) => {
         const card = $("#load-error");
         if (card) {
@@ -859,6 +892,7 @@
 
         const loading = $("#loading");
         if (loading) loading.remove();
+        hideShellLoadingNotice();
         const freshnessCard = $("#globalLastUpdated");
         if (freshnessCard) freshnessCard.classList.add("hidden");
         clearGlobalLastUpdatedTimer();
@@ -4202,6 +4236,11 @@
         leaderboard: $("#publicViewLeaderboard"),
     });
 
+    const ensureLandingEffectsActive = () => {
+        bindLandingScrollEffects();
+        queueLandingScrollEffectsFrame();
+    };
+
     const syncPublicViewVisibility = (viewRaw) => {
         const activeView = sanitizePublicViewValue(viewRaw);
         const containers = getPublicViewContainers();
@@ -4211,7 +4250,7 @@
         const shell = $(".public-shell");
         if (shell) shell.setAttribute("data-active-view", activeView);
         if (activeView === PUBLIC_VIEW_VALUES.landing) {
-            queueLandingScrollEffectsFrame();
+            ensureLandingEffectsActive();
         } else if (typeof document !== "undefined" && document.documentElement) {
             document.documentElement.style.setProperty("--landing-scroll-progress", "0");
         }
@@ -4345,7 +4384,7 @@
             iframe.title = toStr(mediaLabelRaw).trim() || "Landing media";
             iframe.setAttribute("allow", "autoplay; fullscreen; encrypted-media; picture-in-picture");
             iframe.setAttribute("allowfullscreen", "true");
-            iframe.setAttribute("loading", "eager");
+            iframe.setAttribute("loading", "lazy");
             iframe.setAttribute("referrerpolicy", "origin-when-cross-origin");
 
             let settled = false;
@@ -4428,7 +4467,7 @@
             video.defaultMuted = true;
             video.loop = true;
             video.playsInline = true;
-            video.preload = "auto";
+            video.preload = "metadata";
             video.controls = false;
             video.setAttribute("playsinline", "true");
             video.setAttribute("aria-label", toStr(mediaLabelRaw).trim() || "Landing media");
@@ -4505,7 +4544,7 @@
             video.defaultMuted = true;
             video.loop = true;
             video.playsInline = true;
-            video.preload = "auto";
+            video.preload = "metadata";
             video.controls = false;
             video.setAttribute("playsinline", "true");
             video.setAttribute("aria-label", mediaLabel);
@@ -4858,10 +4897,25 @@
         queueLandingScrollEffectsFrame();
     };
 
-    const renderLandingView = (dataRaw) => {
+    const setLandingMediaSlotsToPlaceholder = () => {
+        const bannerSlot = $("#landingBannerSlot");
+        const bannerHost = $("#landingBannerMediaHost");
+        const squareSlot = $("#landingSquareSlot");
+        const squareHost = $("#landingSquareMediaHost");
+        if (bannerSlot && bannerHost) setLandingMediaPlaceholder(bannerSlot, bannerHost, false);
+        if (squareSlot && squareHost) setLandingMediaPlaceholder(squareSlot, squareHost, false);
+    };
+
+    const applyLandingMediaFromData = (dataRaw, optionsRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const allowMediaLoading = !!options.allowMediaLoading;
         const config = getPublicConfigFromData(data);
         applyDiscordLinks(config.discordInviteUrl);
+        if (!allowMediaLoading) {
+            setLandingMediaSlotsToPlaceholder();
+            return;
+        }
         setLandingMediaSlotSource({
             slotId: "landingBannerSlot",
             mediaHostId: "landingBannerMediaHost",
@@ -4876,9 +4930,36 @@
             mediaLabel: "TURTLE icon animation",
             fallbackCandidates: LANDING_MEDIA_FALLBACK_CANDIDATES.square,
         });
+    };
+
+    const promoteLandingMediaStart_ = (reasonRaw) => {
+        if (landingMediaCanStart) return;
+        landingMediaCanStart = true;
+        markBootTiming("landing-media-enabled", { reason: toStr(reasonRaw).trim() || "unknown" });
+        if (getEffectivePublicView() !== PUBLIC_VIEW_VALUES.landing) return;
+        applyLandingMediaFromData(lastRenderedData || {}, { allowMediaLoading: true });
+    };
+
+    const scheduleDeferredLandingMediaStart_ = () => {
+        if (landingMediaCanStart || landingMediaDeferredStartScheduled || typeof window === "undefined") return;
+        landingMediaDeferredStartScheduled = true;
+        if (typeof window.requestIdleCallback === "function") {
+            window.requestIdleCallback(() => promoteLandingMediaStart_("idle"), { timeout: 2500 });
+        }
+        window.addEventListener("load", () => promoteLandingMediaStart_("window-load"), { once: true });
+        window.setTimeout(() => promoteLandingMediaStart_("timeout"), 1800);
+    };
+
+    const renderLandingView = (dataRaw, optionsRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const allowMediaLoading = options.allowMediaLoading === true || (options.allowMediaLoading == null && landingMediaCanStart);
+        applyLandingMediaFromData(data, { allowMediaLoading: allowMediaLoading });
         renderLandingClanFamily(data);
         refreshLandingRevealTargets();
-        queueLandingScrollEffectsFrame();
+        if (getEffectivePublicView() === PUBLIC_VIEW_VALUES.landing) {
+            ensureLandingEffectsActive();
+        }
     };
 
     const removeGlobalLoadingCard = () => {
@@ -4915,6 +4996,7 @@
 
     const renderDataPendingViewState = (viewRaw) => {
         const activeView = sanitizePublicViewValue(viewRaw);
+        showShellLoadingNotice(activeView);
         const freshnessCard = $("#globalLastUpdated");
         if (freshnessCard) freshnessCard.classList.add("hidden");
         clearGlobalLastUpdatedTimer();
@@ -4924,7 +5006,7 @@
         } else if (activeView === PUBLIC_VIEW_VALUES.rosters) {
             renderRostersLoadingState();
         } else {
-            renderLandingView({});
+            renderLandingView({}, { allowMediaLoading: false });
         }
         removeGlobalLoadingCard();
     };
@@ -5130,6 +5212,7 @@
             rosters: allRosters,
             rosterOrder: buildRosterOrderFromRosters(allRosters),
         });
+        lastRenderedRosterFreshnessKey = getRosterPayloadFreshnessKey(lastRenderedData);
 
         const pageTitleHeading = $("#pageTitleHeading");
         const pageTitleText = toStr(safeData.pageTitle).trim();
@@ -5161,6 +5244,8 @@
 
         const loading = $("#loading");
         if (loading) loading.remove();
+        if (rosterHydrationInFlight) showShellLoadingNotice(activeView);
+        else hideShellLoadingNotice();
     };
 
     const render = renderPublicApp;
@@ -5236,6 +5321,49 @@
             throw new Error(sourceLabel + " returned invalid roster payload.");
         }
         return data;
+    };
+
+    const getRosterPayloadFreshnessKey = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const lastUpdatedAt = toStr(data.lastUpdatedAt).trim();
+        if (lastUpdatedAt) return "lastUpdatedAt:" + lastUpdatedAt;
+        return "";
+    };
+
+    const readCachedRosterSnapshot = () => {
+        try {
+            const payload = readLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY);
+            if (!payload || typeof payload !== "object") return null;
+            const data = assertValidRosterPayload(payload.data, "Cached roster snapshot");
+            const cachedAtText = toStr(payload.cachedAt).trim();
+            const cachedAtMs = cachedAtText ? Date.parse(cachedAtText) : 0;
+            if (cachedAtMs > 0 && Date.now() - cachedAtMs > ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS) {
+                return null;
+            }
+            return {
+                data: data,
+                cachedAt: cachedAtMs > 0 ? new Date(cachedAtMs).toISOString() : "",
+                source: toStr(payload.source).trim() || "cache",
+                freshnessKey: toStr(payload.freshnessKey).trim() || getRosterPayloadFreshnessKey(data),
+            };
+        } catch (err) {
+            return null;
+        }
+    };
+
+    const writeCachedRosterSnapshot = (dataRaw, sourceRaw) => {
+        try {
+            const data = assertValidRosterPayload(dataRaw, "Roster snapshot cache write");
+            writeLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY, {
+                schemaVersion: 1,
+                cachedAt: new Date().toISOString(),
+                source: toStr(sourceRaw).trim() || "unknown",
+                freshnessKey: getRosterPayloadFreshnessKey(data),
+                data: data,
+            });
+        } catch (err) {
+            // Ignore storage/validation errors.
+        }
     };
 
     const buildScriptAssetUrl = (assetNameRaw) => {
@@ -5346,26 +5474,49 @@
     applyLoadTimePublicViewSelection();
     updateAdminLink();
     applyDiscordLinks(PUBLIC_LANDING_DEFAULTS.discordInviteUrl);
-    bindLandingScrollEffects();
     bindPublicViewUi();
     bindSearchUi();
     bindProfileUi();
+    scheduleDeferredLandingMediaStart_();
     const initialView = getEffectivePublicView();
     renderDataPendingViewState(initialView);
     markBootTiming("initial-shell-visible", { view: initialView });
     measureBootTiming("shell-visible", "shell-boot-start", "initial-shell-visible");
 
     if (!window.ROSTER_CLIENT_DISABLE_AUTOLOAD) {
+        rosterHydrationInFlight = true;
+        const cachedSnapshot = readCachedRosterSnapshot();
+        if (cachedSnapshot && cachedSnapshot.data) {
+            markBootTiming("cached-roster-render-start", { source: cachedSnapshot.source });
+            render(cachedSnapshot.data);
+            markBootTiming("cached-roster-render-complete", { source: cachedSnapshot.source });
+        }
+
         (async () => {
             markBootTiming("roster-fetch-start");
             try {
                 const loaded = await loadRosterDataWithFallback();
                 markBootTiming("roster-fetch-complete", { source: loaded.source });
                 measureBootTiming("roster-fetch", "roster-fetch-start", "roster-fetch-complete");
-                render(loaded.data);
+                writeCachedRosterSnapshot(loaded.data, loaded.source);
+                const loadedFreshnessKey = getRosterPayloadFreshnessKey(loaded.data);
+                const shouldSkipRerender = !!(loadedFreshnessKey && lastRenderedRosterFreshnessKey && loadedFreshnessKey === lastRenderedRosterFreshnessKey);
+                rosterHydrationInFlight = false;
+                if (!shouldSkipRerender) {
+                    render(loaded.data);
+                } else {
+                    hideShellLoadingNotice();
+                    markBootTiming("full-data-render-skipped", {
+                        reason: "same-freshness-key",
+                        source: loaded.source,
+                    });
+                }
+                promoteLandingMediaStart_("hydration-complete");
                 markBootTiming("full-data-render-complete", { source: loaded.source });
                 measureBootTiming("full-data-render", "shell-boot-start", "full-data-render-complete");
             } catch (err) {
+                rosterHydrationInFlight = false;
+                hideShellLoadingNotice();
                 showError("Roster app crashed while loading roster-data.json.", err);
             }
         })();

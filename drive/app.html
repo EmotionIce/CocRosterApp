@@ -18,6 +18,14 @@
     <div id="globalLastUpdatedValue" class="global-last-updated__value">-</div>
   </div>
 
+  <div id="shellLoadingNotice" class="shell-loading-notice" aria-live="polite" aria-hidden="false">
+    <div class="shell-loading-notice__pulse" aria-hidden="true"></div>
+    <div class="shell-loading-notice__content">
+      <div id="shellLoadingNoticeTitle" class="shell-loading-notice__title">Loading Data</div>
+      <div id="shellLoadingNoticeText" class="shell-loading-notice__text">Clan data is still syncing.</div>
+    </div>
+  </div>
+
   <section id="publicViewLanding" class="public-view public-view--landing">
     <div class="landing-shell">
       <section class="landing-chapter landing-hero" data-landing-reveal>
@@ -186,7 +194,7 @@
     <div id="leaderboard"></div>
   </section>
 
-  <div id="loading" class="card">
+  <div id="loading" class="card hidden">
     <div class="empty">Loading...</div>
   </div>
 

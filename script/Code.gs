@@ -54,7 +54,7 @@ function doGet(e) {
 	}
 
 	const appHtml = getAssetText_("app.html").replace(/__ADMIN_URL__/g, baseUrl + "?page=admin");
-	const clientJs = getAssetText_("client.js");
+	const clientJsUrl = buildScriptAssetUrl_(baseUrl, "client.js");
 	const shouldInlineRosterData = /^(1|true|yes|on)$/i.test(String(p.inlineRosterData || p.inlineRoster || p.inline || "").trim());
 	let inlineRosterData = null;
 	if (shouldInlineRosterData) {
@@ -70,7 +70,7 @@ function doGet(e) {
 	const html = buildIndexHtml_({
 		css: css,
 		appHtml: appHtml,
-		clientJs: clientJs,
+		clientJsUrl: clientJsUrl,
 		buildStamp: buildStamp,
 		baseUrl: baseUrl,
 		inlineRosterData: inlineRosterData,
@@ -83,8 +83,7 @@ function buildIndexHtml_(view) {
 	const model = view && typeof view === "object" ? view : {};
 	const css = typeof model.css === "string" ? model.css : "";
 	const appHtml = typeof model.appHtml === "string" ? model.appHtml : "";
-	const clientJs = typeof model.clientJs === "string" ? model.clientJs : "";
-	const safeClientJs = escapeInlineScriptText_(clientJs);
+	const clientJsUrl = typeof model.clientJsUrl === "string" ? model.clientJsUrl : "";
 	const buildStamp = typeof model.buildStamp === "string" ? model.buildStamp : "";
 	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : "";
 	const inlineRosterData = model && typeof model.inlineRosterData === "object" && model.inlineRosterData ? model.inlineRosterData : null;
@@ -119,13 +118,22 @@ function buildIndexHtml_(view) {
 		"        window.__ROSTER_DATA__ = " + inlineRosterScriptJson + ";",
 		"    </script>",
 		"",
-		"    <script>",
-		safeClientJs,
-		"    </script>",
+		'    <script defer src="' + escapeHtmlAttribute_(clientJsUrl) + '"></script>',
 		"</body>",
 		"",
 		"</html>",
 	].join("\n");
+}
+
+function buildScriptAssetUrl_(baseUrlRaw, assetNameRaw) {
+	const baseUrl = String(baseUrlRaw == null ? "" : baseUrlRaw).trim();
+	const assetName = String(assetNameRaw == null ? "" : assetNameRaw)
+		.trim()
+		.replace(/^[\/\\]+/, "")
+		.replace(/\.\./g, "");
+	if (!baseUrl || !assetName) return "";
+	const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
+	return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
 }
 
 function escapeHtmlAttribute_(value) {

@@ -1089,6 +1089,102 @@ h1{
   font-weight: 600;
 }
 
+.shell-loading-notice{
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 10px;
+  padding: 11px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(56,189,248,.34);
+  background:
+    linear-gradient(138deg, rgba(14,116,144,.24), rgba(15,23,42,.78) 56%, rgba(12,74,110,.32));
+  box-shadow:
+    0 12px 28px rgba(2,6,23,.34),
+    inset 0 1px 0 rgba(255,255,255,.08);
+  overflow: hidden;
+}
+
+.shell-loading-notice::after{
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background: linear-gradient(102deg, transparent 12%, rgba(186,230,253,.2) 48%, transparent 82%);
+  transform: translateX(-58%);
+  animation: shell-loading-glint 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.shell-loading-notice__pulse{
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 2px solid rgba(125,211,252,.66);
+  border-top-color: rgba(255,255,255,.9);
+  border-right-color: rgba(255,255,255,.5);
+  box-shadow: 0 0 0 0 rgba(56,189,248,.42);
+  animation:
+    shell-loading-spin 1s linear infinite,
+    shell-loading-pulse 1.5s ease-out infinite;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+}
+
+.shell-loading-notice__content{
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.shell-loading-notice__title{
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  font-weight: 780;
+  color: #e0f2fe;
+}
+
+.shell-loading-notice__text{
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #dbeafe;
+}
+
+@keyframes shell-loading-spin{
+  to{ transform: rotate(360deg); }
+}
+
+@keyframes shell-loading-pulse{
+  0%{ box-shadow: 0 0 0 0 rgba(56,189,248,.34); }
+  70%{ box-shadow: 0 0 0 9px rgba(56,189,248,0); }
+  100%{ box-shadow: 0 0 0 0 rgba(56,189,248,0); }
+}
+
+@keyframes shell-loading-glint{
+  0%{ transform: translateX(-58%); opacity: .2; }
+  42%{ opacity: .28; }
+  100%{ transform: translateX(70%); opacity: .04; }
+}
+
+@media (max-width: 640px){
+  .shell-loading-notice{
+    align-items: flex-start;
+    padding: 10px 12px;
+  }
+
+  .shell-loading-notice__pulse{
+    margin-top: 2px;
+    width: 18px;
+    height: 18px;
+  }
+}
+
 .leaderboard-controls{
   display:grid;
   gap: 12px;
