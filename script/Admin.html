@@ -9,9 +9,8 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <meta name="build-stamp" content="<?!= buildStamp ?>" />
+  <link rel="stylesheet" href="<?= staticBaseUrl ?>styles.css?v=<?!= encodeURIComponent(buildStamp) ?>" />
   <style>
-    <?!= css ?>
-
     /* Admin-only tweaks */
     .admin-card {
       margin-bottom: 16px;
@@ -874,12 +873,13 @@
     window.ROSTER_ADMIN_MODE = true;
     window.BUILD_STAMP = <?!= JSON.stringify(buildStamp) ?>;
     window.ROSTER_BASE_URL = <?!= JSON.stringify(baseUrl) ?>;
+    window.ROSTER_STATIC_BASE_URL = <?!= JSON.stringify(staticBaseUrl) ?>;
   </script>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="<?= baseUrl ?>?asset=generator.js&v=<?!= encodeURIComponent(buildStamp) ?>"></script>
-  <script src="<?= baseUrl ?>?asset=client.js&v=<?!= encodeURIComponent(buildStamp) ?>"></script>
-  <script src="<?= baseUrl ?>?asset=admin.js&v=<?!= encodeURIComponent(buildStamp) ?>"></script>
+  <script src="<?= staticBaseUrl ?>generator.js?v=<?!= encodeURIComponent(buildStamp) ?>"></script>
+  <script src="<?= staticBaseUrl ?>client.js?v=<?!= encodeURIComponent(buildStamp) ?>"></script>
+  <script src="<?= staticBaseUrl ?>admin.js?v=<?!= encodeURIComponent(buildStamp) ?>"></script>
 </body>
 
 </html>

@@ -5,6 +5,7 @@
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
     const DAY_MS = 24 * 60 * 60 * 1000;
     const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
+    const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
     const ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS = 14 * DAY_MS;
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
@@ -1979,6 +1980,36 @@
         return "";
     };
 
+    const getTownHallIconUrl = (levelRaw) => {
+        const level = toNonNegativeInt(levelRaw);
+        if (level < 1 || level > 18) return "";
+        return buildStaticAssetUrl("assets/icons/th" + level + ".webp");
+    };
+
+    const LEAGUE_ICON_ASSET_BY_FAMILY = {
+        unranked: "assets/icons/league-unranked.webp",
+        skeleton: "assets/icons/league-skeleton.webp",
+        barbarian: "assets/icons/league-barbarian.webp",
+        archer: "assets/icons/league-archer.webp",
+        wizard: "assets/icons/league-wizard.webp",
+        valkyrie: "assets/icons/league-valkyrie.webp",
+        witch: "assets/icons/league-witch.webp",
+        golem: "assets/icons/league-golem.webp",
+        pekka: "assets/icons/league-pekka.webp",
+        titan: "assets/icons/league-titan.webp",
+        dragon: "assets/icons/league-dragon.webp",
+        electro: "assets/icons/league-electro.webp",
+        legend: "assets/icons/league-legend.webp",
+    };
+
+    const getLeagueIconUrlFromFamily = (familyRaw) => {
+        const family = normalizeLeagueFamilyKey(familyRaw);
+        if (!family) return "";
+        const assetPath = LEAGUE_ICON_ASSET_BY_FAMILY[family] || "";
+        if (!assetPath) return "";
+        return buildStaticAssetUrl(assetPath);
+    };
+
     const readLeagueDisplayName = (leagueObj) => {
         const league = leagueObj && typeof leagueObj === "object" ? leagueObj : null;
         if (!league) return "";
@@ -2066,21 +2097,21 @@
             ? leagueIconCache[key]
             : null;
         const localSrc = localEntry && localEntry.dataUrl ? localEntry.dataUrl : "";
-        if (localSrc || key) {
+        if (localSrc) {
             const meta = {
                 name: source.name,
                 src: localSrc,
                 key: key,
             };
             if (PROFILE_LEAGUE_DEBUG && typeof console !== "undefined" && console.log) {
-                console.log("[league-badge]", { source: source, chosen: meta, from: localSrc ? "local-cache" : "local-pending-or-missing" });
+                console.log("[league-badge]", { source: source, chosen: meta, from: "local-cache" });
             }
             return meta;
         }
         const meta = {
             name: source.name,
             src: source.hasApiIconUrls ? source.iconSrc : "",
-            key: "",
+            key: key || "",
         };
         if (PROFILE_LEAGUE_DEBUG && typeof console !== "undefined" && console.log) {
             console.log("[league-badge]", { source: source, chosen: meta, from: source.hasApiIconUrls ? "api-iconUrls-fallback" : "no-icon" });
@@ -2660,46 +2691,23 @@
         if (!source || !source.name) return;
         const key = normalizeLeagueFamilyKey(source.fallbackAssetFamily);
         if (!key) return;
-        if (Object.prototype.hasOwnProperty.call(leagueIconCache, key) || leagueIconPending[key]) return;
+        if (Object.prototype.hasOwnProperty.call(leagueIconCache, key)) return;
 
-        leagueIconPending[key] = runServerMethod("getLeagueIconData", [source.name])
-            .then((response) => {
-                const resolvedKey = normalizeLeagueFamilyKey(response && response.family) || key;
-                const entry = response && response.ok && response.dataUrl
-                    ? { dataUrl: response.dataUrl }
-                    : { dataUrl: "" };
-                leagueIconCache[key] = entry;
-                if (resolvedKey !== key) leagueIconCache[resolvedKey] = entry;
-            })
-            .catch(() => {
-                leagueIconCache[key] = { dataUrl: "" };
-            })
-            .finally(() => {
-                delete leagueIconPending[key];
-                if (profileState.open && profileState.activeTag && profileCache[profileState.activeTag]) {
-                    renderProfileContent(profileState.activeContext, profileCache[profileState.activeTag], "ready");
-                }
-            });
+        leagueIconCache[key] = { dataUrl: getLeagueIconUrlFromFamily(key) };
+        if (profileState.open && profileState.activeTag && profileCache[profileState.activeTag]) {
+            renderProfileContent(profileState.activeContext, profileCache[profileState.activeTag], "ready");
+        }
     };
 
     const requestTownHallIcon = (levelRaw) => {
         const level = toNonNegativeInt(levelRaw);
-        if (level < 1) return;
-        if (Object.prototype.hasOwnProperty.call(townHallIconCache, level) || townHallIconPending[level]) return;
+        if (level < 1 || level > 18) return;
+        if (Object.prototype.hasOwnProperty.call(townHallIconCache, level)) return;
 
-        townHallIconPending[level] = runServerMethod("getTownHallIconData", [level])
-            .then((response) => {
-                townHallIconCache[level] = response && response.ok && response.dataUrl ? response.dataUrl : null;
-            })
-            .catch(() => {
-                townHallIconCache[level] = null;
-            })
-            .finally(() => {
-                delete townHallIconPending[level];
-                if (profileState.open && profileState.activeTag && profileCache[profileState.activeTag]) {
-                    renderProfileContent(profileState.activeContext, profileCache[profileState.activeTag], "ready");
-                }
-            });
+        townHallIconCache[level] = getTownHallIconUrl(level);
+        if (profileState.open && profileState.activeTag && profileCache[profileState.activeTag]) {
+            renderProfileContent(profileState.activeContext, profileCache[profileState.activeTag], "ready");
+        }
     };
 
     const setActiveProfileTrigger = (triggerEl) => {
@@ -4264,6 +4272,16 @@
             .replace(/\\/g, "/")
             .replace(/^drive\//i, "");
 
+    const guessLandingAssetMimeType = (assetPathRaw) => {
+        const assetPath = toStr(assetPathRaw).trim().toLowerCase();
+        if (!assetPath) return "";
+        if (/\.webm$/i.test(assetPath)) return "video/webm";
+        if (/\.webp$/i.test(assetPath)) return "image/webp";
+        if (/\.png$/i.test(assetPath)) return "image/png";
+        if (/\.jpe?g$/i.test(assetPath)) return "image/jpeg";
+        return "";
+    };
+
     const getLandingMediaLoadToken = (slotIdRaw) => {
         const slotId = toStr(slotIdRaw).trim();
         if (!slotId) return 0;
@@ -4343,22 +4361,21 @@
         if (landingMediaAssetCache[assetPath]) return Promise.resolve(landingMediaAssetCache[assetPath]);
         if (landingMediaAssetPending[assetPath]) return landingMediaAssetPending[assetPath];
 
-        landingMediaAssetPending[assetPath] = runServerMethod("getMediaAssetData", [assetPath])
-            .then((response) => {
-                const mimeType = toStr(response && response.mimeType).trim().toLowerCase();
-                const dataUrl = toStr(response && response.dataUrl).trim();
-                if (!response || !response.ok || !mimeType || !dataUrl) return null;
-                if (mimeType.indexOf("image/") !== 0 && mimeType.indexOf("video/") !== 0) return null;
-                const entry = {
-                    assetPath: assetPath,
-                    fileName: toStr(response.fileName).trim(),
-                    mimeType: mimeType,
-                    dataUrl: dataUrl,
-                };
-                landingMediaAssetCache[assetPath] = entry;
-                return entry;
-            })
-            .catch(() => null)
+        landingMediaAssetPending[assetPath] = Promise.resolve().then(() => {
+            const url = buildStaticAssetUrl(assetPath);
+            if (!url) return null;
+            const mimeType = guessLandingAssetMimeType(assetPath);
+            const fileName = assetPath.split("/").pop() || "";
+            const entry = {
+                assetPath: assetPath,
+                fileName: fileName,
+                mimeType: mimeType,
+                url: url,
+                dataUrl: url,
+            };
+            landingMediaAssetCache[assetPath] = entry;
+            return entry;
+        })
             .finally(() => {
                 delete landingMediaAssetPending[assetPath];
             });
@@ -5364,6 +5381,26 @@
         } catch (err) {
             // Ignore storage/validation errors.
         }
+    };
+
+    const buildStaticAssetUrl = (relativePathRaw) => {
+        const relativePath = toStr(relativePathRaw)
+            .trim()
+            .replace(/^[\/\\]+/, "")
+            .replace(/\.\./g, "")
+            .replace(/\\/g, "/");
+        if (!relativePath) return "";
+
+        const configuredBaseUrl = toStr(
+            (typeof window !== "undefined" && window && window.ROSTER_STATIC_BASE_URL)
+                ? window.ROSTER_STATIC_BASE_URL
+                : ""
+        ).trim();
+        const baseUrl = (configuredBaseUrl || STATIC_ASSET_BASE_FALLBACK_URL || "")
+            .trim()
+            .replace(/[\/\\]+$/, "");
+        if (!baseUrl) return "";
+        return baseUrl + "/" + relativePath;
     };
 
     const buildScriptAssetUrl = (assetNameRaw) => {

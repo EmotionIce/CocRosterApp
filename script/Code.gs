@@ -1,12 +1,6 @@
-const FOLDER_ID = "1NrNOgGhK-hsrF7FPFQ7ck2NT9h6DGidH";
-const ARCHIVE_FOLDER_NAME = "_roster-admin-history";
 const ASSET_TEXT_CACHE_VERSION = "v2";
 const ASSET_TEXT_CACHE_TTL_ROSTER_SECONDS = 30;
 const ASSET_TEXT_CACHE_TTL_STATIC_SECONDS = 600;
-const FILE_LOOKUP_CACHE_VERSION = "v1";
-const FILE_LOOKUP_CACHE_TTL_SECONDS = 30;
-const IMAGE_ASSET_CACHE_VERSION = "v1";
-const IMAGE_ASSET_CACHE_TTL_SECONDS = 600;
 const ACTIVE_ROSTER_FILENAME = "roster-data.json";
 const ACTIVE_ROSTER_JOB_LOCK_KEY = "ACTIVE_ROSTER_JOB_LOCK";
 const ACTIVE_ROSTER_JOB_LOCK_WAIT_MS = 30 * 1000;
@@ -26,8 +20,20 @@ const AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY = "AUTO_REFRESH_LAST_RUN_ERROR";
 const AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY = "AUTO_REFRESH_LAST_RUN_ISSUE_COUNT";
 const AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY = "AUTO_REFRESH_LAST_ARCHIVE_DATE";
 const ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY = "ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT";
-const AUTO_REFRESH_DAILY_ARCHIVE_PREFIX = "roster-data.autorefresh.daily";
-const AUTO_REFRESH_DAILY_ARCHIVE_KEEP_DAYS = 30;
+const STATIC_ASSET_BASE_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
+const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
+const FIREBASE_LAYOUT_VERSION = 2;
+const FIREBASE_ACTIVE_PATH = "active";
+const FIREBASE_ARCHIVE_PUBLISH_PATH = "archive/publish";
+const FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH = "archive/autorefreshDaily";
+const FIREBASE_META_PATH = "meta";
+const FIREBASE_PUBLISH_ARCHIVE_KEEP_COUNT = 10;
+const FIREBASE_AUTOREFRESH_DAILY_KEEP_COUNT = 2;
+const FIREBASE_ACCESS_TOKEN_CACHE_KEY = "firebaseAccessToken:v1";
+const FIREBASE_ACCESS_TOKEN_SCOPE = "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email";
+const FIREBASE_ACCESS_TOKEN_TTL_SAFETY_SECONDS = 60;
+const CACHE_SAFE_TEXT_MAX_CHARS = 90 * 1024;
+let firebaseConfigCache_ = null;
 
 function doGet(e) {
 	const p = e && e.parameter ? e.parameter : {};
@@ -37,24 +43,41 @@ function doGet(e) {
 	if (assetData) return serveMediaAssetData_(assetData);
 
 	if (p.debug === "1") {
-		const info = listFolderFiles_();
+		const info = listFirebaseDataDebugInfo_();
 		return ContentService.createTextOutput(JSON.stringify(info, null, 2)).setMimeType(ContentService.MimeType.JSON);
 	}
 
-	const css = getAssetText_("styles.css");
 	const buildStamp = new Date().toISOString();
 	const baseUrl = ScriptApp.getService().getUrl();
+	const staticBaseUrl = STATIC_ASSET_BASE_URL;
 
 	if (String(p.page || "") === "admin") {
 		const t = HtmlService.createTemplateFromFile("Admin");
-		t.css = css;
 		t.buildStamp = buildStamp;
-		t.baseUrl = baseUrl; // <-- THIS WAS MISSING
+		t.baseUrl = baseUrl;
+		t.staticBaseUrl = staticBaseUrl;
 		return t.evaluate().setTitle("Roster Admin").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 	}
 
-	const appHtml = getAssetText_("app.html").replace(/__ADMIN_URL__/g, baseUrl + "?page=admin");
-	const clientJsUrl = buildScriptAssetUrl_(baseUrl, "client.js");
+	const cloudflareStylesUrl = buildStaticAssetUrl_("styles.css", buildStamp);
+	const cloudflareClientJsUrl = buildStaticAssetUrl_("client.js", buildStamp);
+	const cloudflareAppHtml = getCloudflareTextAsset_("app.html", buildStamp);
+	if (!cloudflareAppHtml) {
+		return HtmlService.createHtmlOutput(
+			[
+				"<!doctype html>",
+				"<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+				"<title>CWL Roster</title></head>",
+				"<body style='font-family:system-ui,sans-serif;padding:24px'>",
+				"<h1>Static Shell Unavailable</h1>",
+				"<p>Unable to load <code>app.html</code> from Cloudflare static origin.</p>",
+				"<p>Try again shortly.</p>",
+				"</body></html>",
+			].join(""),
+		).setTitle("CWL Roster");
+	}
+	const appHtmlSource = cloudflareAppHtml;
+	const appHtml = String(appHtmlSource || "").replace(/__ADMIN_URL__/g, baseUrl + "?page=admin");
 	const shouldInlineRosterData = /^(1|true|yes|on)$/i.test(String(p.inlineRosterData || p.inlineRoster || p.inline || "").trim());
 	let inlineRosterData = null;
 	if (shouldInlineRosterData) {
@@ -68,11 +91,12 @@ function doGet(e) {
 		}
 	}
 	const html = buildIndexHtml_({
-		css: css,
+		stylesUrl: cloudflareStylesUrl,
 		appHtml: appHtml,
-		clientJsUrl: clientJsUrl,
+		clientJsUrl: cloudflareClientJsUrl,
 		buildStamp: buildStamp,
 		baseUrl: baseUrl,
+		staticBaseUrl: staticBaseUrl,
 		inlineRosterData: inlineRosterData,
 	});
 
@@ -81,11 +105,12 @@ function doGet(e) {
 
 function buildIndexHtml_(view) {
 	const model = view && typeof view === "object" ? view : {};
-	const css = typeof model.css === "string" ? model.css : "";
+	const stylesUrl = typeof model.stylesUrl === "string" ? model.stylesUrl : "";
 	const appHtml = typeof model.appHtml === "string" ? model.appHtml : "";
 	const clientJsUrl = typeof model.clientJsUrl === "string" ? model.clientJsUrl : "";
 	const buildStamp = typeof model.buildStamp === "string" ? model.buildStamp : "";
 	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : "";
+	const staticBaseUrl = typeof model.staticBaseUrl === "string" ? model.staticBaseUrl : "";
 	const inlineRosterData = model && typeof model.inlineRosterData === "object" && model.inlineRosterData ? model.inlineRosterData : null;
 	const inlineRosterScriptJson = serializeJsonForScriptEmbedding_(inlineRosterData);
 
@@ -101,9 +126,7 @@ function buildIndexHtml_(view) {
 		'    <meta http-equiv="Pragma" content="no-cache" />',
 		'    <meta http-equiv="Expires" content="0" />',
 		'    <meta name="build-stamp" content="' + escapeHtmlAttribute_(buildStamp) + '" />',
-		"    <style>",
-		css,
-		"    </style>",
+		'    <link rel="stylesheet" href="' + escapeHtmlAttribute_(stylesUrl) + '" />',
 		"</head>",
 		"",
 		'<body style="margin:0;">',
@@ -115,6 +138,7 @@ function buildIndexHtml_(view) {
 		"        // useful for debugging caching in devtools",
 		"        window.BUILD_STAMP = " + JSON.stringify(buildStamp) + ";",
 		"        window.ROSTER_BASE_URL = " + JSON.stringify(baseUrl) + ";",
+		"        window.ROSTER_STATIC_BASE_URL = " + JSON.stringify(staticBaseUrl) + ";",
 		"        window.__ROSTER_DATA__ = " + inlineRosterScriptJson + ";",
 		"    </script>",
 		"",
@@ -134,6 +158,302 @@ function buildScriptAssetUrl_(baseUrlRaw, assetNameRaw) {
 	if (!baseUrl || !assetName) return "";
 	const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
 	return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
+}
+
+function buildStaticAssetUrl_(relativePathRaw, versionRaw) {
+	const baseUrl = String(STATIC_ASSET_BASE_URL == null ? "" : STATIC_ASSET_BASE_URL).trim().replace(/[\/\\]+$/, "");
+	const relativePath = String(relativePathRaw == null ? "" : relativePathRaw)
+		.trim()
+		.replace(/^[\/\\]+/, "")
+		.replace(/\.\./g, "")
+		.replace(/\\/g, "/");
+	if (!baseUrl || !relativePath) return "";
+	let url = baseUrl + "/" + relativePath;
+	const version = String(versionRaw == null ? "" : versionRaw).trim();
+	if (version) {
+		const sep = url.indexOf("?") >= 0 ? "&" : "?";
+		url += sep + "v=" + encodeURIComponent(version);
+	}
+	return url;
+}
+
+function getCloudflareTextAsset_(relativePathRaw, versionRaw) {
+	const url = buildStaticAssetUrl_(relativePathRaw, versionRaw);
+	if (!url) return "";
+	try {
+		const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+		const code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+		if (!code || code < 200 || code >= 300) return "";
+		const text = response && typeof response.getContentText === "function" ? String(response.getContentText() || "") : "";
+		return text.trim() ? text : "";
+	} catch (err) {
+		Logger.log("Cloudflare static fetch failed for %s: %s", url, err && (err.message || err.stack) ? err.message || err.stack : String(err));
+		return "";
+	}
+}
+
+function getRequiredScriptProperty_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw).trim();
+	if (!key) throw new Error("Missing Script Property key.");
+	const value = String(PropertiesService.getScriptProperties().getProperty(key) || "");
+	if (!value.trim()) throw new Error("Missing Script Property " + key + ".");
+	return value;
+}
+
+function normalizeFirebaseDbUrl_(urlRaw) {
+	const raw = String(urlRaw == null ? "" : urlRaw).trim();
+	if (!raw) return "";
+	return raw.replace(/\/+$/, "");
+}
+
+function normalizeFirebasePath_(pathRaw) {
+	return String(pathRaw == null ? "" : pathRaw)
+		.trim()
+		.replace(/\\/g, "/")
+		.replace(/^[\/]+|[\/]+$/g, "")
+		.replace(/\.\./g, "");
+}
+
+function buildFirebaseJsonUrl_(dbUrlRaw, pathRaw) {
+	const dbUrl = normalizeFirebaseDbUrl_(dbUrlRaw);
+	if (!dbUrl) throw new Error("Missing Firebase Realtime Database URL.");
+	const safePath = normalizeFirebasePath_(pathRaw);
+	if (/\.json(?:\?|$)/i.test(dbUrl)) {
+		if (!safePath) return dbUrl;
+		const base = dbUrl.replace(/\/+\.json/i, "");
+		const encodedSegments = safePath
+			.split("/")
+			.filter((segment) => segment)
+			.map((segment) => encodeURIComponent(segment));
+		return base + "/" + encodedSegments.join("/") + ".json";
+	}
+	if (!safePath) return dbUrl + "/.json";
+	const encodedSegments = safePath
+		.split("/")
+		.filter((segment) => segment)
+		.map((segment) => encodeURIComponent(segment));
+	return dbUrl + "/" + encodedSegments.join("/") + ".json";
+}
+
+function buildFirebaseRootJsonUrl_(dbUrlRaw) {
+	return buildFirebaseJsonUrl_(dbUrlRaw, "");
+}
+
+function getFirebaseConfig_() {
+	if (firebaseConfigCache_) return firebaseConfigCache_;
+	const config = {
+		dbUrl: normalizeFirebaseDbUrl_(getRequiredScriptProperty_("FIREBASE_DB_URL")),
+		clientEmail: String(getRequiredScriptProperty_("FIREBASE_CLIENT_EMAIL")).trim(),
+		privateKey: String(getRequiredScriptProperty_("FIREBASE_PRIVATE_KEY")).replace(/\\n/g, "\n"),
+		tokenUri: String(getRequiredScriptProperty_("FIREBASE_TOKEN_URI")).trim(),
+	};
+	if (!config.dbUrl) throw new Error("Invalid FIREBASE_DB_URL Script Property.");
+	if (!config.clientEmail) throw new Error("Invalid FIREBASE_CLIENT_EMAIL Script Property.");
+	if (!config.privateKey) throw new Error("Invalid FIREBASE_PRIVATE_KEY Script Property.");
+	if (!config.tokenUri) throw new Error("Invalid FIREBASE_TOKEN_URI Script Property.");
+	firebaseConfigCache_ = config;
+	return config;
+}
+
+function utf8StringToBytes_(valueRaw) {
+	return Utilities.newBlob(String(valueRaw == null ? "" : valueRaw)).getBytes();
+}
+
+function utf8BytesToString_(bytesRaw) {
+	return Utilities.newBlob(bytesRaw || []).getDataAsString("UTF-8");
+}
+
+function base64UrlEncodeBytes_(bytesRaw) {
+	return Utilities.base64EncodeWebSafe(bytesRaw || []).replace(/=+$/g, "");
+}
+
+function base64UrlEncodeUtf8_(valueRaw) {
+	return base64UrlEncodeBytes_(utf8StringToBytes_(valueRaw));
+}
+
+function base64UrlDecodeToUtf8_(valueRaw) {
+	let value = String(valueRaw == null ? "" : valueRaw).trim();
+	if (!value) return "";
+	const mod = value.length % 4;
+	if (mod === 1) throw new Error("Invalid base64url payload length.");
+	if (mod > 0) value += "====".slice(mod);
+	const decoded = Utilities.base64DecodeWebSafe(value);
+	return utf8BytesToString_(decoded);
+}
+
+function needsFirebaseKeyEncoding_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw);
+	if (!key) return true;
+	if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) === 0) return true;
+	if (/[.$#[\]\/]/.test(key)) return true;
+	if (/[\u0000-\u001F\u007F]/.test(key)) return true;
+	return false;
+}
+
+function encodeFirebaseObjectKey_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw);
+	if (!needsFirebaseKeyEncoding_(key)) return key;
+	return FIREBASE_KEY_ENCODING_PREFIX + base64UrlEncodeUtf8_(key);
+}
+
+function decodeFirebaseObjectKey_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw);
+	if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) !== 0) return key;
+	const encodedPart = key.slice(FIREBASE_KEY_ENCODING_PREFIX.length);
+	if (!encodedPart) throw new Error("Invalid Firebase encoded key with empty payload.");
+	try {
+		return base64UrlDecodeToUtf8_(encodedPart);
+	} catch (err) {
+		throw new Error("Invalid Firebase encoded key '" + key + "': " + errorMessage_(err));
+	}
+}
+
+function encodeFirebaseObjectKeysRecursive_(valueRaw) {
+	if (Array.isArray(valueRaw)) {
+		const outArray = [];
+		for (let i = 0; i < valueRaw.length; i++) outArray.push(encodeFirebaseObjectKeysRecursive_(valueRaw[i]));
+		return outArray;
+	}
+	if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
+	const out = {};
+	const keys = Object.keys(valueRaw);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		const encodedKey = encodeFirebaseObjectKey_(key);
+		if (Object.prototype.hasOwnProperty.call(out, encodedKey) && encodedKey !== key) {
+			throw new Error("Firebase key encoding collision for object key '" + key + "'.");
+		}
+		out[encodedKey] = encodeFirebaseObjectKeysRecursive_(valueRaw[key]);
+	}
+	return out;
+}
+
+function decodeFirebaseObjectKeysRecursive_(valueRaw) {
+	if (Array.isArray(valueRaw)) {
+		const outArray = [];
+		for (let i = 0; i < valueRaw.length; i++) outArray.push(decodeFirebaseObjectKeysRecursive_(valueRaw[i]));
+		return outArray;
+	}
+	if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
+	const out = {};
+	const keys = Object.keys(valueRaw);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		const decodedKey = decodeFirebaseObjectKey_(key);
+		if (Object.prototype.hasOwnProperty.call(out, decodedKey) && decodedKey !== key) {
+			throw new Error("Firebase key decoding collision for object key '" + key + "'.");
+		}
+		out[decodedKey] = decodeFirebaseObjectKeysRecursive_(valueRaw[key]);
+	}
+	return out;
+}
+
+function clearFirebaseAccessTokenCache_() {
+	const cache = getScriptCacheSafe_();
+	removeStringFromCache_(cache, FIREBASE_ACCESS_TOKEN_CACHE_KEY);
+}
+
+function requestFirebaseAccessToken_() {
+	const config = getFirebaseConfig_();
+	const nowSeconds = Math.floor(Date.now() / 1000);
+	const header = { alg: "RS256", typ: "JWT" };
+	const claims = {
+		iss: config.clientEmail,
+		scope: FIREBASE_ACCESS_TOKEN_SCOPE,
+		aud: config.tokenUri,
+		iat: nowSeconds,
+		exp: nowSeconds + 3600,
+	};
+	const encodedHeader = base64UrlEncodeUtf8_(JSON.stringify(header));
+	const encodedClaims = base64UrlEncodeUtf8_(JSON.stringify(claims));
+	const unsignedToken = encodedHeader + "." + encodedClaims;
+	const signatureBytes = Utilities.computeRsaSha256Signature(unsignedToken, config.privateKey);
+	const assertion = unsignedToken + "." + base64UrlEncodeBytes_(signatureBytes);
+
+	const response = UrlFetchApp.fetch(config.tokenUri, {
+		method: "post",
+		muteHttpExceptions: true,
+		payload: {
+			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+			assertion: assertion,
+		},
+	});
+	const code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+	const text = response && typeof response.getContentText === "function" ? String(response.getContentText() || "") : "";
+	if (!code || code < 200 || code >= 300) {
+		throw new Error("Firebase token request failed (" + code + "): " + text);
+	}
+	let payload = null;
+	try {
+		payload = text ? JSON.parse(text) : null;
+	} catch (err) {
+		throw new Error("Firebase token endpoint returned invalid JSON.");
+	}
+	const accessToken = String(payload && payload.access_token ? payload.access_token : "").trim();
+	const expiresIn = Math.max(60, Number(payload && payload.expires_in) || 3600);
+	if (!accessToken) throw new Error("Firebase token endpoint response did not include access_token.");
+	return { accessToken: accessToken, expiresIn: expiresIn };
+}
+
+function getFirebaseAccessToken_(forceRefreshRaw) {
+	const forceRefresh = !!forceRefreshRaw;
+	const cache = getScriptCacheSafe_();
+	if (!forceRefresh) {
+		const cached = readStringFromCache_(cache, FIREBASE_ACCESS_TOKEN_CACHE_KEY);
+		if (cached) return cached;
+	}
+	const tokenPayload = requestFirebaseAccessToken_();
+	const ttl = Math.max(60, Math.floor(tokenPayload.expiresIn - FIREBASE_ACCESS_TOKEN_TTL_SAFETY_SECONDS));
+	writeStringToCache_(cache, FIREBASE_ACCESS_TOKEN_CACHE_KEY, tokenPayload.accessToken, ttl);
+	return tokenPayload.accessToken;
+}
+
+function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw) {
+	const path = normalizeFirebasePath_(pathRaw);
+	const method = String(methodRaw == null ? "GET" : methodRaw).trim().toUpperCase();
+	if (!method) throw new Error("Firebase request method is required.");
+	const url = buildFirebaseJsonUrl_(getFirebaseConfig_().dbUrl, path);
+
+	const doRequest = (forceTokenRefresh) => {
+		const accessToken = getFirebaseAccessToken_(forceTokenRefresh);
+		const options = {
+			method: method,
+			muteHttpExceptions: true,
+			headers: {
+				Authorization: "Bearer " + accessToken,
+				Accept: "application/json",
+			},
+		};
+		if (payloadRaw !== undefined) {
+			options.contentType = "application/json";
+			options.payload = JSON.stringify(payloadRaw);
+		}
+		return UrlFetchApp.fetch(url, options);
+	};
+
+	let response = doRequest(false);
+	let code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+	if (code === 401 || code === 403) {
+		clearFirebaseAccessTokenCache_();
+		response = doRequest(true);
+		code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+	}
+
+	const text = response && typeof response.getContentText === "function" ? String(response.getContentText() || "") : "";
+	if (!code || code < 200 || code >= 300) {
+		throw new Error("Firebase Realtime Database request failed (" + code + "): " + text);
+	}
+	const trimmed = text.trim();
+	if (!trimmed) return null;
+	try {
+		return JSON.parse(trimmed);
+	} catch (err) {
+		throw new Error("Firebase Realtime Database response is not valid JSON: " + errorMessage_(err));
+	}
+}
+
+function firebaseRootRequestJson_(methodRaw, payloadRaw) {
+	return firebaseRequestJson_("", methodRaw, payloadRaw);
 }
 
 function escapeHtmlAttribute_(value) {
@@ -159,7 +479,12 @@ function errorMessage_(err) {
 function parseRosterDataText_(text, sourceLabel) {
 	const label = String(sourceLabel == null ? ACTIVE_ROSTER_FILENAME : sourceLabel).trim() || ACTIVE_ROSTER_FILENAME;
 	const raw = String(text == null ? "" : text);
-	if (!raw) throw new Error("Missing " + label + " in Drive folder: " + FOLDER_ID);
+	if (!raw) {
+		if (label === ACTIVE_ROSTER_FILENAME) {
+			throw new Error("Missing " + label + " in Firebase Realtime Database /active.");
+		}
+		throw new Error("Missing " + label + ".");
+	}
 	try {
 		return JSON.parse(raw);
 	} catch (err) {
@@ -167,19 +492,114 @@ function parseRosterDataText_(text, sourceLabel) {
 	}
 }
 
+function decodeAndValidateActiveRosterPayload_(encodedPayload, sourceLabelRaw) {
+	if (!encodedPayload || typeof encodedPayload !== "object" || Array.isArray(encodedPayload)) {
+		throw new Error("Missing or invalid active roster payload at " + String(sourceLabelRaw || "unknown") + ".");
+	}
+	const decodedPayload = decodeFirebaseObjectKeysRecursive_(encodedPayload);
+	const rosterData = validateRosterData_(decodedPayload);
+	const text = JSON.stringify(rosterData);
+	return {
+		text: text,
+		rosterData: rosterData,
+		source: String(sourceLabelRaw || "firebase"),
+	};
+}
+
+function readLegacyRootActiveRosterSnapshotOrNull_() {
+	const encodedRoot = firebaseRootRequestJson_("GET");
+	if (!encodedRoot || typeof encodedRoot !== "object" || Array.isArray(encodedRoot)) return null;
+	try {
+		return decodeAndValidateActiveRosterPayload_(encodedRoot, "firebase:/ (legacy-root)");
+	} catch (err) {
+		return null;
+	}
+}
+
+function readActiveRosterSnapshotFromFirebase_() {
+	const encodedPayload = firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "GET");
+	if (encodedPayload != null) {
+		return decodeAndValidateActiveRosterPayload_(encodedPayload, "firebase:/active");
+	}
+	const legacySnapshot = readLegacyRootActiveRosterSnapshotOrNull_();
+	if (legacySnapshot) {
+		return legacySnapshot;
+	}
+	throw new Error("Missing active roster payload at /active and no valid legacy root payload fallback was found.");
+}
+
+function readActiveRosterSnapshot_() {
+	return readActiveRosterSnapshotFromFirebase_();
+}
+
+// Legacy wrapper kept to avoid breaking any indirect references.
 function readActiveRosterSnapshotFromDrive_() {
-	const file = findFileByName_(ACTIVE_ROSTER_FILENAME);
-	if (!file) throw new Error("Missing " + ACTIVE_ROSTER_FILENAME + " in Drive folder: " + FOLDER_ID);
-	const text = file.getBlob().getDataAsString("UTF-8");
-	const rosterData = parseRosterDataText_(text, ACTIVE_ROSTER_FILENAME);
-	return { file: file, text: text, rosterData: rosterData };
+	return readActiveRosterSnapshot_();
 }
 
+function readActiveRosterData_() {
+	return readActiveRosterSnapshot_().rosterData;
+}
+
+// Legacy wrapper kept to avoid breaking any indirect references.
 function readActiveRosterDataFromDrive_() {
-	return readActiveRosterSnapshotFromDrive_().rosterData;
+	return readActiveRosterData_();
 }
 
-// Called from client.js via google.script.run (no CORS, short cache with Drive fallback)
+function migrateLegacyFirebaseRootToNamespacedLayout_() {
+	const activeNode = firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "GET");
+	if (activeNode != null) {
+		const currentActive = decodeAndValidateActiveRosterPayload_(activeNode, "firebase:/active");
+		const existingArchive = firebaseRequestJson_("archive", "GET");
+		const archiveObj = existingArchive && typeof existingArchive === "object" && !Array.isArray(existingArchive) ? existingArchive : {};
+		if (!archiveObj.publish || typeof archiveObj.publish !== "object" || Array.isArray(archiveObj.publish)) {
+			firebaseRequestJson_(FIREBASE_ARCHIVE_PUBLISH_PATH, "PUT", {});
+		}
+		if (!archiveObj.autorefreshDaily || typeof archiveObj.autorefreshDaily !== "object" || Array.isArray(archiveObj.autorefreshDaily)) {
+			firebaseRequestJson_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH, "PUT", {});
+		}
+		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+			layoutVersion: FIREBASE_LAYOUT_VERSION,
+			lastMigrationCheckAt: new Date().toISOString(),
+		});
+		return {
+			ok: true,
+			migrated: false,
+			reason: "already-namespaced",
+			activeLastUpdatedAt: String((currentActive.rosterData && currentActive.rosterData.lastUpdatedAt) || "").trim(),
+		};
+	}
+
+	const legacySnapshot = readLegacyRootActiveRosterSnapshotOrNull_();
+	if (!legacySnapshot) {
+		throw new Error("Legacy Firebase root payload was not found or is invalid; migration was not applied.");
+	}
+
+	const migratedAt = new Date().toISOString();
+	const rootPayload = {
+		active: encodeFirebaseObjectKeysRecursive_(legacySnapshot.rosterData),
+		archive: {
+			publish: {},
+			autorefreshDaily: {},
+		},
+		meta: {
+			layoutVersion: FIREBASE_LAYOUT_VERSION,
+			migratedAt: migratedAt,
+			migrationSource: "legacy-root",
+		},
+	};
+	firebaseRootRequestJson_("PUT", rootPayload);
+	updateActiveRosterDataCaches_(legacySnapshot.text);
+
+	return {
+		ok: true,
+		migrated: true,
+		migratedAt: migratedAt,
+		activeLastUpdatedAt: String((legacySnapshot.rosterData && legacySnapshot.rosterData.lastUpdatedAt) || "").trim(),
+	};
+}
+
+// Called from client.js via google.script.run (no CORS, short cache with Firebase backend)
 function getRosterData() {
 	return parseRosterDataText_(getAssetText_(ACTIVE_ROSTER_FILENAME), ACTIVE_ROSTER_FILENAME);
 }
@@ -255,19 +675,15 @@ function getTownHallIconData(levelRaw) {
 		}
 	}
 
-	const candidates = ["assets/icons/th" + level + ".webp", "assets/icons/th" + level + ".wepb", "th" + level + ".webp", "th" + level + ".wepb"];
-	const file = findFirstFileByNameCandidates_(candidates);
-	if (!file) {
-		return { ok: false, level: level, dataUrl: "", fileName: "" };
-	}
-
-	const blob = file.getBlob();
-	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
+	const assetPath = "assets/icons/th" + level + ".webp";
+	const url = buildStaticAssetUrl_(assetPath);
 	const payload = {
-		ok: true,
+		ok: !!url,
 		level: level,
-		fileName: file.getName(),
-		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
+		assetPath: assetPath,
+		fileName: "th" + level + ".webp",
+		mimeType: "image/webp",
+		dataUrl: url || "",
 	};
 
 	try {
@@ -305,67 +721,11 @@ function pickMostRecentlyUpdatedFile_(filesRaw) {
 }
 
 function findFileByRelativePathCaseInsensitive_(pathRaw) {
-	const safePath = normalizeImageAssetPath_(pathRaw);
-	if (!safePath) return null;
-
-	const segments = safePath
-		.split("/")
-		.map((part) => String(part || "").trim())
-		.filter((part) => part);
-	if (!segments.length) return null;
-
-	const filenameLower = String(segments[segments.length - 1] || "").toLowerCase();
-	if (!filenameLower) return null;
-
-	let folders = [DriveApp.getFolderById(FOLDER_ID)];
-	for (let i = 0; i < segments.length - 1; i++) {
-		const folderNameLower = String(segments[i] || "").toLowerCase();
-		if (!folderNameLower) return null;
-		const nextFolders = [];
-		for (let j = 0; j < folders.length; j++) {
-			const it = folders[j].getFolders();
-			while (it.hasNext()) {
-				const child = it.next();
-				if (String(child.getName() || "").toLowerCase() === folderNameLower) nextFolders.push(child);
-			}
-		}
-		if (!nextFolders.length) return null;
-		folders = nextFolders;
-	}
-
-	const matches = [];
-	for (let i = 0; i < folders.length; i++) {
-		const it = folders[i].getFiles();
-		while (it.hasNext()) {
-			const file = it.next();
-			if (String(file.getName() || "").toLowerCase() === filenameLower) matches.push(file);
-		}
-	}
-	return pickMostRecentlyUpdatedFile_(matches);
+	return null;
 }
 
 function findFileByNameRecursivelyCaseInsensitive_(filenameRaw) {
-	const filenameLower = String(filenameRaw == null ? "" : filenameRaw)
-		.trim()
-		.toLowerCase();
-	if (!filenameLower) return null;
-
-	const root = DriveApp.getFolderById(FOLDER_ID);
-	const queue = [root];
-	const matches = [];
-	for (let index = 0; index < queue.length; index++) {
-		const folder = queue[index];
-		const filesIt = folder.getFiles();
-		while (filesIt.hasNext()) {
-			const file = filesIt.next();
-			if (String(file.getName() || "").toLowerCase() === filenameLower) {
-				matches.push(file);
-			}
-		}
-		const foldersIt = folder.getFolders();
-		while (foldersIt.hasNext()) queue.push(foldersIt.next());
-	}
-	return pickMostRecentlyUpdatedFile_(matches);
+	return null;
 }
 
 function findImageAssetFile_(assetPathRaw) {
@@ -425,41 +785,18 @@ function getMediaAssetData(assetPathRaw) {
 		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "", mimeType: "" };
 	}
 
-	const cache = getScriptCacheSafe_();
-	const cacheKey = "mediaAsset:" + IMAGE_ASSET_CACHE_VERSION + ":" + encodeURIComponent(safeAssetPath);
-	const cached = readStringFromCache_(cache, cacheKey);
-	if (cached) {
-		try {
-			const parsed = JSON.parse(cached);
-			if (parsed && parsed.ok && parsed.assetPath === safeAssetPath && parsed.dataUrl && isSupportedMediaMimeType_(parsed.mimeType)) {
-				return parsed;
-			}
-		} catch (err) {
-			Logger.log("Ignoring invalid media asset cache for path '%s': %s", safeAssetPath, err && err.message ? err.message : String(err));
-		}
-	}
-
-	const lookup = findImageAssetFile_(safeAssetPath);
-	const file = lookup && lookup.file ? lookup.file : null;
-	if (!file) {
-		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: "", mimeType: "" };
-	}
-
-	const blob = file.getBlob();
-	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
-	if (!isSupportedMediaMimeType_(mimeType)) {
-		return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: file.getName(), mimeType: String(mimeType || "") };
-	}
-
+	const fileName = safeAssetPath.split(/[\/\\]/).pop() || safeAssetPath;
+	const mimeType = inferAssetMimeType_(fileName, "");
+	if (!isSupportedMediaMimeType_(mimeType)) return { ok: false, assetPath: safeAssetPath, dataUrl: "", fileName: fileName, mimeType: String(mimeType || "") };
+	const url = buildStaticAssetUrl_(safeAssetPath);
 	const payload = {
-		ok: true,
+		ok: !!url,
 		assetPath: safeAssetPath,
-		fileName: file.getName(),
+		fileName: fileName,
 		mimeType: mimeType,
-		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
+		dataUrl: url || "",
+		url: url || "",
 	};
-
-	writeStringToCache_(cache, cacheKey, JSON.stringify(payload), IMAGE_ASSET_CACHE_TTL_SECONDS);
 	return payload;
 }
 
@@ -563,47 +900,18 @@ function getLeagueIconData(leagueNameRaw) {
 	}
 
 	const key = normalizeLeagueFamilyKey_(family) || assetPath;
-	const cache = CacheService.getScriptCache();
-	const cacheKey = "leagueIcon:" + LEAGUE_ICON_CACHE_VERSION + ":" + key;
-	const cached = cache.get(cacheKey);
-	if (cached) {
-		try {
-			const parsed = JSON.parse(cached);
-			if (parsed && parsed.ok && parsed.key === key && parsed.dataUrl) {
-				return parsed;
-			}
-		} catch (err) {
-			Logger.log("Ignoring invalid league icon cache for key %s: %s", key, err && err.message ? err.message : String(err));
-		}
-	}
-
+	const url = buildStaticAssetUrl_(assetPath);
 	const baseName = assetPath.split(/[\/\\]/).pop() || "";
-	const typoAssetPath = /\.webp$/i.test(assetPath) ? assetPath.replace(/\.webp$/i, ".wepb") : assetPath;
-	const typoBaseName = /\.webp$/i.test(baseName) ? baseName.replace(/\.webp$/i, ".wepb") : baseName;
-	// Prefer exact relative-path assets to avoid selecting wrong duplicate filenames elsewhere in Drive.
-	const file = findFileByRelativePath_(assetPath) || findFileByRelativePath_(typoAssetPath) || findFirstFileByNameCandidates_([baseName, typoBaseName]);
-	if (!file) {
-		Logger.log("No league icon file found for league '%s' mapped to '%s'.", leagueName, assetPath);
-		return { ok: false, key: key, leagueName: leagueName, family: family, assetPath: assetPath, dataUrl: "", fileName: "" };
-	}
-
-	const blob = file.getBlob();
-	const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
 	const payload = {
-		ok: true,
+		ok: !!url,
 		key: key,
 		leagueName: leagueName,
 		family: family,
 		assetPath: assetPath,
-		fileName: file.getName(),
-		dataUrl: "data:" + mimeType + ";base64," + Utilities.base64Encode(blob.getBytes()),
+		fileName: baseName,
+		mimeType: "image/webp",
+		dataUrl: url || "",
 	};
-
-	try {
-		cache.put(cacheKey, JSON.stringify(payload), LEAGUE_ICON_CACHE_TTL_SECONDS);
-	} catch (cacheErr) {
-		Logger.log("Unable to cache league icon for key %s: %s", key, cacheErr && cacheErr.message ? cacheErr.message : String(cacheErr));
-	}
 
 	return payload;
 }
@@ -706,18 +1014,22 @@ function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 	}
 }
 
-function updateActiveRosterDataCaches_(file, text) {
-	const fileObj = file && typeof file === "object" ? file : null;
+function updateActiveRosterDataCaches_(text) {
 	const cache = getScriptCacheSafe_();
-	const fileId = fileObj && fileObj.getId ? String(fileObj.getId() || "").trim() : "";
 	const payloadText = String(text == null ? "" : text);
+	maybeCacheText_(cache, buildAssetTextCacheKey_(ACTIVE_ROSTER_FILENAME), payloadText, getAssetTextCacheTtlSeconds_(ACTIVE_ROSTER_FILENAME), {
+		maxChars: CACHE_SAFE_TEXT_MAX_CHARS,
+		logOversize: true,
+	});
+}
 
-	writeStringToCache_(cache, buildAssetTextCacheKey_(ACTIVE_ROSTER_FILENAME), payloadText, getAssetTextCacheTtlSeconds_(ACTIVE_ROSTER_FILENAME));
-
-	if (fileId) {
-		writeStringToCache_(cache, buildNewestFileIdCacheKey_(ACTIVE_ROSTER_FILENAME), fileId, FILE_LOOKUP_CACHE_TTL_SECONDS);
-		writeStringToCache_(cache, buildFileIdsCacheKey_(ACTIVE_ROSTER_FILENAME), JSON.stringify({ ids: [fileId] }), FILE_LOOKUP_CACHE_TTL_SECONDS);
-	}
+function writeActiveRosterDataToFirebase_(rosterDataRaw) {
+	const validated = validateRosterData_(rosterDataRaw);
+	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
+	firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "PUT", encodedPayload);
+	const payloadText = JSON.stringify(validated);
+	updateActiveRosterDataCaches_(payloadText);
+	return { rosterData: validated, text: payloadText };
 }
 
 function getServerDateString_(dateRaw) {
@@ -739,16 +1051,114 @@ function parseIsoToMs_(isoRaw) {
 	return isFinite(ms) ? ms : 0;
 }
 
-function buildAutoRefreshDailyArchiveFilename_(dateStringRaw) {
-	const dateString = String(dateStringRaw == null ? "" : dateStringRaw).trim();
-	if (!dateString) return "";
-	return AUTO_REFRESH_DAILY_ARCHIVE_PREFIX + "." + dateString + ".json";
+function buildSafePublishArchiveKey_(timestampRaw) {
+	const date = timestampRaw ? new Date(timestampRaw) : new Date();
+	const safeDate = isFinite(date.getTime()) ? date : new Date();
+	const prefix = Utilities.formatDate(safeDate, "Etc/UTC", "yyyyMMdd'T'HHmmss_SSS'Z'");
+	return prefix + "_" + Utilities.getUuid().slice(0, 8);
 }
 
-function isAutoRefreshDailyArchiveFilename_(nameRaw) {
-	const name = String(nameRaw == null ? "" : nameRaw).trim();
-	const match = /^roster-data\.autorefresh\.daily\.(\d{4}-\d{2}-\d{2})\.json$/i.exec(name);
-	return match ? String(match[1] || "") : "";
+function buildFirebaseChildPath_(parentPathRaw, keyRaw) {
+	const parentPath = normalizeFirebasePath_(parentPathRaw);
+	const key = String(keyRaw == null ? "" : keyRaw).trim();
+	if (!key) return parentPath;
+	return parentPath ? parentPath + "/" + key : key;
+}
+
+function readFirebaseMapObject_(pathRaw) {
+	const payload = firebaseRequestJson_(pathRaw, "GET");
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+	return payload;
+}
+
+function listFirebaseChildKeys_(pathRaw) {
+	return Object.keys(readFirebaseMapObject_(pathRaw));
+}
+
+function writeArchivedRosterPayload_(pathRaw, rosterDataRaw) {
+	const validated = validateRosterData_(rosterDataRaw);
+	const encoded = encodeFirebaseObjectKeysRecursive_(validated);
+	firebaseRequestJson_(pathRaw, "PUT", encoded);
+	return validated;
+}
+
+function createPublishArchiveBackupFromSnapshot_(sourceSnapshotRaw, timestampRaw) {
+	const sourceSnapshot = sourceSnapshotRaw && typeof sourceSnapshotRaw === "object" ? sourceSnapshotRaw : null;
+	if (!sourceSnapshot || !sourceSnapshot.rosterData) {
+		return { created: false, key: "" };
+	}
+	const key = buildSafePublishArchiveKey_(timestampRaw);
+	const path = buildFirebaseChildPath_(FIREBASE_ARCHIVE_PUBLISH_PATH, key);
+	writeArchivedRosterPayload_(path, sourceSnapshot.rosterData);
+	return { created: true, key: key };
+}
+
+function cleanupPublishArchiveBackups_() {
+	const keys = listFirebaseChildKeys_(FIREBASE_ARCHIVE_PUBLISH_PATH)
+		.filter((key) => key)
+		.sort()
+		.reverse();
+	let deletedCount = 0;
+	for (let i = FIREBASE_PUBLISH_ARCHIVE_KEEP_COUNT; i < keys.length; i++) {
+		firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_ARCHIVE_PUBLISH_PATH, keys[i]), "DELETE");
+		deletedCount++;
+	}
+	return deletedCount;
+}
+
+function createAutoRefreshDailyArchiveIfNeeded_(dateStringRaw, rosterDataRaw) {
+	const archiveDate = String(dateStringRaw == null ? "" : dateStringRaw).trim() || getServerDateString_(new Date());
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(archiveDate)) {
+		return { created: false, existed: false, archiveDate: "", key: "" };
+	}
+	const path = buildFirebaseChildPath_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH, archiveDate);
+	const existing = firebaseRequestJson_(path, "GET");
+	if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+		return { created: false, existed: true, archiveDate: archiveDate, key: archiveDate };
+	}
+	writeArchivedRosterPayload_(path, rosterDataRaw);
+	return { created: true, existed: false, archiveDate: archiveDate, key: archiveDate };
+}
+
+function cleanupOldAutoRefreshDailyArchives_() {
+	const keys = listFirebaseChildKeys_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH)
+		.filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))
+		.sort()
+		.reverse();
+	let deletedCount = 0;
+	for (let i = FIREBASE_AUTOREFRESH_DAILY_KEEP_COUNT; i < keys.length; i++) {
+		firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH, keys[i]), "DELETE");
+		deletedCount++;
+	}
+	return deletedCount;
+}
+
+function findLatestAutoRefreshArchiveDate_() {
+	const keys = listFirebaseChildKeys_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH)
+		.filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))
+		.sort();
+	return keys.length ? keys[keys.length - 1] : "";
+}
+
+function listFirebaseDataDebugInfo_() {
+	let activeExists = false;
+	let activeLastUpdatedAt = "";
+	let hasLegacyRootPayload = false;
+	try {
+		const activeSnapshot = readActiveRosterSnapshotFromFirebase_();
+		activeExists = !!(activeSnapshot && activeSnapshot.rosterData);
+		activeLastUpdatedAt = String((activeSnapshot && activeSnapshot.rosterData && activeSnapshot.rosterData.lastUpdatedAt) || "").trim();
+		hasLegacyRootPayload = activeSnapshot && activeSnapshot.source === "firebase:/ (legacy-root)";
+	} catch (err) {}
+	return {
+		activePath: FIREBASE_ACTIVE_PATH,
+		activeExists: activeExists,
+		activeLastUpdatedAt: activeLastUpdatedAt,
+		hasLegacyRootPayload: hasLegacyRootPayload,
+		publishArchiveCount: listFirebaseChildKeys_(FIREBASE_ARCHIVE_PUBLISH_PATH).length,
+		autorefreshDailyCount: listFirebaseChildKeys_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH).length,
+		latestAutorefreshDailyArchiveDate: findLatestAutoRefreshArchiveDate_(),
+	};
 }
 
 function normalizeActiveRosterForCompare_(rosterDataRaw) {
@@ -791,7 +1201,7 @@ function getLastSuccessfulActiveWriteAt_() {
 	const text = String(props.getProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY) || "").trim();
 	if (text) return text;
 	try {
-		const activeData = readActiveRosterDataFromDrive_();
+		const activeData = readActiveRosterData_();
 		const fallback = String((activeData && activeData.lastUpdatedAt) || "").trim();
 		if (!fallback) return "";
 		props.setProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY, fallback);
@@ -828,290 +1238,203 @@ function buildAutoRefreshIssueSummary_(issuesRaw) {
 	return rosterName + " | " + step + " | " + message;
 }
 
-function buildActiveRosterTempFilename_() {
-	const stem = ACTIVE_ROSTER_FILENAME.replace(/\.json$/i, "") || "roster-data";
-	const timestamp = new Date().toISOString().replace(/[:.]/g, "_");
-	const nonce = Utilities.getUuid().replace(/-/g, "");
-	return stem + ".tmp." + timestamp + "." + nonce + ".json";
-}
-
-function createVerifiedTempActiveRosterDataFile_(folder, payloadTextRaw) {
-	const payloadText = String(payloadTextRaw == null ? "" : payloadTextRaw);
-	const tempName = buildActiveRosterTempFilename_();
-	const file = folder.createFile(tempName, payloadText, "application/json");
-	const writtenText = file.getBlob().getDataAsString("UTF-8");
-	validateRosterData_(parseRosterDataText_(writtenText, tempName));
-	return { file: file, text: writtenText, name: tempName };
-}
-
-function replaceActiveRosterDataFile_(validatedRosterData, options) {
+function replaceActiveRosterData_(validatedRosterData, options) {
 	const opts = options && typeof options === "object" ? options : {};
 	const validated = validateRosterData_(validatedRosterData);
-	const folder = opts.folder && typeof opts.folder === "object" ? opts.folder : DriveApp.getFolderById(FOLDER_ID);
-	const archiveFolder = opts.archiveFolder && typeof opts.archiveFolder === "object" ? opts.archiveFolder : null;
-	const backupEnabled = !!archiveFolder;
-	const backupNameStem = String(opts.backupNameStem == null ? "roster-data" : opts.backupNameStem).trim() || "roster-data";
-	const payloadText = JSON.stringify(validated);
-	const oldFiles = findFilesByNameInFolder_(folder, ACTIVE_ROSTER_FILENAME);
-	const tempResult = createVerifiedTempActiveRosterDataFile_(folder, payloadText);
-	const tempFile = tempResult.file;
-	let promoted = false;
-
-	try {
-		if (backupEnabled && oldFiles.length) {
-			const timestamp = new Date().toISOString().replace(/[:.]/g, "_");
-			for (let i = 0; i < oldFiles.length; i++) {
-				const oldFile = oldFiles[i];
-				const suffix = i === 0 ? "" : "." + (i + 1);
-				archiveFolder.createFile(backupNameStem + "." + timestamp + suffix + ".backup.json", oldFile.getBlob());
-			}
-		}
-		tempFile.setName(ACTIVE_ROSTER_FILENAME);
-		promoted = true;
-	} catch (err) {
-		let tempLooksPromoted = false;
-		let promotionStateKnown = true;
+	let sourceSnapshot = opts.sourceSnapshot && typeof opts.sourceSnapshot === "object" ? opts.sourceSnapshot : null;
+	if (!sourceSnapshot) {
 		try {
-			tempLooksPromoted = String(tempFile.getName ? tempFile.getName() : "") === ACTIVE_ROSTER_FILENAME;
-		} catch (nameErr) {
-			promotionStateKnown = false;
-			tempLooksPromoted = false;
-		}
-		if (tempLooksPromoted) {
-			promoted = true;
-			Logger.log("Active roster temp promotion reported an error but appears successful: %s", errorMessage_(err));
-		}
-		if (!promoted) {
-			if (promotionStateKnown) {
-				try {
-					tempFile.setTrashed(true);
-				} catch (cleanupErr) {
-					Logger.log("Unable to cleanup temporary roster file after failed replacement: %s", errorMessage_(cleanupErr));
-				}
-			} else {
-				Logger.log("Unable to verify temp promotion state after replacement error; leaving temp file untouched: %s", errorMessage_(err));
-			}
-			throw err;
-		}
-	}
-
-	for (let i = 0; i < oldFiles.length; i++) {
-		try {
-			oldFiles[i].setTrashed(true);
+			sourceSnapshot = readActiveRosterSnapshot_();
 		} catch (err) {
-			Logger.log("Unable to trash stale active roster file '%s': %s", oldFiles[i].getName(), errorMessage_(err));
+			sourceSnapshot = null;
 		}
 	}
-
-	try {
-		updateActiveRosterDataCaches_(tempFile, tempResult.text);
-	} catch (cacheErr) {
-		Logger.log("Unable to update active roster caches after replacement: %s", errorMessage_(cacheErr));
-	}
+	const writeResult = writeActiveRosterDataToFirebase_(validated);
 
 	return {
-		file: tempFile,
-		replacedCount: oldFiles.length,
-		validatedRosterData: validated,
+		replacedCount: sourceSnapshot ? 1 : 0,
+		validatedRosterData: writeResult.rosterData,
+		text: writeResult.text,
 	};
+}
+
+// Legacy wrapper kept to avoid breaking any indirect references.
+function replaceActiveRosterDataFile_(validatedRosterData, options) {
+	return replaceActiveRosterData_(validatedRosterData, options);
 }
 
 function writePublishedRosterData_(rosterDataRaw) {
 	const publishedAt = new Date().toISOString();
-	let validated = withRosterLastUpdatedAt_(rosterDataRaw, publishedAt);
+	let validationStepLabel = "prepare publish payload";
+	let duplicateDiagnosticsRosterData = rosterDataRaw;
+	let validated = null;
 
-	// Protect against accidental metric loss when preview payload has no metrics.
-	const incomingMetricCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
-	if (incomingMetricCount < 1) {
+	try {
+		validationStepLabel = "set publish timestamp";
+		validated = withRosterLastUpdatedAt_(rosterDataRaw, publishedAt);
+		duplicateDiagnosticsRosterData = validated;
+
+		let activeSourceSnapshot = null;
+		let activeData = null;
 		try {
-			const activeData = readActiveRosterDataFromDrive_();
-			const activeMetricCount = countPlayerMetricsEntries_(activeData && activeData.playerMetrics);
-			if (activeMetricCount > 0) {
-				validated.playerMetrics = sanitizePlayerMetricsStore_(activeData.playerMetrics, publishedAt);
-				validated = validateRosterData_(validated);
-				Logger.log("publishRosterData: preserved existing playerMetrics (entries=%s) because incoming payload had none.", activeMetricCount);
-			}
+			activeSourceSnapshot = readActiveRosterSnapshot_();
+			activeData = activeSourceSnapshot && activeSourceSnapshot.rosterData ? activeSourceSnapshot.rosterData : null;
 		} catch (err) {
-			Logger.log("publishRosterData: unable to preserve existing playerMetrics fallback: %s", errorMessage_(err));
+			Logger.log("publishRosterData: unable to read current active roster snapshot from Firebase: %s", errorMessage_(err));
 		}
-	}
 
-	const lowCoverageRosters = incomingMetricCount > 0 ? listRostersNeedingMetricsCoverageRepair_(validated, PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH) : [];
-	if (lowCoverageRosters.length > 0) {
-		Logger.log(
-			"publishRosterData: detected %s roster(s) below metrics coverage threshold %.2f; running targeted recapture.",
-			lowCoverageRosters.length,
-			PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH,
-		);
-	}
-
-	// Do publish-time capture when payload has no metrics, or when one/more rosters have low metrics coverage.
-	const shouldRunPublishMetricsCapture = incomingMetricCount < 1 || lowCoverageRosters.length > 0;
-	if (shouldRunPublishMetricsCapture) {
-		try {
-			const rosters = Array.isArray(validated && validated.rosters) ? validated.rosters : [];
-			const rosterCaptureQueue = [];
-			if (incomingMetricCount < 1) {
-				for (let i = 0; i < rosters.length; i++) {
-					const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-					const rosterId = String(roster.id == null ? "" : roster.id).trim();
-					const clanTag = normalizeTag_(roster.connectedClanTag);
-					if (!rosterId || !clanTag) continue;
-					rosterCaptureQueue.push({ rosterId: rosterId, clanTag: clanTag, reason: "emptyMetricsStore" });
+		// Protect against accidental metric loss when preview payload has no metrics.
+		const incomingMetricCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
+		if (incomingMetricCount < 1) {
+			try {
+				const activeMetricCount = countPlayerMetricsEntries_(activeData && activeData.playerMetrics);
+				if (activeMetricCount > 0) {
+					validated.playerMetrics = sanitizePlayerMetricsStore_(activeData.playerMetrics, publishedAt);
+					validationStepLabel = "validate payload after metrics preservation";
+					validated = validateRosterData_(validated);
+					duplicateDiagnosticsRosterData = validated;
+					Logger.log("publishRosterData: preserved existing playerMetrics (entries=%s) because incoming payload had none.", activeMetricCount);
 				}
-			} else {
-				for (let i = 0; i < lowCoverageRosters.length; i++) {
-					const item = lowCoverageRosters[i] && typeof lowCoverageRosters[i] === "object" ? lowCoverageRosters[i] : {};
-					const rosterId = String(item.rosterId == null ? "" : item.rosterId).trim();
-					if (!rosterId) continue;
-					rosterCaptureQueue.push({ rosterId: rosterId, clanTag: normalizeTag_(item.clanTag), reason: "lowCoverage" });
-				}
+			} catch (err) {
+				Logger.log("publishRosterData: unable to preserve existing playerMetrics fallback: %s", errorMessage_(err));
 			}
+		}
 
-			let attemptedClans = 0;
-			let capturedClans = 0;
-			let recorded = 0;
-			let updated = 0;
-			let profileAttempted = 0;
-			let profileEnriched = 0;
-			const errors = [];
+		const lowCoverageRosters = incomingMetricCount > 0 ? listRostersNeedingMetricsCoverageRepair_(validated, PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH) : [];
+		if (lowCoverageRosters.length > 0) {
+			Logger.log(
+				"publishRosterData: detected %s roster(s) below metrics coverage threshold %.2f; running targeted recapture.",
+				lowCoverageRosters.length,
+				PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH,
+			);
+		}
 
-			for (let i = 0; i < rosterCaptureQueue.length; i++) {
-				const item = rosterCaptureQueue[i] && typeof rosterCaptureQueue[i] === "object" ? rosterCaptureQueue[i] : {};
-				const rosterId = String(item.rosterId == null ? "" : item.rosterId).trim();
-				const clanTag = normalizeTag_(item.clanTag);
-				if (!rosterId) continue;
-				attemptedClans++;
-				try {
-					const capture = captureMemberTrackingForRoster_(validated, rosterId, {
-						continueOnError: true,
-						metricsProfileMode: "always",
-					});
-					if (capture) {
-						capturedClans += toNonNegativeInt_(capture.capturedClans) > 0 ? 1 : 0;
-						recorded += toNonNegativeInt_(capture.recorded);
-						updated += toNonNegativeInt_(capture.updated);
-						profileAttempted += toNonNegativeInt_(capture.profileAttempted);
-						profileEnriched += toNonNegativeInt_(capture.profileEnriched);
-						if (Array.isArray(capture.errors) && capture.errors.length) {
-							for (let j = 0; j < capture.errors.length; j++) {
-								errors.push(capture.errors[j]);
+		// Do publish-time capture when payload has no metrics, or when one/more rosters have low metrics coverage.
+		const shouldRunPublishMetricsCapture = incomingMetricCount < 1 || lowCoverageRosters.length > 0;
+		if (shouldRunPublishMetricsCapture) {
+			try {
+				const rosters = Array.isArray(validated && validated.rosters) ? validated.rosters : [];
+				const rosterCaptureQueue = [];
+				if (incomingMetricCount < 1) {
+					for (let i = 0; i < rosters.length; i++) {
+						const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+						const rosterId = String(roster.id == null ? "" : roster.id).trim();
+						const clanTag = normalizeTag_(roster.connectedClanTag);
+						if (!rosterId || !clanTag) continue;
+						rosterCaptureQueue.push({ rosterId: rosterId, clanTag: clanTag, reason: "emptyMetricsStore" });
+					}
+				} else {
+					for (let i = 0; i < lowCoverageRosters.length; i++) {
+						const item = lowCoverageRosters[i] && typeof lowCoverageRosters[i] === "object" ? lowCoverageRosters[i] : {};
+						const rosterId = String(item.rosterId == null ? "" : item.rosterId).trim();
+						if (!rosterId) continue;
+						rosterCaptureQueue.push({ rosterId: rosterId, clanTag: normalizeTag_(item.clanTag), reason: "lowCoverage" });
+					}
+				}
+
+				let attemptedClans = 0;
+				let capturedClans = 0;
+				let recorded = 0;
+				let updated = 0;
+				let profileAttempted = 0;
+				let profileEnriched = 0;
+				const errors = [];
+
+				for (let i = 0; i < rosterCaptureQueue.length; i++) {
+					const item = rosterCaptureQueue[i] && typeof rosterCaptureQueue[i] === "object" ? rosterCaptureQueue[i] : {};
+					const rosterId = String(item.rosterId == null ? "" : item.rosterId).trim();
+					const clanTag = normalizeTag_(item.clanTag);
+					if (!rosterId) continue;
+					attemptedClans++;
+					try {
+						const capture = captureMemberTrackingForRoster_(validated, rosterId, {
+							continueOnError: true,
+							metricsProfileMode: "always",
+						});
+						if (capture) {
+							capturedClans += toNonNegativeInt_(capture.capturedClans) > 0 ? 1 : 0;
+							recorded += toNonNegativeInt_(capture.recorded);
+							updated += toNonNegativeInt_(capture.updated);
+							profileAttempted += toNonNegativeInt_(capture.profileAttempted);
+							profileEnriched += toNonNegativeInt_(capture.profileEnriched);
+							if (Array.isArray(capture.errors) && capture.errors.length) {
+								for (let j = 0; j < capture.errors.length; j++) {
+									errors.push(capture.errors[j]);
+								}
 							}
 						}
+					} catch (err) {
+						errors.push({ clanTag: clanTag, message: errorMessage_(err) });
 					}
-				} catch (err) {
-					errors.push({ clanTag: clanTag, message: errorMessage_(err) });
 				}
+
+				validationStepLabel = "validate payload after metrics recapture";
+				validated = validateRosterData_(validated);
+				duplicateDiagnosticsRosterData = validated;
+				Logger.log(
+					"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s profileAttempted=%s profileEnriched=%s errors=%s repairedRosters=%s",
+					attemptedClans,
+					capturedClans,
+					recorded,
+					updated,
+					countPlayerMetricsEntries_(validated && validated.playerMetrics),
+					profileAttempted,
+					profileEnriched,
+					errors.length,
+					lowCoverageRosters.length,
+				);
+			} catch (err) {
+				Logger.log("publishRosterData: fallback metrics capture failed: %s", errorMessage_(err));
 			}
-
-			validated = validateRosterData_(validated);
-			Logger.log(
-				"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s profileAttempted=%s profileEnriched=%s errors=%s repairedRosters=%s",
-				attemptedClans,
-				capturedClans,
-				recorded,
-				updated,
-				countPlayerMetricsEntries_(validated && validated.playerMetrics),
-				profileAttempted,
-				profileEnriched,
-				errors.length,
-				lowCoverageRosters.length,
-			);
-		} catch (err) {
-			Logger.log("publishRosterData: fallback metrics capture failed: %s", errorMessage_(err));
+		} else {
+			Logger.log("publishRosterData: skipped live metrics capture because incoming payload already has %s metric entries.", incomingMetricCount);
 		}
-	} else {
-		Logger.log("publishRosterData: skipped live metrics capture because incoming payload already has %s metric entries.", incomingMetricCount);
+
+		const publishBackup = createPublishArchiveBackupFromSnapshot_(activeSourceSnapshot, publishedAt);
+		validationStepLabel = "validate payload before active write";
+		duplicateDiagnosticsRosterData = validated;
+		replaceActiveRosterData_(validated, { sourceSnapshot: activeSourceSnapshot });
+		const publishArchiveCleanupDeleted = cleanupPublishArchiveBackups_();
+
+		const counts = countRosterPayload_(validated);
+		const metricEntryCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
+		const meta = {
+			publishedAt: publishedAt,
+			lastUpdatedAt: publishedAt,
+			pageTitle: validated.pageTitle || "",
+			rosterCount: Array.isArray(validated.rosters) ? validated.rosters.length : 0,
+			playerCount: counts.playerCount,
+			noteCount: counts.noteCount,
+			metricEntryCount: metricEntryCount,
+			publishArchiveCreated: !!publishBackup.created,
+			publishArchiveKey: String(publishBackup.key || ""),
+			publishArchiveCleanupDeleted: publishArchiveCleanupDeleted,
+		};
+		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+			layoutVersion: FIREBASE_LAYOUT_VERSION,
+			lastPublishAt: publishedAt,
+			lastPublishArchiveKey: meta.publishArchiveKey,
+			lastPublishArchiveCleanupDeleted: publishArchiveCleanupDeleted,
+		});
+		Logger.log(
+			"publishRosterData ok rosters=%s players=%s notes=%s metricEntries=%s backupCreated=%s backupKey=%s backupCleanupDeleted=%s",
+			meta.rosterCount,
+			counts.playerCount,
+			counts.noteCount,
+			metricEntryCount,
+			meta.publishArchiveCreated,
+			meta.publishArchiveKey,
+			publishArchiveCleanupDeleted,
+		);
+		markActiveDataWriteSuccess_(publishedAt);
+		return meta;
+	} catch (err) {
+		rethrowWithDuplicateRosterTagDetails_(validationStepLabel, err, duplicateDiagnosticsRosterData);
 	}
-
-	const folder = DriveApp.getFolderById(FOLDER_ID);
-	const archiveFolder = getArchiveFolder_();
-	moveLegacyHistoryFilesToArchive_(folder, archiveFolder);
-	replaceActiveRosterDataFile_(validated, {
-		folder: folder,
-		archiveFolder: archiveFolder,
-		backupNameStem: "roster-data",
-	});
-
-	const oldMetaFiles = findFilesByNameInFolder_(archiveFolder, "roster-data.last-import.json");
-	for (let i = 0; i < oldMetaFiles.length; i++) oldMetaFiles[i].setTrashed(true);
-
-	const counts = countRosterPayload_(validated);
-	const metricEntryCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
-	const meta = {
-		publishedAt: publishedAt,
-		lastUpdatedAt: publishedAt,
-		folderId: FOLDER_ID,
-		archiveFolderId: archiveFolder.getId(),
-		pageTitle: validated.pageTitle || "",
-		rosterCount: Array.isArray(validated.rosters) ? validated.rosters.length : 0,
-		playerCount: counts.playerCount,
-		noteCount: counts.noteCount,
-		metricEntryCount: metricEntryCount,
-	};
-	archiveFolder.createFile("roster-data.last-import.json", JSON.stringify(meta, null, 2), "application/json");
-	Logger.log("publishRosterData ok folderId=%s archiveFolderId=%s rosters=%s players=%s notes=%s metricEntries=%s", FOLDER_ID, archiveFolder.getId(), meta.rosterCount, counts.playerCount, counts.noteCount, metricEntryCount);
-	markActiveDataWriteSuccess_(publishedAt);
-	return meta;
-}
-
-function createAutoRefreshDailyArchiveIfNeeded_(archiveFolder, dateStringRaw, sourceTextRaw) {
-	const folder = archiveFolder && typeof archiveFolder === "object" ? archiveFolder : null;
-	if (!folder) return { created: false, existed: false, archiveDate: "", fileName: "" };
-
-	const archiveDate = String(dateStringRaw == null ? "" : dateStringRaw).trim() || getServerDateString_(new Date());
-	const fileName = buildAutoRefreshDailyArchiveFilename_(archiveDate);
-	if (!fileName) return { created: false, existed: false, archiveDate: "", fileName: "" };
-
-	const existing = findFilesByNameInFolder_(folder, fileName);
-	if (existing.length > 0) {
-		return { created: false, existed: true, archiveDate: archiveDate, fileName: fileName };
-	}
-
-	const sourceText = String(sourceTextRaw == null ? "" : sourceTextRaw);
-	folder.createFile(fileName, sourceText, "application/json");
-	return { created: true, existed: false, archiveDate: archiveDate, fileName: fileName };
-}
-
-function cleanupOldAutoRefreshDailyArchives_(archiveFolder, todayRaw) {
-	const folder = archiveFolder && typeof archiveFolder === "object" ? archiveFolder : null;
-	if (!folder) return 0;
-	const today = todayRaw instanceof Date ? todayRaw : new Date();
-	const cutoffDate = new Date(today.getTime() - AUTO_REFRESH_DAILY_ARCHIVE_KEEP_DAYS * 24 * 60 * 60 * 1000);
-	const cutoffDateString = getServerDateString_(cutoffDate);
-	let deletedCount = 0;
-
-	const it = folder.getFiles();
-	while (it.hasNext()) {
-		const file = it.next();
-		const archiveDate = isAutoRefreshDailyArchiveFilename_(file.getName && file.getName());
-		if (!archiveDate || archiveDate >= cutoffDateString) continue;
-		try {
-			file.setTrashed(true);
-			deletedCount++;
-		} catch (err) {
-			Logger.log("Unable to delete stale auto-refresh archive '%s': %s", file.getName(), errorMessage_(err));
-		}
-	}
-	return deletedCount;
-}
-
-function findLatestAutoRefreshArchiveDate_(archiveFolder) {
-	const folder = archiveFolder && typeof archiveFolder === "object" ? archiveFolder : null;
-	if (!folder) return "";
-	let latest = "";
-	const it = folder.getFiles();
-	while (it.hasNext()) {
-		const file = it.next();
-		const archiveDate = isAutoRefreshDailyArchiveFilename_(file.getName && file.getName());
-		if (!archiveDate) continue;
-		if (!latest || archiveDate > latest) latest = archiveDate;
-	}
-	return latest;
 }
 
 function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterDataRaw) {
-	const sourceSnapshot = sourceSnapshotRaw && typeof sourceSnapshotRaw === "object" ? sourceSnapshotRaw : readActiveRosterSnapshotFromDrive_();
+	const sourceSnapshot = sourceSnapshotRaw && typeof sourceSnapshotRaw === "object" ? sourceSnapshotRaw : readActiveRosterSnapshot_();
 	const sourceData = validateRosterData_(sourceSnapshot.rosterData);
 	const refreshedData = validateRosterData_(refreshedRosterDataRaw);
 	const changed = hasActiveRosterPayloadChanged_(sourceData, refreshedData);
@@ -1133,14 +1456,12 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 
 	const writtenAt = new Date().toISOString();
 	const payloadToWrite = withRosterLastUpdatedAt_(refreshedData, writtenAt);
-	const payloadText = JSON.stringify(payloadToWrite, null, 2);
 	const counts = countRosterPayload_(payloadToWrite);
-	const writeResult = replaceActiveRosterDataFile_(payloadToWrite);
-	const archiveFolder = getArchiveFolder_();
+	const writeResult = replaceActiveRosterData_(payloadToWrite, { sourceSnapshot: sourceSnapshot });
 	const archiveDate = getServerDateString_(new Date());
 	let archiveCreated = false;
 	try {
-		const archiveResult = createAutoRefreshDailyArchiveIfNeeded_(archiveFolder, archiveDate, payloadText);
+		const archiveResult = createAutoRefreshDailyArchiveIfNeeded_(archiveDate, payloadToWrite);
 		archiveCreated = !!archiveResult.created;
 		if (archiveResult.archiveDate) {
 			PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, archiveResult.archiveDate);
@@ -1148,7 +1469,13 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 	} catch (err) {
 		Logger.log("Unable to create auto-refresh daily archive: %s", errorMessage_(err));
 	}
-	const archiveCleanupDeleted = cleanupOldAutoRefreshDailyArchives_(archiveFolder, new Date());
+	const archiveCleanupDeleted = cleanupOldAutoRefreshDailyArchives_();
+	firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+		layoutVersion: FIREBASE_LAYOUT_VERSION,
+		lastAutoRefreshWriteAt: writtenAt,
+		lastAutoRefreshArchiveDate: archiveDate,
+		lastAutoRefreshArchiveCleanupDeleted: archiveCleanupDeleted,
+	});
 	markActiveDataWriteSuccess_(writtenAt);
 
 	return {
@@ -1176,28 +1503,122 @@ function findRosterInDataById_(rosterData, rosterIdRaw) {
 	return null;
 }
 
-function runAutoRefreshAllRosters_(rosterDataRaw) {
-	let rosterData = validateRosterData_(rosterDataRaw);
+function cloneRosterDataForRefresh_(rosterDataRaw) {
+	try {
+		return JSON.parse(JSON.stringify(rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {}));
+	} catch (err) {
+		throw new Error("Unable to clone roster data for refresh rollback: " + errorMessage_(err));
+	}
+}
+
+function findDuplicateRosterTags_(rosterDataRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const byTag = {};
+	const sections = ["main", "subs", "missing"];
+
+	for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
+		const roster = rosters[rosterIndex] && typeof rosters[rosterIndex] === "object" ? rosters[rosterIndex] : {};
+		const rosterId = String(roster.id == null ? "" : roster.id).trim() || "(missing-id@" + rosterIndex + ")";
+		for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+			const section = sections[sectionIndex];
+			const players = Array.isArray(roster[section]) ? roster[section] : [];
+			for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
+				const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
+				const tag = normalizeTag_(player.tag);
+				if (!tag) continue;
+				if (!byTag[tag]) byTag[tag] = [];
+				byTag[tag].push({
+					rosterId: rosterId,
+					section: section,
+					index: playerIndex,
+				});
+			}
+		}
+	}
+
+	const tags = Object.keys(byTag).sort();
+	const duplicates = [];
+	for (let i = 0; i < tags.length; i++) {
+		const tag = tags[i];
+		const occurrences = byTag[tag];
+		if (!Array.isArray(occurrences) || occurrences.length < 2) continue;
+		duplicates.push({
+			tag: tag,
+			occurrences: occurrences,
+		});
+	}
+	return duplicates;
+}
+
+function formatDuplicateRosterTagsForMessage_(duplicatesRaw, maxTagsRaw, maxLocationsRaw) {
+	const duplicates = Array.isArray(duplicatesRaw) ? duplicatesRaw : [];
+	if (!duplicates.length) return "";
+	const maxTags = Math.max(1, toNonNegativeInt_(maxTagsRaw) || 3);
+	const maxLocations = Math.max(1, toNonNegativeInt_(maxLocationsRaw) || 4);
+	const tagParts = [];
+	for (let i = 0; i < duplicates.length && i < maxTags; i++) {
+		const duplicate = duplicates[i] && typeof duplicates[i] === "object" ? duplicates[i] : {};
+		const tag = normalizeTag_(duplicate.tag) || String(duplicate.tag || "");
+		const occurrences = Array.isArray(duplicate.occurrences) ? duplicate.occurrences : [];
+		const locationParts = [];
+		for (let j = 0; j < occurrences.length && j < maxLocations; j++) {
+			const occurrence = occurrences[j] && typeof occurrences[j] === "object" ? occurrences[j] : {};
+			const rosterId = String(occurrence.rosterId == null ? "" : occurrence.rosterId).trim() || "?";
+			const section = String(occurrence.section == null ? "" : occurrence.section).trim() || "?";
+			const index = toNonNegativeInt_(occurrence.index);
+			locationParts.push(rosterId + "/" + section + "[" + index + "]");
+		}
+		if (occurrences.length > maxLocations) locationParts.push("+" + (occurrences.length - maxLocations) + " more");
+		tagParts.push(tag + ": " + locationParts.join(", "));
+	}
+	if (duplicates.length > maxTags) tagParts.push("+" + (duplicates.length - maxTags) + " more tag(s)");
+	return "duplicate tag detail: " + tagParts.join(" ; ");
+}
+
+function appendDuplicateRosterTagDetailsToError_(stepLabelRaw, err, rosterDataRaw) {
+	const baseMessage = errorMessage_(err);
+	if (!/duplicate player tag in output/i.test(baseMessage)) return baseMessage;
+	const duplicates = findDuplicateRosterTags_(rosterDataRaw);
+	if (!duplicates.length) return baseMessage;
+	const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "refresh";
+	Logger.log("duplicate-tag diagnostics (%s): %s", stepLabel, JSON.stringify(duplicates));
+	const detail = formatDuplicateRosterTagsForMessage_(duplicates, 2, 3);
+	return detail ? detail + " | " + baseMessage : baseMessage;
+}
+
+function rethrowWithDuplicateRosterTagDetails_(stepLabelRaw, err, rosterDataRaw) {
+	const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabelRaw, err, rosterDataRaw);
+	if (detailedMessage === errorMessage_(err)) throw err;
+	throw new Error(detailedMessage);
+}
+
+function runAutoRefreshAllRosters_(rosterDataRaw) {
+	let rosterData = null;
+	try {
+		rosterData = validateRosterData_(rosterDataRaw);
+	} catch (err) {
+		rethrowWithDuplicateRosterTagDetails_("initialize refresh payload", err, rosterDataRaw);
+	}
+	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const rosterIds = [];
+	for (let i = 0; i < sourceRosters.length; i++) {
+		const rosterId = String((sourceRosters[i] && sourceRosters[i].id) || "").trim();
+		if (!rosterId) continue;
+		rosterIds.push(rosterId);
+	}
 	const issues = [];
 	const perRoster = [];
 	let processedRosters = 0;
 	let rostersWithIssues = 0;
-	let ownershipSnapshot = null;
-	let ownershipSnapshotError = null;
-	try {
-		ownershipSnapshot = buildLiveRosterOwnershipSnapshot_(rosterData);
-	} catch (err) {
-		ownershipSnapshotError = err;
-	}
+	const ownershipSnapshot = buildLiveRosterOwnershipSnapshot_(rosterData);
 
-	for (let i = 0; i < rosters.length; i++) {
-		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-		const rosterId = String(roster.id || "").trim();
-		if (!rosterId) continue;
+	for (let i = 0; i < rosterIds.length; i++) {
+		const rosterId = rosterIds[i];
 		processedRosters++;
 
-		const rosterTitle = String(roster.title || "").trim();
+		const currentRoster = findRosterInDataById_(rosterData, rosterId);
+		const rosterTitle = String((currentRoster && currentRoster.title) || "").trim();
 		const rosterLabel = rosterTitle ? rosterTitle : rosterId;
 		const rosterIssues = [];
 		const addIssue = (stepRaw, messageRaw) => {
@@ -1214,52 +1635,91 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 			issues.push(issue);
 		};
 
-		const currentRoster = findRosterInDataById_(rosterData, rosterId);
+		const runStepWithRollback = (stepLabelRaw, stepFn) => {
+			const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
+			const beforeStep = cloneRosterDataForRefresh_(rosterData);
+			try {
+				const stepResult = stepFn();
+				if (stepResult && stepResult.rosterData) {
+					rosterData = stepResult.rosterData;
+				}
+				return { ok: true, result: stepResult };
+			} catch (err) {
+				const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabel, err, rosterData);
+				rosterData = beforeStep;
+				addIssue(stepLabel, detailedMessage);
+				return { ok: false, error: err };
+			}
+		};
+
+		if (!currentRoster) {
+			addIssue("pipeline", "Roster not found in current refresh payload.");
+			if (rosterIssues.length > 0) rostersWithIssues++;
+			perRoster.push({
+				rosterId: rosterId,
+				rosterName: rosterLabel,
+				issueCount: rosterIssues.length,
+				issues: rosterIssues,
+			});
+			continue;
+		}
+
 		const trackingMode = getRosterTrackingMode_(currentRoster);
+		const poolStepLabel = "sync clan roster pool";
 		const lineupStepLabel = trackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup";
 		const statsStepLabel = trackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats";
+		const benchStepLabel = "compute bench suggestions";
 		const noCurrentWarMessage = trackingMode === "regularWar" ? "no current regular war found" : "no current cwl war found";
 		const hasConnectedClanTag = !!normalizeTag_(currentRoster && currentRoster.connectedClanTag);
+		const addSkippedIssue = (stepLabelRaw, prerequisiteStepLabelRaw) => {
+			const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
+			const prerequisiteStepLabel = String(prerequisiteStepLabelRaw == null ? "" : prerequisiteStepLabelRaw).trim();
+			const suffix = prerequisiteStepLabel ? ": " + prerequisiteStepLabel : "";
+			addIssue(stepLabel, "skipped because previous step failed" + suffix + ".");
+		};
+		let poolStepOk = false;
+		let lineupStepOk = false;
+		let statsStepOk = false;
 		if (!hasConnectedClanTag) {
-			addIssue("sync clan roster pool", "Connected clan tag is missing.");
+			addIssue(poolStepLabel, "Connected clan tag is missing.");
 		}
 
 		if (hasConnectedClanTag) {
-			try {
-				if (ownershipSnapshotError) throw ownershipSnapshotError;
-				const syncPool = syncClanRosterPoolInternal_(rosterData, rosterId, { ownershipSnapshot: ownershipSnapshot });
-				rosterData = syncPool && syncPool.rosterData ? syncPool.rosterData : rosterData;
-			} catch (err) {
-				addIssue("sync clan roster pool", errorMessage_(err));
-			}
+			const poolStep = runStepWithRollback(poolStepLabel, () => {
+				return syncClanRosterPoolInternal_(rosterData, rosterId, { ownershipSnapshot: ownershipSnapshot });
+			});
+			poolStepOk = !!poolStep.ok;
+		}
 
-			try {
-				const syncToday = syncClanTodayLineupInternal_(rosterData, rosterId);
-				rosterData = syncToday && syncToday.rosterData ? syncToday.rosterData : rosterData;
+		if (!hasConnectedClanTag || !poolStepOk) {
+			addSkippedIssue(lineupStepLabel, poolStepLabel);
+		} else {
+			const syncTodayStep = runStepWithRollback(lineupStepLabel, () => syncClanTodayLineupInternal_(rosterData, rosterId));
+			lineupStepOk = !!syncTodayStep.ok;
+			if (syncTodayStep.ok) {
+				const syncToday = syncTodayStep.result;
 				const message = String((syncToday && syncToday.result && syncToday.result.message) || "")
 					.trim()
 					.toLowerCase();
 				if (message === noCurrentWarMessage) {
 					Logger.log("autoRefresh: roster '%s' has no current war for mode '%s'; treated as non-fatal.", rosterId, trackingMode);
 				}
-			} catch (err) {
-				addIssue(lineupStepLabel, errorMessage_(err));
-			}
-
-			try {
-				const refresh = refreshTrackingStatsInternal_(rosterData, rosterId);
-				rosterData = refresh && refresh.rosterData ? refresh.rosterData : rosterData;
-			} catch (err) {
-				addIssue(statsStepLabel, errorMessage_(err));
 			}
 		}
 
+		if (!hasConnectedClanTag || !poolStepOk || !lineupStepOk) {
+			addSkippedIssue(statsStepLabel, !poolStepOk || !hasConnectedClanTag ? poolStepLabel : lineupStepLabel);
+		} else {
+			const statsStep = runStepWithRollback(statsStepLabel, () => refreshTrackingStatsInternal_(rosterData, rosterId));
+			statsStepOk = !!statsStep.ok;
+		}
+
 		if (trackingMode === "cwl") {
-			try {
-				const bench = computeBenchSuggestionsInternal_(rosterData, rosterId);
-				rosterData = bench && bench.rosterData ? bench.rosterData : rosterData;
-			} catch (err) {
-				addIssue("compute bench suggestions", errorMessage_(err));
+			if (!hasConnectedClanTag || !poolStepOk || !lineupStepOk || !statsStepOk) {
+				const failedStepLabel = !poolStepOk || !hasConnectedClanTag ? poolStepLabel : !lineupStepOk ? lineupStepLabel : statsStepLabel;
+				addSkippedIssue(benchStepLabel, failedStepLabel);
+			} else {
+				runStepWithRollback(benchStepLabel, () => computeBenchSuggestionsInternal_(rosterData, rosterId));
 			}
 		}
 
@@ -1272,8 +1732,15 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 		});
 	}
 
+	let validatedRosterData = null;
+	try {
+		validatedRosterData = validateRosterData_(rosterData);
+	} catch (err) {
+		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh payload", err, rosterData));
+	}
+
 	return {
-		rosterData: validateRosterData_(rosterData),
+		rosterData: validatedRosterData,
 		processedRosters: processedRosters,
 		rostersWithIssues: rostersWithIssues,
 		issueCount: issues.length,
@@ -1425,14 +1892,9 @@ function readAutoRefreshSettings_() {
 	const lastRunIssueCount = Math.max(0, toNonNegativeInt_(props.getProperty(AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY)));
 	let lastArchiveDate = "";
 	try {
-		const archiveFolder = getExistingArchiveFolderOrNull_();
-		if (archiveFolder) {
-			lastArchiveDate = findLatestAutoRefreshArchiveDate_(archiveFolder);
-			if (lastArchiveDate) props.setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, lastArchiveDate);
-			else props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
-		} else {
-			props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
-		}
+		lastArchiveDate = findLatestAutoRefreshArchiveDate_();
+		if (lastArchiveDate) props.setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, lastArchiveDate);
+		else props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
 	} catch (err) {
 		lastArchiveDate = String(props.getProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY) || "").trim();
 		Logger.log("Unable to resolve latest auto-refresh archive date: %s", errorMessage_(err));
@@ -1505,8 +1967,7 @@ function autoRefreshActiveRosterTick() {
 			const lastWriteAt = getLastSuccessfulActiveWriteAt_();
 			const summary = "Auto-refresh skipped: active data was written recently (" + (lastWriteAt || "unknown") + ").";
 			try {
-				const archiveFolder = getExistingArchiveFolderOrNull_();
-				if (archiveFolder) cleanupOldAutoRefreshDailyArchives_(archiveFolder, new Date());
+				cleanupOldAutoRefreshDailyArchives_();
 			} catch (cleanupErr) {
 				Logger.log("Unable to cleanup stale auto-refresh archives: %s", errorMessage_(cleanupErr));
 			}
@@ -1514,7 +1975,7 @@ function autoRefreshActiveRosterTick() {
 			return { ok: true, skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
 		}
 
-		const sourceSnapshot = readActiveRosterSnapshotFromDrive_();
+		const sourceSnapshot = readActiveRosterSnapshot_();
 		const runResult = runAutoRefreshAllRosters_(sourceSnapshot.rosterData);
 		runIssueCount = runResult.issueCount;
 		runIssueSummary = String(runResult.issueSummary || "").trim();
@@ -1529,8 +1990,7 @@ function autoRefreshActiveRosterTick() {
 		}
 		if (!writeResult.changed) {
 			try {
-				const archiveFolder = getExistingArchiveFolderOrNull_();
-				const cleanupDeleted = archiveFolder ? cleanupOldAutoRefreshDailyArchives_(archiveFolder, new Date()) : 0;
+				const cleanupDeleted = cleanupOldAutoRefreshDailyArchives_();
 				if (cleanupDeleted > 0) {
 					summary += " Cleaned " + cleanupDeleted + " stale daily archive(s).";
 				}
@@ -1559,7 +2019,7 @@ function autoRefreshActiveRosterTick() {
 }
 
 /**
- * Replaces roster-data.json in Drive using a validated temporary file and keeps publish backups.
+ * Replaces the active roster payload in Firebase Realtime Database and keeps publish backups in Firebase archive.
  * Called from Admin UI via google.script.run.publishRosterData(rosterData, password)
  */
 function publishRosterData(rosterData, password) {
@@ -1572,193 +2032,71 @@ function publishRosterData(rosterData, password) {
 	});
 }
 
-// Optional: keep for manual checks like ?asset=styles.css
+// Asset route remains for active roster JSON compatibility.
 function serveAsset_(name) {
 	const safeName = String(name)
 		.replace(/^[\/\\]+/, "")
 		.replace(/\.\./g, "");
-	const ext = (safeName.split(".").pop() || "").toLowerCase();
-	const isTextAsset = /^(css|html|js|json|map|svg|txt)$/i.test(ext);
-	let mime = ContentService.MimeType.TEXT;
-	if (ext === "js") mime = ContentService.MimeType.JAVASCRIPT;
-	if (ext === "json") mime = ContentService.MimeType.JSON;
-	if (ext === "html") mime = ContentService.MimeType.HTML;
-	// css stays TEXT (fine)
-
+	if (safeName.toLowerCase() !== ACTIVE_ROSTER_FILENAME.toLowerCase()) {
+		return ContentService.createTextOutput("404 - asset not found: " + safeName).setMimeType(ContentService.MimeType.TEXT);
+	}
 	try {
-		if (isTextAsset) {
-			const text = getAssetText_(safeName);
-			if (text !== "") {
-				return ContentService.createTextOutput(text).setMimeType(mime);
-			}
-			// Distinguish between "missing file" and "empty text file".
-			const maybeFile = findFileByName_(safeName);
-			if (!maybeFile) {
-				return ContentService.createTextOutput("404 - asset not found: " + safeName).setMimeType(ContentService.MimeType.TEXT);
-			}
-			return ContentService.createTextOutput("").setMimeType(mime);
-		}
-
-		const file = findFileByName_(safeName);
-		if (!file) {
+		const text = getAssetText_(safeName);
+		if (!text) {
 			return ContentService.createTextOutput("404 - asset not found: " + safeName).setMimeType(ContentService.MimeType.TEXT);
 		}
-
-		const text = file.getBlob().getDataAsString("UTF-8");
-		return ContentService.createTextOutput(text).setMimeType(mime);
+		return ContentService.createTextOutput(text).setMimeType(ContentService.MimeType.JSON);
 	} catch (err) {
-		return ContentService.createTextOutput("ASSET_ERROR for " + safeName + ":\n\n" + (err && (err.stack || err.message) ? err.stack || err.message : String(err))).setMimeType(ContentService.MimeType.TEXT);
+		return ContentService.createTextOutput("ASSET_ERROR for " + safeName + ":\n\n" + errorMessage_(err)).setMimeType(ContentService.MimeType.TEXT);
 	}
 }
 
 function serveMediaAssetData_(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
-	const fail = (reason) =>
-		ContentService.createTextOutput(JSON.stringify({
+	return ContentService.createTextOutput(
+		JSON.stringify({
 			ok: false,
 			assetPath: safeAssetPath,
-			reason: String(reason || "unknown"),
+			reason: "disabled-use-cloudflare-static-url",
 			mimeType: "",
 			dataBase64: "",
 			fileName: "",
-		})).setMimeType(ContentService.MimeType.JSON);
-	if (!safeAssetPath) return fail("empty-path");
-	if (!isSupportedMediaAssetExtension_(safeAssetPath)) return fail("invalid-extension");
-
-	try {
-		const lookup = findImageAssetFile_(safeAssetPath);
-		const file = lookup && lookup.file ? lookup.file : null;
-		if (!file) return fail("not-found");
-
-		const blob = file.getBlob();
-		const mimeType = inferAssetMimeType_(file.getName(), blob.getContentType && blob.getContentType());
-		if (!isSupportedMediaMimeType_(mimeType)) return fail("not-media");
-
-		return ContentService.createTextOutput(JSON.stringify({
-			ok: true,
-			assetPath: safeAssetPath,
-			fileName: file.getName(),
-			mimeType: mimeType,
-			dataBase64: Utilities.base64Encode(blob.getBytes()),
-		})).setMimeType(ContentService.MimeType.JSON);
-	} catch (err) {
-		return fail(err && err.message ? err.message : String(err));
-	}
+		}),
+	).setMimeType(ContentService.MimeType.JSON);
 }
 
 function serveImageAssetData_(assetPathRaw) {
 	return serveMediaAssetData_(assetPathRaw);
 }
 
-function findFileByName_(filename) {
-	const cache = getScriptCacheSafe_();
-	const cacheKey = buildNewestFileIdCacheKey_(filename);
-	const cachedNewestId = readStringFromCache_(cache, cacheKey);
-	if (cachedNewestId) {
-		const cachedNewest = resolveFileByIdAndName_(cachedNewestId, filename);
-		if (cachedNewest) return cachedNewest;
-	}
-
-	const files = findFilesByName_(filename);
-	if (!files.length) return null;
-	files.sort((a, b) => {
-		const at = a.getLastUpdated ? a.getLastUpdated().getTime() : 0;
-		const bt = b.getLastUpdated ? b.getLastUpdated().getTime() : 0;
-		return bt - at;
-	});
-	const newest = files[0];
-	const newestId = newest && newest.getId ? String(newest.getId() || "").trim() : "";
-	if (newestId) {
-		writeStringToCache_(cache, cacheKey, newestId, FILE_LOOKUP_CACHE_TTL_SECONDS);
-	}
-	return newest;
-}
-
-function findFilesByName_(filename) {
-	const cache = getScriptCacheSafe_();
-	const cacheKey = buildFileIdsCacheKey_(filename);
-	const cachedPayload = readStringFromCache_(cache, cacheKey);
-	if (cachedPayload) {
-		const cachedIds = parseCachedFileIds_(cachedPayload);
-		if (cachedIds) {
-			const cachedFiles = resolveFilesByIdsAndName_(cachedIds, filename);
-			if (cachedFiles) return cachedFiles;
-		}
-	}
-
-	const folder = DriveApp.getFolderById(FOLDER_ID);
-	const files = findFilesByNameInFolder_(folder, filename);
-	const fileIds = [];
-	for (let i = 0; i < files.length; i++) {
-		const fileId = files[i] && files[i].getId ? String(files[i].getId() || "").trim() : "";
-		if (fileId) fileIds.push(fileId);
-	}
-	writeStringToCache_(cache, cacheKey, JSON.stringify({ ids: fileIds }), FILE_LOOKUP_CACHE_TTL_SECONDS);
-	return files;
-}
-
-function findFilesByNameInFolder_(folder, filename) {
-	const it = folder.getFilesByName(filename);
-	const out = [];
-	while (it.hasNext()) out.push(it.next());
-	return out;
-}
-
-function getExistingArchiveFolderOrNull_() {
-	const props = PropertiesService.getScriptProperties();
-	const configuredArchiveId = String(props.getProperty("ARCHIVE_FOLDER_ID") || "").trim();
-	if (configuredArchiveId) {
-		try {
-			return DriveApp.getFolderById(configuredArchiveId);
-		} catch (err) {
-			Logger.log("Invalid ARCHIVE_FOLDER_ID '%s': %s", configuredArchiveId, err && err.message ? err.message : String(err));
-		}
-	}
-
-	const root = DriveApp.getFolderById(FOLDER_ID);
-	const it = root.getFoldersByName(ARCHIVE_FOLDER_NAME);
-	if (it.hasNext()) return it.next();
-	return null;
-}
-
-function getArchiveFolder_() {
-	const existing = getExistingArchiveFolderOrNull_();
-	if (existing) return existing;
-	const root = DriveApp.getFolderById(FOLDER_ID);
-	return root.createFolder(ARCHIVE_FOLDER_NAME);
-}
-
-function moveLegacyHistoryFilesToArchive_(mainFolder, archiveFolder) {
-	if (!mainFolder || !archiveFolder) return;
-	const it = mainFolder.getFiles();
-	while (it.hasNext()) {
-		const f = it.next();
-		const name = f.getName();
-		const isBackup = /^roster-data\..+\.backup\.json$/i.test(name);
-		const isLastImport = name === "roster-data.last-import.json";
-		if (!isBackup && !isLastImport) continue;
-		try {
-			f.moveTo(archiveFolder);
-		} catch (err) {
-			Logger.log("Unable to move history file '%s' to archive folder '%s': %s", name, archiveFolder.getId(), err && err.message ? err.message : String(err));
-		}
-	}
-}
-
 function getAssetText_(filename) {
 	const safeFilename = String(filename == null ? "" : filename).trim();
 	if (!safeFilename) return "";
+	const isActiveRosterAsset = safeFilename.toLowerCase() === ACTIVE_ROSTER_FILENAME.toLowerCase();
 
 	const cache = getScriptCacheSafe_();
 	const cacheKey = buildAssetTextCacheKey_(safeFilename);
 	const cachedText = readStringFromCache_(cache, cacheKey);
 	if (cachedText !== null) return cachedText;
 
-	const file = findFileByName_(safeFilename);
-	if (!file) return "";
-	const text = file.getBlob().getDataAsString("UTF-8");
-	writeStringToCache_(cache, cacheKey, text, getAssetTextCacheTtlSeconds_(safeFilename));
-	return text;
+	if (isActiveRosterAsset) {
+		try {
+			const snapshot = readActiveRosterSnapshot_();
+			const text = snapshot && typeof snapshot.text === "string" ? snapshot.text : "";
+			if (text) {
+				maybeCacheText_(cache, cacheKey, text, getAssetTextCacheTtlSeconds_(safeFilename), {
+					maxChars: CACHE_SAFE_TEXT_MAX_CHARS,
+					logOversize: false,
+				});
+			}
+			return text;
+		} catch (err) {
+			Logger.log("Unable to read active roster payload from Firebase for asset route: %s", errorMessage_(err));
+			return "";
+		}
+	}
+
+	return "";
 }
 
 function getScriptCacheSafe_() {
@@ -1791,16 +2129,45 @@ function writeStringToCache_(cache, key, value, ttlSeconds) {
 	}
 }
 
+function maybeCacheText_(cache, key, textRaw, ttlSeconds, optionsRaw) {
+	if (!cache || !key || textRaw == null) return false;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const maxCharsRaw = Number(options.maxChars);
+	const maxChars = isFinite(maxCharsRaw) && maxCharsRaw > 0 ? Math.floor(maxCharsRaw) : CACHE_SAFE_TEXT_MAX_CHARS;
+	const logOversize = options.logOversize !== false;
+	const text = String(textRaw);
+	if (text.length > maxChars) {
+		if (logOversize) {
+			Logger.log(
+				"Skipping cache for %s because payload exceeds safe CacheService size threshold (%s > %s chars).",
+				key,
+				text.length,
+				maxChars,
+			);
+		}
+		return false;
+	}
+	const ttl = Math.max(1, Number(ttlSeconds) || 0);
+	try {
+		cache.put(key, text, ttl);
+		return true;
+	} catch (err) {
+		Logger.log("Skipping cache write for key '%s' due to non-fatal cache error: %s", key, err && err.message ? err.message : String(err));
+		return false;
+	}
+}
+
+function removeStringFromCache_(cache, key) {
+	if (!cache || !key) return;
+	try {
+		if (typeof cache.remove === "function") cache.remove(key);
+	} catch (err) {
+		Logger.log("Cache remove failed for key '%s': %s", key, err && err.message ? err.message : String(err));
+	}
+}
+
 function buildAssetTextCacheKey_(filename) {
 	return "assetText:" + ASSET_TEXT_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
-}
-
-function buildFileIdsCacheKey_(filename) {
-	return "fileIdsByName:" + FILE_LOOKUP_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
-}
-
-function buildNewestFileIdCacheKey_(filename) {
-	return "newestFileIdByName:" + FILE_LOOKUP_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
 }
 
 function getAssetTextCacheTtlSeconds_(filename) {
@@ -1811,71 +2178,8 @@ function getAssetTextCacheTtlSeconds_(filename) {
 	return ASSET_TEXT_CACHE_TTL_STATIC_SECONDS;
 }
 
-function parseCachedFileIds_(raw) {
-	try {
-		const parsed = JSON.parse(raw);
-		const ids = parsed && Array.isArray(parsed.ids) ? parsed.ids : null;
-		if (!ids) return null;
-		const out = [];
-		for (let i = 0; i < ids.length; i++) {
-			const id = String(ids[i] == null ? "" : ids[i]).trim();
-			if (!id) return null;
-			out.push(id);
-		}
-		return out;
-	} catch (err) {
-		return null;
-	}
-}
-
-function resolveFileByIdAndName_(fileId, expectedFilename) {
-	const id = String(fileId == null ? "" : fileId).trim();
-	const expected = String(expectedFilename == null ? "" : expectedFilename);
-	if (!id || !expected) return null;
-	try {
-		const file = DriveApp.getFileById(id);
-		if (!file) return null;
-		if (String(file.getName() || "") !== expected) return null;
-		if (file.isTrashed && file.isTrashed()) return null;
-		return file;
-	} catch (err) {
-		return null;
-	}
-}
-
-function resolveFilesByIdsAndName_(fileIds, expectedFilename) {
-	if (!Array.isArray(fileIds)) return null;
-	const out = [];
-	for (let i = 0; i < fileIds.length; i++) {
-		const file = resolveFileByIdAndName_(fileIds[i], expectedFilename);
-		if (!file) return null;
-		out.push(file);
-	}
-	return out;
-}
-
 function listFolderFiles_() {
-	const folder = DriveApp.getFolderById(FOLDER_ID);
-	const it = folder.getFiles();
-
-	const byName = {};
-	while (it.hasNext()) {
-		const f = it.next();
-		const n = f.getName();
-		if (!byName[n]) byName[n] = [];
-		byName[n].push({
-			size: f.getSize(),
-			lastUpdated: f.getLastUpdated ? f.getLastUpdated().toISOString() : null,
-		});
-	}
-
-	return Object.keys(byName)
-		.sort()
-		.map((name) => ({
-			name,
-			count: byName[name].length,
-			versions: byName[name],
-		}));
+	return listFirebaseDataDebugInfo_();
 }
 
 function assertAdminPassword_(password) {
@@ -2069,94 +2373,11 @@ function isPublishedRosterTag_(tagRaw) {
 }
 
 function findFirstFileByNameCandidates_(names) {
-	const list = Array.isArray(names) ? names : [];
-	const matches = [];
-	const seenIds = {};
-
-	for (let i = 0; i < list.length; i++) {
-		const rawName = String(list[i] == null ? "" : list[i])
-			.replace(/^[\/\\]+/, "")
-			.replace(/\.\./g, "");
-		if (!rawName) continue;
-
-		const byPath = findFileByRelativePath_(rawName);
-		if (byPath) {
-			const pathFileId = byPath && byPath.getId ? byPath.getId() : "";
-			if (pathFileId && !seenIds[pathFileId]) {
-				seenIds[pathFileId] = true;
-				matches.push(byPath);
-			}
-		}
-
-		const candidates = [rawName];
-		const parts = rawName.split(/[\/\\]/);
-		const baseName = parts.length ? parts[parts.length - 1] : rawName;
-		if (baseName && baseName !== rawName) candidates.push(baseName);
-
-		for (let j = 0; j < candidates.length; j++) {
-			const files = findFilesByName_(candidates[j]);
-			for (let k = 0; k < files.length; k++) {
-				const file = files[k];
-				const fileId = file && file.getId ? file.getId() : "";
-				if (!fileId || seenIds[fileId]) continue;
-				seenIds[fileId] = true;
-				matches.push(file);
-			}
-		}
-	}
-
-	matches.sort((a, b) => {
-		const at = a && a.getLastUpdated ? a.getLastUpdated().getTime() : 0;
-		const bt = b && b.getLastUpdated ? b.getLastUpdated().getTime() : 0;
-		return bt - at;
-	});
-
-	return matches.length ? matches[0] : null;
+	return null;
 }
 
 function findFileByRelativePath_(pathRaw) {
-	const safePath = String(pathRaw == null ? "" : pathRaw)
-		.replace(/^[\/\\]+/, "")
-		.replace(/\.\./g, "")
-		.replace(/\\/g, "/");
-	if (!safePath) return null;
-
-	const segments = safePath
-		.split("/")
-		.map((part) => String(part || "").trim())
-		.filter((part) => part);
-	if (!segments.length) return null;
-	if (segments.length === 1) {
-		return findFileByName_(segments[0]);
-	}
-
-	const filename = segments[segments.length - 1];
-	let folders = [DriveApp.getFolderById(FOLDER_ID)];
-
-	for (let i = 0; i < segments.length - 1; i++) {
-		const folderName = segments[i];
-		const nextFolders = [];
-		for (let j = 0; j < folders.length; j++) {
-			const it = folders[j].getFoldersByName(folderName);
-			while (it.hasNext()) nextFolders.push(it.next());
-		}
-		if (!nextFolders.length) return null;
-		folders = nextFolders;
-	}
-
-	const files = [];
-	for (let i = 0; i < folders.length; i++) {
-		const it = folders[i].getFilesByName(filename);
-		while (it.hasNext()) files.push(it.next());
-	}
-	if (!files.length) return null;
-
-	files.sort((a, b) => {
-		const at = a && a.getLastUpdated ? a.getLastUpdated().getTime() : 0;
-		const bt = b && b.getLastUpdated ? b.getLastUpdated().getTime() : 0;
-		return bt - at;
-	});
-	return files[0];
+	return null;
 }
 
 function inferAssetMimeType_(filename, providedMimeType) {
@@ -4936,6 +5157,74 @@ function normalizeRosterSlots_(roster) {
 	roster.badges = { main: roster.main.length, subs: roster.subs.length, missing: roster.missing.length };
 }
 
+function dedupeRosterSectionsByTag_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster) return { changed: false, removedCount: 0, removed: [] };
+	if (!Array.isArray(roster.main)) roster.main = [];
+	if (!Array.isArray(roster.subs)) roster.subs = [];
+	if (!Array.isArray(roster.missing)) roster.missing = [];
+
+	const sections = ["main", "subs", "missing"];
+	const keptByTag = {};
+	const removed = [];
+
+	for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+		const section = sections[sectionIndex];
+		const players = Array.isArray(roster[section]) ? roster[section] : [];
+		const nextPlayers = [];
+		for (let i = 0; i < players.length; i++) {
+			const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag) {
+				nextPlayers.push(player);
+				continue;
+			}
+			if (!keptByTag[tag]) {
+				keptByTag[tag] = {
+					section: section,
+					index: nextPlayers.length,
+				};
+				nextPlayers.push(player);
+				continue;
+			}
+			removed.push({
+				tag: tag,
+				removedFromSection: section,
+				removedFromIndex: i,
+				keptInSection: keptByTag[tag].section,
+				keptIndex: keptByTag[tag].index,
+			});
+		}
+		roster[section] = nextPlayers;
+	}
+
+	normalizeRosterSlots_(roster);
+	return {
+		changed: removed.length > 0,
+		removedCount: removed.length,
+		removed: removed,
+	};
+}
+
+function summarizeRosterSectionDedupe_(dedupeRaw, maxItemsRaw) {
+	const dedupe = dedupeRaw && typeof dedupeRaw === "object" ? dedupeRaw : {};
+	const removed = Array.isArray(dedupe.removed) ? dedupe.removed : [];
+	if (!removed.length) return "";
+	const maxItems = Math.max(1, toNonNegativeInt_(maxItemsRaw) || 4);
+	const parts = [];
+	for (let i = 0; i < removed.length && i < maxItems; i++) {
+		const item = removed[i] && typeof removed[i] === "object" ? removed[i] : {};
+		const tag = normalizeTag_(item.tag) || String(item.tag || "");
+		const removedSection = String(item.removedFromSection || "").trim() || "?";
+		const keptSection = String(item.keptInSection || "").trim() || "?";
+		const removedIndex = toNonNegativeInt_(item.removedFromIndex);
+		const keptIndex = toNonNegativeInt_(item.keptIndex);
+		parts.push(tag + " " + removedSection + "[" + removedIndex + "] -> " + keptSection + "[" + keptIndex + "]");
+	}
+	if (removed.length > maxItems) parts.push("+" + (removed.length - maxItems) + " more");
+	return parts.join(" ; ");
+}
+
 function clearRosterBenchSuggestions_(roster) {
 	if (!roster || typeof roster !== "object") return;
 	if (Object.prototype.hasOwnProperty.call(roster, "benchSuggestions")) {
@@ -5165,6 +5454,15 @@ function resolveRosterPoolSource_(clanTagRaw, rosterIdRaw, ownershipSnapshotRaw)
 	const clanTag = normalizeTag_(clanTagRaw);
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	const snapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : null;
+	if (snapshot && clanTag) {
+		const clanErrorByTag = snapshot.clanErrorByTag && typeof snapshot.clanErrorByTag === "object" ? snapshot.clanErrorByTag : {};
+		const clanError = clanErrorByTag[clanTag] && typeof clanErrorByTag[clanTag] === "object" ? clanErrorByTag[clanTag] : null;
+		if (clanError) {
+			const step = String(clanError.step == null ? "" : clanError.step).trim() || "build shared ownership snapshot";
+			const message = String(clanError.message == null ? "" : clanError.message).trim() || "unknown error";
+			throw new Error("Unable to build shared roster ownership snapshot for clan " + clanTag + " (" + step + "): " + message);
+		}
+	}
 	if (snapshot && rosterId) {
 		const membersByRosterId = snapshot.membersByRosterId && typeof snapshot.membersByRosterId === "object" ? snapshot.membersByRosterId : {};
 		if (Array.isArray(membersByRosterId[rosterId])) {
@@ -5198,6 +5496,7 @@ function buildRosterPlayerSeedByTag_(rosterData) {
 function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const shouldRecordMetrics = options.recordMetrics !== false;
+	const snapshotStartedAtIso = new Date().toISOString();
 	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
 		.trim()
 		.toLowerCase();
@@ -5207,6 +5506,9 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		? metricsRunState.profileRunState && typeof metricsRunState.profileRunState === "object"
 			? metricsRunState.profileRunState
 			: (metricsRunState.profileRunState = {})
+		: null;
+	const metricsWorkingRosterData = shouldRecordMetrics
+		? { playerMetrics: sanitizePlayerMetricsStore_(rosterData && rosterData.playerMetrics, snapshotStartedAtIso) }
 		: null;
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const membersByRosterId = {};
@@ -5218,6 +5520,32 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const membersByClanTag = {};
 	const memberTrackingByRosterId = {};
 	const memberTrackingByClanTag = {};
+	const clanErrorByTag = {};
+
+	const registerClanError = (clanTagRaw, stepRaw, errRaw, rosterIdRaw) => {
+		const clanTag = normalizeTag_(clanTagRaw);
+		if (!clanTag) return null;
+		if (clanErrorByTag[clanTag] && typeof clanErrorByTag[clanTag] === "object") return clanErrorByTag[clanTag];
+
+		const step = String(stepRaw == null ? "" : stepRaw).trim() || "build snapshot";
+		const message = errorMessage_(errRaw);
+		const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+		const payload = {
+			clanTag: clanTag,
+			rosterId: rosterId,
+			step: step,
+			message: message,
+		};
+		clanErrorByTag[clanTag] = payload;
+		Logger.log(
+			"buildLiveRosterOwnershipSnapshot: failed for clan '%s' at step '%s'%s: %s",
+			clanTag,
+			step,
+			rosterId ? " (roster " + rosterId + ")" : "",
+			message,
+		);
+		return payload;
+	};
 
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
@@ -5231,43 +5559,76 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedClanTagByRosterId[rosterId] = clanTag;
 
 		let members = membersByClanTag[clanTag];
-		if (!members) {
-			const clanSnapshot = fetchClanMembersSnapshot_(clanTag);
-			members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
-			membersByClanTag[clanTag] = members;
-			if (shouldRecordMetrics) {
-				const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
-					mode: metricsProfileMode,
-					runState: metricsProfileRunState,
-					clanTag: clanTag,
-					sourceRosterId: rosterId,
-					source: "buildLiveRosterOwnershipSnapshot",
-				});
-				const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
-				const metricsRecord = recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
-					capturedAt: clanSnapshot && clanSnapshot.capturedAt,
-					runState: metricsRunState,
-					sourceRosterId: rosterId,
-					source: "buildLiveRosterOwnershipSnapshot",
-				});
-				memberTrackingByClanTag[clanTag] = {
-					clanTag: clanTag,
-					capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
-					attemptedClans: 1,
-					capturedClans: 1,
-					recorded: toNonNegativeInt_(metricsRecord && metricsRecord.recorded),
-					updated: toNonNegativeInt_(metricsRecord && metricsRecord.updated),
-					errors: [],
-					entryCount: countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics),
-					profileEnriched: toNonNegativeInt_(enriched && enriched.enriched),
-					profileAttempted: toNonNegativeInt_(enriched && enriched.attempted),
-					metricsProfileMode: metricsProfileMode,
-				};
+		if (!members && !clanErrorByTag[clanTag]) {
+			let clanSnapshot = null;
+			try {
+				clanSnapshot = fetchClanMembersSnapshot_(clanTag);
+				members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
+				membersByClanTag[clanTag] = members;
+			} catch (err) {
+				registerClanError(clanTag, "fetch clan members", err, rosterId);
+				membersByClanTag[clanTag] = [];
+				members = membersByClanTag[clanTag];
+			}
+
+			if (!clanErrorByTag[clanTag] && shouldRecordMetrics) {
+				try {
+					const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
+						mode: metricsProfileMode,
+						runState: metricsProfileRunState,
+						clanTag: clanTag,
+						sourceRosterId: rosterId,
+						source: "buildLiveRosterOwnershipSnapshot",
+					});
+					const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
+					const metricsRecord = recordClanMemberMetricsSnapshot_(metricsWorkingRosterData, clanTag, metricsMembers, {
+						capturedAt: clanSnapshot && clanSnapshot.capturedAt,
+						runState: metricsRunState,
+						sourceRosterId: rosterId,
+						source: "buildLiveRosterOwnershipSnapshot",
+					});
+					memberTrackingByClanTag[clanTag] = {
+						clanTag: clanTag,
+						capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
+						attemptedClans: 1,
+						capturedClans: 1,
+						recorded: toNonNegativeInt_(metricsRecord && metricsRecord.recorded),
+						updated: toNonNegativeInt_(metricsRecord && metricsRecord.updated),
+						errors: [],
+						entryCount: countPlayerMetricsEntries_(metricsWorkingRosterData && metricsWorkingRosterData.playerMetrics),
+						profileEnriched: toNonNegativeInt_(enriched && enriched.enriched),
+						profileAttempted: toNonNegativeInt_(enriched && enriched.attempted),
+						metricsProfileMode: metricsProfileMode,
+					};
+				} catch (err) {
+					registerClanError(clanTag, "record clan metrics", err, rosterId);
+					memberTrackingByClanTag[clanTag] = {
+						clanTag: clanTag,
+						capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
+						attemptedClans: 1,
+						capturedClans: 0,
+						recorded: 0,
+						updated: 0,
+						errors: [{ clanTag: clanTag, message: errorMessage_(err) }],
+						entryCount: countPlayerMetricsEntries_(metricsWorkingRosterData && metricsWorkingRosterData.playerMetrics),
+						profileEnriched: 0,
+						profileAttempted: 0,
+						metricsProfileMode: metricsProfileMode,
+					};
+				}
 			}
 		}
 		if (memberTrackingByClanTag[clanTag]) {
 			memberTrackingByRosterId[rosterId] = memberTrackingByClanTag[clanTag];
 		}
+
+		if (clanErrorByTag[clanTag]) {
+			membersByRosterId[rosterId] = [];
+			memberTagSetByRosterId[rosterId] = {};
+			continue;
+		}
+
+		members = Array.isArray(membersByClanTag[clanTag]) ? membersByClanTag[clanTag] : [];
 		membersByRosterId[rosterId] = members;
 
 		const tagSet = {};
@@ -5282,6 +5643,18 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		memberTagSetByRosterId[rosterId] = tagSet;
 	}
 
+	if (shouldRecordMetrics && metricsWorkingRosterData) {
+		const failedClanCount = Object.keys(clanErrorByTag).length;
+		if (failedClanCount < 1) {
+			rosterData.playerMetrics = sanitizePlayerMetricsStore_(metricsWorkingRosterData.playerMetrics, new Date().toISOString());
+		} else {
+			Logger.log(
+				"buildLiveRosterOwnershipSnapshot: discarding staged playerMetrics updates because %s connected clan(s) failed during snapshot build.",
+				failedClanCount,
+			);
+		}
+	}
+
 	return {
 		membersByRosterId: membersByRosterId,
 		memberTagSetByRosterId: memberTagSetByRosterId,
@@ -5290,6 +5663,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
 		connectedRosterIds: connectedRosterIds,
 		memberTrackingByRosterId: memberTrackingByRosterId,
+		clanErrorByTag: clanErrorByTag,
 		seedPlayerByTag: buildRosterPlayerSeedByTag_(rosterData),
 	};
 }
@@ -5695,9 +6069,17 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 	roster.subs = subs;
 	roster.missing = missing;
 	roster.warPerformance = warPerformance;
-	normalizeRosterSlots_(roster);
+	const dedupeResult = dedupeRosterSectionsByTag_(roster);
+	if (dedupeResult.changed) {
+		Logger.log(
+			"applyRosterPoolSync_ deduped roster '%s': removed %s cross-section duplicate(s). %s",
+			rosterId,
+			dedupeResult.removedCount,
+			summarizeRosterSectionDedupe_(dedupeResult, 6),
+		);
+	}
 
-	if (added > 0 || movedToMissing > 0 || restored > 0 || removed > 0 || updated > 0) {
+	if (added > 0 || movedToMissing > 0 || restored > 0 || removed > 0 || updated > 0 || dedupeResult.changed) {
 		clearRosterBenchSuggestions_(roster);
 	}
 
@@ -5979,6 +6361,15 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 	roster.main = main;
 	roster.subs = subs;
 	roster.missing = missing;
+	const dedupeResult = dedupeRosterSectionsByTag_(roster);
+	if (dedupeResult.changed) {
+		Logger.log(
+			"applyRegularWarRosterPoolSync_ deduped roster '%s': removed %s cross-section duplicate(s). %s",
+			rosterId,
+			dedupeResult.removedCount,
+			summarizeRosterSectionDedupe_(dedupeResult, 6),
+		);
+	}
 
 	const finalTagSet = buildRosterPoolTagSet_(roster);
 	const byTagKeys = Object.keys(byTag);
@@ -5994,8 +6385,7 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 		delete membershipByTag[membershipKeys[i]];
 	}
 
-	normalizeRosterSlots_(roster);
-	if (added > 0 || movedToMissing > 0 || restored > 0 || removed > 0) {
+	if (added > 0 || movedToMissing > 0 || restored > 0 || removed > 0 || dedupeResult.changed) {
 		clearRosterBenchSuggestions_(roster);
 	}
 
@@ -6140,11 +6530,20 @@ function applyTodayLineupSync_(roster, participantsRaw) {
 
 	roster.main = orderedParticipantTags.map((tag) => poolByTag[tag]).filter(Boolean);
 	roster.subs = subsOrderedTags.map((tag) => poolByTag[tag]).filter(Boolean);
-	normalizeRosterSlots_(roster);
+	const dedupeResult = dedupeRosterSectionsByTag_(roster);
+	if (dedupeResult.changed) {
+		const rosterId = String((roster && roster.id) || "").trim() || "unknown";
+		Logger.log(
+			"applyTodayLineupSync_ deduped roster '%s': removed %s cross-section duplicate(s). %s",
+			rosterId,
+			dedupeResult.removedCount,
+			summarizeRosterSectionDedupe_(dedupeResult, 6),
+		);
+	}
 
 	const afterMainOrder = roster.main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
 	const afterSubsOrder = roster.subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
-	if (beforeMainOrder.join("|") !== afterMainOrder.join("|") || beforeSubsOrder.join("|") !== afterSubsOrder.join("|") || updated > 0) {
+	if (beforeMainOrder.join("|") !== afterMainOrder.join("|") || beforeSubsOrder.join("|") !== afterSubsOrder.join("|") || updated > 0 || dedupeResult.changed) {
 		clearRosterBenchSuggestions_(roster);
 	}
 
