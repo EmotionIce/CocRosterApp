@@ -5837,8 +5837,12 @@ function resolveRosterPoolSource_(clanTagRaw, rosterIdRaw, ownershipSnapshotRaw)
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	const snapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : null;
 	if (snapshot && clanTag) {
-		const clanErrorByTag = snapshot.clanErrorByTag && typeof snapshot.clanErrorByTag === "object" ? snapshot.clanErrorByTag : {};
-		const clanError = clanErrorByTag[clanTag] && typeof clanErrorByTag[clanTag] === "object" ? clanErrorByTag[clanTag] : null;
+		const poolSyncErrorByTag = snapshot.poolSyncErrorByTag && typeof snapshot.poolSyncErrorByTag === "object" ? snapshot.poolSyncErrorByTag : {};
+		const legacyClanErrorByTag = snapshot.clanErrorByTag && typeof snapshot.clanErrorByTag === "object" ? snapshot.clanErrorByTag : {};
+		let clanError = poolSyncErrorByTag[clanTag] && typeof poolSyncErrorByTag[clanTag] === "object" ? poolSyncErrorByTag[clanTag] : null;
+		if (!clanError) {
+			clanError = legacyClanErrorByTag[clanTag] && typeof legacyClanErrorByTag[clanTag] === "object" ? legacyClanErrorByTag[clanTag] : null;
+		}
 		if (clanError) {
 			const step = String(clanError.step == null ? "" : clanError.step).trim() || "build shared ownership snapshot";
 			const message = String(clanError.message == null ? "" : clanError.message).trim() || "unknown error";
@@ -5904,14 +5908,18 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const membersByClanTag = {};
 	const memberTrackingByRosterId = {};
 	const memberTrackingByClanTag = {};
-	const clanErrorByTag = {};
+	const stagedMemberTrackingByClanTag = {};
+	const poolSyncErrorByTag = {};
+	const metricsErrorByTag = {};
 
-	const registerClanError = (clanTagRaw, stepRaw, errRaw, rosterIdRaw) => {
+	const registerSnapshotClanError = (targetMapRaw, errorTypeRaw, clanTagRaw, stepRaw, errRaw, rosterIdRaw) => {
+		const targetMap = targetMapRaw && typeof targetMapRaw === "object" ? targetMapRaw : {};
 		const clanTag = normalizeTag_(clanTagRaw);
 		if (!clanTag) return null;
-		if (clanErrorByTag[clanTag] && typeof clanErrorByTag[clanTag] === "object") return clanErrorByTag[clanTag];
+		if (targetMap[clanTag] && typeof targetMap[clanTag] === "object") return targetMap[clanTag];
 
 		const step = String(stepRaw == null ? "" : stepRaw).trim() || "build snapshot";
+		const errorType = String(errorTypeRaw == null ? "" : errorTypeRaw).trim() || "snapshot";
 		const message = errorMessage_(errRaw);
 		const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 		const payload = {
@@ -5920,9 +5928,10 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 			step: step,
 			message: message,
 		};
-		clanErrorByTag[clanTag] = payload;
+		targetMap[clanTag] = payload;
 		Logger.log(
-			"buildLiveRosterOwnershipSnapshot: failed for clan '%s' at step '%s'%s: %s",
+			"buildLiveRosterOwnershipSnapshot: %s failed for clan '%s' at step '%s'%s: %s",
+			errorType,
 			clanTag,
 			step,
 			rosterId ? " (roster " + rosterId + ")" : "",
@@ -5930,6 +5939,10 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		);
 		return payload;
 	};
+	const registerPoolSyncError = (clanTagRaw, stepRaw, errRaw, rosterIdRaw) =>
+		registerSnapshotClanError(poolSyncErrorByTag, "pool-sync", clanTagRaw, stepRaw, errRaw, rosterIdRaw);
+	const registerMetricsError = (clanTagRaw, stepRaw, errRaw, rosterIdRaw) =>
+		registerSnapshotClanError(metricsErrorByTag, "metrics", clanTagRaw, stepRaw, errRaw, rosterIdRaw);
 
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
@@ -5943,12 +5956,12 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedClanTagByRosterId[rosterId] = clanTag;
 
 		let members = membersByClanTag[clanTag];
-		if (!members && !clanErrorByTag[clanTag]) {
+		if (!members && !poolSyncErrorByTag[clanTag]) {
 			let clanSnapshot = null;
 			const hasPrefetchedError = Object.prototype.hasOwnProperty.call(prefetchedClanErrorsByTag, clanTag);
 			const hasPrefetchedSnapshot = Object.prototype.hasOwnProperty.call(prefetchedClanSnapshotsByTag, clanTag);
 			if (hasPrefetchedError) {
-				registerClanError(clanTag, "fetch clan members", prefetchedClanErrorsByTag[clanTag], rosterId);
+				registerPoolSyncError(clanTag, "fetch clan members", prefetchedClanErrorsByTag[clanTag], rosterId);
 				membersByClanTag[clanTag] = [];
 				members = membersByClanTag[clanTag];
 			} else {
@@ -5957,13 +5970,13 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 					members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
 					membersByClanTag[clanTag] = members;
 				} catch (err) {
-					registerClanError(clanTag, "fetch clan members", err, rosterId);
+					registerPoolSyncError(clanTag, "fetch clan members", err, rosterId);
 					membersByClanTag[clanTag] = [];
 					members = membersByClanTag[clanTag];
 				}
 			}
 
-			if (!clanErrorByTag[clanTag] && shouldRecordMetrics) {
+			if (!poolSyncErrorByTag[clanTag] && shouldRecordMetrics) {
 				try {
 					const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
 						mode: metricsProfileMode,
@@ -5979,8 +5992,9 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						sourceRosterId: rosterId,
 						source: "buildLiveRosterOwnershipSnapshot",
 					});
-					memberTrackingByClanTag[clanTag] = {
+					const stagedTracking = {
 						clanTag: clanTag,
+						rosterId: rosterId,
 						capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
 						attemptedClans: 1,
 						capturedClans: 1,
@@ -5992,10 +6006,13 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						profileAttempted: toNonNegativeInt_(enriched && enriched.attempted),
 						metricsProfileMode: metricsProfileMode,
 					};
+					memberTrackingByClanTag[clanTag] = stagedTracking;
+					stagedMemberTrackingByClanTag[clanTag] = stagedTracking;
 				} catch (err) {
-					registerClanError(clanTag, "record clan metrics", err, rosterId);
-					memberTrackingByClanTag[clanTag] = {
+					registerMetricsError(clanTag, "record clan metrics", err, rosterId);
+					const stagedTracking = {
 						clanTag: clanTag,
+						rosterId: rosterId,
 						capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
 						attemptedClans: 1,
 						capturedClans: 0,
@@ -6007,14 +6024,13 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						profileAttempted: 0,
 						metricsProfileMode: metricsProfileMode,
 					};
+					memberTrackingByClanTag[clanTag] = stagedTracking;
+					stagedMemberTrackingByClanTag[clanTag] = stagedTracking;
 				}
 			}
 		}
-		if (memberTrackingByClanTag[clanTag]) {
-			memberTrackingByRosterId[rosterId] = memberTrackingByClanTag[clanTag];
-		}
 
-		if (clanErrorByTag[clanTag]) {
+		if (poolSyncErrorByTag[clanTag]) {
 			membersByRosterId[rosterId] = [];
 			memberTagSetByRosterId[rosterId] = {};
 			continue;
@@ -6035,16 +6051,83 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		memberTagSetByRosterId[rosterId] = tagSet;
 	}
 
+	const committedMetricsByClanTag = {};
+	let metricsCommitFailedClanCount = 0;
 	if (shouldRecordMetrics && metricsWorkingRosterData) {
-		const failedClanCount = Object.keys(clanErrorByTag).length;
-		if (failedClanCount < 1) {
+		const failedClanTagSet = {};
+		const poolSyncErrorTags = Object.keys(poolSyncErrorByTag);
+		for (let i = 0; i < poolSyncErrorTags.length; i++) failedClanTagSet[poolSyncErrorTags[i]] = true;
+		const metricsErrorTags = Object.keys(metricsErrorByTag);
+		for (let i = 0; i < metricsErrorTags.length; i++) failedClanTagSet[metricsErrorTags[i]] = true;
+		metricsCommitFailedClanCount = Object.keys(failedClanTagSet).length;
+		if (metricsCommitFailedClanCount < 1) {
 			rosterData.playerMetrics = sanitizePlayerMetricsStore_(metricsWorkingRosterData.playerMetrics, new Date().toISOString());
+			const trackedClanTags = Object.keys(stagedMemberTrackingByClanTag);
+			for (let i = 0; i < trackedClanTags.length; i++) {
+				const clanTag = trackedClanTags[i];
+				if (!clanTag || poolSyncErrorByTag[clanTag] || metricsErrorByTag[clanTag]) continue;
+				committedMetricsByClanTag[clanTag] = true;
+			}
 		} else {
 			Logger.log(
 				"buildLiveRosterOwnershipSnapshot: discarding staged playerMetrics updates because %s connected clan(s) failed during snapshot build.",
-				failedClanCount,
+				metricsCommitFailedClanCount,
 			);
 		}
+	}
+	const committedEntryCount = countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics);
+	const trackedClanTags = Object.keys(stagedMemberTrackingByClanTag);
+	for (let i = 0; i < trackedClanTags.length; i++) {
+		const clanTag = trackedClanTags[i];
+		const stagedTracking = stagedMemberTrackingByClanTag[clanTag] && typeof stagedMemberTrackingByClanTag[clanTag] === "object" ? stagedMemberTrackingByClanTag[clanTag] : {};
+		const hasPoolSyncError = !!(poolSyncErrorByTag[clanTag] && typeof poolSyncErrorByTag[clanTag] === "object");
+		const hasMetricsError = !!(metricsErrorByTag[clanTag] && typeof metricsErrorByTag[clanTag] === "object");
+		const committed = !!committedMetricsByClanTag[clanTag];
+		const errors = Array.isArray(stagedTracking.errors) ? stagedTracking.errors.slice() : [];
+
+		if (!committed && !hasPoolSyncError && !hasMetricsError && toNonNegativeInt_(stagedTracking.capturedClans) > 0) {
+			const warningMessage =
+				metricsCommitFailedClanCount > 0
+					? "staged metrics were not committed because " + metricsCommitFailedClanCount + " connected clan(s) failed during snapshot build."
+					: "staged metrics were not committed during snapshot finalization.";
+			errors.push({
+				clanTag: clanTag,
+				message: warningMessage,
+				severity: "warning",
+				type: "metricsCommitSkipped",
+			});
+			if (!metricsErrorByTag[clanTag]) {
+				metricsErrorByTag[clanTag] = {
+					clanTag: clanTag,
+					rosterId: String(stagedTracking.rosterId == null ? "" : stagedTracking.rosterId).trim(),
+					step: "commit staged metrics",
+					message: warningMessage,
+				};
+			}
+		}
+
+		memberTrackingByClanTag[clanTag] = {
+			clanTag: clanTag,
+			capturedAt: String(stagedTracking.capturedAt == null ? "" : stagedTracking.capturedAt),
+			attemptedClans: toNonNegativeInt_(stagedTracking.attemptedClans),
+			capturedClans: committed ? toNonNegativeInt_(stagedTracking.capturedClans) : 0,
+			recorded: committed ? toNonNegativeInt_(stagedTracking.recorded) : 0,
+			updated: committed ? toNonNegativeInt_(stagedTracking.updated) : 0,
+			errors: errors,
+			entryCount: committedEntryCount,
+			profileEnriched: toNonNegativeInt_(stagedTracking.profileEnriched),
+			profileAttempted: toNonNegativeInt_(stagedTracking.profileAttempted),
+			metricsProfileMode: String(stagedTracking.metricsProfileMode == null ? metricsProfileMode : stagedTracking.metricsProfileMode),
+			committed: committed,
+		};
+	}
+	const connectedTrackingRosterIds = Object.keys(connectedClanTagByRosterId);
+	for (let i = 0; i < connectedTrackingRosterIds.length; i++) {
+		const rosterId = connectedTrackingRosterIds[i];
+		const clanTag = normalizeTag_(connectedClanTagByRosterId[rosterId]);
+		const tracking = clanTag && memberTrackingByClanTag[clanTag] && typeof memberTrackingByClanTag[clanTag] === "object" ? memberTrackingByClanTag[clanTag] : null;
+		if (tracking) memberTrackingByRosterId[rosterId] = tracking;
+		else delete memberTrackingByRosterId[rosterId];
 	}
 
 	return {
@@ -6055,7 +6138,9 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
 		connectedRosterIds: connectedRosterIds,
 		memberTrackingByRosterId: memberTrackingByRosterId,
-		clanErrorByTag: clanErrorByTag,
+		poolSyncErrorByTag: poolSyncErrorByTag,
+		metricsErrorByTag: metricsErrorByTag,
+		clanErrorByTag: poolSyncErrorByTag,
 		seedPlayerByTag: buildRosterPlayerSeedByTag_(rosterData),
 	};
 }
