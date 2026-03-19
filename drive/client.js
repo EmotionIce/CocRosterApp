@@ -2774,8 +2774,8 @@
         root.setAttribute("aria-hidden", "true");
         root.innerHTML = [
             '<div class="profile-modal__backdrop" data-profile-dismiss="backdrop"></div>',
-            '<div class="profile-modal__panel" role="dialog" aria-modal="true" aria-labelledby="' + PROFILE_MODAL_ID + 'Title">',
-            '<div class="profile-modal__topbar">',
+            '<div class="profile-modal__panel glass-surface glass-surface--strong" role="dialog" aria-modal="true" aria-labelledby="' + PROFILE_MODAL_ID + 'Title">',
+            '<div class="profile-modal__topbar glass-surface glass-surface--soft">',
             '<div class="profile-modal__title-wrap"><div class="profile-modal__eyebrow">Player profile</div><div class="profile-modal__title" id="' + PROFILE_MODAL_ID + 'Title">Player profile</div></div>',
             '<button type="button" class="profile-modal__close" data-profile-dismiss="close" aria-label="Close player profile">Close</button>',
             '</div>',
