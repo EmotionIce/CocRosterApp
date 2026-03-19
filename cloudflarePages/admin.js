@@ -2714,7 +2714,7 @@
           await runExclusiveRosterPoolRefresh(async () => {
             const res = await runServerMethod("syncClanRosterPool", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
             setClanSyncStatus(rosterId, formatRosterPoolStatus(res && res.result), false);
-            applyMergedRosterPreview(rosterId, res && res.rosterData);
+            applyServerSyncedPreview(res && res.rosterData);
           });
         } catch (err) {
           failClanStep(err);
@@ -2734,7 +2734,7 @@
           if (mode === "cwl" && msg.toLowerCase() === "no current cwl war found") {
             renderClanSyncTable();
           } else {
-            applyMergedRosterPreview(rosterId, res && res.rosterData);
+            applyServerSyncedPreview(res && res.rosterData);
           }
         } catch (err) {
           failClanStep(err);
@@ -2748,7 +2748,7 @@
           renderCwlPerfTable();
           const res = await runServerMethod("refreshTrackingStats", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
           setCwlStatus(rosterId, formatTrackingRefreshStatus(res && res.result), false);
-          applyMergedRosterPreview(rosterId, res && res.rosterData);
+          applyServerSyncedPreview(res && res.rosterData);
         } catch (err) {
           failTrackingStep(err);
         }
@@ -2761,7 +2761,7 @@
             setCwlStatus(rosterId, "Suggesting...", false);
             renderCwlPerfTable();
             const res = await runServerMethod("computeBenchSuggestions", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
-            applyMergedRosterPreview(rosterId, res && res.rosterData);
+            applyServerSyncedPreview(res && res.rosterData);
             const summary = res && res.result ? res.result : {};
             setCwlStatus(rosterId, formatSuggestionStatus(summary), false);
             renderCwlPerfTable();
