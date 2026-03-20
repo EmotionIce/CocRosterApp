@@ -789,10 +789,12 @@
         const aggregateWarsTracked = toNonNegativeInt(
             perfMeta.finalizedRegularWarCount != null ? perfMeta.finalizedRegularWarCount : aggregateMetaRaw.warsTracked
         );
-        const aggregateStatusMessage = toStr(aggregateMetaRaw.statusMessage).trim();
         const aggregateStatusLevelRaw = toStr(aggregateMetaRaw.statusLevel).trim().toLowerCase();
         const aggregateStatusLevel = aggregateStatusLevelRaw === "warning" || aggregateStatusLevelRaw === "info"
             ? aggregateStatusLevelRaw
+            : "";
+        const aggregateStatusMessage = aggregateStatusLevel === "warning"
+            ? toStr(aggregateMetaRaw.statusMessage).trim()
             : "";
         const aggregateUnresolvedIncompleteWarCount = toNonNegativeInt(aggregateMetaRaw.unresolvedIncompleteWarCount);
         const aggregatePendingRecentRepairCount = toNonNegativeInt(aggregateMetaRaw.pendingRecentRepairCount);
@@ -2273,7 +2275,8 @@
             : "";
         const heroAlertCards = trackingMode === "regularWar"
             ? (() => {
-                const showAggregateStatusNotice = !!regularWar.aggregateStatusMessage
+                const showAggregateStatusNotice = regularWar.aggregateStatusLevel === "warning"
+                    && !!regularWar.aggregateStatusMessage
                     && !(regularWar.currentWarUnavailableReason === "privateWarLog" && regularWar.aggregateStatusLevel !== "warning");
                 return [
                     regularWar.currentWarUnavailableReason === "privateWarLog"
@@ -4133,8 +4136,10 @@
         const regularWarAggregateStatusLevel = regularWarAggregateStatusLevelRaw === "warning" || regularWarAggregateStatusLevelRaw === "info"
             ? regularWarAggregateStatusLevelRaw
             : "";
-        const regularWarAggregateStatusMessage = toStr(regularWarAggregateMeta.statusMessage).trim();
-        const regularWarAggregateHasNotice = !!regularWarAggregateStatusMessage;
+        const regularWarAggregateStatusMessage = regularWarAggregateStatusLevel === "warning"
+            ? toStr(regularWarAggregateMeta.statusMessage).trim()
+            : "";
+        const regularWarAggregateHasNotice = regularWarAggregateStatusLevel === "warning" && !!regularWarAggregateStatusMessage;
         const regularWarAggregateShowWithLiveWarning = regularWarAggregateHasNotice
             && !(regularWarLiveUnavailable && regularWarAggregateStatusLevel !== "warning");
 
@@ -4167,7 +4172,7 @@
                 meta.appendChild(el("span", "badge", "Live war refresh unavailable"));
             }
             if (regularWarAggregateShowWithLiveWarning) {
-                meta.appendChild(el("span", "badge", regularWarAggregateStatusLevel === "warning" ? "Aggregate status warning" : "Aggregate status notice"));
+                meta.appendChild(el("span", "badge", "Aggregate status warning"));
             }
         }
 

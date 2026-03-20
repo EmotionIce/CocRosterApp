@@ -1885,9 +1885,16 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 				}
 			}
 		} else if (state.nextStepIndex === 2) {
-			if (!state.hasConnectedClanTag || !state.poolStepOk || !state.lineupStepOk) {
+			const allowStatsWithoutLineup = state.trackingMode === "regularWar";
+			if (!state.hasConnectedClanTag || !state.poolStepOk || (!state.lineupStepOk && !allowStatsWithoutLineup)) {
 				addSkippedIssueForState(state, state.statsStepLabel, !state.poolStepOk || !state.hasConnectedClanTag ? state.poolStepLabel : state.lineupStepLabel);
 			} else {
+				if (!state.lineupStepOk && allowStatsWithoutLineup) {
+					Logger.log(
+						"autoRefresh: roster '%s' running regular-war stats/repair despite lineup sync issue so history repair can proceed.",
+						state.rosterId,
+					);
+				}
 				const statsStep = runStepWithRollbackForState(state, state.statsStepLabel, () => refreshTrackingStatsInternal_(rosterData, state.rosterId, pipelinePrefetchOptions));
 				state.statsStepOk = !!statsStep.ok;
 			}
@@ -4599,7 +4606,8 @@ function summarizeRegularWarHistoryState_(warPerformanceRaw, nowIsoRaw) {
 			}
 		} else {
 			statusLevel = "info";
-			statusMessage = "Recent regular-war history is being verified from public war-log data.";
+			// Keep pending-repair states quiet in player-facing UI; only stale unresolved states should warn.
+			statusMessage = "";
 		}
 	}
 
@@ -4664,8 +4672,9 @@ function buildRegularWarAggregateMetaFromWarPerformance_(warPerformanceRaw, repa
 		oldestUnresolvedIncompleteAt: String(summary.oldestUnresolvedIncompleteAt || ""),
 		lastRepairAttemptAt: String(summary.lastRepairAttemptAt || meta.lastRegularWarRepairAttemptAt || ""),
 		lastRepairSuccessAt: String(summary.lastRepairSuccessAt || meta.lastRegularWarRepairSuccessAt || ""),
-		statusLevel: String(summary.statusLevel || meta.regularWarStatusLevel || ""),
-		statusMessage: String(summary.statusMessage || meta.regularWarStatusMessage || ""),
+		// Always derive status from current ledger summary to avoid stale sticky messages.
+		statusLevel: String(summary.statusLevel || ""),
+		statusMessage: String(summary.statusMessage || ""),
 	});
 }
 
