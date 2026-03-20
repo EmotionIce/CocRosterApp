@@ -321,6 +321,28 @@
     const getRosterTrackingMode = (rosterRaw) =>
         rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
 
+    const getRosterCwlPreparationModel = (rosterRaw) => {
+        const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+        const raw = roster && roster.cwlPreparation && typeof roster.cwlPreparation === "object" && !Array.isArray(roster.cwlPreparation)
+            ? roster.cwlPreparation
+            : null;
+        if (!raw) return null;
+        const enabled = getRosterTrackingMode(roster) === "cwl" && raw.enabled === true;
+        const rosterSizeRaw = Number(raw.rosterSize);
+        const rosterSize = Number.isFinite(rosterSizeRaw)
+            ? Math.max(5, Math.min(50, Math.floor(rosterSizeRaw / 5) * 5))
+            : 0;
+        return {
+            enabled: enabled,
+            rosterSize: rosterSize > 0 ? rosterSize : 0,
+        };
+    };
+
+    const isCwlPreparationActivePublic_ = (rosterRaw) => {
+        const prep = getRosterCwlPreparationModel(rosterRaw);
+        return !!(prep && prep.enabled);
+    };
+
     const buildDefaultPublicViewState = () => ({
         view: PUBLIC_VIEW_VALUES.landing,
         leaderboard: {
@@ -940,6 +962,7 @@
 
     const getRosterBenchSuggestionModel = (roster) => {
         if (getRosterTrackingMode(roster) !== "cwl") return null;
+        if (isCwlPreparationActivePublic_(roster)) return null;
         const raw = roster && typeof roster === "object" && roster.benchSuggestions && typeof roster.benchSuggestions === "object"
             ? roster.benchSuggestions
             : null;
@@ -4078,11 +4101,12 @@
         const hideSuggestions = !!options.hideSuggestions;
         const expandMissingByDefault = !!options.expandMissingByDefault;
         const trackingMode = getRosterTrackingMode(roster);
+        const prepActive = trackingMode === "cwl" && isCwlPreparationActivePublic_(roster);
         const mainPlayers = Array.isArray(roster && roster.main) ? roster.main : [];
         const subPlayers = Array.isArray(roster && roster.subs) ? roster.subs : [];
         const missingPlayers = Array.isArray(roster && roster.missing) ? roster.missing : [];
         const clanProfileUrl = getClanProfileUrl(roster && roster.connectedClanTag);
-        const suggestionModel = hideSuggestions || trackingMode !== "cwl" ? null : getRosterBenchSuggestionModel(roster);
+        const suggestionModel = hideSuggestions || prepActive || trackingMode !== "cwl" ? null : getRosterBenchSuggestionModel(roster);
         const regularWarData = roster && roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : {};
         const regularWarCurrentMeta = regularWarData.currentWar && typeof regularWarData.currentWar === "object" ? regularWarData.currentWar : {};
         const regularWarAggregateMeta = regularWarData.aggregateMeta && typeof regularWarData.aggregateMeta === "object"
@@ -4113,6 +4137,9 @@
         const meta = el("div", "roster-meta");
         meta.appendChild(bMain);
         meta.appendChild(bSubs);
+        if (prepActive) {
+            meta.appendChild(el("span", "badge roster-prep-public-badge", "Showing planned CWL Rosters"));
+        }
         if (trackingMode === "regularWar") {
             meta.appendChild(el("span", "badge", "Missing: " + toStr(roster.badges && roster.badges.missing)));
             if (regularWarLiveUnavailable) {
@@ -4161,7 +4188,7 @@
             warning.appendChild(el("div", "roster-data-warning__text", warningParts.join(" ")));
             card.appendChild(warning);
         }
-        if (!hideSuggestions && trackingMode === "cwl") {
+        if (!hideSuggestions && trackingMode === "cwl" && !prepActive) {
             const suggestionBanner = renderRosterSuggestionBanner(roster, suggestionModel);
             if (suggestionBanner) card.appendChild(suggestionBanner);
         }

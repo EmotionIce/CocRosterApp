@@ -1738,11 +1738,71 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 		addIssueForState(state, stepLabel, "skipped because previous step failed" + suffix + ".");
 	};
 
+	const getStepFailureMessageForState_ = (stepResultRaw, stepLabelRaw) => {
+		const stepResult = stepResultRaw && typeof stepResultRaw === "object" ? stepResultRaw : {};
+		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
+		let message = "";
+
+		const stepError = Object.prototype.hasOwnProperty.call(stepResult, "error") ? stepResult.error : null;
+		if (stepError && typeof stepError === "object") {
+			message = errorMessage_(stepError);
+		} else if (stepError != null) {
+			message = String(stepError);
+		}
+
+		const result = stepResult.result && typeof stepResult.result === "object" ? stepResult.result : {};
+		if (!message) {
+			message = String(result.warRefreshError == null ? "" : result.warRefreshError).trim();
+		}
+		if (!message) {
+			const resultError = Object.prototype.hasOwnProperty.call(result, "error") ? result.error : null;
+			if (resultError && typeof resultError === "object") {
+				message = errorMessage_(resultError);
+			} else if (resultError != null) {
+				message = String(resultError);
+			}
+		}
+		if (!message) {
+			message = String(result.message == null ? "" : result.message).trim();
+		}
+		if (!message) {
+			message = stepLabel + " failed.";
+		}
+		return message;
+	};
+
 	const runStepWithRollbackForState = (state, stepLabelRaw, stepFn) => {
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
 		const beforeStep = cloneRosterDataForRefresh_(rosterData);
 		try {
 			const stepResult = stepFn();
+			const stepReportedFailure = !!(stepResult && typeof stepResult === "object" && stepResult.ok === false);
+			if (stepReportedFailure) {
+				let failureRosterData = null;
+				let failureRosterValidationErr = null;
+				if (stepResult && typeof stepResult === "object" && stepResult.rosterData) {
+					try {
+						failureRosterData = validateRosterData_(stepResult.rosterData);
+					} catch (validationErr) {
+						failureRosterValidationErr = validationErr;
+					}
+				}
+				if (failureRosterData) {
+					rosterData = failureRosterData;
+				} else {
+					rosterData = beforeStep;
+				}
+				const failureMessage = failureRosterValidationErr
+					? stepLabel + " failed and returned invalid rosterData: " + errorMessage_(failureRosterValidationErr)
+					: getStepFailureMessageForState_(stepResult, stepLabel);
+				const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabel, new Error(failureMessage), rosterData);
+				addIssueForState(state, stepLabel, detailedMessage);
+				return {
+					ok: false,
+					result: stepResult,
+					error: failureRosterValidationErr || (stepResult && stepResult.error ? stepResult.error : new Error(detailedMessage)),
+				};
+			}
 			if (stepResult && stepResult.rosterData) {
 				rosterData = stepResult.rosterData;
 			}
@@ -1765,6 +1825,7 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 			rosterId: rosterId,
 			rosterName: rosterTitle ? rosterTitle : rosterId,
 			trackingMode: trackingMode,
+			prepActive: trackingMode === "cwl" && !!(currentRoster && isCwlPreparationActive_(currentRoster)),
 			poolStepLabel: "sync clan roster pool",
 			lineupStepLabel: trackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup",
 			statsStepLabel: trackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats",
@@ -1805,7 +1866,10 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 				state.poolStepOk = false;
 			}
 		} else if (state.nextStepIndex === 1) {
-			if (!state.hasConnectedClanTag || !state.poolStepOk) {
+			if (state.trackingMode === "cwl" && state.prepActive) {
+				state.lineupStepOk = true;
+				Logger.log("autoRefresh: roster '%s' lineup sync intentionally suppressed because CWL Preparation Mode is active.", state.rosterId);
+			} else if (!state.hasConnectedClanTag || !state.poolStepOk) {
 				addSkippedIssueForState(state, state.lineupStepLabel, state.poolStepLabel);
 			} else {
 				const syncTodayStep = runStepWithRollbackForState(state, state.lineupStepLabel, () => syncClanTodayLineupInternal_(rosterData, state.rosterId, pipelinePrefetchOptions));
@@ -1828,7 +1892,9 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 				state.statsStepOk = !!statsStep.ok;
 			}
 		} else if (state.nextStepIndex === 3 && state.trackingMode === "cwl") {
-			if (!state.hasConnectedClanTag || !state.poolStepOk || !state.lineupStepOk || !state.statsStepOk) {
+			if (state.prepActive) {
+				Logger.log("autoRefresh: roster '%s' bench suggestions intentionally suppressed because CWL Preparation Mode is active.", state.rosterId);
+			} else if (!state.hasConnectedClanTag || !state.poolStepOk || !state.lineupStepOk || !state.statsStepOk) {
 				const failedStepLabel = !state.poolStepOk || !state.hasConnectedClanTag ? state.poolStepLabel : !state.lineupStepOk ? state.lineupStepLabel : state.statsStepLabel;
 				addSkippedIssueForState(state, state.benchStepLabel, failedStepLabel);
 			} else {
@@ -2338,6 +2404,10 @@ const PLAYER_PROFILE_CACHE_TTL_SECONDS = 300;
 const TOWN_HALL_ICON_CACHE_TTL_SECONDS = 3600;
 const LEAGUE_ICON_CACHE_TTL_SECONDS = 3600;
 const LEAGUE_ICON_CACHE_VERSION = "v4";
+const CWL_PREPARATION_ALGORITHM = "strength_top_x_v1";
+const CWL_PREPARATION_MIN_ROSTER_SIZE = 5;
+const CWL_PREPARATION_MAX_ROSTER_SIZE = 50;
+const CWL_PREPARATION_ROSTER_SIZE_STEP = 5;
 // How long to retain a member's tracking data after they stop appearing in the roster.
 // This is intentionally long (e.g., 28 days) to avoid losing war history for temporary departures.
 const REGULAR_WAR_MISSING_GRACE_MS = 28 * 24 * 60 * 60 * 1000; // 28 days
@@ -5481,6 +5551,372 @@ function clearRosterBenchSuggestions_(roster) {
 	}
 }
 
+function normalizePreparationRosterSize_(rawValue, fallbackValue) {
+	const normalize = (value) => {
+		const n = Number(value);
+		if (!isFinite(n)) return 0;
+		const floored = Math.floor(n);
+		if (floored <= 0) return 0;
+		const snapped = Math.floor(floored / CWL_PREPARATION_ROSTER_SIZE_STEP) * CWL_PREPARATION_ROSTER_SIZE_STEP;
+		if (snapped <= 0) return 0;
+		return Math.max(CWL_PREPARATION_MIN_ROSTER_SIZE, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE, snapped));
+	};
+	const primary = normalize(rawValue);
+	if (primary) return primary;
+	const fallback = normalize(fallbackValue);
+	if (fallback) return fallback;
+	return CWL_PREPARATION_MIN_ROSTER_SIZE;
+}
+
+function normalizePreparationLockState_(rawValue, rosterPoolTagSetRaw) {
+	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+	const out = {};
+	const keys = Object.keys(raw);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag || !rosterPoolTagSet[tag]) continue;
+		const state = String(raw[keys[i]] == null ? "" : raw[keys[i]])
+			.trim()
+			.toLowerCase();
+		if (state !== "lockedin" && state !== "lockedout") continue;
+		out[tag] = state === "lockedin" ? "lockedIn" : "lockedOut";
+	}
+	return out;
+}
+
+function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingModeRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : null;
+	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+	const trackingMode = String(trackingModeRaw == null ? "" : trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+	const defaultRosterSize = normalizePreparationRosterSize_(options.defaultRosterSize, CWL_PREPARATION_MIN_ROSTER_SIZE);
+	const lockStateByTag = normalizePreparationLockState_(raw && raw.lockStateByTag, rosterPoolTagSet);
+	const lockTags = Object.keys(lockStateByTag);
+	const enabledRaw = raw ? toBooleanFlag_(raw.enabled) : false;
+	const enabled = trackingMode === "cwl" ? enabledRaw : false;
+	const rosterSize = normalizePreparationRosterSize_(raw && raw.rosterSize, defaultRosterSize);
+	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
+	if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
+		throw new Error("CWL Preparation Mode invalid: lockedIn count (" + lockedInCount + ") exceeds roster size (" + rosterSize + ").");
+	}
+	const lastAppliedAt = raw && typeof raw.lastAppliedAt === "string" ? raw.lastAppliedAt.trim() : "";
+	const hasSource = !!raw;
+	const hasMeaningfulContent = hasSource || enabled || lockTags.length > 0;
+	if (!hasMeaningfulContent) return null;
+	const out = {
+		enabled: enabled,
+		rosterSize: rosterSize,
+		lockStateByTag: lockStateByTag,
+		algorithm: CWL_PREPARATION_ALGORITHM,
+	};
+	if (lastAppliedAt) out.lastAppliedAt = lastAppliedAt;
+	return out;
+}
+
+function collectRosterPoolPlayersWithSection_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const main = Array.isArray(roster.main) ? roster.main : [];
+	const subs = Array.isArray(roster.subs) ? roster.subs : [];
+	const missing = Array.isArray(roster.missing) ? roster.missing : [];
+	const sections = [
+		{ key: "main", players: main },
+		{ key: "subs", players: subs },
+		{ key: "missing", players: missing },
+	];
+	const out = [];
+	const seen = {};
+	let order = 0;
+	for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+		const section = sections[sectionIndex];
+		const players = Array.isArray(section.players) ? section.players : [];
+		for (let i = 0; i < players.length; i++) {
+			const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+			const tag = normalizeTag_(player.tag);
+			if (!tag || seen[tag]) continue;
+			seen[tag] = true;
+			out.push({
+				tag: tag,
+				player: player,
+				sourceSection: section.key,
+				sourceIndex: i,
+				sourceOrder: order++,
+			});
+		}
+	}
+	return out;
+}
+
+function getRosterCwlPreparation_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const trackingMode = getRosterTrackingMode_(roster);
+	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
+	const rosterPoolTagSet = {};
+	for (let i = 0; i < poolEntries.length; i++) rosterPoolTagSet[poolEntries[i].tag] = true;
+	const fallbackRosterSize = normalizePreparationRosterSize_(
+		Array.isArray(roster.main) ? roster.main.length : 0,
+		CWL_PREPARATION_MIN_ROSTER_SIZE,
+	);
+	const sanitized =
+		sanitizeRosterCwlPreparation_(roster.cwlPreparation, rosterPoolTagSet, trackingMode, {
+			defaultRosterSize: fallbackRosterSize,
+			enforceLockedInLimit: true,
+		}) || {
+			enabled: false,
+			rosterSize: fallbackRosterSize,
+			lockStateByTag: {},
+			algorithm: CWL_PREPARATION_ALGORITHM,
+		};
+	if (!sanitized.lockStateByTag || typeof sanitized.lockStateByTag !== "object") sanitized.lockStateByTag = {};
+	if (!sanitized.algorithm) sanitized.algorithm = CWL_PREPARATION_ALGORITHM;
+	return sanitized;
+}
+
+function isCwlPreparationActive_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	if (getRosterTrackingMode_(roster) !== "cwl") return false;
+	const prep = getRosterCwlPreparation_(roster);
+	return !!(prep && prep.enabled);
+}
+
+function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const poolEntries = Array.isArray(options.poolEntries) ? options.poolEntries : collectRosterPoolPlayersWithSection_(roster);
+	const cwlStatsByTag = roster && roster.cwlStats && roster.cwlStats.byTag && typeof roster.cwlStats.byTag === "object" ? roster.cwlStats.byTag : {};
+	const config = options.config && typeof options.config === "object" ? options.config : getBenchPlannerConfig_();
+	const ranked = [];
+	let thMin = Number.MAX_SAFE_INTEGER;
+	let thMax = 0;
+	let sumThreeStarRate = 0;
+	let sumMissRate = 0;
+	let meanCount = 0;
+	for (let i = 0; i < poolEntries.length; i++) {
+		const entry = poolEntries[i] && typeof poolEntries[i] === "object" ? poolEntries[i] : {};
+		const player = entry.player && typeof entry.player === "object" ? entry.player : {};
+		const tag = normalizeTag_(entry.tag || player.tag);
+		if (!tag) continue;
+		const metrics = deriveCwlMetrics_(cwlStatsByTag[tag]);
+		const th = toNonNegativeInt_(player.th);
+		const playerStats = {
+			tag: tag,
+			th: th,
+			countedAttacks: metrics.countedAttacks,
+			resolvedWarDays: metrics.resolvedWarDays,
+			starsPerf: metrics.starsPerf,
+			destructionPerf: metrics.destructionPerf,
+			threeStarCount: metrics.threeStarCount,
+			hitUpCount: metrics.hitUpCount,
+			sameThHitCount: metrics.sameThHitCount,
+			missedAttacks: metrics.missedAttacks,
+		};
+		ranked.push({
+			tag: tag,
+			player: player,
+			th: th,
+			sourceSection: entry.sourceSection || "subs",
+			sourceOrder: toNonNegativeInt_(entry.sourceOrder),
+			playerStats: playerStats,
+			strengthScore: Number.NEGATIVE_INFINITY,
+			strengthComponents: null,
+		});
+		thMin = Math.min(thMin, th);
+		thMax = Math.max(thMax, th);
+		sumThreeStarRate += toNonNegativeInt_(metrics.threeStarCount) / Math.max(1, toNonNegativeInt_(metrics.countedAttacks));
+		sumMissRate += toNonNegativeInt_(metrics.missedAttacks) / Math.max(1, toNonNegativeInt_(metrics.resolvedWarDays));
+		meanCount++;
+	}
+	if (!ranked.length) {
+		return {
+			ranked: [],
+			byTag: {},
+		};
+	}
+	if (thMin === Number.MAX_SAFE_INTEGER) thMin = 0;
+	const planningContext = {
+		thMin: thMin,
+		thMax: thMax,
+		poolThreeStarRateMean: meanCount > 0 ? sumThreeStarRate / meanCount : 0.33,
+		poolMissRateMean: meanCount > 0 ? sumMissRate / meanCount : 0.1,
+	};
+	const sectionPriority = { main: 0, subs: 1, missing: 2 };
+	for (let i = 0; i < ranked.length; i++) {
+		const strength = computeStrengthScore_(ranked[i].playerStats, planningContext, config);
+		const score = strength && isFinite(Number(strength.score)) ? Number(strength.score) : Number.NEGATIVE_INFINITY;
+		ranked[i].strengthScore = score;
+		ranked[i].strengthComponents = strength && typeof strength === "object" ? strength : null;
+	}
+	ranked.sort((left, right) => {
+		const leftScore = isFinite(Number(left && left.strengthScore)) ? Number(left.strengthScore) : Number.NEGATIVE_INFINITY;
+		const rightScore = isFinite(Number(right && right.strengthScore)) ? Number(right.strengthScore) : Number.NEGATIVE_INFINITY;
+		if (leftScore !== rightScore) return rightScore - leftScore;
+		const leftTh = toNonNegativeInt_(left && left.th);
+		const rightTh = toNonNegativeInt_(right && right.th);
+		if (leftTh !== rightTh) return rightTh - leftTh;
+		const leftPriority = Object.prototype.hasOwnProperty.call(sectionPriority, left && left.sourceSection) ? sectionPriority[left.sourceSection] : 9;
+		const rightPriority = Object.prototype.hasOwnProperty.call(sectionPriority, right && right.sourceSection) ? sectionPriority[right.sourceSection] : 9;
+		if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+		const leftOrder = toNonNegativeInt_(left && left.sourceOrder);
+		const rightOrder = toNonNegativeInt_(right && right.sourceOrder);
+		if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+		return compareTagsAsc_(left && left.tag, right && right.tag);
+	});
+	const byTag = {};
+	for (let i = 0; i < ranked.length; i++) byTag[ranked[i].tag] = ranked[i];
+	return {
+		ranked: ranked,
+		byTag: byTag,
+	};
+}
+
+function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster) throw new Error("Roster is required.");
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const trackingMode = getRosterTrackingMode_(roster);
+	if (!Array.isArray(roster.main)) roster.main = [];
+	if (!Array.isArray(roster.subs)) roster.subs = [];
+	if (!Array.isArray(roster.missing)) roster.missing = [];
+
+	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
+	const rosterPoolTagSet = {};
+	for (let i = 0; i < poolEntries.length; i++) rosterPoolTagSet[poolEntries[i].tag] = true;
+	const fallbackRosterSize = normalizePreparationRosterSize_(
+		Array.isArray(roster.main) ? roster.main.length : 0,
+		CWL_PREPARATION_MIN_ROSTER_SIZE,
+	);
+	const prep =
+		sanitizeRosterCwlPreparation_(roster.cwlPreparation, rosterPoolTagSet, trackingMode, {
+			defaultRosterSize: fallbackRosterSize,
+			enforceLockedInLimit: options.enforceLockedInLimit !== false,
+		}) || {
+			enabled: false,
+			rosterSize: fallbackRosterSize,
+			lockStateByTag: {},
+			algorithm: CWL_PREPARATION_ALGORITHM,
+		};
+	if (!prep.lockStateByTag || typeof prep.lockStateByTag !== "object") prep.lockStateByTag = {};
+	prep.algorithm = CWL_PREPARATION_ALGORITHM;
+
+	const lockStateByTag = prep.lockStateByTag;
+	const lockTags = Object.keys(lockStateByTag);
+	let lockedInCount = 0;
+	let lockedOutCount = 0;
+	for (let i = 0; i < lockTags.length; i++) {
+		if (lockStateByTag[lockTags[i]] === "lockedIn") lockedInCount++;
+		else if (lockStateByTag[lockTags[i]] === "lockedOut") lockedOutCount++;
+	}
+
+	const beforeMainTags = roster.main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const beforeSubsTags = roster.subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const beforeMissingTags = roster.missing.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+
+	if (trackingMode !== "cwl" || !prep.enabled) {
+		prep.enabled = false;
+		roster.cwlPreparation = prep;
+		return {
+			enabled: false,
+			rosterSize: prep.rosterSize,
+			filledMainCount: beforeMainTags.length,
+			underfilled: false,
+			lockedInCount: lockedInCount,
+			lockedOutCount: lockedOutCount,
+			autoSelectedCount: Math.max(0, beforeMainTags.length - lockedInCount),
+			changed: false,
+			cwlPreparationBlocked: false,
+		};
+	}
+
+	if (lockedInCount > prep.rosterSize) {
+		throw new Error("CWL Preparation Mode invalid: lockedIn count (" + lockedInCount + ") exceeds roster size (" + prep.rosterSize + ").");
+	}
+
+	const ranking = buildCwlPreparationRanking_(roster, { poolEntries: poolEntries });
+	const ranked = Array.isArray(ranking.ranked) ? ranking.ranked : [];
+	const rankedByTag = ranking.byTag && typeof ranking.byTag === "object" ? ranking.byTag : {};
+	const lockedInEntries = [];
+	const selectedSet = {};
+	for (let i = 0; i < lockTags.length; i++) {
+		const tag = lockTags[i];
+		if (lockStateByTag[tag] !== "lockedIn") continue;
+		const entry = rankedByTag[tag];
+		if (!entry || !entry.player) continue;
+		lockedInEntries.push(entry);
+		selectedSet[tag] = true;
+	}
+	lockedInEntries.sort((left, right) => {
+		const leftScore = isFinite(Number(left && left.strengthScore)) ? Number(left.strengthScore) : Number.NEGATIVE_INFINITY;
+		const rightScore = isFinite(Number(right && right.strengthScore)) ? Number(right.strengthScore) : Number.NEGATIVE_INFINITY;
+		if (leftScore !== rightScore) return rightScore - leftScore;
+		const leftTh = toNonNegativeInt_(left && left.th);
+		const rightTh = toNonNegativeInt_(right && right.th);
+		if (leftTh !== rightTh) return rightTh - leftTh;
+		return compareTagsAsc_(left && left.tag, right && right.tag);
+	});
+	const nextMain = [];
+	for (let i = 0; i < lockedInEntries.length; i++) nextMain.push(lockedInEntries[i].player);
+
+	let remainingSlots = Math.max(0, prep.rosterSize - nextMain.length);
+	for (let i = 0; i < ranked.length && remainingSlots > 0; i++) {
+		const entry = ranked[i];
+		const tag = entry && entry.tag ? entry.tag : "";
+		if (!tag || selectedSet[tag]) continue;
+		if (lockStateByTag[tag] === "lockedOut") continue;
+		nextMain.push(entry.player);
+		selectedSet[tag] = true;
+		remainingSlots--;
+	}
+	const nextSubs = [];
+	for (let i = 0; i < ranked.length; i++) {
+		const entry = ranked[i];
+		const tag = entry && entry.tag ? entry.tag : "";
+		if (!tag || selectedSet[tag]) continue;
+		nextSubs.push(entry.player);
+	}
+
+	roster.main = nextMain;
+	roster.subs = nextSubs;
+	roster.missing = [];
+	normalizeRosterSlots_(roster);
+	const dedupeResult = dedupeRosterSectionsByTag_(roster);
+	if (dedupeResult.changed) {
+		Logger.log(
+			"applyCwlPreparationRebalance_ deduped roster '%s': removed %s duplicate(s). %s",
+			String((roster && roster.id) || "").trim() || "unknown",
+			dedupeResult.removedCount,
+			summarizeRosterSectionDedupe_(dedupeResult, 6),
+		);
+	}
+
+	const afterMainTags = roster.main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const afterSubsTags = roster.subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const afterMissingTags = roster.missing.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const compositionChanged =
+		beforeMainTags.join("|") !== afterMainTags.join("|") ||
+		beforeSubsTags.join("|") !== afterSubsTags.join("|") ||
+		beforeMissingTags.join("|") !== afterMissingTags.join("|") ||
+		!!dedupeResult.changed;
+	if (compositionChanged) {
+		clearRosterBenchSuggestions_(roster);
+	}
+
+	if (options.recordAppliedAt !== false) {
+		prep.lastAppliedAt = new Date().toISOString();
+	}
+	roster.cwlPreparation = prep;
+	return {
+		enabled: true,
+		rosterSize: prep.rosterSize,
+		filledMainCount: afterMainTags.length,
+		underfilled: afterMainTags.length < prep.rosterSize,
+		lockedInCount: lockedInCount,
+		lockedOutCount: lockedOutCount,
+		autoSelectedCount: Math.max(0, afterMainTags.length - lockedInCount),
+		changed: compositionChanged,
+		cwlPreparationBlocked: false,
+	};
+}
+
 function findRosterById_(rosterData, rosterIdRaw) {
 	const rosterDataSafe = validateRosterData_(rosterData);
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
@@ -5572,7 +6008,9 @@ function mapLeagueGroupDataForClan_(clanTagRaw, leaguegroupRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
 	const data = leaguegroupRaw && typeof leaguegroupRaw === "object" ? leaguegroupRaw : {};
-	const clans = Array.isArray(data && data.clans) ? data.clans : [];
+	const hasClansArray = Array.isArray(data && data.clans);
+	const hasRoundsArray = Array.isArray(data && data.rounds);
+	const clans = hasClansArray ? data.clans : [];
 	let clanEntry = null;
 	for (let i = 0; i < clans.length; i++) {
 		const c = clans[i] && typeof clans[i] === "object" ? clans[i] : {};
@@ -5582,6 +6020,7 @@ function mapLeagueGroupDataForClan_(clanTagRaw, leaguegroupRaw) {
 		}
 	}
 	return {
+		isMalformed: !hasClansArray || !hasRoundsArray,
 		clanFound: !!clanEntry,
 		members: mapApiMembers_(clanEntry && clanEntry.members),
 		warTags: extractLeagueGroupWarTags_(data),
@@ -5924,7 +6363,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 			? metricsRunState.profileRunState
 			: (metricsRunState.profileRunState = {})
 		: null;
-	const metricsWorkingRosterData = shouldRecordMetrics
+	let metricsCommittedRosterData = shouldRecordMetrics
 		? { playerMetrics: sanitizePlayerMetricsStore_(rosterData && rosterData.playerMetrics, snapshotStartedAtIso) }
 		: null;
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -5938,6 +6377,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const memberTrackingByRosterId = {};
 	const memberTrackingByClanTag = {};
 	const stagedMemberTrackingByClanTag = {};
+	const committedMetricsByClanTag = {};
 	const poolSyncErrorByTag = {};
 	const metricsErrorByTag = {};
 
@@ -6005,8 +6445,11 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 				}
 			}
 
-			if (!poolSyncErrorByTag[clanTag] && shouldRecordMetrics) {
+			if (!poolSyncErrorByTag[clanTag] && shouldRecordMetrics && metricsCommittedRosterData) {
 				try {
+					const metricsWorkingCopy = {
+						playerMetrics: sanitizePlayerMetricsStore_(metricsCommittedRosterData.playerMetrics, snapshotStartedAtIso),
+					};
 					const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
 						mode: metricsProfileMode,
 						runState: metricsProfileRunState,
@@ -6015,12 +6458,14 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						source: "buildLiveRosterOwnershipSnapshot",
 					});
 					const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
-					const metricsRecord = recordClanMemberMetricsSnapshot_(metricsWorkingRosterData, clanTag, metricsMembers, {
+					const metricsRecord = recordClanMemberMetricsSnapshot_(metricsWorkingCopy, clanTag, metricsMembers, {
 						capturedAt: clanSnapshot && clanSnapshot.capturedAt,
 						runState: metricsRunState,
 						sourceRosterId: rosterId,
 						source: "buildLiveRosterOwnershipSnapshot",
 					});
+					metricsCommittedRosterData = metricsWorkingCopy;
+					committedMetricsByClanTag[clanTag] = true;
 					const stagedTracking = {
 						clanTag: clanTag,
 						rosterId: rosterId,
@@ -6030,7 +6475,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						recorded: toNonNegativeInt_(metricsRecord && metricsRecord.recorded),
 						updated: toNonNegativeInt_(metricsRecord && metricsRecord.updated),
 						errors: [],
-						entryCount: countPlayerMetricsEntries_(metricsWorkingRosterData && metricsWorkingRosterData.playerMetrics),
+						entryCount: countPlayerMetricsEntries_(metricsCommittedRosterData && metricsCommittedRosterData.playerMetrics),
 						profileEnriched: toNonNegativeInt_(enriched && enriched.enriched),
 						profileAttempted: toNonNegativeInt_(enriched && enriched.attempted),
 						metricsProfileMode: metricsProfileMode,
@@ -6048,7 +6493,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						recorded: 0,
 						updated: 0,
 						errors: [{ clanTag: clanTag, message: errorMessage_(err) }],
-						entryCount: countPlayerMetricsEntries_(metricsWorkingRosterData && metricsWorkingRosterData.playerMetrics),
+						entryCount: countPlayerMetricsEntries_(metricsCommittedRosterData && metricsCommittedRosterData.playerMetrics),
 						profileEnriched: 0,
 						profileAttempted: 0,
 						metricsProfileMode: metricsProfileMode,
@@ -6080,60 +6525,16 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		memberTagSetByRosterId[rosterId] = tagSet;
 	}
 
-	const committedMetricsByClanTag = {};
-	let metricsCommitFailedClanCount = 0;
-	if (shouldRecordMetrics && metricsWorkingRosterData) {
-		const failedClanTagSet = {};
-		const poolSyncErrorTags = Object.keys(poolSyncErrorByTag);
-		for (let i = 0; i < poolSyncErrorTags.length; i++) failedClanTagSet[poolSyncErrorTags[i]] = true;
-		const metricsErrorTags = Object.keys(metricsErrorByTag);
-		for (let i = 0; i < metricsErrorTags.length; i++) failedClanTagSet[metricsErrorTags[i]] = true;
-		metricsCommitFailedClanCount = Object.keys(failedClanTagSet).length;
-		if (metricsCommitFailedClanCount < 1) {
-			rosterData.playerMetrics = sanitizePlayerMetricsStore_(metricsWorkingRosterData.playerMetrics, new Date().toISOString());
-			const trackedClanTags = Object.keys(stagedMemberTrackingByClanTag);
-			for (let i = 0; i < trackedClanTags.length; i++) {
-				const clanTag = trackedClanTags[i];
-				if (!clanTag || poolSyncErrorByTag[clanTag] || metricsErrorByTag[clanTag]) continue;
-				committedMetricsByClanTag[clanTag] = true;
-			}
-		} else {
-			Logger.log(
-				"buildLiveRosterOwnershipSnapshot: discarding staged playerMetrics updates because %s connected clan(s) failed during snapshot build.",
-				metricsCommitFailedClanCount,
-			);
-		}
+	if (shouldRecordMetrics && metricsCommittedRosterData) {
+		rosterData.playerMetrics = sanitizePlayerMetricsStore_(metricsCommittedRosterData.playerMetrics, new Date().toISOString());
 	}
 	const committedEntryCount = countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics);
 	const trackedClanTags = Object.keys(stagedMemberTrackingByClanTag);
 	for (let i = 0; i < trackedClanTags.length; i++) {
 		const clanTag = trackedClanTags[i];
 		const stagedTracking = stagedMemberTrackingByClanTag[clanTag] && typeof stagedMemberTrackingByClanTag[clanTag] === "object" ? stagedMemberTrackingByClanTag[clanTag] : {};
-		const hasPoolSyncError = !!(poolSyncErrorByTag[clanTag] && typeof poolSyncErrorByTag[clanTag] === "object");
-		const hasMetricsError = !!(metricsErrorByTag[clanTag] && typeof metricsErrorByTag[clanTag] === "object");
 		const committed = !!committedMetricsByClanTag[clanTag];
 		const errors = Array.isArray(stagedTracking.errors) ? stagedTracking.errors.slice() : [];
-
-		if (!committed && !hasPoolSyncError && !hasMetricsError && toNonNegativeInt_(stagedTracking.capturedClans) > 0) {
-			const warningMessage =
-				metricsCommitFailedClanCount > 0
-					? "staged metrics were not committed because " + metricsCommitFailedClanCount + " connected clan(s) failed during snapshot build."
-					: "staged metrics were not committed during snapshot finalization.";
-			errors.push({
-				clanTag: clanTag,
-				message: warningMessage,
-				severity: "warning",
-				type: "metricsCommitSkipped",
-			});
-			if (!metricsErrorByTag[clanTag]) {
-				metricsErrorByTag[clanTag] = {
-					clanTag: clanTag,
-					rosterId: String(stagedTracking.rosterId == null ? "" : stagedTracking.rosterId).trim(),
-					step: "commit staged metrics",
-					message: warningMessage,
-				};
-			}
-		}
 
 		memberTrackingByClanTag[clanTag] = {
 			clanTag: clanTag,
@@ -6908,6 +7309,35 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 	};
 }
 
+function buildCwlLineupUnavailableNoopResult_(rosterRaw, unavailableReasonRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const result = {
+		mode: "cwl",
+		activeSet: Array.isArray(roster.main) ? roster.main.length : 0,
+		benched: Array.isArray(roster.subs) ? roster.subs.length : 0,
+		updated: 0,
+		message: "no current CWL war found",
+	};
+	const unavailableReason = String(unavailableReasonRaw == null ? "" : unavailableReasonRaw).trim();
+	if (unavailableReason) result.unavailableReason = unavailableReason;
+	return result;
+}
+
+function buildCwlStatsUnavailableNoopResult_(unavailableReasonRaw, messageRaw) {
+	const unavailableReason = String(unavailableReasonRaw == null ? "" : unavailableReasonRaw).trim();
+	const message = String(messageRaw == null ? "" : messageRaw).trim() || "CWL unavailable; stats unchanged";
+	const result = {
+		mode: "cwl",
+		warsProcessed: 0,
+		playersTracked: 0,
+		cwlUnavailable: true,
+		statsUnchanged: true,
+		message: message,
+	};
+	if (unavailableReason) result.unavailableReason = unavailableReason;
+	return result;
+}
+
 function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw, optionsRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const warTags = Array.isArray(warTagsRaw) ? warTagsRaw : [];
@@ -6920,12 +7350,22 @@ function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw, optionsRaw) {
 
 		let war = null;
 		if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarErrorByTag, warTag)) {
-			throw prefetchedCwlWarErrorByTag[warTag];
+			const prefetchedErr = prefetchedCwlWarErrorByTag[warTag];
+			if (prefetchedErr && Number(prefetchedErr.statusCode) === 404) continue;
+			throw prefetchedErr;
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarRawByTag, warTag)) {
 			war = prefetchedCwlWarRawByTag[warTag];
 		} else {
-			war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+			try {
+				war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+			} catch (err) {
+				if (err && Number(err.statusCode) === 404) continue;
+				throw err;
+			}
+		}
+		if (!war || typeof war !== "object" || Array.isArray(war)) {
+			throw new Error("Invalid CWL war payload for war tag " + warTag + ".");
 		}
 		const state = String((war && war.state) || "").toLowerCase();
 		if (state !== "preparation" && state !== "inwar") continue;
@@ -7094,6 +7534,10 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 	if (result && typeof result === "object") {
 		result.memberTracking = memberTrackingByRosterId[ctx.rosterId] && typeof memberTrackingByRosterId[ctx.rosterId] === "object" ? memberTrackingByRosterId[ctx.rosterId] : null;
 	}
+	if (ctx.trackingMode === "cwl" && isCwlPreparationActive_(ctx.roster)) {
+		const prepSummary = applyCwlPreparationRebalance_(ctx.roster, { enforceLockedInLimit: true, recordAppliedAt: true });
+		if (result && typeof result === "object") result.cwlPreparation = prepSummary;
+	}
 	updateWarPerformanceMembership_(ctx.roster, nowIso);
 	const outRosterData = validateRosterData_(ctx.rosterData);
 	return { ok: true, rosterData: outRosterData, result: result };
@@ -7123,6 +7567,23 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {};
 	const prefetchedCwlWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
 	const prefetchedCwlWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
+	if (ctx.trackingMode === "cwl" && isCwlPreparationActive_(ctx.roster)) {
+		const prep = getRosterCwlPreparation_(ctx.roster);
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: {
+				mode: "cwl",
+				activeSet: Array.isArray(ctx.roster.main) ? ctx.roster.main.length : 0,
+				benched: Array.isArray(ctx.roster.subs) ? ctx.roster.subs.length : 0,
+				updated: 0,
+				cwlPreparationBlocked: true,
+				rosterSize: normalizePreparationRosterSize_(prep && prep.rosterSize, CWL_PREPARATION_MIN_ROSTER_SIZE),
+				message: "CWL Preparation Mode active; live CWL lineup sync blocked",
+			},
+		};
+	}
 	if (ctx.trackingMode === "regularWar") {
 		let currentWar = null;
 		if (Object.prototype.hasOwnProperty.call(prefetchedRegularWarErrorByClanTag, ctx.clanTag)) {
@@ -7208,14 +7669,35 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			leaguegroup = fetchLeagueGroupData_(ctx.clanTag);
 		}
 	} catch (err) {
-		if (err && err.statusCode === 404) {
-			throw new Error("No CWL league group found (404). Sync today lineup requires an active CWL league group.");
+		if (err && Number(err.statusCode) === 404) {
+			const outRosterData = validateRosterData_(ctx.rosterData);
+			return {
+				ok: true,
+				rosterData: outRosterData,
+				result: buildCwlLineupUnavailableNoopResult_(ctx.roster, "leagueGroup404"),
+			};
 		}
 		throw err;
 	}
 
-	if (!leaguegroup || !leaguegroup.clanFound) {
-		throw new Error("Connected clan is not present in the current CWL league group.");
+	if (!leaguegroup || leaguegroup.isMalformed) {
+		throw new Error("Invalid CWL league group payload.");
+	}
+	if (!leaguegroup.clanFound) {
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: buildCwlLineupUnavailableNoopResult_(ctx.roster, "clanNotInLeagueGroup"),
+		};
+	}
+	if (!Array.isArray(leaguegroup.warTags) || !leaguegroup.warTags.length) {
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: buildCwlLineupUnavailableNoopResult_(ctx.roster, "noWarTags"),
+		};
 	}
 
 	const currentWar = findCurrentCwlWarForClan_(ctx.clanTag, leaguegroup.warTags, {
@@ -7223,10 +7705,11 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		prefetchedCwlWarErrorByTag: prefetchedCwlWarErrorByTag,
 	});
 	if (!currentWar) {
+		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
 			ok: true,
-			rosterData: ctx.rosterData,
-			result: { mode: "cwl", activeSet: 0, benched: 0, updated: 0, message: "no current CWL war found" },
+			rosterData: outRosterData,
+			result: buildCwlLineupUnavailableNoopResult_(ctx.roster, "noUsableWars"),
 		};
 	}
 
@@ -7260,7 +7743,6 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	const prefetchedCwlWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
 	const prefetchedCwlWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
 	const nowIso = new Date().toISOString();
-	const warPerformance = prepareWarPerformanceForRefresh_(ctx.roster, nowIso);
 	let leaguegroup = null;
 	try {
 		if (Object.prototype.hasOwnProperty.call(prefetchedLeaguegroupErrorByClanTag, ctx.clanTag)) {
@@ -7272,39 +7754,108 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			leaguegroup = cocFetch_("/clans/" + encodeTagForPath_(ctx.clanTag) + "/currentwar/leaguegroup");
 		}
 	} catch (err) {
-		if (err && err.statusCode === 404) {
-			throw new Error("CWL not available");
+		if (err && Number(err.statusCode) === 404) {
+			const outRosterData = validateRosterData_(ctx.rosterData);
+			return {
+				ok: true,
+				rosterData: outRosterData,
+				result: buildCwlStatsUnavailableNoopResult_("leagueGroup404"),
+			};
 		}
 		throw err;
 	}
 
-	const warTags = extractLeagueGroupWarTags_(leaguegroup);
-	if (!leagueGroupContainsClan_(leaguegroup, ctx.clanTag) || !warTags.length) {
-		throw new Error("CWL not available");
+	const isMalformedLeaguegroup =
+		!leaguegroup ||
+		typeof leaguegroup !== "object" ||
+		Array.isArray(leaguegroup) ||
+		!Array.isArray(leaguegroup.clans) ||
+		!Array.isArray(leaguegroup.rounds);
+	if (isMalformedLeaguegroup) {
+		throw new Error("Invalid CWL league group payload.");
 	}
 
-	const rosterPoolTagSet = buildRosterPoolTagSet_(ctx.roster);
-	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
-	const byTag = {};
-	let warsProcessed = 0;
-	let finalizedCwlWars = 0;
+	const warTags = extractLeagueGroupWarTags_(leaguegroup);
+	if (!leagueGroupContainsClan_(leaguegroup, ctx.clanTag)) {
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: buildCwlStatsUnavailableNoopResult_("clanNotInLeagueGroup"),
+		};
+	}
+	if (!warTags.length) {
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: buildCwlStatsUnavailableNoopResult_("noWarTags"),
+		};
+	}
 
+	const usableWars = [];
+	let sawWarTag404 = false;
 	for (let i = 0; i < warTags.length; i++) {
 		const warTag = warTags[i];
 		let war = null;
 		if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarErrorByTag, warTag)) {
-			throw prefetchedCwlWarErrorByTag[warTag];
+			const prefetchedErr = prefetchedCwlWarErrorByTag[warTag];
+			if (prefetchedErr && Number(prefetchedErr.statusCode) === 404) {
+				sawWarTag404 = true;
+				continue;
+			}
+			throw prefetchedErr;
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarRawByTag, warTag)) {
 			war = prefetchedCwlWarRawByTag[warTag];
 		} else {
-			war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+			try {
+				war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+			} catch (err) {
+				if (err && Number(err.statusCode) === 404) {
+					sawWarTag404 = true;
+					continue;
+				}
+				throw err;
+			}
+		}
+		if (!war || typeof war !== "object" || Array.isArray(war)) {
+			throw new Error("Invalid CWL war payload for war tag " + warTag + ".");
 		}
 		const warState = String((war && war.state) || "").toLowerCase();
 		if (warState !== "inwar" && warState !== "warended") continue;
 
 		const side = pickWarSideForClan_(war, ctx.clanTag);
 		if (!side) continue;
+
+		usableWars.push({
+			warTag: warTag,
+			war: war,
+			warState: warState,
+			side: side,
+		});
+	}
+	if (!usableWars.length) {
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			rosterData: outRosterData,
+			result: buildCwlStatsUnavailableNoopResult_(sawWarTag404 ? "warTag404" : "noUsableWars"),
+		};
+	}
+
+	const warPerformance = prepareWarPerformanceForRefresh_(ctx.roster, nowIso);
+	const rosterPoolTagSet = buildRosterPoolTagSet_(ctx.roster);
+	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
+	const byTag = {};
+	let warsProcessed = 0;
+	let finalizedCwlWars = 0;
+
+	for (let i = 0; i < usableWars.length; i++) {
+		const warTag = usableWars[i].warTag;
+		const war = usableWars[i].war;
+		const warState = usableWars[i].warState;
+		const side = usableWars[i].side;
 		warsProcessed++;
 		if (warState === "warended") {
 			const ingested = ingestCwlWarIntoWarPerformance_(warPerformance, war, warTag, ctx.clanTag, trackedHistoryTagSet, nowIso, "cwlRefreshWarEnded");
@@ -7607,6 +8158,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
 	const ctx = findRosterById_(rosterData, rosterId);
 	let capture = null;
+	let postCaptureRosterData = null;
 	try {
 		capture = captureMemberTrackingForRoster_(ctx.rosterData, ctx.rosterId, {
 			continueOnError: true,
@@ -7625,6 +8177,14 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	} catch (err) {
 		Logger.log("refreshTrackingStatsCore metrics capture failed for roster '%s': %s", ctx.rosterId, errorMessage_(err));
 	}
+	if (capture) {
+		try {
+			// Keep a clean post-capture snapshot so later war-refresh failures can preserve metrics safely.
+			postCaptureRosterData = validateRosterData_(ctx.rosterData);
+		} catch (snapshotErr) {
+			Logger.log("refreshTrackingStatsCore unable to create post-capture snapshot for roster '%s': %s", ctx.rosterId, errorMessage_(snapshotErr));
+		}
+	}
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
 	let refresh = null;
 	try {
@@ -7635,13 +8195,35 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 			Logger.log("refreshTrackingStatsCore war refresh skipped for roster '%s' because war log is private: %s", ctx.rosterId, errorMessage_(err));
 			return {
 				ok: true,
-				rosterData: validateRosterData_(ctx.rosterData),
+				rosterData: postCaptureRosterData || validateRosterData_(ctx.rosterData),
 				result: {
 					mode: trackingMode,
 					warDataSkipped: true,
 					currentWarUnavailableReason: "privateWarLog",
 					message: "war data unavailable: private war log",
 					memberTracking: capture,
+				},
+			};
+		}
+		if (capture && postCaptureRosterData) {
+			const warRefreshError = errorMessage_(err);
+			const refreshLabel = trackingMode === "regularWar" ? "regular war refresh" : "CWL refresh";
+			return {
+				ok: false,
+				rosterData: postCaptureRosterData,
+				result: {
+					mode: trackingMode,
+					memberTracking: capture,
+					partialFailure: true,
+					warRefreshFailed: true,
+					memberTrackingPreserved: true,
+					warRefreshError: warRefreshError,
+					message: "member tracking captured; " + refreshLabel + " failed: " + warRefreshError,
+				},
+				error: {
+					step: trackingMode === "regularWar" ? "refreshRegularWarStats" : "refreshCwlStats",
+					code: "warRefreshFailedAfterMemberTracking",
+					message: warRefreshError,
 				},
 			};
 		}
@@ -8884,6 +9466,32 @@ function computeBenchSuggestionsCore_(rosterData, rosterId) {
 			actionableTargetMainTags: [],
 		};
 	}
+	if (isCwlPreparationActive_(ctx.roster)) {
+		clearRosterBenchSuggestions_(ctx.roster);
+		const prep = getRosterCwlPreparation_(ctx.roster);
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: true,
+			benchTags: [],
+			swapInTags: [],
+			pairs: [],
+			rosterData: outRosterData,
+			result: {
+				mode: "cwl",
+				benchCount: 0,
+				swapCount: 0,
+				needsRewardsCount: 0,
+				cwlPreparationBlocked: true,
+				rosterSize: normalizePreparationRosterSize_(prep && prep.rosterSize, CWL_PREPARATION_MIN_ROSTER_SIZE),
+				message: "CWL Preparation Mode active; bench suggestions are disabled",
+			},
+			algorithm: "",
+			nextEditableDayIndex: -1,
+			plannerSummary: null,
+			targetMainTags: [],
+			actionableTargetMainTags: [],
+		};
+	}
 	const config = getBenchPlannerConfig_();
 	const updatedAt = new Date().toISOString();
 	const seasonContext = buildCwlSeasonContext_(ctx.roster, config);
@@ -9317,6 +9925,10 @@ function validateRosterData_(data) {
 		const sanitizedRegularWar = sanitizeRosterRegularWar_(r.regularWar, retentionTagSet);
 		sanitizedWarPerformance = backfillWarPerformanceFromLegacyRegularAggregate_(sanitizedWarPerformance, sanitizedRegularWar);
 		const sanitizedBenchSuggestions = sanitizeRosterBenchSuggestions_(r.benchSuggestions, rosterPoolTagSet);
+		const sanitizedCwlPreparation = sanitizeRosterCwlPreparation_(r.cwlPreparation, rosterPoolTagSet, trackingMode, {
+			defaultRosterSize: normalizePreparationRosterSize_(outMain.length, CWL_PREPARATION_MIN_ROSTER_SIZE),
+			enforceLockedInLimit: true,
+		});
 
 		// Recompute badges to match array lengths (this avoids drift)
 		const nextRoster = {
@@ -9332,7 +9944,14 @@ function validateRosterData_(data) {
 		if (sanitizedCwlStats) nextRoster.cwlStats = sanitizedCwlStats;
 		if (sanitizedRegularWar) nextRoster.regularWar = sanitizedRegularWar;
 		if (sanitizedWarPerformance) nextRoster.warPerformance = sanitizedWarPerformance;
-		if (sanitizedBenchSuggestions) nextRoster.benchSuggestions = sanitizedBenchSuggestions;
+		if (sanitizedCwlPreparation) nextRoster.cwlPreparation = sanitizedCwlPreparation;
+		const prepActive = trackingMode === "cwl" && !!(sanitizedCwlPreparation && sanitizedCwlPreparation.enabled);
+		if (prepActive) {
+			clearRosterBenchSuggestions_(nextRoster);
+			applyCwlPreparationRebalance_(nextRoster, { recordAppliedAt: false, enforceLockedInLimit: true });
+		} else if (sanitizedBenchSuggestions) {
+			nextRoster.benchSuggestions = sanitizedBenchSuggestions;
+		}
 		out.rosters.push(nextRoster);
 	}
 
