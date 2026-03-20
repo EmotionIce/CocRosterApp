@@ -2412,6 +2412,7 @@ const CWL_PREPARATION_ROSTER_SIZE_STEP = 5;
 // This is intentionally long (e.g., 28 days) to avoid losing war history for temporary departures.
 const REGULAR_WAR_MISSING_GRACE_MS = 28 * 24 * 60 * 60 * 1000; // 28 days
 const REGULAR_WAR_WARLOG_LIMIT = 25;
+const REGULAR_WAR_REPAIR_GRACE_MS = 6 * 60 * 60 * 1000; // 6 hours
 const ROSTER_LOCK_KEY_PREFIX = "ROSTER_LOCK:";
 const ROSTER_LOCK_WAIT_MS = 30 * 1000;
 const ROSTER_LOCK_LEASE_MS = 10 * 60 * 1000;
@@ -4197,6 +4198,7 @@ function sanitizeWarPerformanceMeta_(rawMeta) {
 
 	out.finalizedRegularWarCount = toNonNegativeInt_(meta.finalizedRegularWarCount != null ? meta.finalizedRegularWarCount : out.finalizedRegularWarCount);
 	out.finalizedCwlWarCount = toNonNegativeInt_(meta.finalizedCwlWarCount != null ? meta.finalizedCwlWarCount : out.finalizedCwlWarCount);
+	out.regularWarLegacyBaselineWarCount = toNonNegativeInt_(meta.regularWarLegacyBaselineWarCount != null ? meta.regularWarLegacyBaselineWarCount : out.regularWarLegacyBaselineWarCount);
 	out.lastFinalizationReason = typeof meta.lastFinalizationReason === "string" ? meta.lastFinalizationReason : String(out.lastFinalizationReason || "");
 	out.lastFinalizationSource = typeof meta.lastFinalizationSource === "string" ? meta.lastFinalizationSource : String(out.lastFinalizationSource || "");
 	out.lastSuccessfulLongTermFinalizationAt = typeof meta.lastSuccessfulLongTermFinalizationAt === "string" ? meta.lastSuccessfulLongTermFinalizationAt : String(out.lastSuccessfulLongTermFinalizationAt || "");
@@ -4205,8 +4207,102 @@ function sanitizeWarPerformanceMeta_(rawMeta) {
 	out.lastRegularWarFinalizationReason = typeof meta.lastRegularWarFinalizationReason === "string" ? meta.lastRegularWarFinalizationReason : String(out.lastRegularWarFinalizationReason || "");
 	out.lastRegularWarFinalizationWarKey = typeof meta.lastRegularWarFinalizationWarKey === "string" ? meta.lastRegularWarFinalizationWarKey : String(out.lastRegularWarFinalizationWarKey || "");
 	out.lastRegularWarFinalizationIncomplete = toBooleanFlag_(meta.lastRegularWarFinalizationIncomplete != null ? meta.lastRegularWarFinalizationIncomplete : out.lastRegularWarFinalizationIncomplete);
+	out.lastRegularWarFinalizationAttemptAt = typeof meta.lastRegularWarFinalizationAttemptAt === "string" ? meta.lastRegularWarFinalizationAttemptAt : String(out.lastRegularWarFinalizationAttemptAt || "");
+	out.lastRegularWarFinalizationStatus = typeof meta.lastRegularWarFinalizationStatus === "string" ? meta.lastRegularWarFinalizationStatus : String(out.lastRegularWarFinalizationStatus || "");
+	out.unresolvedRegularWarCount = toNonNegativeInt_(meta.unresolvedRegularWarCount != null ? meta.unresolvedRegularWarCount : out.unresolvedRegularWarCount);
+	out.pendingRegularWarRepairCount = toNonNegativeInt_(meta.pendingRegularWarRepairCount != null ? meta.pendingRegularWarRepairCount : out.pendingRegularWarRepairCount);
+	out.oldestUnresolvedRegularWarAt = typeof meta.oldestUnresolvedRegularWarAt === "string" ? meta.oldestUnresolvedRegularWarAt : String(out.oldestUnresolvedRegularWarAt || "");
+	out.lastRegularWarRepairAttemptAt = typeof meta.lastRegularWarRepairAttemptAt === "string" ? meta.lastRegularWarRepairAttemptAt : String(out.lastRegularWarRepairAttemptAt || "");
+	out.lastRegularWarRepairSuccessAt = typeof meta.lastRegularWarRepairSuccessAt === "string" ? meta.lastRegularWarRepairSuccessAt : String(out.lastRegularWarRepairSuccessAt || "");
+	const statusLevelRaw = String(meta.regularWarStatusLevel == null ? "" : meta.regularWarStatusLevel)
+		.trim()
+		.toLowerCase();
+	out.regularWarStatusLevel = statusLevelRaw === "warning" || statusLevelRaw === "info" ? statusLevelRaw : "";
+	out.regularWarStatusMessage = typeof meta.regularWarStatusMessage === "string" ? meta.regularWarStatusMessage : String(out.regularWarStatusMessage || "");
 	out.lastCwlWarFinalizedAt = typeof meta.lastCwlWarFinalizedAt === "string" ? meta.lastCwlWarFinalizedAt : String(out.lastCwlWarFinalizedAt || "");
 	out.lastCwlWarFinalizedTag = typeof meta.lastCwlWarFinalizedTag === "string" ? meta.lastCwlWarFinalizedTag : String(out.lastCwlWarFinalizedTag || "");
+	return out;
+}
+
+function createEmptyRegularWarHistoryEntry_(warKeyRaw) {
+	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
+	return {
+		warKey: warKey,
+		finalizedAt: "",
+		lastUpdatedAt: "",
+		source: "",
+		reason: "",
+		incomplete: false,
+		authoritative: false,
+		firstIncompleteAt: "",
+		lastRepairAttemptAt: "",
+		repairedAt: "",
+		statsByTag: {},
+	};
+}
+
+function sanitizeRegularWarHistoryStatsByTag_(statsByTagRaw) {
+	const statsByTag = statsByTagRaw && typeof statsByTagRaw === "object" ? statsByTagRaw : {};
+	const out = {};
+	const keys = Object.keys(statsByTag);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag) continue;
+		const stats = sanitizeWarPerformanceStatsEntry_(statsByTag[keys[i]]);
+		if (!hasWarPerformanceStatsData_(stats)) continue;
+		out[tag] = stats;
+	}
+	return out;
+}
+
+function sanitizeRegularWarHistoryEntry_(entryRaw, warKeyRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const fallbackWarKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
+	const warKey = String(entry.warKey == null ? fallbackWarKey : entry.warKey).trim();
+	if (!warKey) return null;
+
+	const out = createEmptyRegularWarHistoryEntry_(warKey);
+	out.finalizedAt = typeof entry.finalizedAt === "string" ? entry.finalizedAt : "";
+	out.lastUpdatedAt = typeof entry.lastUpdatedAt === "string" ? entry.lastUpdatedAt : "";
+	out.source = typeof entry.source === "string" ? entry.source : "";
+	out.reason = typeof entry.reason === "string" ? entry.reason : "";
+	out.incomplete = toBooleanFlag_(entry.incomplete);
+	out.authoritative = toBooleanFlag_(entry.authoritative);
+	if (out.authoritative) out.incomplete = false;
+	out.firstIncompleteAt = typeof entry.firstIncompleteAt === "string" ? entry.firstIncompleteAt : "";
+	out.lastRepairAttemptAt = typeof entry.lastRepairAttemptAt === "string" ? entry.lastRepairAttemptAt : "";
+	out.repairedAt = typeof entry.repairedAt === "string" ? entry.repairedAt : "";
+	out.statsByTag = sanitizeRegularWarHistoryStatsByTag_(entry.statsByTag);
+	if (!out.lastUpdatedAt) out.lastUpdatedAt = out.finalizedAt;
+	if (out.incomplete && !out.firstIncompleteAt) out.firstIncompleteAt = out.finalizedAt || out.lastUpdatedAt;
+	return out;
+}
+
+function sanitizeRegularWarHistoryByKey_(historyRaw) {
+	const history = historyRaw && typeof historyRaw === "object" ? historyRaw : {};
+	const out = {};
+	const keys = Object.keys(history);
+	for (let i = 0; i < keys.length; i++) {
+		const key = String(keys[i] == null ? "" : keys[i]).trim();
+		if (!key) continue;
+		const sanitized = sanitizeRegularWarHistoryEntry_(history[key], key);
+		if (!sanitized) continue;
+		out[sanitized.warKey] = sanitized;
+	}
+	return out;
+}
+
+function sanitizeRegularWarLegacyBaselineByTag_(baselineRaw) {
+	const baseline = baselineRaw && typeof baselineRaw === "object" ? baselineRaw : {};
+	const out = {};
+	const keys = Object.keys(baseline);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag) continue;
+		const stats = sanitizeWarPerformanceStatsEntry_(baseline[keys[i]]);
+		if (!hasWarPerformanceStatsData_(stats)) continue;
+		out[tag] = stats;
+	}
 	return out;
 }
 
@@ -4276,6 +4372,13 @@ function sanitizeRosterWarPerformance_(rawWarPerformance) {
 		processedCwlWarTags[tag] = true;
 	}
 
+	const regularWarHistoryByKeyRaw =
+		warPerformance.regularWarHistoryByKey && typeof warPerformance.regularWarHistoryByKey === "object" ? warPerformance.regularWarHistoryByKey : {};
+	const regularWarHistoryByKey = sanitizeRegularWarHistoryByKey_(regularWarHistoryByKeyRaw);
+	const regularWarLegacyBaselineByTagRaw =
+		warPerformance.regularWarLegacyBaselineByTag && typeof warPerformance.regularWarLegacyBaselineByTag === "object" ? warPerformance.regularWarLegacyBaselineByTag : {};
+	const regularWarLegacyBaselineByTag = sanitizeRegularWarLegacyBaselineByTag_(regularWarLegacyBaselineByTagRaw);
+
 	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
 	if (!meta.lastFinalizationReason && typeof warPerformance.lastFinalizationReason === "string") {
 		meta.lastFinalizationReason = warPerformance.lastFinalizationReason;
@@ -4302,6 +4405,8 @@ function sanitizeRosterWarPerformance_(rawWarPerformance) {
 		lastFinalizationSource: typeof meta.lastFinalizationSource === "string" ? meta.lastFinalizationSource : "",
 		processedRegularWarKeys: processedRegularWarKeys,
 		processedCwlWarTags: processedCwlWarTags,
+		regularWarLegacyBaselineByTag: regularWarLegacyBaselineByTag,
+		regularWarHistoryByKey: regularWarHistoryByKey,
 		byTag: byTag,
 		membershipByTag: membershipByTag,
 		meta: meta,
@@ -4318,6 +4423,8 @@ function createEmptyRosterWarPerformance_() {
 		lastFinalizationSource: "",
 		processedRegularWarKeys: {},
 		processedCwlWarTags: {},
+		regularWarLegacyBaselineByTag: {},
+		regularWarHistoryByKey: {},
 		lastRegularWarSnapshot: null,
 		byTag: {},
 		membershipByTag: {},
@@ -4331,6 +4438,8 @@ function ensureWarPerformance_(roster) {
 	const next = sanitizeRosterWarPerformance_(roster.warPerformance) || createEmptyRosterWarPerformance_();
 	if (!next.processedRegularWarKeys || typeof next.processedRegularWarKeys !== "object") next.processedRegularWarKeys = {};
 	if (!next.processedCwlWarTags || typeof next.processedCwlWarTags !== "object") next.processedCwlWarTags = {};
+	if (!next.regularWarLegacyBaselineByTag || typeof next.regularWarLegacyBaselineByTag !== "object") next.regularWarLegacyBaselineByTag = {};
+	if (!next.regularWarHistoryByKey || typeof next.regularWarHistoryByKey !== "object") next.regularWarHistoryByKey = {};
 	if (!next.byTag || typeof next.byTag !== "object") next.byTag = {};
 	if (!next.membershipByTag || typeof next.membershipByTag !== "object") next.membershipByTag = {};
 	if (!next.meta || typeof next.meta !== "object") next.meta = sanitizeWarPerformanceMeta_(null);
@@ -4373,6 +4482,193 @@ function mapRegularAggregateToWarPerformanceStats_(aggregateRaw) {
 	return out;
 }
 
+function buildRegularWarLegacyBaselineFromWarPerformanceByTag_(warPerformanceRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const byTagRaw = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
+	const out = {};
+	const tags = Object.keys(byTagRaw);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const entry = byTagRaw[tags[i]] && typeof byTagRaw[tags[i]] === "object" ? byTagRaw[tags[i]] : {};
+		const regularStats = sanitizeWarPerformanceStatsEntry_(entry.regular);
+		if (!hasWarPerformanceStatsData_(regularStats)) continue;
+		out[tag] = regularStats;
+	}
+	return out;
+}
+
+function buildRegularWarLegacyBaselineFromRegularWarCompat_(regularWarRaw) {
+	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
+	const byTagRaw = regularWar.byTag && typeof regularWar.byTag === "object" ? regularWar.byTag : {};
+	const out = {};
+	const tags = Object.keys(byTagRaw);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const compatEntry = byTagRaw[tags[i]] && typeof byTagRaw[tags[i]] === "object" ? byTagRaw[tags[i]] : {};
+		const mapped = mapRegularAggregateToWarPerformanceStats_(compatEntry.aggregate);
+		if (!hasWarPerformanceStatsData_(mapped)) continue;
+		out[tag] = mapped;
+	}
+	return out;
+}
+
+function ensureRegularWarLegacyBaseline_(warPerformanceRaw, regularWarRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	if (!warPerformance) return { changed: false, baselineByTag: {} };
+
+	const existingBaseline = sanitizeRegularWarLegacyBaselineByTag_(warPerformance.regularWarLegacyBaselineByTag);
+	if (Object.keys(existingBaseline).length > 0) {
+		warPerformance.regularWarLegacyBaselineByTag = existingBaseline;
+		return { changed: false, baselineByTag: existingBaseline };
+	}
+
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	let baselineByTag = {};
+	if (Object.keys(historyByKey).length < 1) {
+		baselineByTag = buildRegularWarLegacyBaselineFromWarPerformanceByTag_(warPerformance);
+		if (Object.keys(baselineByTag).length < 1) {
+			baselineByTag = buildRegularWarLegacyBaselineFromRegularWarCompat_(regularWarRaw);
+		}
+	}
+
+	warPerformance.regularWarLegacyBaselineByTag = baselineByTag;
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	const baselineWarCount = toNonNegativeInt_(meta.regularWarLegacyBaselineWarCount);
+	const legacyFinalizedCount = toNonNegativeInt_(meta.finalizedRegularWarCount);
+	const regularWarCompat = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
+	const compatAggregateMeta = regularWarCompat.aggregateMeta && typeof regularWarCompat.aggregateMeta === "object" ? regularWarCompat.aggregateMeta : {};
+	const compatWarsTracked = toNonNegativeInt_(compatAggregateMeta.warsTracked);
+	if (baselineWarCount < 1 && Object.keys(baselineByTag).length > 0) {
+		const legacyCountSeed = legacyFinalizedCount > 0 ? legacyFinalizedCount : compatWarsTracked;
+		if (legacyCountSeed > 0) meta.regularWarLegacyBaselineWarCount = legacyCountSeed;
+	}
+	warPerformance.meta = meta;
+	return { changed: true, baselineByTag: baselineByTag };
+}
+
+function summarizeRegularWarHistoryState_(warPerformanceRaw, nowIsoRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const nowIso = typeof nowIsoRaw === "string" && nowIsoRaw ? nowIsoRaw : new Date().toISOString();
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const keys = Object.keys(historyByKey).sort();
+	let unresolvedIncompleteWarCount = 0;
+	let pendingRecentRepairCount = 0;
+	let oldestUnresolvedMs = 0;
+	let lastRepairAttemptMs = 0;
+	let lastRepairSuccessMs = 0;
+	let latestFinalizedMs = 0;
+
+	for (let i = 0; i < keys.length; i++) {
+		const entry = historyByKey[keys[i]];
+		const finalizedMs = parseIsoToMs_(entry.finalizedAt);
+		if (finalizedMs > latestFinalizedMs) latestFinalizedMs = finalizedMs;
+		const repairAttemptMs = parseIsoToMs_(entry.lastRepairAttemptAt);
+		if (repairAttemptMs > lastRepairAttemptMs) lastRepairAttemptMs = repairAttemptMs;
+		const repairedMs = parseIsoToMs_(entry.repairedAt);
+		if (repairedMs > lastRepairSuccessMs) lastRepairSuccessMs = repairedMs;
+		if (!entry.incomplete) continue;
+		unresolvedIncompleteWarCount++;
+		const firstIncompleteMs = parseIsoToMs_(entry.firstIncompleteAt || entry.finalizedAt || entry.lastUpdatedAt);
+		if (!oldestUnresolvedMs || (firstIncompleteMs > 0 && firstIncompleteMs < oldestUnresolvedMs)) {
+			oldestUnresolvedMs = firstIncompleteMs;
+		}
+		if (!(firstIncompleteMs > 0) || nowMs - firstIncompleteMs <= REGULAR_WAR_REPAIR_GRACE_MS) {
+			pendingRecentRepairCount++;
+		}
+	}
+
+	const staleUnresolvedWarCount = Math.max(0, unresolvedIncompleteWarCount - pendingRecentRepairCount);
+	let statusLevel = "";
+	let statusMessage = "";
+	if (unresolvedIncompleteWarCount > 0) {
+		if (staleUnresolvedWarCount > 0) {
+			statusLevel = "warning";
+			statusMessage =
+				staleUnresolvedWarCount === 1
+					? "1 regular war is still using provisional history data; aggregate regular-war totals may be slightly incomplete."
+					: staleUnresolvedWarCount + " regular wars are still using provisional history data; aggregate regular-war totals may be slightly incomplete.";
+			if (pendingRecentRepairCount > 0) {
+				statusMessage +=
+					" " +
+					(pendingRecentRepairCount === 1
+						? "1 recent war is still in the verification window."
+						: pendingRecentRepairCount + " recent wars are still in the verification window.");
+			}
+		} else {
+			statusLevel = "info";
+			statusMessage = "Recent regular-war history is being verified from public war-log data.";
+		}
+	}
+
+	return {
+		historyCount: keys.length,
+		unresolvedIncompleteWarCount: unresolvedIncompleteWarCount,
+		pendingRecentRepairCount: pendingRecentRepairCount,
+		staleUnresolvedWarCount: staleUnresolvedWarCount,
+		oldestUnresolvedIncompleteAt: oldestUnresolvedMs > 0 ? new Date(oldestUnresolvedMs).toISOString() : "",
+		lastRepairAttemptAt: lastRepairAttemptMs > 0 ? new Date(lastRepairAttemptMs).toISOString() : "",
+		lastRepairSuccessAt: lastRepairSuccessMs > 0 ? new Date(lastRepairSuccessMs).toISOString() : "",
+		latestFinalizedAt: latestFinalizedMs > 0 ? new Date(latestFinalizedMs).toISOString() : "",
+		statusLevel: statusLevel,
+		statusMessage: statusMessage,
+	};
+}
+
+function applyRegularWarHistorySummaryToMeta_(warPerformanceRaw, summaryRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	if (!warPerformance) return sanitizeWarPerformanceMeta_(null);
+	const summary = summaryRaw && typeof summaryRaw === "object" ? summaryRaw : {};
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	const baselineWarCount = toNonNegativeInt_(meta.regularWarLegacyBaselineWarCount);
+	meta.finalizedRegularWarCount = baselineWarCount + toNonNegativeInt_(summary.historyCount);
+	meta.unresolvedRegularWarCount = toNonNegativeInt_(summary.unresolvedIncompleteWarCount);
+	meta.pendingRegularWarRepairCount = toNonNegativeInt_(summary.pendingRecentRepairCount);
+	meta.oldestUnresolvedRegularWarAt = String(summary.oldestUnresolvedIncompleteAt || "");
+	meta.lastRegularWarRepairAttemptAt = String(summary.lastRepairAttemptAt || "");
+	meta.lastRegularWarRepairSuccessAt = String(summary.lastRepairSuccessAt || "");
+	meta.regularWarStatusLevel = String(summary.statusLevel || "");
+	meta.regularWarStatusMessage = String(summary.statusMessage || "");
+	meta.lastRegularWarFinalizationIncomplete = meta.unresolvedRegularWarCount > 0;
+	if (summary.latestFinalizedAt) {
+		meta.lastRegularWarFinalizedAt = String(summary.latestFinalizedAt);
+	}
+
+	const latestLongTermMs = Math.max(parseIsoToMs_(meta.lastSuccessfulLongTermFinalizationAt), parseIsoToMs_(summary.latestFinalizedAt), parseIsoToMs_(summary.lastRepairSuccessAt));
+	if (latestLongTermMs > 0) {
+		meta.lastSuccessfulLongTermFinalizationAt = new Date(latestLongTermMs).toISOString();
+	}
+
+	warPerformance.meta = meta;
+	return meta;
+}
+
+function buildRegularWarAggregateMetaFromWarPerformance_(warPerformanceRaw, repairResultRaw, nowIsoRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const repairResult = repairResultRaw && typeof repairResultRaw === "object" ? repairResultRaw : {};
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	const summary = summarizeRegularWarHistoryState_(warPerformance, nowIsoRaw);
+	const unresolvedCount = toNonNegativeInt_(summary.unresolvedIncompleteWarCount);
+	const warLogUnavailableReason = String(repairResult.warLogUnavailableReason == null ? "" : repairResult.warLogUnavailableReason).trim();
+	return sanitizeRegularWarAggregateMeta_({
+		source: "warPerformanceHistoryLedger",
+		warLogAvailable: toBooleanFlag_(repairResult.warLogAvailable),
+		warsTracked: toNonNegativeInt_(meta.finalizedRegularWarCount),
+		lastSuccessfulWarLogRefreshAt: String(summary.lastRepairSuccessAt || meta.lastRegularWarFinalizedAt || ""),
+		unavailableReason: unresolvedCount > 0 ? warLogUnavailableReason : "",
+		unresolvedIncompleteWarCount: unresolvedCount,
+		pendingRecentRepairCount: toNonNegativeInt_(summary.pendingRecentRepairCount),
+		staleUnresolvedWarCount: toNonNegativeInt_(summary.staleUnresolvedWarCount),
+		oldestUnresolvedIncompleteAt: String(summary.oldestUnresolvedIncompleteAt || ""),
+		lastRepairAttemptAt: String(summary.lastRepairAttemptAt || meta.lastRegularWarRepairAttemptAt || ""),
+		lastRepairSuccessAt: String(summary.lastRepairSuccessAt || meta.lastRegularWarRepairSuccessAt || ""),
+		statusLevel: String(summary.statusLevel || meta.regularWarStatusLevel || ""),
+		statusMessage: String(summary.statusMessage || meta.regularWarStatusMessage || ""),
+	});
+}
+
 function hydrateWarPerformanceOverallFromBreakdown_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : null;
 	if (!entry) return false;
@@ -4392,84 +4688,99 @@ function hydrateWarPerformanceOverallFromBreakdown_(entryRaw) {
 	return true;
 }
 
-function backfillWarPerformanceFromLegacyRegularAggregate_(warPerformanceRaw, regularWarRaw) {
-	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
-	const regularByTag = regularWar.byTag && typeof regularWar.byTag === "object" ? regularWar.byTag : {};
-	const regularTags = Object.keys(regularByTag);
+function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	if (!warPerformance) return { changed: false, summary: summarizeRegularWarHistoryState_(null, nowIsoRaw) };
 
-	const sourceWarPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
-	let hasLegacyRegularHistory = false;
-	for (let i = 0; i < regularTags.length; i++) {
-		const tag = normalizeTag_(regularTags[i]);
+	const baselineByTag = sanitizeRegularWarLegacyBaselineByTag_(warPerformance.regularWarLegacyBaselineByTag);
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const aggregateRegularByTag = {};
+	const baselineTags = Object.keys(baselineByTag);
+	for (let i = 0; i < baselineTags.length; i++) {
+		const tag = normalizeTag_(baselineTags[i]);
 		if (!tag) continue;
-		const compatEntry = regularByTag[regularTags[i]] && typeof regularByTag[regularTags[i]] === "object" ? regularByTag[regularTags[i]] : {};
-		const mapped = mapRegularAggregateToWarPerformanceStats_(compatEntry.aggregate);
-		if (hasWarPerformanceStatsData_(mapped)) {
-			hasLegacyRegularHistory = true;
-			break;
+		aggregateRegularByTag[tag] = sanitizeWarPerformanceStatsEntry_(baselineByTag[baselineTags[i]]);
+	}
+
+	const warKeys = Object.keys(historyByKey).sort();
+	for (let i = 0; i < warKeys.length; i++) {
+		const entry = historyByKey[warKeys[i]];
+		const statsByTag = entry && entry.statsByTag && typeof entry.statsByTag === "object" ? entry.statsByTag : {};
+		const statTags = Object.keys(statsByTag);
+		for (let j = 0; j < statTags.length; j++) {
+			const tag = normalizeTag_(statTags[j]);
+			if (!tag) continue;
+			if (!aggregateRegularByTag[tag]) aggregateRegularByTag[tag] = createEmptyWarPerformanceStats_();
+			mergeWarPerformanceStats_(aggregateRegularByTag[tag], sanitizeWarPerformanceStatsEntry_(statsByTag[statTags[j]]));
 		}
 	}
 
-	if (!sourceWarPerformance && !hasLegacyRegularHistory) return sourceWarPerformance;
-
-	const warPerformance = sourceWarPerformance || createEmptyRosterWarPerformance_();
-	if (!warPerformance.byTag || typeof warPerformance.byTag !== "object") warPerformance.byTag = {};
-
-	let changed = !sourceWarPerformance && hasLegacyRegularHistory;
-	const byTag = warPerformance.byTag;
-	const allTagMap = {};
-	const existingTags = Object.keys(byTag);
-	for (let i = 0; i < existingTags.length; i++) {
-		const tag = normalizeTag_(existingTags[i]);
-		if (tag) allTagMap[tag] = true;
-	}
-	for (let i = 0; i < regularTags.length; i++) {
-		const tag = normalizeTag_(regularTags[i]);
-		if (tag) allTagMap[tag] = true;
+	const currentByTagRaw = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
+	const currentByTag = {};
+	const currentTags = Object.keys(currentByTagRaw);
+	for (let i = 0; i < currentTags.length; i++) {
+		const tag = normalizeTag_(currentTags[i]);
+		if (!tag) continue;
+		currentByTag[tag] = sanitizeWarPerformanceEntry_(currentByTagRaw[currentTags[i]]);
 	}
 
-	const allTags = Object.keys(allTagMap);
+	const allTagSet = {};
+	const aggregateTags = Object.keys(aggregateRegularByTag);
+	for (let i = 0; i < aggregateTags.length; i++) allTagSet[aggregateTags[i]] = true;
+	for (let i = 0; i < currentTags.length; i++) {
+		const tag = normalizeTag_(currentTags[i]);
+		if (!tag) continue;
+		allTagSet[tag] = true;
+	}
+
+	const rebuiltByTag = {};
+	const allTags = Object.keys(allTagSet);
 	for (let i = 0; i < allTags.length; i++) {
 		const tag = normalizeTag_(allTags[i]);
 		if (!tag) continue;
-
-		const compatEntry = regularByTag[tag] && typeof regularByTag[tag] === "object" ? regularByTag[tag] : {};
-		const mappedRegular = mapRegularAggregateToWarPerformanceStats_(compatEntry.aggregate);
-		const hasMappedRegular = hasWarPerformanceStatsData_(mappedRegular);
-
-		let entry = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : null;
-		if (!entry && !hasMappedRegular) continue;
-		if (!entry) {
-			entry = createEmptyWarPerformanceEntry_();
-			byTag[tag] = entry;
-			changed = true;
-		}
-
-		const sanitizedRegular = sanitizeWarPerformanceStatsEntry_(entry.regular);
-		const sanitizedCwl = sanitizeWarPerformanceStatsEntry_(entry.cwl);
-		entry.regular = sanitizedRegular;
-		entry.cwl = sanitizedCwl;
-		entry.overall = sanitizeWarPerformanceStatsEntry_(entry.overall);
-
-		if (hasMappedRegular && !hasWarPerformanceStatsData_(sanitizedRegular)) {
-			entry.regular = mappedRegular;
-			changed = true;
-		}
-
-		if (hydrateWarPerformanceOverallFromBreakdown_(entry)) {
-			changed = true;
-		}
+		const currentEntry = currentByTag[tag] && typeof currentByTag[tag] === "object" ? currentByTag[tag] : createEmptyWarPerformanceEntry_();
+		const regularStats = aggregateRegularByTag[tag] ? sanitizeWarPerformanceStatsEntry_(aggregateRegularByTag[tag]) : createEmptyWarPerformanceStats_();
+		const cwlStats = sanitizeWarPerformanceStatsEntry_(currentEntry.cwl);
+		const overallStats = createEmptyWarPerformanceStats_();
+		mergeWarPerformanceStats_(overallStats, regularStats);
+		mergeWarPerformanceStats_(overallStats, cwlStats);
+		if (!hasWarPerformanceStatsData_(overallStats) && !hasWarPerformanceStatsData_(regularStats) && !hasWarPerformanceStatsData_(cwlStats)) continue;
+		rebuiltByTag[tag] = {
+			overall: overallStats,
+			regular: regularStats,
+			cwl: cwlStats,
+		};
 	}
 
-	return changed ? warPerformance : sourceWarPerformance;
+	warPerformance.regularWarLegacyBaselineByTag = baselineByTag;
+	warPerformance.regularWarHistoryByKey = historyByKey;
+	warPerformance.byTag = rebuiltByTag;
+	const summary = summarizeRegularWarHistoryState_(warPerformance, nowIsoRaw);
+	applyRegularWarHistorySummaryToMeta_(warPerformance, summary);
+	return { changed: true, summary: summary };
+}
+
+function backfillWarPerformanceFromLegacyRegularAggregate_(warPerformanceRaw, regularWarRaw) {
+	const sourceWarPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	const hasLegacyCompatibilityData = Object.keys(buildRegularWarLegacyBaselineFromRegularWarCompat_(regularWarRaw)).length > 0;
+	if (!sourceWarPerformance && !hasLegacyCompatibilityData) return sourceWarPerformance;
+
+	const warPerformance = sourceWarPerformance || createEmptyRosterWarPerformance_();
+	ensureRegularWarLegacyBaseline_(warPerformance, regularWarRaw);
+	rebuildRegularWarAggregatesFromHistory_(warPerformance, new Date().toISOString());
+	return warPerformance;
 }
 
 function prepareWarPerformanceForRefresh_(roster, nowIso) {
 	if (!roster || typeof roster !== "object") return null;
 	let warPerformance = ensureWarPerformance_(roster);
+	ensureRegularWarLegacyBaseline_(warPerformance, roster.regularWar);
+	rebuildRegularWarAggregatesFromHistory_(warPerformance, nowIso);
 	roster.warPerformance = warPerformance;
 	updateWarPerformanceMembership_(roster, nowIso);
 	warPerformance = ensureWarPerformance_(roster);
+	ensureRegularWarLegacyBaseline_(warPerformance, roster.regularWar);
+	rebuildRegularWarAggregatesFromHistory_(warPerformance, nowIso);
 	roster.warPerformance = warPerformance;
 	return warPerformance;
 }
@@ -4644,6 +4955,128 @@ function ensureWarPerformancePlayerEntry_(warPerformance, tagRaw) {
 	return warPerformance.byTag[tag];
 }
 
+function buildTagSetFromRaw_(tagSetRaw) {
+	const tagSet = tagSetRaw && typeof tagSetRaw === "object" ? tagSetRaw : {};
+	const out = {};
+	const keys = Object.keys(tagSet);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+function buildRegularWarFinalizeTagSet_(warPerformanceRaw, warKeyRaw, trackedTagSetRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
+	const out = buildTagSetFromRaw_(trackedTagSetRaw);
+	if (!warKey) return out;
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const existing = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
+	if (!existing || !existing.statsByTag || typeof existing.statsByTag !== "object") return out;
+	const tags = Object.keys(existing.statsByTag);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+function upsertRegularWarHistoryEntry_(warPerformanceRaw, warKeyRaw, statsByTagRaw, optionsRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
+	if (!warPerformance || !warKey) {
+		return { applied: false, warKey: warKey, repaired: false, authoritative: false, incomplete: false, reason: "invalidInput" };
+	}
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowText = typeof options.nowIso === "string" && options.nowIso ? options.nowIso : new Date().toISOString();
+	const source = String(options.source == null ? "" : options.source).trim();
+	const reason = String(options.reason == null ? "" : options.reason).trim();
+	const incomplete = toBooleanFlag_(options.incomplete);
+	const authoritative = options.authoritative == null ? !incomplete : toBooleanFlag_(options.authoritative);
+
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const existing = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
+	if (existing && existing.authoritative && !authoritative) {
+		return { applied: false, warKey: warKey, repaired: false, authoritative: true, incomplete: false, reason: "authoritativeAlreadyStored" };
+	}
+
+	const sanitizedStatsByTag = sanitizeRegularWarHistoryStatsByTag_(statsByTagRaw);
+	const hasIncomingStats = Object.keys(sanitizedStatsByTag).length > 0;
+	if (!hasIncomingStats && !(existing && existing.statsByTag && Object.keys(existing.statsByTag).length > 0)) {
+		return { applied: false, warKey: warKey, repaired: false, authoritative: authoritative, incomplete: incomplete, reason: "missingStatsByTag" };
+	}
+
+	const next = existing ? sanitizeRegularWarHistoryEntry_(existing, warKey) : createEmptyRegularWarHistoryEntry_(warKey);
+	next.finalizedAt = next.finalizedAt || nowText;
+	next.lastUpdatedAt = nowText;
+	next.source = source || next.source;
+	next.reason = reason || next.reason;
+	next.incomplete = !!incomplete;
+	next.authoritative = authoritative && !incomplete;
+	if (next.incomplete) {
+		next.firstIncompleteAt = next.firstIncompleteAt || nowText;
+	} else if (!next.firstIncompleteAt && existing && existing.firstIncompleteAt) {
+		next.firstIncompleteAt = existing.firstIncompleteAt;
+	}
+	if (toBooleanFlag_(options.recordRepairAttempt)) {
+		next.lastRepairAttemptAt = nowText;
+	}
+	const repaired = !!(existing && existing.incomplete && next.authoritative);
+	if (repaired) {
+		next.repairedAt = nowText;
+		next.lastRepairAttemptAt = nowText;
+	} else if (existing && existing.repairedAt) {
+		next.repairedAt = existing.repairedAt;
+	}
+	if (hasIncomingStats) {
+		next.statsByTag = sanitizedStatsByTag;
+	}
+
+	historyByKey[warKey] = sanitizeRegularWarHistoryEntry_(next, warKey);
+	warPerformance.regularWarHistoryByKey = historyByKey;
+	rebuildRegularWarAggregatesFromHistory_(warPerformance, nowText);
+	markWarPerformanceFinalization_(warPerformance, "regular", warKey, nowText, source || "regularWarFinalized", reason || source || "regularWarFinalized", next.incomplete);
+	return {
+		applied: true,
+		warKey: warKey,
+		repaired: repaired,
+		authoritative: !!next.authoritative,
+		incomplete: !!next.incomplete,
+		reason: repaired ? "repaired" : "applied",
+	};
+}
+
+function markRegularWarHistoryRepairAttempt_(warPerformanceRaw, warKeyRaw, nowIsoRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
+	if (!warPerformance || !warKey) return false;
+	const nowText = typeof nowIsoRaw === "string" && nowIsoRaw ? nowIsoRaw : new Date().toISOString();
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const entry = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
+	if (!entry || !entry.incomplete) return false;
+	entry.lastRepairAttemptAt = nowText;
+	entry.lastUpdatedAt = nowText;
+	historyByKey[warKey] = entry;
+	warPerformance.regularWarHistoryByKey = historyByKey;
+	return true;
+}
+
+function buildWarLogEntryMapByWarKey_(entriesRaw, clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+	const out = {};
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i] && typeof entries[i] === "object" ? entries[i] : {};
+		const warKey = getStableRegularWarKey_(entry, clanTag);
+		if (!warKey || out[warKey]) continue;
+		out[warKey] = entry;
+	}
+	return out;
+}
+
 function recordRegularWarFinalizationAttempt_(warPerformance, warKey, source, reason, incomplete, finalized, nowIso) {
 	if (!warPerformance || typeof warPerformance !== "object") return;
 	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
@@ -4651,9 +5084,10 @@ function recordRegularWarFinalizationAttempt_(warPerformance, warKey, source, re
 	meta.lastRegularWarFinalizationWarKey = String(warKey == null ? "" : warKey).trim();
 	meta.lastRegularWarFinalizationSource = String(source == null ? "" : source).trim();
 	meta.lastRegularWarFinalizationReason = String(reason == null ? "" : reason).trim();
-	meta.lastRegularWarFinalizationIncomplete = !!incomplete;
+	meta.lastRegularWarFinalizationIncomplete = toNonNegativeInt_(meta.unresolvedRegularWarCount) > 0;
 	meta.lastRegularWarFinalizationAttemptAt = nowText;
 	meta.lastRegularWarFinalizationStatus = finalized ? "finalized" : "skipped";
+	if (finalized) meta.lastRegularWarFinalizedAt = nowText;
 	warPerformance.meta = meta;
 }
 
@@ -4680,7 +5114,6 @@ function markWarPerformanceFinalization_(warPerformance, modeRaw, identifierRaw,
 	meta.lastFinalizationSource = source;
 	meta.lastSuccessfulLongTermFinalizationAt = nowText;
 	if (mode === "regular") {
-		meta.finalizedRegularWarCount = toNonNegativeInt_(meta.finalizedRegularWarCount) + 1;
 		meta.lastRegularWarFinalizedAt = nowText;
 		meta.lastRegularWarFinalizationSource = source;
 		meta.lastRegularWarFinalizationReason = reason;
@@ -4721,10 +5154,24 @@ function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifie
 	const identifier = target.identifier;
 	if (!identifier) return { applied: false, identifier: "", mode: mode, reason: "missingIdentifier" };
 
-	if (!warPerformance.processedRegularWarKeys || typeof warPerformance.processedRegularWarKeys !== "object") warPerformance.processedRegularWarKeys = {};
+	if (mode === "regular") {
+		const historyResult = upsertRegularWarHistoryEntry_(warPerformance, identifier, statsByTagRaw, {
+			nowIso: nowIso,
+			source: source,
+			reason: reason,
+			incomplete: incomplete,
+			authoritative: !toBooleanFlag_(incomplete),
+		});
+		return {
+			applied: !!historyResult.applied,
+			identifier: identifier,
+			mode: mode,
+			reason: historyResult.reason || (historyResult.applied ? "applied" : "skipped"),
+		};
+	}
+
 	if (!warPerformance.processedCwlWarTags || typeof warPerformance.processedCwlWarTags !== "object") warPerformance.processedCwlWarTags = {};
-	const processedMap = mode === "regular" ? warPerformance.processedRegularWarKeys : warPerformance.processedCwlWarTags;
-	if (processedMap[identifier]) return { applied: false, identifier: identifier, mode: mode, reason: "alreadyProcessed" };
+	if (warPerformance.processedCwlWarTags[identifier]) return { applied: false, identifier: identifier, mode: mode, reason: "alreadyProcessed" };
 
 	const statsByTag = statsByTagRaw && typeof statsByTagRaw === "object" ? statsByTagRaw : {};
 	const tagKeys = Object.keys(statsByTag);
@@ -4734,12 +5181,11 @@ function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifie
 		const stats = sanitizeWarPerformanceStatsEntry_(statsByTag[tagKeys[i]]);
 		const entry = ensureWarPerformancePlayerEntry_(warPerformance, tag);
 		if (!entry) continue;
-		if (mode === "regular") mergeWarPerformanceStats_(entry.regular, stats);
-		else mergeWarPerformanceStats_(entry.cwl, stats);
+		mergeWarPerformanceStats_(entry.cwl, stats);
 		mergeWarPerformanceStats_(entry.overall, stats);
 	}
 
-	processedMap[identifier] = true;
+	warPerformance.processedCwlWarTags[identifier] = true;
 	markWarPerformanceFinalization_(warPerformance, mode, identifier, nowIso, source, reason, incomplete);
 	return { applied: true, identifier: identifier, mode: mode, reason: "applied" };
 }
@@ -4878,14 +5324,10 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	const currentWar = options.currentWar && typeof options.currentWar === "object" ? options.currentWar : null;
 	const currentWarMeta = sanitizeRegularWarCurrentWar_(options.currentWarMeta);
 	const previousSnapshot = sanitizeRegularWarSnapshot_(options.previousSnapshot);
-
-	if (warPerformance.processedRegularWarKeys && warPerformance.processedRegularWarKeys[previousWarKey]) {
-		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "alreadyProcessed", "alreadyProcessed", false, false, nowIso);
-		return { attempted: true, finalized: false, source: "alreadyProcessed", incomplete: false, reason: "alreadyProcessed" };
-	}
+	const finalizationTagSet = buildRegularWarFinalizeTagSet_(warPerformance, previousWarKey, trackedTagSet);
 
 	if (currentWar && currentWarMeta.warKey === previousWarKey && String(currentWarMeta.state || "").toLowerCase() === "warended" && warHasMemberLevelDataForClan_(currentWar, clanTag)) {
-		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, currentWar, clanTag, trackedTagSet, nowIso, "currentWarEnded", "directCurrentWarEnded", false);
+		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, currentWar, clanTag, finalizationTagSet, nowIso, "currentWarEnded", "directCurrentWarEnded", false);
 		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "currentWarEnded", "directCurrentWarEnded", false, finalized, nowIso);
 		return { attempted: true, finalized: finalized, source: "currentWarEnded", incomplete: false, reason: finalized ? "directCurrentWarEnded" : "directCurrentWarEndedSkipped" };
 	}
@@ -4898,14 +5340,14 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 		warLogLookupFailed = true;
 	}
 	if (warLogEntry && warHasMemberLevelDataForClan_(warLogEntry, clanTag)) {
-		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, warLogEntry, clanTag, trackedTagSet, nowIso, "targetedWarLog", "targetedWarLogFallback", false);
+		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, warLogEntry, clanTag, finalizationTagSet, nowIso, "targetedWarLog", "targetedWarLogFallback", false);
 		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "targetedWarLog", "targetedWarLogFallback", false, finalized, nowIso);
 		return { attempted: true, finalized: finalized, source: "targetedWarLog", incomplete: false, reason: finalized ? "targetedWarLogFallback" : "targetedWarLogFallbackSkipped" };
 	}
 
 	if (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey === previousWarKey) {
 		const fallbackReason = warLogEntry ? "warLogMissingMemberDetail_snapshotFallback" : warLogLookupFailed ? "warLogLookupFailed_snapshotFallback" : "snapshotFallbackNoFinalData";
-		const finalized = finalizeRegularWarFromSnapshot_(warPerformance, previousSnapshot, trackedTagSet, nowIso, "liveSnapshotFallback", fallbackReason, true);
+		const finalized = finalizeRegularWarFromSnapshot_(warPerformance, previousSnapshot, finalizationTagSet, nowIso, "liveSnapshotFallback", fallbackReason, true);
 		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "liveSnapshotFallback", fallbackReason, true, finalized, nowIso);
 		return { attempted: true, finalized: finalized, source: "liveSnapshotFallback", incomplete: true, reason: fallbackReason };
 	}
@@ -4920,6 +5362,88 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 
 function tryFinalizePreviousRegularWar_(optionsRaw) {
 	return finalizeRegularWarFromLiveOrFallback_(optionsRaw);
+}
+
+function attemptRepairIncompleteRegularWarHistory_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const warPerformance = options.warPerformance && typeof options.warPerformance === "object" ? options.warPerformance : null;
+	if (!warPerformance) {
+		return {
+			attemptedWarCount: 0,
+			repairedWarCount: 0,
+			warLogAvailable: false,
+			warLogUnavailableReason: "",
+			errorCount: 0,
+			summary: summarizeRegularWarHistoryState_(null, options.nowIso),
+		};
+	}
+
+	const nowIso = typeof options.nowIso === "string" && options.nowIso ? options.nowIso : new Date().toISOString();
+	const clanTag = normalizeTag_(options.clanTag);
+	const trackedTagSet = buildTagSetFromRaw_(options.trackedTagSet);
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const unresolvedWarKeys = Object.keys(historyByKey)
+		.filter((warKey) => {
+			const entry = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
+			return !!(entry && entry.incomplete);
+		})
+		.sort();
+
+	if (!unresolvedWarKeys.length) {
+		rebuildRegularWarAggregatesFromHistory_(warPerformance, nowIso);
+		return {
+			attemptedWarCount: 0,
+			repairedWarCount: 0,
+			warLogAvailable: false,
+			warLogUnavailableReason: "",
+			errorCount: 0,
+			summary: summarizeRegularWarHistoryState_(warPerformance, nowIso),
+		};
+	}
+
+	let warLogEntries = [];
+	let warLogAvailable = false;
+	let warLogUnavailableReason = "";
+	const errors = [];
+	if (clanTag) {
+		try {
+			warLogEntries = fetchClanWarLog_(clanTag, REGULAR_WAR_WARLOG_LIMIT);
+			warLogAvailable = true;
+		} catch (err) {
+			if (isPrivateWarLogError_(err)) {
+				warLogUnavailableReason = "privateWarLog";
+			} else {
+				warLogUnavailableReason = "warLogLookupFailed";
+				errors.push(errorMessage_(err));
+			}
+		}
+	}
+	const warLogByKey = warLogAvailable ? buildWarLogEntryMapByWarKey_(warLogEntries, clanTag) : {};
+	let repairedWarCount = 0;
+	let attemptedWarCount = 0;
+
+	for (let i = 0; i < unresolvedWarKeys.length; i++) {
+		const warKey = unresolvedWarKeys[i];
+		attemptedWarCount++;
+		markRegularWarHistoryRepairAttempt_(warPerformance, warKey, nowIso);
+		if (!warLogAvailable) continue;
+		const warLogEntry = Object.prototype.hasOwnProperty.call(warLogByKey, warKey) ? warLogByKey[warKey] : null;
+		if (!warLogEntry || !warHasMemberLevelDataForClan_(warLogEntry, clanTag)) continue;
+		const repairTagSet = buildRegularWarFinalizeTagSet_(warPerformance, warKey, trackedTagSet);
+		const repaired = finalizeRegularWarIntoWarPerformance_(warPerformance, warLogEntry, clanTag, repairTagSet, nowIso, "repairWarLog", "repairFromWarLog", false);
+		if (repaired) repairedWarCount++;
+	}
+
+	rebuildRegularWarAggregatesFromHistory_(warPerformance, nowIso);
+	return {
+		attemptedWarCount: attemptedWarCount,
+		repairedWarCount: repairedWarCount,
+		warLogAvailable: warLogAvailable,
+		warLogUnavailableReason: warLogUnavailableReason,
+		errorCount: errors.length,
+		errors: errors,
+		summary: summarizeRegularWarHistoryState_(warPerformance, nowIso),
+	};
 }
 
 function ensureTrackedWarMembership_(warPerformance, activeTagSetRaw, nowIso) {
@@ -5131,12 +5655,22 @@ function sanitizeRegularWarCurrentWar_(rawCurrentWar) {
 
 function sanitizeRegularWarAggregateMeta_(rawMeta) {
 	const meta = rawMeta && typeof rawMeta === "object" ? rawMeta : {};
+	const statusLevelRaw = String(meta.statusLevel == null ? "" : meta.statusLevel)
+		.trim()
+		.toLowerCase();
 	return {
 		source: typeof meta.source === "string" ? meta.source : "",
 		warLogAvailable: toBooleanFlag_(meta.warLogAvailable),
 		warsTracked: toNonNegativeInt_(meta.warsTracked),
 		lastSuccessfulWarLogRefreshAt: typeof meta.lastSuccessfulWarLogRefreshAt === "string" ? meta.lastSuccessfulWarLogRefreshAt : "",
 		unavailableReason: typeof meta.unavailableReason === "string" ? meta.unavailableReason : "",
+		unresolvedIncompleteWarCount: toNonNegativeInt_(meta.unresolvedIncompleteWarCount),
+		pendingRecentRepairCount: toNonNegativeInt_(meta.pendingRecentRepairCount),
+		staleUnresolvedWarCount: toNonNegativeInt_(meta.staleUnresolvedWarCount),
+		oldestUnresolvedIncompleteAt: typeof meta.oldestUnresolvedIncompleteAt === "string" ? meta.oldestUnresolvedIncompleteAt : "",
+		lastRepairAttemptAt: typeof meta.lastRepairAttemptAt === "string" ? meta.lastRepairAttemptAt : "",
+		lastRepairSuccessAt: typeof meta.lastRepairSuccessAt === "string" ? meta.lastRepairSuccessAt : "",
+		statusLevel: statusLevelRaw === "warning" || statusLevelRaw === "info" ? statusLevelRaw : "",
 		statusMessage: typeof meta.statusMessage === "string" ? meta.statusMessage : "",
 	};
 }
@@ -6634,6 +7168,7 @@ function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 	}
 
 	const warPerformance = roster.warPerformance && typeof roster.warPerformance === "object" ? roster.warPerformance : null;
+	let regularHistoryOrBaselineChanged = false;
 	if (warPerformance && warPerformance.byTag && typeof warPerformance.byTag === "object" && Object.prototype.hasOwnProperty.call(warPerformance.byTag, tag)) {
 		delete warPerformance.byTag[tag];
 		changed = true;
@@ -6641,6 +7176,42 @@ function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 	if (warPerformance && warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" && Object.prototype.hasOwnProperty.call(warPerformance.membershipByTag, tag)) {
 		delete warPerformance.membershipByTag[tag];
 		changed = true;
+	}
+	if (
+		warPerformance &&
+		warPerformance.regularWarLegacyBaselineByTag &&
+		typeof warPerformance.regularWarLegacyBaselineByTag === "object" &&
+		Object.prototype.hasOwnProperty.call(warPerformance.regularWarLegacyBaselineByTag, tag)
+	) {
+		delete warPerformance.regularWarLegacyBaselineByTag[tag];
+		changed = true;
+		regularHistoryOrBaselineChanged = true;
+	}
+	if (warPerformance && warPerformance.regularWarHistoryByKey && typeof warPerformance.regularWarHistoryByKey === "object") {
+		const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+		const warKeys = Object.keys(historyByKey);
+		let historyChanged = false;
+		for (let i = 0; i < warKeys.length; i++) {
+			const warKey = warKeys[i];
+			const entry = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
+			if (!entry || !entry.statsByTag || typeof entry.statsByTag !== "object") continue;
+			if (!Object.prototype.hasOwnProperty.call(entry.statsByTag, tag)) continue;
+			delete entry.statsByTag[tag];
+			historyChanged = true;
+			if (Object.keys(entry.statsByTag).length < 1) {
+				delete historyByKey[warKey];
+			} else {
+				historyByKey[warKey] = sanitizeRegularWarHistoryEntry_(entry, warKey);
+			}
+		}
+		if (historyChanged) {
+			warPerformance.regularWarHistoryByKey = historyByKey;
+			changed = true;
+			regularHistoryOrBaselineChanged = true;
+		}
+	}
+	if (warPerformance && regularHistoryOrBaselineChanged) {
+		rebuildRegularWarAggregatesFromHistory_(warPerformance, new Date().toISOString());
 	}
 
 	return changed;
@@ -8016,6 +8587,12 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			nowIso: nowIso,
 		});
 	}
+	const repairResult = attemptRepairIncompleteRegularWarHistory_({
+		warPerformance: warPerformance,
+		clanTag: ctx.clanTag,
+		trackedTagSet: trackedHistoryTagSet,
+		nowIso: nowIso,
+	});
 
 	const nextLifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
 	const keepPendingPreviousWar = !isCurrentWarPrivate && !liveSnapshot && !!previousActiveWarKey && !!shouldFinalizePrevious && !!(finalization && finalization.attempted) && !(finalization && finalization.finalized);
@@ -8049,6 +8626,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	warPerformance.regularWarLifecycle = nextLifecycle;
 	warPerformance.lastRefreshedAt = nowIso;
 	ctx.roster.warPerformance = warPerformance;
+	const aggregateMeta = buildRegularWarAggregateMetaFromWarPerformance_(warPerformance, repairResult, nowIso);
 
 	const attacksPerMember = toNonNegativeInt_(currentWarMeta.attacksPerMember);
 	const liveCurrentByTag = liveSnapshot && liveSnapshot.currentByTag && typeof liveSnapshot.currentByTag === "object" ? liveSnapshot.currentByTag : {};
@@ -8087,16 +8665,6 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		};
 	}
 
-	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
-	const aggregateMeta = {
-		source: "warPerformance",
-		warLogAvailable: false,
-		warsTracked: toNonNegativeInt_(meta.finalizedRegularWarCount),
-		lastSuccessfulWarLogRefreshAt: typeof meta.lastRegularWarFinalizedAt === "string" ? meta.lastRegularWarFinalizedAt : "",
-		unavailableReason: "",
-		statusMessage: meta.lastRegularWarFinalizationIncomplete ? "At least one regular-war finalization used fallback data and may be incomplete." : "",
-	};
-
 	const membershipByTag = {};
 	const setMembership = (playersRaw, role) => {
 		const players = Array.isArray(playersRaw) ? playersRaw : [];
@@ -8125,6 +8693,10 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		membershipByTag: membershipByTag,
 	};
 	updateWarPerformanceMembership_(ctx.roster, nowIso);
+	const refreshedWarPerformance = ensureWarPerformance_(ctx.roster);
+	ctx.roster.warPerformance = refreshedWarPerformance;
+	const aggregateMetaFinal = buildRegularWarAggregateMetaFromWarPerformance_(refreshedWarPerformance, repairResult, nowIso);
+	ctx.roster.regularWar.aggregateMeta = sanitizeRegularWarAggregateMeta_(aggregateMetaFinal);
 	clearRosterBenchSuggestions_(ctx.roster);
 
 	const outRosterData = validateRosterData_(ctx.rosterData);
@@ -8135,19 +8707,21 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			mode: "regularWar",
 			currentWarState: currentWarState,
 			playersTracked: trackedTags.length,
-			warsProcessed: toNonNegativeInt_(aggregateMeta.warsTracked),
-			warLogAvailable: false,
+			warsProcessed: toNonNegativeInt_(aggregateMetaFinal.warsTracked),
+			warLogAvailable: toBooleanFlag_(aggregateMetaFinal.warLogAvailable),
 			finalizationAttempted: !!(finalization && finalization.attempted),
 			finalizedRegularWar: !!(finalization && finalization.finalized),
 			finalizationSource: String((finalization && finalization.source) || ""),
 			finalizationReason: String((finalization && finalization.reason) || ""),
 			finalizationIncomplete: !!(finalization && finalization.incomplete),
+			repairAttemptedWarCount: toNonNegativeInt_(repairResult && repairResult.attemptedWarCount),
+			repairedWarCount: toNonNegativeInt_(repairResult && repairResult.repairedWarCount),
 			teamSize: toNonNegativeInt_(currentWarMeta.teamSize),
 			attacksPerMember: toNonNegativeInt_(currentWarMeta.attacksPerMember),
 			currentWarUnavailableReason: String(currentWarMeta.unavailableReason || ""),
 			currentWarStatusMessage: String(currentWarMeta.statusMessage || ""),
-			aggregateUnavailableReason: String(aggregateMeta && aggregateMeta.unavailableReason ? aggregateMeta.unavailableReason : ""),
-			aggregateStatusMessage: String(aggregateMeta && aggregateMeta.statusMessage ? aggregateMeta.statusMessage : ""),
+			aggregateUnavailableReason: String(aggregateMetaFinal && aggregateMetaFinal.unavailableReason ? aggregateMetaFinal.unavailableReason : ""),
+			aggregateStatusMessage: String(aggregateMetaFinal && aggregateMetaFinal.statusMessage ? aggregateMetaFinal.statusMessage : ""),
 		},
 	};
 }

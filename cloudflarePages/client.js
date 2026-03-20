@@ -65,8 +65,8 @@
         landing: "landing",
     };
     const PUBLIC_LANDING_DEFAULTS = {
-        bannerMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=banner_qhln0h&profile=cld-looping",
-        squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_jperx8&profile=cld-looping",
+        bannerMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=banner_xwhksj&profile=cld-looping",
+        squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_ofyufv&profile=cld-looping",
         discordInviteUrl: "https://discord.gg/turtlecoc",
     };
     const LANDING_MEDIA_REMOTE_LOAD_TIMEOUT_MS = 9000;
@@ -789,10 +789,14 @@
         const aggregateWarsTracked = toNonNegativeInt(
             perfMeta.finalizedRegularWarCount != null ? perfMeta.finalizedRegularWarCount : aggregateMetaRaw.warsTracked
         );
-        const aggregateStatusMessage = toStr(aggregateMetaRaw.statusMessage).trim()
-            || (toBoolFlag(perfMeta.lastRegularWarFinalizationIncomplete)
-                ? "At least one regular-war finalization used fallback data and may be incomplete."
-                : "");
+        const aggregateStatusMessage = toStr(aggregateMetaRaw.statusMessage).trim();
+        const aggregateStatusLevelRaw = toStr(aggregateMetaRaw.statusLevel).trim().toLowerCase();
+        const aggregateStatusLevel = aggregateStatusLevelRaw === "warning" || aggregateStatusLevelRaw === "info"
+            ? aggregateStatusLevelRaw
+            : "";
+        const aggregateUnresolvedIncompleteWarCount = toNonNegativeInt(aggregateMetaRaw.unresolvedIncompleteWarCount);
+        const aggregatePendingRecentRepairCount = toNonNegativeInt(aggregateMetaRaw.pendingRecentRepairCount);
+        const aggregateStaleUnresolvedWarCount = toNonNegativeInt(aggregateMetaRaw.staleUnresolvedWarCount);
 
         return {
             lastRefreshedAt: toStr(regularWar.lastRefreshedAt).trim(),
@@ -800,6 +804,7 @@
             currentWarUnavailableReason: toStr(currentWarRaw.unavailableReason).trim(),
             currentWarStatusMessage: toStr(currentWarRaw.statusMessage).trim(),
             aggregateUnavailableReason: toStr(aggregateMetaRaw.unavailableReason).trim(),
+            aggregateStatusLevel: aggregateStatusLevel,
             aggregateStatusMessage: aggregateStatusMessage,
             teamSize: toNonNegativeInt(currentWarRaw.teamSize),
             attacksPerMember: toNonNegativeInt(currentWarRaw.attacksPerMember),
@@ -838,6 +843,12 @@
                 source: aggregateSource,
                 warLogAvailable: toBoolFlag(aggregateMetaRaw.warLogAvailable),
                 warsTracked: aggregateWarsTracked,
+                unresolvedIncompleteWarCount: aggregateUnresolvedIncompleteWarCount,
+                pendingRecentRepairCount: aggregatePendingRecentRepairCount,
+                staleUnresolvedWarCount: aggregateStaleUnresolvedWarCount,
+                lastRepairAttemptAt: toStr(aggregateMetaRaw.lastRepairAttemptAt).trim(),
+                lastRepairSuccessAt: toStr(aggregateMetaRaw.lastRepairSuccessAt).trim(),
+                statusLevel: aggregateStatusLevel,
             },
         };
     };
@@ -2261,20 +2272,24 @@
                 : (role === "sub" ? "alert" : "success"))
             : "";
         const heroAlertCards = trackingMode === "regularWar"
-            ? [
-                regularWar.currentWarUnavailableReason === "privateWarLog"
-                    ? renderNotice("Live war data", "Unavailable because the clan war log is private.", "alert")
-                    : "",
-                regularWar.aggregateStatusMessage
-                    ? renderNotice("Aggregate status", regularWar.aggregateStatusMessage, "info")
-                    : "",
-                regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0
-                    ? renderNotice("Pending", formatNumber(regularWar.current.attacksRemaining) + " " + pluralize(regularWar.current.attacksRemaining, "attack", "attacks") + " left in current war", "alert")
-                    : "",
-                regularWar.current.missedAttacks > 0
-                    ? renderNotice("Missed", "Missed " + formatNumber(regularWar.current.missedAttacks) + " " + pluralize(regularWar.current.missedAttacks, "attack", "attacks"), "alert")
-                    : "",
-            ].filter(Boolean).join("")
+            ? (() => {
+                const showAggregateStatusNotice = !!regularWar.aggregateStatusMessage
+                    && !(regularWar.currentWarUnavailableReason === "privateWarLog" && regularWar.aggregateStatusLevel !== "warning");
+                return [
+                    regularWar.currentWarUnavailableReason === "privateWarLog"
+                        ? renderNotice("Live war data", "Unavailable because the clan war log is private.", "alert")
+                        : "",
+                    showAggregateStatusNotice
+                        ? renderNotice("Aggregate status", regularWar.aggregateStatusMessage, "info")
+                        : "",
+                    regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0
+                        ? renderNotice("Pending", formatNumber(regularWar.current.attacksRemaining) + " " + pluralize(regularWar.current.attacksRemaining, "attack", "attacks") + " left in current war", "alert")
+                        : "",
+                    regularWar.current.missedAttacks > 0
+                        ? renderNotice("Missed", "Missed " + formatNumber(regularWar.current.missedAttacks) + " " + pluralize(regularWar.current.missedAttacks, "attack", "attacks"), "alert")
+                        : "",
+                ].filter(Boolean).join("");
+            })()
             : [
                 cwl.currentWarAttackPending >= 1 ? renderNotice("Pending", "Current CWL attack pending", "alert") : "",
                 cwl.missedAttacks > 0 ? renderNotice("Missed", "Missed " + formatNumber(cwl.missedAttacks) + " " + pluralize(cwl.missedAttacks, "attack", "attacks"), "alert") : "",
@@ -4114,8 +4129,14 @@
             : {};
         const regularWarLiveUnavailable = toStr(regularWarCurrentMeta.unavailableReason).trim() === "privateWarLog";
         const regularWarLiveStatusMessage = toStr(regularWarCurrentMeta.statusMessage).trim();
+        const regularWarAggregateStatusLevelRaw = toStr(regularWarAggregateMeta.statusLevel).trim().toLowerCase();
+        const regularWarAggregateStatusLevel = regularWarAggregateStatusLevelRaw === "warning" || regularWarAggregateStatusLevelRaw === "info"
+            ? regularWarAggregateStatusLevelRaw
+            : "";
         const regularWarAggregateStatusMessage = toStr(regularWarAggregateMeta.statusMessage).trim();
         const regularWarAggregateHasNotice = !!regularWarAggregateStatusMessage;
+        const regularWarAggregateShowWithLiveWarning = regularWarAggregateHasNotice
+            && !(regularWarLiveUnavailable && regularWarAggregateStatusLevel !== "warning");
 
         const card = el("div", "card");
         const head = el("div", "roster-head");
@@ -4145,8 +4166,8 @@
             if (regularWarLiveUnavailable) {
                 meta.appendChild(el("span", "badge", "Live war refresh unavailable"));
             }
-            if (regularWarAggregateHasNotice) {
-                meta.appendChild(el("span", "badge", "Aggregate status notice"));
+            if (regularWarAggregateShowWithLiveWarning) {
+                meta.appendChild(el("span", "badge", regularWarAggregateStatusLevel === "warning" ? "Aggregate status warning" : "Aggregate status notice"));
             }
         }
 
@@ -4174,19 +4195,17 @@
         head.appendChild(h2);
         head.appendChild(meta);
         card.appendChild(head);
-        if (trackingMode === "regularWar" && (regularWarLiveUnavailable || regularWarAggregateHasNotice)) {
+        if (trackingMode === "regularWar" && regularWarLiveUnavailable) {
             const warning = el("div", "roster-data-warning");
             warning.appendChild(el("div", "roster-data-warning__title", "Live war data warning"));
-            const warningParts = [];
-            if (regularWarLiveUnavailable) {
-                warningParts.push(regularWarLiveStatusMessage || "Fresh live war data could not be fetched because the clan war log is private.");
-            }
-            if (regularWarAggregateHasNotice) {
-                warningParts.push(regularWarAggregateStatusMessage);
-            }
-            warningParts.push("Showing last known roster and war values; some data may be stale.");
-            warning.appendChild(el("div", "roster-data-warning__text", warningParts.join(" ")));
+            warning.appendChild(el("div", "roster-data-warning__text", regularWarLiveStatusMessage || "Fresh live war data could not be fetched because the clan war log is private."));
             card.appendChild(warning);
+        }
+        if (trackingMode === "regularWar" && regularWarAggregateShowWithLiveWarning) {
+            const aggregateNotice = el("div", "roster-data-warning");
+            aggregateNotice.appendChild(el("div", "roster-data-warning__title", "Regular-war aggregate status"));
+            aggregateNotice.appendChild(el("div", "roster-data-warning__text", regularWarAggregateStatusMessage));
+            card.appendChild(aggregateNotice);
         }
         if (!hideSuggestions && trackingMode === "cwl" && !prepActive) {
             const suggestionBanner = renderRosterSuggestionBanner(roster, suggestionModel);
