@@ -85,25 +85,6 @@
   const cloneJson = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
   const REFRESH_ALL_STEP_DELAY_MS = 1000;
 
-  const createAsyncMutex = () => {
-    let tail = Promise.resolve();
-    return async (task) => {
-      const previous = tail;
-      let release = () => { };
-      tail = new Promise((resolve) => {
-        release = resolve;
-      });
-      await previous;
-      try {
-        return await task();
-      } finally {
-        release();
-      }
-    };
-  };
-
-  const runExclusiveRosterPoolRefresh = createAsyncMutex();
-
   const normalizeTag = (tag) => {
     const t = toStr(tag).trim().toUpperCase();
     if (!t) return "";
@@ -406,7 +387,15 @@
     return merged;
   };
 
-  const applyMergedRosterPreview = (rosterIdRaw, nextRosterData, statusMsg) => {
+  const toJsonCompareKey_ = (valueRaw) => {
+    try {
+      return JSON.stringify(valueRaw == null ? null : valueRaw);
+    } catch {
+      return "";
+    }
+  };
+
+  const applyMergedRosterPreview = (rosterIdRaw, nextRosterData, statusMsg, optionsRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) {
       throw new Error("Roster ID is required.");
@@ -417,6 +406,8 @@
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
       throw new Error("No roster preview is loaded.");
     }
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const requestRosterData = options.requestRosterData && Array.isArray(options.requestRosterData.rosters) ? options.requestRosterData : null;
 
     const nextRosterIndex = getRosterIndexInRosterData_(nextRosterData, rosterId);
     if (nextRosterIndex < 0) {
@@ -424,24 +415,122 @@
     }
 
     const mergedRosterData = cloneJson(state.lastRosterData);
-    const targetRosterIndex = getRosterIndexInRosterData_(mergedRosterData, rosterId);
-    if (targetRosterIndex < 0) {
-      throw new Error("Roster not found in current preview: " + rosterId);
+
+    if (!requestRosterData) {
+      const targetRosterIndex = getRosterIndexInRosterData_(mergedRosterData, rosterId);
+      if (targetRosterIndex < 0) {
+        throw new Error("Roster not found in current preview: " + rosterId);
+      }
+      mergedRosterData.rosters[targetRosterIndex] = cloneJson(nextRosterData.rosters[nextRosterIndex]);
+      if (typeof nextRosterData.pageTitle === "string") {
+        mergedRosterData.pageTitle = nextRosterData.pageTitle;
+      }
+      if (Number.isFinite(Number(nextRosterData.schemaVersion))) {
+        mergedRosterData.schemaVersion = Number(nextRosterData.schemaVersion);
+      }
+      if (Array.isArray(nextRosterData.rosterOrder)) {
+        mergedRosterData.rosterOrder = cloneJson(nextRosterData.rosterOrder);
+      }
+      if (typeof nextRosterData.lastUpdatedAt === "string") {
+        mergedRosterData.lastUpdatedAt = nextRosterData.lastUpdatedAt;
+      }
+    } else {
+      const nextRosters = Array.isArray(nextRosterData.rosters) ? nextRosterData.rosters : [];
+      const requestRosters = Array.isArray(requestRosterData.rosters) ? requestRosterData.rosters : [];
+      const nextRosterById = {};
+      const nextRosterJsonById = {};
+      const requestRosterJsonById = {};
+      const changedRosterIdSet = {};
+
+      for (let i = 0; i < nextRosters.length; i++) {
+        const nextRoster = nextRosters[i] && typeof nextRosters[i] === "object" ? nextRosters[i] : {};
+        const nextId = toStr(nextRoster.id).trim();
+        if (!nextId || Object.prototype.hasOwnProperty.call(nextRosterById, nextId)) continue;
+        nextRosterById[nextId] = nextRoster;
+        nextRosterJsonById[nextId] = toJsonCompareKey_(nextRoster);
+      }
+      for (let i = 0; i < requestRosters.length; i++) {
+        const requestRoster = requestRosters[i] && typeof requestRosters[i] === "object" ? requestRosters[i] : {};
+        const requestId = toStr(requestRoster.id).trim();
+        if (!requestId || Object.prototype.hasOwnProperty.call(requestRosterJsonById, requestId)) continue;
+        requestRosterJsonById[requestId] = toJsonCompareKey_(requestRoster);
+      }
+
+      changedRosterIdSet[rosterId] = true;
+      const nextRosterIds = Object.keys(nextRosterById);
+      for (let i = 0; i < nextRosterIds.length; i++) {
+        const id = nextRosterIds[i];
+        if (!Object.prototype.hasOwnProperty.call(requestRosterJsonById, id)) {
+          changedRosterIdSet[id] = true;
+          continue;
+        }
+        if (requestRosterJsonById[id] !== nextRosterJsonById[id]) {
+          changedRosterIdSet[id] = true;
+        }
+      }
+      const requestRosterIds = Object.keys(requestRosterJsonById);
+      for (let i = 0; i < requestRosterIds.length; i++) {
+        const id = requestRosterIds[i];
+        if (!Object.prototype.hasOwnProperty.call(nextRosterById, id)) {
+          changedRosterIdSet[id] = true;
+        }
+      }
+
+      const currentRosters = Array.isArray(mergedRosterData.rosters) ? mergedRosterData.rosters : [];
+      const filteredRosters = [];
+      for (let i = 0; i < currentRosters.length; i++) {
+        const currentRoster = currentRosters[i] && typeof currentRosters[i] === "object" ? currentRosters[i] : {};
+        const currentId = toStr(currentRoster.id).trim();
+        if (currentId && changedRosterIdSet[currentId] && !Object.prototype.hasOwnProperty.call(nextRosterById, currentId)) {
+          continue;
+        }
+        filteredRosters.push(currentRoster);
+      }
+      mergedRosterData.rosters = filteredRosters;
+
+      const changedRosterIds = Object.keys(changedRosterIdSet);
+      for (let i = 0; i < changedRosterIds.length; i++) {
+        const id = changedRosterIds[i];
+        const nextRoster = nextRosterById[id];
+        if (!nextRoster) continue;
+        const currentIndex = getRosterIndexInRosterData_(mergedRosterData, id);
+        if (currentIndex >= 0) {
+          mergedRosterData.rosters[currentIndex] = cloneJson(nextRoster);
+        } else {
+          mergedRosterData.rosters.push(cloneJson(nextRoster));
+        }
+      }
+
+      const requestPageTitle = toStr(requestRosterData.pageTitle).trim();
+      const incomingPageTitle = toStr(nextRosterData.pageTitle).trim();
+      if (typeof nextRosterData.pageTitle === "string" && (requestPageTitle !== incomingPageTitle || !toStr(mergedRosterData.pageTitle).trim())) {
+        mergedRosterData.pageTitle = nextRosterData.pageTitle;
+      }
+      if (Number.isFinite(Number(nextRosterData.schemaVersion))) {
+        const requestSchemaVersion = Number(requestRosterData.schemaVersion);
+        const incomingSchemaVersion = Number(nextRosterData.schemaVersion);
+        if (!Number.isFinite(requestSchemaVersion) || requestSchemaVersion !== incomingSchemaVersion) {
+          mergedRosterData.schemaVersion = incomingSchemaVersion;
+        }
+      }
+      if (Array.isArray(nextRosterData.rosterOrder)) {
+        const incomingOrderKey = toJsonCompareKey_(nextRosterData.rosterOrder);
+        const requestOrderKey = toJsonCompareKey_(Array.isArray(requestRosterData.rosterOrder) ? requestRosterData.rosterOrder : []);
+        if (incomingOrderKey !== requestOrderKey || !Array.isArray(mergedRosterData.rosterOrder)) {
+          mergedRosterData.rosterOrder = cloneJson(nextRosterData.rosterOrder);
+        }
+      }
+      if (typeof nextRosterData.lastUpdatedAt === "string") {
+        const incomingLastUpdatedAt = toStr(nextRosterData.lastUpdatedAt).trim();
+        const requestLastUpdatedAt = toStr(requestRosterData.lastUpdatedAt).trim();
+        const incomingMs = parseIsoMs_(incomingLastUpdatedAt);
+        const currentMs = parseIsoMs_(mergedRosterData.lastUpdatedAt);
+        if (incomingLastUpdatedAt && (requestLastUpdatedAt !== incomingLastUpdatedAt || !currentMs || (incomingMs > 0 && incomingMs >= currentMs))) {
+          mergedRosterData.lastUpdatedAt = incomingLastUpdatedAt;
+        }
+      }
     }
 
-    mergedRosterData.rosters[targetRosterIndex] = cloneJson(nextRosterData.rosters[nextRosterIndex]);
-    if (typeof nextRosterData.pageTitle === "string") {
-      mergedRosterData.pageTitle = nextRosterData.pageTitle;
-    }
-    if (Number.isFinite(Number(nextRosterData.schemaVersion))) {
-      mergedRosterData.schemaVersion = Number(nextRosterData.schemaVersion);
-    }
-    if (Array.isArray(nextRosterData.rosterOrder)) {
-      mergedRosterData.rosterOrder = cloneJson(nextRosterData.rosterOrder);
-    }
-    if (typeof nextRosterData.lastUpdatedAt === "string") {
-      mergedRosterData.lastUpdatedAt = nextRosterData.lastUpdatedAt;
-    }
     const mergedPlayerMetrics = mergePlayerMetricsStore_(mergedRosterData.playerMetrics, nextRosterData.playerMetrics);
     if (mergedPlayerMetrics) {
       mergedRosterData.playerMetrics = mergedPlayerMetrics;
@@ -2513,9 +2602,12 @@
           ensureServerReady();
           setBusy(true);
           setRowStatus("Syncing roster pool...", false);
-          const res = await runServerMethod("syncClanRosterPool", [state.lastRosterData, rosterId, state.password]);
+          const requestRosterData = cloneCurrentRosterDataForServer_();
+          const res = await runServerMethod("syncClanRosterPool", [requestRosterData, rosterId, state.password]);
           setRowStatus(formatRosterPoolStatus(res && res.result), false);
-          applyServerSyncedPreview(res && res.rosterData, "Roster pool synced for " + rosterId + ".");
+          applyMergedRosterPreview(rosterId, res && res.rosterData, "Roster pool synced for " + rosterId + ".", {
+            requestRosterData: requestRosterData,
+          });
         } catch (err) {
           setRowStatus(toErrorMessage(err), true);
         } finally {
@@ -2529,18 +2621,23 @@
           const mode = getRosterTrackingMode(r);
           setBusy(true);
           setRowStatus(mode === "regularWar" ? "Syncing current war lineup..." : "Syncing lineup...", false);
-          const res = await runServerMethod("syncClanTodayLineup", [state.lastRosterData, rosterId, state.password]);
+          const requestRosterData = cloneCurrentRosterDataForServer_();
+          const res = await runServerMethod("syncClanTodayLineup", [requestRosterData, rosterId, state.password]);
           const result = res && res.result ? res.result : {};
           const msg = toStr(result.message).trim();
           setRowStatus(formatTodayLineupStatus(result), false);
           if (mode === "cwl" && msg.toLowerCase() === "no current cwl war found") {
             setStatus("No current CWL war found for " + rosterId + ".");
           } else {
-            applyServerSyncedPreview(
+            applyMergedRosterPreview(
+              rosterId,
               res && res.rosterData,
               mode === "regularWar"
                 ? "Current war lineup synced for " + rosterId + "."
-                : "Lineup synced for " + rosterId + "."
+                : "Lineup synced for " + rosterId + ".",
+              {
+                requestRosterData: requestRosterData,
+              }
             );
           }
         } catch (err) {
@@ -2555,9 +2652,12 @@
           ensureServerReady();
           setBusy(true);
           setRowStatus("Refreshing tracking stats...", false);
-          const res = await runServerMethod("refreshTrackingStats", [state.lastRosterData, rosterId, state.password]);
+          const requestRosterData = cloneCurrentRosterDataForServer_();
+          const res = await runServerMethod("refreshTrackingStats", [requestRosterData, rosterId, state.password]);
           setRowStatus(formatTrackingRefreshStatus(res && res.result), false);
-          applyServerSyncedPreview(res && res.rosterData, "Tracking stats refreshed for " + rosterId + ".");
+          applyMergedRosterPreview(rosterId, res && res.rosterData, "Tracking stats refreshed for " + rosterId + ".", {
+            requestRosterData: requestRosterData,
+          });
         } catch (err) {
           setRowStatus(toErrorMessage(err), true);
         } finally {
@@ -2571,11 +2671,12 @@
           ensureServerReady();
           setBusy(true);
           setRowStatus("Suggesting...", false);
-          const res = await runServerMethod("computeBenchSuggestions", [state.lastRosterData, rosterId, state.password]);
+          const requestRosterData = cloneCurrentRosterDataForServer_();
+          const res = await runServerMethod("computeBenchSuggestions", [requestRosterData, rosterId, state.password]);
           if (res && res.rosterData && Array.isArray(res.rosterData.rosters)) {
-            state.lastRosterData = res.rosterData;
-            normalizeRosterOrderInData_(state.lastRosterData);
-            reindexAllRosters();
+            applyMergedRosterPreview(rosterId, res.rosterData, "", {
+              requestRosterData: requestRosterData,
+            });
           }
           const summary = applySuggestionResponseToState(rosterId, res);
           renderPreviewFromState();
@@ -2655,10 +2756,57 @@
       setStatus("Refresh all running: " + completedRosters + "/" + totalRosters + " rosters complete.");
     };
 
+    const createRefreshAllStartSlotDispatcher = () => {
+      let nextAllowedStartMs = Date.now();
+      return async (task) => {
+        if (typeof task !== "function") {
+          throw new Error("Refresh-all task is required.");
+        }
+        const nowMs = Date.now();
+        const scheduledStartMs = Math.max(nowMs, nextAllowedStartMs);
+        const stepDelayMs = Math.max(0, Number(REFRESH_ALL_STEP_DELAY_MS) || 0);
+        nextAllowedStartMs = scheduledStartMs + stepDelayMs;
+        const waitMs = scheduledStartMs - nowMs;
+        if (waitMs > 0) {
+          await pause(waitMs);
+        }
+        return task();
+      };
+    };
+
+    const dispatchRefreshAllTask = createRefreshAllStartSlotDispatcher();
+    const scheduleRefreshAllRequest = (methodName, rosterIdRaw) => {
+      const rosterId = toStr(rosterIdRaw).trim();
+      if (!rosterId) {
+        throw new Error("Roster ID is required.");
+      }
+      return dispatchRefreshAllTask(async () => {
+        const requestRosterData = cloneCurrentRosterDataForServer_();
+        const response = await runServerMethod(methodName, [requestRosterData, rosterId, state.password]);
+        return {
+          requestRosterData: requestRosterData,
+          response: response,
+        };
+      });
+    };
+
+    const mergeRefreshAllRosterPreviewIfValid = (rosterIdRaw, scheduledResponse) => {
+      const response = scheduledResponse && scheduledResponse.response;
+      const rosterData = response && response.rosterData;
+      if (!rosterData || !Array.isArray(rosterData.rosters)) return false;
+      applyMergedRosterPreview(rosterIdRaw, rosterData, "", {
+        requestRosterData: scheduledResponse && scheduledResponse.requestRosterData,
+      });
+      return true;
+    };
+
     const runRefreshAllRosterPipeline = async (rosterIdRaw) => {
       const rosterId = toStr(rosterIdRaw).trim();
       const rosterLabel = formatRosterDisplayLabel(rosterId) || rosterId;
       const issues = [];
+      let poolStepOk = false;
+      let lineupStepOk = false;
+      let statsStepOk = false;
 
       const addIssue = (msg) => {
         issues.push(rosterLabel + ": " + msg);
@@ -2685,7 +2833,6 @@
       };
       const getCurrentTrackingMode = () => getRosterTrackingMode(requireCurrentRoster());
       const shouldSuggestBench = () => getCurrentTrackingMode() === "cwl";
-      const totalSteps = shouldSuggestBench() ? 4 : 3;
 
       const failClanStep = (err) => {
         const msg = toErrorMessage(err);
@@ -2701,72 +2848,103 @@
         addIssue(msg);
       };
 
-      const waitForNextStep = async (stepIndex) => {
-        if (stepIndex >= totalSteps - 1 || REFRESH_ALL_STEP_DELAY_MS < 1) return;
-        await pause(REFRESH_ALL_STEP_DELAY_MS);
+      const skipClanStep = (stepLabel, prerequisiteStepLabel) => {
+        const skippedMsg = "Skipped: previous step failed (" + prerequisiteStepLabel + ").";
+        setClanSyncStatus(rosterId, skippedMsg, false);
+        renderClanSyncTable();
+        addIssue(stepLabel + " skipped because previous step failed: " + prerequisiteStepLabel + ".");
+      };
+
+      const skipTrackingStep = (stepLabel, prerequisiteStepLabel) => {
+        const skippedMsg = "Skipped: previous step failed (" + prerequisiteStepLabel + ").";
+        setCwlStatus(rosterId, skippedMsg, false);
+        renderCwlPerfTable();
+        addIssue(stepLabel + " skipped because previous step failed: " + prerequisiteStepLabel + ".");
       };
 
       try {
+        // Step 1: syncClanRosterPool
         try {
           requireConnectedClanTag();
           setClanSyncStatus(rosterId, "Syncing roster pool...", false);
           renderClanSyncTable();
-          await runExclusiveRosterPoolRefresh(async () => {
-            const res = await runServerMethod("syncClanRosterPool", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
-            setClanSyncStatus(rosterId, formatRosterPoolStatus(res && res.result), false);
-            applyServerSyncedPreview(res && res.rosterData);
-          });
-        } catch (err) {
-          failClanStep(err);
-        }
-
-        await waitForNextStep(0);
-
-        try {
-          requireConnectedClanTag();
-          const mode = getCurrentTrackingMode();
-          setClanSyncStatus(rosterId, mode === "regularWar" ? "Syncing current war lineup..." : "Syncing today lineup...", false);
+          const scheduled = await scheduleRefreshAllRequest("syncClanRosterPool", rosterId);
+          const res = scheduled && scheduled.response ? scheduled.response : {};
+          setClanSyncStatus(rosterId, formatRosterPoolStatus(res && res.result), false);
+          mergeRefreshAllRosterPreviewIfValid(rosterId, scheduled);
           renderClanSyncTable();
-          const res = await runServerMethod("syncClanTodayLineup", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
-          const result = res && res.result ? res.result : {};
-          const msg = toStr(result.message).trim();
-          setClanSyncStatus(rosterId, formatTodayLineupStatus(result), false);
-          if (mode === "cwl" && msg.toLowerCase() === "no current cwl war found") {
-            renderClanSyncTable();
-          } else {
-            applyServerSyncedPreview(res && res.rosterData);
-          }
+          poolStepOk = true;
         } catch (err) {
+          poolStepOk = false;
           failClanStep(err);
         }
 
-        await waitForNextStep(1);
-
-        try {
-          requireConnectedClanTag();
-          setCwlStatus(rosterId, "Refreshing tracking stats...", false);
-          renderCwlPerfTable();
-          const res = await runServerMethod("refreshTrackingStats", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
-          setCwlStatus(rosterId, formatTrackingRefreshStatus(res && res.result), false);
-          applyServerSyncedPreview(res && res.rosterData);
-        } catch (err) {
-          failTrackingStep(err);
+        // Step 2: syncClanTodayLineup
+        if (!poolStepOk) {
+          skipClanStep("sync today lineup", "sync clan roster pool");
+        } else {
+          try {
+            requireConnectedClanTag();
+            const mode = getCurrentTrackingMode();
+            setClanSyncStatus(rosterId, mode === "regularWar" ? "Syncing current war lineup..." : "Syncing today lineup...", false);
+            renderClanSyncTable();
+            const scheduled = await scheduleRefreshAllRequest("syncClanTodayLineup", rosterId);
+            const res = scheduled && scheduled.response ? scheduled.response : {};
+            const result = res && res.result ? res.result : {};
+            setClanSyncStatus(rosterId, formatTodayLineupStatus(result), false);
+            mergeRefreshAllRosterPreviewIfValid(rosterId, scheduled);
+            renderClanSyncTable();
+            lineupStepOk = true;
+          } catch (err) {
+            lineupStepOk = false;
+            failClanStep(err);
+          }
         }
 
-        await waitForNextStep(2);
-
-        if (shouldSuggestBench()) {
+        // Step 3: refreshTrackingStats
+        if (!poolStepOk) {
+          skipTrackingStep("refresh tracking stats", "sync clan roster pool");
+        } else if (!lineupStepOk) {
+          skipTrackingStep("refresh tracking stats", "sync today lineup");
+        } else {
           try {
-            requireCurrentRoster();
-            setCwlStatus(rosterId, "Suggesting...", false);
+            requireConnectedClanTag();
+            setCwlStatus(rosterId, "Refreshing tracking stats...", false);
             renderCwlPerfTable();
-            const res = await runServerMethod("computeBenchSuggestions", [cloneCurrentRosterDataForServer_(), rosterId, state.password]);
-            applyServerSyncedPreview(res && res.rosterData);
-            const summary = res && res.result ? res.result : {};
-            setCwlStatus(rosterId, formatSuggestionStatus(summary), false);
+            const scheduled = await scheduleRefreshAllRequest("refreshTrackingStats", rosterId);
+            const res = scheduled && scheduled.response ? scheduled.response : {};
+            setCwlStatus(rosterId, formatTrackingRefreshStatus(res && res.result), false);
+            mergeRefreshAllRosterPreviewIfValid(rosterId, scheduled);
             renderCwlPerfTable();
+            statsStepOk = true;
           } catch (err) {
+            statsStepOk = false;
             failTrackingStep(err);
+          }
+        }
+
+        // Step 4: computeBenchSuggestions (CWL only)
+        if (shouldSuggestBench()) {
+          if (!poolStepOk) {
+            skipTrackingStep("compute bench suggestions", "sync clan roster pool");
+          } else if (!lineupStepOk) {
+            skipTrackingStep("compute bench suggestions", "sync today lineup");
+          } else if (!statsStepOk) {
+            skipTrackingStep("compute bench suggestions", "refresh tracking stats");
+          } else {
+            try {
+              requireCurrentRoster();
+              setCwlStatus(rosterId, "Suggesting...", false);
+              renderCwlPerfTable();
+              const scheduled = await scheduleRefreshAllRequest("computeBenchSuggestions", rosterId);
+              const res = scheduled && scheduled.response ? scheduled.response : {};
+              mergeRefreshAllRosterPreviewIfValid(rosterId, scheduled);
+              const summary = res && res.result ? res.result : {};
+              setCwlStatus(rosterId, formatSuggestionStatus(summary), false);
+              renderCwlPerfTable();
+            } catch (err) {
+              failTrackingStep(err);
+            }
           }
         }
       } catch (err) {
@@ -2786,12 +2964,28 @@
     setStatus("Refresh all running: 0/" + totalRosters + " rosters complete.");
     let issues = [];
     try {
+      const pipelineRuns = [];
       for (let i = 0; i < rosters.length; i++) {
         const rosterId = toStr(rosters[i] && rosters[i].id).trim();
         if (!rosterId) continue;
-        const rosterIssues = await runRefreshAllRosterPipeline(rosterId);
-        if (Array.isArray(rosterIssues) && rosterIssues.length) {
-          issues = issues.concat(rosterIssues);
+        pipelineRuns.push({
+          rosterId: rosterId,
+          promise: runRefreshAllRosterPipeline(rosterId),
+        });
+      }
+
+      const settled = await Promise.allSettled(pipelineRuns.map((item) => item.promise));
+      for (let i = 0; i < settled.length; i++) {
+        const run = settled[i];
+        const rosterId = pipelineRuns[i] && pipelineRuns[i].rosterId;
+        const rosterLabel = formatRosterDisplayLabel(rosterId) || rosterId || "unknown roster";
+        if (run.status === "fulfilled") {
+          const rosterIssues = Array.isArray(run.value) ? run.value : [];
+          if (rosterIssues.length) {
+            issues = issues.concat(rosterIssues);
+          }
+        } else {
+          issues.push(rosterLabel + ": " + toErrorMessage(run.reason));
         }
       }
     } finally {

@@ -21,6 +21,8 @@ const AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY = "AUTO_REFRESH_LAST_RUN_ISSUE_
 const AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY = "AUTO_REFRESH_LAST_ARCHIVE_DATE";
 const ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY = "ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT";
 const STATIC_ASSET_BASE_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
+const STATIC_ASSET_VERSION_PROPERTY = "STATIC_ASSET_VERSION";
+const STATIC_ASSET_VERSION_FALLBACK = "v1";
 const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
 const FIREBASE_LAYOUT_VERSION = 2;
 const FIREBASE_ACTIVE_PATH = "active";
@@ -33,6 +35,7 @@ const FIREBASE_ACCESS_TOKEN_CACHE_KEY = "firebaseAccessToken:v1";
 const FIREBASE_ACCESS_TOKEN_SCOPE = "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email";
 const FIREBASE_ACCESS_TOKEN_TTL_SAFETY_SECONDS = 60;
 const CACHE_SAFE_TEXT_MAX_CHARS = 90 * 1024;
+let staticAssetVersionCache_ = null;
 let firebaseConfigCache_ = null;
 
 function doGet(e) {
@@ -48,20 +51,22 @@ function doGet(e) {
 	}
 
 	const buildStamp = new Date().toISOString();
+	const assetVersion = getStaticAssetVersion_();
 	const baseUrl = ScriptApp.getService().getUrl();
 	const staticBaseUrl = STATIC_ASSET_BASE_URL;
 
 	if (String(p.page || "") === "admin") {
 		const t = HtmlService.createTemplateFromFile("Admin");
 		t.buildStamp = buildStamp;
+		t.assetVersion = assetVersion;
 		t.baseUrl = baseUrl;
 		t.staticBaseUrl = staticBaseUrl;
 		return t.evaluate().setTitle("Roster Admin").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 	}
 
-	const cloudflareStylesUrl = buildStaticAssetUrl_("styles.css", buildStamp);
-	const cloudflareClientJsUrl = buildStaticAssetUrl_("client.js", buildStamp);
-	const cloudflareAppHtml = getCloudflareTextAsset_("app.html", buildStamp);
+	const cloudflareStylesUrl = buildStaticAssetUrl_("styles.css", assetVersion);
+	const cloudflareClientJsUrl = buildStaticAssetUrl_("client.js", assetVersion);
+	const cloudflareAppHtml = getCloudflareTextAsset_("app.html", assetVersion);
 	if (!cloudflareAppHtml) {
 		return HtmlService.createHtmlOutput(
 			[
@@ -158,6 +163,23 @@ function buildScriptAssetUrl_(baseUrlRaw, assetNameRaw) {
 	if (!baseUrl || !assetName) return "";
 	const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
 	return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
+}
+
+function getStaticAssetVersion_() {
+	if (staticAssetVersionCache_ !== null) return staticAssetVersionCache_;
+	let configuredVersion = "";
+	try {
+		configuredVersion = String(PropertiesService.getScriptProperties().getProperty(STATIC_ASSET_VERSION_PROPERTY) || "").trim();
+	} catch (err) {
+		Logger.log(
+			"Unable to read Script Property %s for static asset version: %s",
+			STATIC_ASSET_VERSION_PROPERTY,
+			err && (err.message || err.stack) ? err.message || err.stack : String(err),
+		);
+	}
+	const version = configuredVersion || STATIC_ASSET_VERSION_FALLBACK;
+	staticAssetVersionCache_ = version;
+	return version;
 }
 
 function buildStaticAssetUrl_(relativePathRaw, versionRaw) {
@@ -1017,7 +1039,10 @@ function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 function updateActiveRosterDataCaches_(text) {
 	const cache = getScriptCacheSafe_();
 	const payloadText = String(text == null ? "" : text);
-	maybeCacheText_(cache, buildAssetTextCacheKey_(ACTIVE_ROSTER_FILENAME), payloadText, getAssetTextCacheTtlSeconds_(ACTIVE_ROSTER_FILENAME), {
+	const cacheKey = buildAssetTextCacheKey_(ACTIVE_ROSTER_FILENAME);
+	// Ensure successful Firebase writes never leave an older active-roster cache value behind.
+	removeStringFromCache_(cache, cacheKey);
+	maybeCacheText_(cache, cacheKey, payloadText, getAssetTextCacheTtlSeconds_(ACTIVE_ROSTER_FILENAME), {
 		maxChars: CACHE_SAFE_TEXT_MAX_CHARS,
 		logOversize: true,
 	});
@@ -1169,6 +1194,7 @@ function normalizeActiveRosterForCompare_(rosterDataRaw) {
 		rosterOrder: validated.rosterOrder,
 		rosters: validated.rosters,
 		playerMetrics: validated.playerMetrics,
+		publicConfig: validated.publicConfig || null,
 	});
 }
 
@@ -1187,6 +1213,9 @@ function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
 		playerMetrics: validated.playerMetrics,
 		lastUpdatedAt: timestamp,
 	};
+	if (validated.publicConfig && typeof validated.publicConfig === "object") {
+		out.publicConfig = validated.publicConfig;
+	}
 	return validateRosterData_(out);
 }
 
@@ -7136,8 +7165,23 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		const state = String((currentWar && currentWar.state) || "")
 			.trim()
 			.toLowerCase();
-		const lineupSource = state === "preparation" || state === "inwar" ? currentWar.participants : [];
-		const result = applyTodayLineupSync_(ctx.roster, lineupSource);
+		const isLiveRegularWar = state === "preparation" || state === "inwar";
+		if (!isLiveRegularWar) {
+			const outRosterData = validateRosterData_(ctx.rosterData);
+			return {
+				ok: true,
+				rosterData: outRosterData,
+				result: {
+					mode: "regularWar",
+					activeSet: Array.isArray(ctx.roster.main) ? ctx.roster.main.length : 0,
+					benched: Array.isArray(ctx.roster.subs) ? ctx.roster.subs.length : 0,
+					missing: Array.isArray(ctx.roster.missing) ? ctx.roster.missing.length : 0,
+					updated: 0,
+					message: "no current regular war found",
+				},
+			};
+		}
+		const result = applyTodayLineupSync_(ctx.roster, currentWar.participants);
 		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
 			ok: true,
@@ -7148,7 +7192,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 				benched: result.benched,
 				missing: Array.isArray(ctx.roster.missing) ? ctx.roster.missing.length : 0,
 				updated: result.updated,
-				message: state === "preparation" || state === "inwar" ? "" : "no current regular war found",
+				message: "",
 			},
 		};
 	}
@@ -9138,6 +9182,40 @@ function sanitizeNotes_(raw) {
 	return arr.map((n) => String(n == null ? "" : n).trim()).filter((n) => n);
 }
 
+function sanitizePublicConfigUrl_(valueRaw) {
+	const value = String(valueRaw == null ? "" : valueRaw).trim();
+	if (!value) return "";
+	return /^https?:\/\//i.test(value) ? value : "";
+}
+
+function copySanitizedPublicConfigUrls_(target, source, keys) {
+	if (!target || typeof target !== "object" || !source || typeof source !== "object" || !Array.isArray(keys)) return;
+	for (let i = 0; i < keys.length; i++) {
+		const key = String(keys[i] == null ? "" : keys[i]).trim();
+		if (!key) continue;
+		const value = sanitizePublicConfigUrl_(source[key]);
+		if (value) target[key] = value;
+	}
+}
+
+function sanitizePublicConfig_(raw) {
+	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+	if (!source) return null;
+
+	const mediaKeys = ["bannerMediaUrl", "bannerUrl", "bannerGifUrl", "squareMediaUrl", "squareUrl", "squareGifUrl", "discordInviteUrl"];
+	const out = {};
+	copySanitizedPublicConfigUrls_(out, source, mediaKeys);
+
+	const landingSource = source.landing && typeof source.landing === "object" && !Array.isArray(source.landing) ? source.landing : null;
+	if (landingSource) {
+		const landingOut = {};
+		copySanitizedPublicConfigUrls_(landingOut, landingSource, mediaKeys);
+		if (Object.keys(landingOut).length) out.landing = landingOut;
+	}
+
+	return Object.keys(out).length ? out : null;
+}
+
 function countRosterPayload_(rosterData) {
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	let playerCount = 0;
@@ -9169,20 +9247,25 @@ function validateRosterData_(data) {
 	};
 	const lastUpdatedAt = typeof data.lastUpdatedAt === "string" ? data.lastUpdatedAt.trim() : "";
 	if (lastUpdatedAt) out.lastUpdatedAt = lastUpdatedAt;
+	const publicConfig = sanitizePublicConfig_(data.publicConfig);
+	if (publicConfig) out.publicConfig = publicConfig;
 
 	const rosters = Array.isArray(data.rosters) ? data.rosters : null;
 	if (!rosters) throw new Error("Invalid roster data: expected 'rosters' to be an array.");
 
 	const seenTags = {};
+	const seenRosterIds = {};
 
 	for (let i = 0; i < rosters.length; i++) {
 		const r = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-		const id = typeof r.id === "string" ? r.id : "";
+		const id = typeof r.id === "string" ? r.id.trim() : "";
 		const title = typeof r.title === "string" ? r.title : "";
 		const connectedClanTag = normalizeTag_(r.connectedClanTag);
 		const trackingMode = getRosterTrackingMode_(r);
 
 		if (!id) throw new Error("Invalid roster: missing 'id' at index " + i + ".");
+		if (seenRosterIds[id]) throw new Error("Invalid roster: duplicate 'id' value '" + id + "'.");
+		seenRosterIds[id] = true;
 		if (!title) throw new Error("Invalid roster: missing 'title' for roster '" + id + "'.");
 
 		const main = Array.isArray(r.main) ? r.main : [];
