@@ -688,7 +688,7 @@
 
     .admin-command-grid {
       display: grid;
-      gap: 10px;
+      gap: 8px;
     }
 
     .admin-command-top {
@@ -716,20 +716,20 @@
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      align-items: start;
+      align-items: center;
       min-width: 0;
     }
 
     .admin-command-actions .btn {
-      min-height: 38px;
+      min-height: 36px;
     }
 
-    .admin-command-actions .auto-refresh-panel {
-      margin-left: auto;
-      min-width: 240px;
-      max-width: 360px;
-      flex: 1 1 280px;
-      align-self: stretch;
+    .admin-command-actions--compact {
+      justify-content: flex-start;
+    }
+
+    .admin-command-actions--compact .btn {
+      flex: 0 0 auto;
     }
 
     .admin-command-footer {
@@ -738,6 +738,29 @@
       border-top: 1px solid #1f2937;
       padding-top: 8px;
       min-width: 0;
+    }
+
+    .admin-secondary-controls {
+      padding: 12px;
+      border-color: #334155;
+      background: rgba(11, 18, 32, 0.78);
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .admin-secondary-grid {
+      display: grid;
+      grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    .admin-secondary-controls .auto-refresh-panel {
+      min-width: 0;
+      width: 100%;
+      max-width: none;
     }
 
     .admin-global-status {
@@ -1146,8 +1169,8 @@
         grid-template-columns: 1fr;
       }
 
-      .admin-command-actions .auto-refresh-panel {
-        margin-left: 0;
+      .admin-secondary-grid {
+        grid-template-columns: 1fr;
       }
 
       .roster-actions-grid {
@@ -1167,6 +1190,11 @@
       body.admin-shell-page .container.admin-shell-container {
         margin-top: 14px;
         padding-bottom: 24px;
+      }
+
+      .admin-command-bar {
+        position: static;
+        top: auto;
       }
 
       .admin-auth-card.is-unlocked .admin-auth-grid {
@@ -1240,34 +1268,37 @@
     <div id="adminPanel" class="admin-shell hidden">
       <section class="card admin-command-bar">
         <div class="admin-command-grid">
-          <div class="admin-command-top">
-            <label class="admin-field" for="pageTitle">
-              <span class="admin-field-label">Page title</span>
-              <input id="pageTitle" class="admin-input" value="Roster Overview" />
-            </label>
-
-            <div class="admin-command-actions">
-              <button id="loadActiveBtn" class="btn secondary" type="button">Load active config</button>
-              <button id="refreshAllBtn" class="btn secondary" type="button" disabled>Refresh all</button>
-              <button id="publishBtn" class="btn" type="button" disabled>Publish</button>
-
-              <div class="auto-refresh-panel">
-                <label class="auto-refresh-toggle-row" for="autoRefreshToggle">
-                  <input id="autoRefreshToggle" type="checkbox" disabled />
-                  <span>Auto-refresh periodically</span>
-                </label>
-                <div class="small muted">Every 2 hours</div>
-                <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
-              </div>
-            </div>
+          <div class="admin-command-actions admin-command-actions--compact">
+            <button id="loadActiveBtn" class="btn secondary" type="button">Load active config</button>
+            <button id="refreshAllBtn" class="btn secondary" type="button" disabled>Refresh all</button>
+            <button id="publishBtn" class="btn" type="button" disabled>Publish</button>
           </div>
 
           <div class="admin-command-footer">
-            <div class="small muted">
-              Load active config into preview, run roster or import operations, then publish.
-            </div>
             <div id="status" class="small admin-global-status"></div>
           </div>
+        </div>
+      </section>
+
+      <section class="card admin-secondary-controls">
+        <div class="admin-secondary-grid">
+          <label class="admin-field" for="pageTitle">
+            <span class="admin-field-label">Page title</span>
+            <input id="pageTitle" class="admin-input" value="Roster Overview" />
+          </label>
+
+          <div class="auto-refresh-panel">
+            <label class="auto-refresh-toggle-row" for="autoRefreshToggle">
+              <input id="autoRefreshToggle" type="checkbox" disabled />
+              <span>Auto-refresh periodically</span>
+            </label>
+            <div class="small muted">Every 2 hours</div>
+            <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
+          </div>
+        </div>
+
+        <div class="small muted">
+          Load active config into preview, run roster or import operations, then publish.
         </div>
       </section>
 
