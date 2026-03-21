@@ -63,26 +63,39 @@
       justify-content: center;
       padding: 10px 14px;
       border-radius: 12px;
-      border: 1px solid #e5e7eb;
-      background: #111827;
-      color: #fff;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      background: rgba(15, 23, 42, 0.85);
+      color: #f8fafc;
       font-weight: 700;
       cursor: pointer;
       user-select: none;
+      transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
     }
 
     .btn.secondary {
-      background: rgba(148, 163, 184, 0.12);
-      color: #e5e7eb;
-      border-color: #475569;
+      background: rgba(15, 23, 42, 0.58);
+      color: #dbeafe;
+      border-color: rgba(100, 116, 139, 0.52);
+    }
+
+    .btn:hover:not(:disabled) {
+      border-color: rgba(148, 163, 184, 0.62);
+      background: rgba(30, 41, 59, 0.92);
+      transform: translateY(-1px);
+    }
+
+    .btn:focus-visible {
+      outline: none;
+      border-color: rgba(245, 214, 125, 0.75);
+      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.16);
     }
 
     #loadActiveBtn {
       gap: 10px;
-      background: linear-gradient(135deg, rgba(16, 185, 129, 0.28), rgba(14, 165, 233, 0.22));
-      border-color: rgba(110, 231, 183, 0.42);
+      background: linear-gradient(135deg, rgba(245, 214, 125, 0.22), rgba(56, 189, 248, 0.18));
+      border-color: rgba(245, 214, 125, 0.45);
       color: #f8fafc;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 26px rgba(8, 145, 178, 0.16);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 10px 24px rgba(15, 23, 42, 0.36);
       position: relative;
       transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
       white-space: nowrap;
@@ -93,22 +106,22 @@
       width: 8px;
       height: 8px;
       border-radius: 999px;
-      background: #6ee7b7;
-      box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.14);
+      background: #f5d67d;
+      box-shadow: 0 0 0 4px rgba(245, 214, 125, 0.18);
       flex: 0 0 auto;
     }
 
     #loadActiveBtn:hover:not(:disabled) {
-      background: linear-gradient(135deg, rgba(16, 185, 129, 0.34), rgba(14, 165, 233, 0.28));
-      border-color: rgba(167, 243, 208, 0.72);
+      background: linear-gradient(135deg, rgba(245, 214, 125, 0.28), rgba(56, 189, 248, 0.24));
+      border-color: rgba(252, 235, 178, 0.74);
       transform: translateY(-1px);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 16px 30px rgba(8, 145, 178, 0.2);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13), 0 14px 28px rgba(15, 23, 42, 0.4);
     }
 
     #loadActiveBtn:focus-visible {
       outline: none;
-      border-color: rgba(186, 230, 253, 0.85);
-      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 26px rgba(8, 145, 178, 0.16);
+      border-color: rgba(252, 235, 178, 0.9);
+      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 12px 26px rgba(15, 23, 42, 0.34);
     }
 
     #loadActiveBtn:disabled {
@@ -446,20 +459,27 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      border: 1px solid #334155;
+      border: 1px solid rgba(71, 85, 105, 0.78);
       border-radius: 8px;
       padding: 6px 10px;
-      background: #0f172a;
+      background: rgba(10, 18, 32, 0.9);
       color: #e5e7eb;
       font-size: 12px;
       font-weight: 700;
       cursor: pointer;
       line-height: 1.2;
       white-space: nowrap;
+      transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
     }
 
     .clan-sync-btn.secondary {
-      background: transparent;
+      background: rgba(15, 23, 42, 0.52);
+    }
+
+    .clan-sync-btn:hover:not(:disabled) {
+      border-color: rgba(245, 214, 125, 0.45);
+      background: rgba(15, 23, 42, 0.95);
+      transform: translateY(-1px);
     }
 
     .clan-sync-btn.danger {
@@ -580,11 +600,6 @@
     }
 
     @media (max-width: 640px) {
-      #loadActiveBtn {
-        width: 100%;
-        justify-content: center;
-      }
-
       .player-admin-summary {
         align-items: flex-start;
       }
@@ -623,6 +638,9 @@
     /* Admin UX 2.0 shell */
     body.admin-shell-page {
       margin: 0;
+      --admin-accent: #f5d67d;
+      --admin-accent-soft: rgba(245, 214, 125, 0.2);
+      --admin-accent-strong: rgba(245, 214, 125, 0.42);
     }
 
     body.admin-shell-page .container.admin-shell-container {
@@ -643,6 +661,19 @@
 
     .admin-page-head h1 {
       margin: 0;
+      color: #f8fafc;
+      letter-spacing: 0.01em;
+      text-shadow: 0 0 0 transparent, 0 6px 22px rgba(15, 23, 42, 0.4);
+    }
+
+    .admin-page-head-link {
+      min-height: 34px;
+      padding: 7px 12px;
+      border-radius: 10px;
+      font-size: 12px;
+      text-decoration: none;
+      line-height: 1.1;
+      white-space: nowrap;
     }
 
     .admin-auth-card {
@@ -678,17 +709,17 @@
 
     .admin-command-bar {
       padding: 12px;
-      position: sticky;
-      top: 10px;
-      z-index: 40;
-      border-color: #334155;
-      background: rgba(11, 18, 32, 0.92);
+      position: static;
+      top: auto;
+      z-index: auto;
+      border-color: rgba(245, 214, 125, 0.24);
+      background: linear-gradient(160deg, rgba(18, 28, 46, 0.9), rgba(10, 17, 30, 0.86));
       backdrop-filter: blur(6px);
     }
 
     .admin-command-grid {
       display: grid;
-      gap: 10px;
+      gap: 8px;
     }
 
     .admin-command-top {
@@ -716,20 +747,34 @@
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      align-items: start;
+      align-items: center;
       min-width: 0;
     }
 
     .admin-command-actions .btn {
-      min-height: 38px;
+      min-height: 36px;
     }
 
-    .admin-command-actions .auto-refresh-panel {
-      margin-left: auto;
-      min-width: 240px;
-      max-width: 360px;
-      flex: 1 1 280px;
-      align-self: stretch;
+    .admin-command-btn {
+      min-height: 34px;
+      padding: 7px 11px;
+      border-radius: 10px;
+      font-size: 12px;
+      line-height: 1.1;
+    }
+
+    .admin-command-actions .admin-command-btn {
+      min-height: 34px;
+    }
+
+    .admin-command-actions--compact {
+      justify-content: flex-start;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .admin-command-actions--compact .btn {
+      flex: 0 0 auto;
     }
 
     .admin-command-footer {
@@ -738,6 +783,29 @@
       border-top: 1px solid #1f2937;
       padding-top: 8px;
       min-width: 0;
+    }
+
+    .admin-secondary-controls {
+      padding: 12px;
+      border-color: rgba(71, 85, 105, 0.62);
+      background: linear-gradient(180deg, rgba(11, 18, 32, 0.8), rgba(9, 15, 27, 0.72));
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .admin-secondary-grid {
+      display: grid;
+      grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    .admin-secondary-controls .auto-refresh-panel {
+      min-width: 0;
+      width: 100%;
+      max-width: none;
     }
 
     .admin-global-status {
@@ -767,19 +835,19 @@
     }
 
     .admin-tab:hover:not(:disabled) {
-      border-color: #475569;
-      background: rgba(30, 41, 59, 0.74);
+      border-color: rgba(245, 214, 125, 0.35);
+      background: rgba(30, 41, 59, 0.82);
     }
 
     .admin-tab:focus-visible {
       outline: none;
-      border-color: rgba(125, 211, 252, 0.82);
-      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+      border-color: rgba(252, 235, 178, 0.8);
+      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.2);
     }
 
     .admin-tab.is-active {
-      border-color: rgba(125, 211, 252, 0.56);
-      background: rgba(14, 165, 233, 0.18);
+      border-color: rgba(245, 214, 125, 0.62);
+      background: linear-gradient(160deg, rgba(245, 214, 125, 0.16), rgba(30, 41, 59, 0.54));
       color: #f8fafc;
     }
 
@@ -906,18 +974,24 @@
     }
 
     .roster-actions-grid {
-      display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       min-width: 0;
+      align-items: center;
     }
 
     .roster-actions-grid .clan-sync-btn {
       min-height: 34px;
-      min-width: 0;
-      white-space: normal;
+      min-width: 112px;
+      flex: 0 0 auto;
+      white-space: nowrap;
       text-align: center;
-      word-break: break-word;
+    }
+
+    .roster-order-controls .clan-sync-btn,
+    .cwl-prep-strip .clan-sync-btn {
+      min-width: 0;
     }
 
     .roster-admin-card__status {
@@ -1141,17 +1215,41 @@
       overflow: hidden;
     }
 
+    @media (min-width: 1180px) {
+      .admin-shell {
+        --admin-desktop-max-width: 1240px;
+      }
+
+      .admin-shell > .admin-command-bar,
+      .admin-shell > .admin-secondary-controls,
+      .admin-shell > .admin-tabs,
+      .admin-shell > .admin-tab-panel {
+        width: 100%;
+        max-width: var(--admin-desktop-max-width);
+        margin-inline: auto;
+      }
+
+      .admin-section-head p {
+        max-width: 84ch;
+      }
+
+      .roster-admin-card__config {
+        grid-template-columns: repeat(3, minmax(220px, 360px));
+        justify-content: start;
+      }
+
+      .roster-actions-grid .clan-sync-btn {
+        min-width: 124px;
+      }
+    }
+
     @media (max-width: 1100px) {
       .admin-command-top {
         grid-template-columns: 1fr;
       }
 
-      .admin-command-actions .auto-refresh-panel {
-        margin-left: 0;
-      }
-
-      .roster-actions-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+      .admin-secondary-grid {
+        grid-template-columns: 1fr;
       }
 
       .roster-admin-card__config {
@@ -1190,8 +1288,10 @@
         grid-template-columns: 1fr;
       }
 
-      .roster-actions-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+      .roster-actions-grid .clan-sync-btn {
+        flex: 1 1 calc(50% - 3px);
+        min-width: 0;
+        white-space: normal;
       }
 
       .import-filter-grid {
@@ -1219,6 +1319,9 @@
   <div class="container admin-shell-container">
     <header class="admin-page-head">
       <h1>Roster Admin</h1>
+      <a id="backToPublicBtn" class="btn secondary admin-page-head-link" href="/" aria-label="Back to public roster">
+        Public Page
+      </a>
     </header>
 
     <section id="unlockCard" class="card admin-auth-card">
@@ -1240,34 +1343,37 @@
     <div id="adminPanel" class="admin-shell hidden">
       <section class="card admin-command-bar">
         <div class="admin-command-grid">
-          <div class="admin-command-top">
-            <label class="admin-field" for="pageTitle">
-              <span class="admin-field-label">Page title</span>
-              <input id="pageTitle" class="admin-input" value="Roster Overview" />
-            </label>
-
-            <div class="admin-command-actions">
-              <button id="loadActiveBtn" class="btn secondary" type="button">Load active config</button>
-              <button id="refreshAllBtn" class="btn secondary" type="button" disabled>Refresh all</button>
-              <button id="publishBtn" class="btn" type="button" disabled>Publish</button>
-
-              <div class="auto-refresh-panel">
-                <label class="auto-refresh-toggle-row" for="autoRefreshToggle">
-                  <input id="autoRefreshToggle" type="checkbox" disabled />
-                  <span>Auto-refresh periodically</span>
-                </label>
-                <div class="small muted">Every 2 hours</div>
-                <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
-              </div>
-            </div>
+          <div class="admin-command-actions admin-command-actions--compact">
+            <button id="loadActiveBtn" class="btn secondary admin-command-btn" type="button">Load active config</button>
+            <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>Refresh all</button>
+            <button id="publishBtn" class="btn admin-command-btn" type="button" disabled>Publish</button>
           </div>
 
           <div class="admin-command-footer">
-            <div class="small muted">
-              Load active config into preview, run roster or import operations, then publish.
-            </div>
             <div id="status" class="small admin-global-status"></div>
           </div>
+        </div>
+      </section>
+
+      <section class="card admin-secondary-controls">
+        <div class="admin-secondary-grid">
+          <label class="admin-field" for="pageTitle">
+            <span class="admin-field-label">Page title</span>
+            <input id="pageTitle" class="admin-input" value="Roster Overview" />
+          </label>
+
+          <div class="auto-refresh-panel">
+            <label class="auto-refresh-toggle-row" for="autoRefreshToggle">
+              <input id="autoRefreshToggle" type="checkbox" disabled />
+              <span>Auto-refresh periodically</span>
+            </label>
+            <div class="small muted">Every 2 hours</div>
+            <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
+          </div>
+        </div>
+
+        <div class="small muted">
+          Load active config into preview, run roster or import operations, then publish.
         </div>
       </section>
 
@@ -1483,7 +1589,7 @@
     </div>
   </div>
 
-    <script src="./public-config.js?v=20260321c"></script>
+    <script src="./public-config.js?v=20260321d"></script>
   <script>
     window.ROSTER_CLIENT_DISABLE_AUTOLOAD = true;
     window.ROSTER_ADMIN_MODE = true;
@@ -1494,9 +1600,9 @@
   </script>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="./generator.js?v=20260321c"></script>
-  <script src="./client.js?v=20260321c"></script>
-  <script src="./admin.js?v=20260321c"></script>
+  <script src="./generator.js?v=20260321d"></script>
+  <script src="./client.js?v=20260321d"></script>
+  <script src="./admin.js?v=20260321d"></script>
 </body>
 
 </html>

@@ -3786,26 +3786,14 @@
         prepStrip.appendChild(prepToggleBtn);
         prepStrip.appendChild(prepStepper);
         prepStrip.appendChild(prepSummaryPill);
-      } else {
-        const prepDisabled = document.createElement("button");
-        prepDisabled.type = "button";
-        prepDisabled.className = "clan-sync-btn secondary cwl-prep-disabled";
-        prepDisabled.textContent = "Enable prep";
-        prepDisabled.title = CWL_PREPARATION_WARNING_SWITCH_TO_CWL;
-        prepDisabled.onclick = () => {
-          alert(CWL_PREPARATION_WARNING_SWITCH_TO_CWL);
-        };
-        const prepInfo = document.createElement("span");
-        prepInfo.className = "cwl-prep-summary-pill";
-        prepInfo.textContent = "CWL prep unavailable";
-        prepStrip.appendChild(prepDisabled);
-        prepStrip.appendChild(prepInfo);
       }
 
-      prepField.appendChild(prepStrip);
       configGrid.appendChild(trackingField);
       configGrid.appendChild(tagField);
-      configGrid.appendChild(prepField);
+      if (trackingMode === "cwl") {
+        prepField.appendChild(prepStrip);
+        configGrid.appendChild(prepField);
+      }
       card.appendChild(configGrid);
 
       const actions = document.createElement("div");
@@ -3861,7 +3849,7 @@
       actions.appendChild(syncPoolBtn);
       actions.appendChild(syncLineupBtn);
       actions.appendChild(refreshBtn);
-      actions.appendChild(suggestBtn);
+      if (trackingMode === "cwl") actions.appendChild(suggestBtn);
       actions.appendChild(clearBtn);
       card.appendChild(actions);
 
@@ -4470,11 +4458,62 @@
     }
   };
 
+  const loadActiveConfigIntoPreview = async (optionsRaw) => {
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const silentError = !!options.silentError;
+    const statusOnSuccess = toStr(options.statusOnSuccess).trim() || "Active config loaded.";
+
+    try {
+      setStatus("Loading active config...");
+      const rosterData = await loadActiveRosterData();
+      if (!rosterData || !Array.isArray(rosterData.rosters)) {
+        throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
+      }
+
+      const pageTitleInput = $("#pageTitle");
+      if (pageTitleInput) pageTitleInput.value = toStr(rosterData.pageTitle).trim() || "Roster Overview";
+
+      state.lastRosterData = rosterData;
+      normalizeRosterOrderInData_(state.lastRosterData);
+      clearRosterStatuses();
+      state.benchMarksByRoster = {};
+      state.swapInMarksByRoster = {};
+      state.suggestionNotesByRoster = {};
+      reindexAllRosters();
+      setAddPreviewRosterStatus("", false);
+      setAddPlayerStatus("", false);
+
+      if (state.importSession) {
+        alignImportMappingWithPreview();
+        invalidateImportComparison("Preview changed after loading active config. Re-run compare with preview.");
+      }
+
+      renderPreviewFromState();
+      const publishBtn = $("#publishBtn");
+      if (publishBtn) publishBtn.disabled = false;
+      setStatus(statusOnSuccess);
+      return rosterData;
+    } catch (err) {
+      setStatus("");
+      if (!silentError) {
+        alert("Failed to load active config: " + toErrorMessage(err));
+      }
+      throw err;
+    }
+  };
+
   const init = () => {
     window.ROSTER_ROSTER_ACTION_BUILDER = buildRosterActionControls;
     window.ROSTER_PLAYER_ACTION_BUILDER = buildPlayerActionControls;
     window.ROSTER_GET_ADMIN_PASSWORD = () => state.password || "";
     window.ROSTER_OPEN_PLAYER_EDIT = openPlayerEditPanel;
+
+    const backToPublicBtn = $("#backToPublicBtn");
+    if (backToPublicBtn) {
+      const baseRaw = toStr(window && window.ROSTER_STATIC_BASE_URL).trim() || "/";
+      const base = baseRaw.endsWith("/") ? baseRaw : (baseRaw + "/");
+      backToPublicBtn.setAttribute("href", base);
+    }
 
     bindAdminTabs();
     bindOverlayCloseHandlers();
@@ -4525,12 +4564,22 @@
           loginBtn.textContent = "Unlocked";
         }
         if (pwInput) pwInput.disabled = true;
-        setLoginStatus("Unlocked.");
+        setLoginStatus("Unlocked. Loading active config...");
         refreshAdminWorkflowUi();
         try {
           await loadAutoRefreshSettings();
         } catch (settingsErr) {
           alert("Unlocked, but failed to load auto-refresh settings: " + toErrorMessage(settingsErr));
+        }
+        try {
+          await loadActiveConfigIntoPreview({
+            silentError: true,
+            statusOnSuccess: "Active config loaded.",
+          });
+          setLoginStatus("Unlocked.");
+        } catch (loadErr) {
+          setLoginStatus("Unlocked (auto-load failed).");
+          setStatus("Auto-load failed. Use Load active config.");
         }
       } catch (err) {
         show("#adminPanel", false);
@@ -4591,6 +4640,24 @@
       });
     }
     renderAutoRefreshUi();
+
+    const pageTitleInput = $("#pageTitle");
+    if (pageTitleInput) {
+      const commitPageTitle = () => {
+        if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return;
+        const nextTitle = toStr(pageTitleInput.value).trim() || "Roster Overview";
+        pageTitleInput.value = nextTitle;
+        if (toStr(state.lastRosterData.pageTitle).trim() === nextTitle) return;
+        state.lastRosterData.pageTitle = nextTitle;
+        const publishBtn = $("#publishBtn");
+        if (publishBtn) publishBtn.disabled = false;
+        setStatus("Page title updated.");
+        markReportStale("Preview changed after page title update. Re-run compare with preview.");
+        renderPreviewFromState();
+      };
+      pageTitleInput.addEventListener("change", commitPageTitle);
+      pageTitleInput.addEventListener("blur", commitPageTitle);
+    }
 
     const excludeWarOutInput = $("#excludeWarOut");
     const requireDiscordInput = $("#requireDiscord");
@@ -4667,37 +4734,12 @@
 
     $("#loadActiveBtn").onclick = async () => {
       try {
-        setStatus("Loading active config...");
-        const rosterData = await loadActiveRosterData();
-        if (!rosterData || !Array.isArray(rosterData.rosters)) {
-          throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
-        }
-
-        const pageTitleInput = $("#pageTitle");
-        if (pageTitleInput) pageTitleInput.value = toStr(rosterData.pageTitle).trim() || "Roster Overview";
-
-        state.lastRosterData = rosterData;
-        normalizeRosterOrderInData_(state.lastRosterData);
-        clearRosterStatuses();
-        state.benchMarksByRoster = {};
-        state.swapInMarksByRoster = {};
-        state.suggestionNotesByRoster = {};
-        reindexAllRosters();
-        setAddPreviewRosterStatus("", false);
-        setAddPlayerStatus("", false);
-
-        if (state.importSession) {
-          alignImportMappingWithPreview();
-          invalidateImportComparison("Preview changed after loading active config. Re-run compare with preview.");
-        }
-
-        renderPreviewFromState();
-        const publishBtn = $("#publishBtn");
-        if (publishBtn) publishBtn.disabled = false;
-        setStatus("Active config loaded.");
-      } catch (err) {
-        setStatus("");
-        alert("Failed to load active config: " + toErrorMessage(err));
+        await loadActiveConfigIntoPreview({
+          silentError: false,
+          statusOnSuccess: "Active config loaded.",
+        });
+      } catch (_err) {
+        // Alert is shown inside loadActiveConfigIntoPreview when silentError is false.
       }
     };
 
