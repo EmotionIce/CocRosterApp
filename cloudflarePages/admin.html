@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html>
 
 <head>
@@ -8,8 +8,8 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <meta name="build-stamp" content="<?!= buildStamp ?>" />
-  <link rel="stylesheet" href="<?= staticBaseUrl ?>styles.css?v=<?!= encodeURIComponent(assetVersion) ?>" />
+  <meta name="build-stamp" content="cloudflare-admin" />
+  <link rel="stylesheet" href="./styles.css" />
   <style>
     /* Admin-only tweaks */
     .admin-card {
@@ -1483,20 +1483,23 @@
     </div>
   </div>
 
+    <script src="./public-config.js?v=20260321c"></script>
   <script>
-    // keep the renderer, but do not auto-load public data on the admin page
     window.ROSTER_CLIENT_DISABLE_AUTOLOAD = true;
     window.ROSTER_ADMIN_MODE = true;
-    window.BUILD_STAMP = <?!= JSON.stringify(buildStamp) ?>;
-    window.ROSTER_BASE_URL = <?!= JSON.stringify(baseUrl) ?>;
-    window.ROSTER_STATIC_BASE_URL = <?!= JSON.stringify(staticBaseUrl) ?>;
+    window.BUILD_STAMP = "cloudflare-admin";
+    window.ROSTER_STATIC_BASE_URL = window.ROSTER_STATIC_BASE_URL || "/";
+    window.ROSTER_BASE_URL = window.ROSTER_BASE_URL || "";
+    window.ROSTER_ADMIN_API_BASE = window.ROSTER_ADMIN_API_BASE || "/api/admin";
   </script>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="<?= staticBaseUrl ?>generator.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
-  <script src="<?= staticBaseUrl ?>client.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
-  <script src="<?= staticBaseUrl ?>admin.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
+  <script src="./generator.js?v=20260321c"></script>
+  <script src="./client.js?v=20260321c"></script>
+  <script src="./admin.js?v=20260321c"></script>
 </body>
 
 </html>
+
+
 

@@ -1,0 +1,38 @@
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/public-config.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/app.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/admin
+  Cache-Control: public, max-age=0, must-revalidate
+
+/admin.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/console
+  Cache-Control: public, max-age=0, must-revalidate
+
+/console.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/client.js
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/admin.js
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/generator.js
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/styles.css
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

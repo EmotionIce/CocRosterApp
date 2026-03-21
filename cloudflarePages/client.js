@@ -5,6 +5,11 @@
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
     const DAY_MS = 24 * 60 * 60 * 1000;
     const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
+    const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
+    const FIREBASE_ACTIVE_PATH = "active";
+    const FIREBASE_PUBLIC_SOURCE = "firebase-public";
+    const FIREBASE_PUBLIC_LEGACY_SOURCE = "firebase-public-legacy-root";
+    const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
     const ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS = 14 * DAY_MS;
@@ -154,16 +159,42 @@
         const adminLink = $("#openAdminLink");
         if (!adminLink) return;
 
+        const hostName = toStr(
+            typeof window !== "undefined" && window && window.location ? window.location.hostname : ""
+        ).toLowerCase();
+        const isAppsScriptHost = /(^|\.)script\.google\.com$/.test(hostName);
+        if (!isAppsScriptHost) {
+            adminLink.href = "/console";
+            adminLink.removeAttribute("aria-disabled");
+            adminLink.classList.remove("is-disabled");
+            return;
+        }
+
+        const explicitAdminUrl = toStr(
+            typeof window !== "undefined" && window ? window.ROSTER_ADMIN_URL : ""
+        ).trim();
+        const normalizedExplicitAdminUrl =
+            explicitAdminUrl && (/^https?:\/\//i.test(explicitAdminUrl) || explicitAdminUrl.startsWith("/"))
+                ? explicitAdminUrl
+                : "";
+
         const baseUrl = toStr(
-            (typeof window !== "undefined" && (window.ROSTER_BASE_URL || window.BASE_URL))
+            (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
                 ? (window.ROSTER_BASE_URL || window.BASE_URL)
                 : ""
         ).trim();
+        const normalizedBaseUrl =
+            baseUrl && (/^https?:\/\//i.test(baseUrl) || baseUrl.startsWith("/"))
+                ? baseUrl
+                : "";
 
-        if (baseUrl) {
-            const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
-            adminLink.href = baseUrl + sep + "page=admin";
-        }
+        const targetUrl = normalizedBaseUrl
+            ? (normalizedBaseUrl + (normalizedBaseUrl.indexOf("?") >= 0 ? "&" : "?") + "page=admin")
+            : (normalizedExplicitAdminUrl || "/console");
+
+        adminLink.href = targetUrl;
+        adminLink.removeAttribute("aria-disabled");
+        adminLink.classList.remove("is-disabled");
     };
 
     const normalizeHttpUrl = (valueRaw) => {
@@ -2711,20 +2742,155 @@
         initLegendsJourneySections(profileState.bodyEl);
     };
 
+    const normalizeAdminApiEndpoint = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (!value) return "";
+        if (/^https?:\/\//i.test(value) || value.startsWith("/")) return value;
+        return "";
+    };
+
+    const resolveScriptServerBaseUrl = () => {
+        const value = toStr(
+            (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
+                ? (window.ROSTER_BASE_URL || window.BASE_URL)
+                : ""
+        ).trim();
+        if (!/^https?:\/\//i.test(value)) return "";
+        return value;
+    };
+
+    const isLikelyWorkerAdminApiEndpoint = (endpointRaw) => {
+        const endpoint = toStr(endpointRaw).trim().toLowerCase();
+        if (!endpoint) return false;
+        return endpoint.indexOf("/api/admin") >= 0;
+    };
+
+    const isAbsoluteHttpEndpoint = (endpointRaw) =>
+        /^https?:\/\//i.test(toStr(endpointRaw).trim());
+
+    const resolveAdminApiEndpoints = () => {
+        const configured = normalizeAdminApiEndpoint(
+            typeof window !== "undefined" && window
+                ? window.ROSTER_ADMIN_API_BASE
+                : ""
+        );
+        const endpoints = [];
+        const seen = Object.create(null);
+        const pushUnique = (endpointRaw) => {
+            const endpoint = normalizeAdminApiEndpoint(endpointRaw);
+            if (!endpoint) return;
+            if (seen[endpoint]) return;
+            seen[endpoint] = true;
+            endpoints.push(endpoint);
+        };
+
+        pushUnique(configured || "/api/admin");
+        pushUnique(resolveScriptServerBaseUrl());
+        return endpoints;
+    };
+
+    const createAdminApiError = (messageRaw, retryableRaw) => {
+        const err = new Error(toStr(messageRaw).trim() || "Admin API call failed.");
+        err.retryable = !!retryableRaw;
+        return err;
+    };
+
+    const callAdminApiEndpoint = async (endpoint, methodName, args) => {
+        let response = null;
+        let rawText = "";
+        const payloadText = JSON.stringify({
+            method: methodName,
+            args: Array.isArray(args) ? args : [],
+        });
+        const isCrossOrigin = isAbsoluteHttpEndpoint(endpoint);
+        try {
+            response = await fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "Content-Type": isCrossOrigin ? "text/plain;charset=utf-8" : "application/json",
+                },
+                body: payloadText,
+                redirect: "follow",
+            });
+            rawText = await response.text();
+        } catch (err) {
+            const endpointIsProxy = isLikelyWorkerAdminApiEndpoint(endpoint);
+            const msg = err && err.message
+                ? err.message
+                : ("Network error while calling " + methodName + ".");
+            throw createAdminApiError(msg, endpointIsProxy);
+        }
+
+        let payload = null;
+        try {
+            payload = JSON.parse(rawText);
+        } catch {
+            payload = null;
+        }
+
+        const inferUpstreamError = () => {
+            const text = toStr(rawText).toLowerCase();
+            if (!text) return "";
+            if (response.status === 404 && isLikelyWorkerAdminApiEndpoint(endpoint)) {
+                return "Admin API route is missing at /api/admin. Falling back to Apps Script endpoint.";
+            }
+            if (text.indexOf("script-funktion nicht gefunden: dopost") >= 0 || text.indexOf("script function not found: dopost") >= 0) {
+                return "Apps Script is missing doPost. Deploy the latest script version and redeploy the web app.";
+            }
+            return "";
+        };
+
+        const endpointIsProxy = isLikelyWorkerAdminApiEndpoint(endpoint);
+        if (!response.ok) {
+            const msg = payload && payload.error
+                ? toStr(payload.error).trim()
+                : (inferUpstreamError() || ("HTTP " + response.status + " while calling " + methodName + "."));
+            const retryable = endpointIsProxy && (response.status === 404 || response.status === 405 || response.status >= 500);
+            throw createAdminApiError(msg, retryable);
+        }
+        if (!payload || payload.ok !== true) {
+            const msg = payload && payload.error
+                ? toStr(payload.error).trim()
+                : (inferUpstreamError() || ("Server method failed: " + methodName));
+            const retryable = endpointIsProxy && !payload;
+            throw createAdminApiError(msg || ("Server method failed: " + methodName), retryable);
+        }
+        return payload.result;
+    };
+
+    const runServerMethodViaHttp = async (methodName, args) => {
+        const endpoints = resolveAdminApiEndpoints();
+        let lastError = null;
+        for (let i = 0; i < endpoints.length; i++) {
+            const endpoint = endpoints[i];
+            try {
+                return await callAdminApiEndpoint(endpoint, methodName, args);
+            } catch (err) {
+                lastError = err;
+                const hasNext = i < endpoints.length - 1;
+                if (!hasNext || !(err && err.retryable)) {
+                    throw err;
+                }
+            }
+        }
+        if (lastError) throw lastError;
+        throw new Error("No admin API endpoints are configured.");
+    };
+
     const runServerMethod = (methodName, args) =>
         new Promise((resolve, reject) => {
-            if (!window.google || !google.script || !google.script.run) {
-                reject(new Error("google.script.run is not available (not running inside Apps Script HtmlService)."));
+            if (window.google && google.script && google.script.run) {
+                const runner = google.script.run
+                    .withSuccessHandler(resolve)
+                    .withFailureHandler((err) => reject(err && err.message ? new Error(err.message) : err));
+                if (!runner || typeof runner[methodName] !== "function") {
+                    reject(new Error("Server method is not available: " + methodName));
+                    return;
+                }
+                runner[methodName](...(Array.isArray(args) ? args : []));
                 return;
             }
-            const runner = google.script.run
-                .withSuccessHandler(resolve)
-                .withFailureHandler((err) => reject(err && err.message ? new Error(err.message) : err));
-            if (!runner || typeof runner[methodName] !== "function") {
-                reject(new Error("Server method is not available: " + methodName));
-                return;
-            }
-            runner[methodName](...(Array.isArray(args) ? args : []));
+            runServerMethodViaHttp(methodName, args).then(resolve).catch(reject);
         });
 
     const requestLeagueIcon = (playerRaw) => {
@@ -5074,7 +5240,7 @@
         } else if (activeView === PUBLIC_VIEW_VALUES.rosters) {
             renderRostersLoadingState();
         } else {
-            renderLandingView({}, { allowMediaLoading: false });
+            renderLandingView({}, { allowMediaLoading: landingMediaCanStart });
         }
         removeGlobalLoadingCard();
     };
@@ -5408,10 +5574,12 @@
             if (cachedAtMs > 0 && Date.now() - cachedAtMs > ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS) {
                 return null;
             }
+            const cachedSourceRaw = toStr(payload.source).trim();
+            const cachedSource = /^firebase-public(?:-|$)/.test(cachedSourceRaw) ? cachedSourceRaw : "cache";
             return {
                 data: data,
                 cachedAt: cachedAtMs > 0 ? new Date(cachedAtMs).toISOString() : "",
-                source: toStr(payload.source).trim() || "cache",
+                source: cachedSource,
                 freshnessKey: toStr(payload.freshnessKey).trim() || getRosterPayloadFreshnessKey(data),
             };
         } catch (err) {
@@ -5434,6 +5602,230 @@
         }
     };
 
+    const normalizeFirebaseDbUrl = (urlRaw) => {
+        const raw = toStr(urlRaw).trim();
+        if (!raw) return "";
+        return raw.replace(/\/+$/, "");
+    };
+
+    const normalizeFirebasePath = (pathRaw) =>
+        toStr(pathRaw)
+            .trim()
+            .replace(/\\/g, "/")
+            .replace(/^[\/]+|[\/]+$/g, "")
+            .replace(/\.\./g, "");
+
+    const buildFirebasePublicJsonUrl = (pathRaw) => {
+        const configuredDbUrl = normalizeFirebaseDbUrl(
+            (typeof window !== "undefined" && window && window.ROSTER_FIREBASE_DB_URL)
+                ? window.ROSTER_FIREBASE_DB_URL
+                : ""
+        );
+        if (!configuredDbUrl) {
+            throw new Error("Missing window.ROSTER_FIREBASE_DB_URL for Firebase public hydration. Set it in public-config.js.");
+        }
+
+        const safePath = normalizeFirebasePath(pathRaw);
+        const queryIndex = configuredDbUrl.indexOf("?");
+        const dbUrlWithoutQuery = queryIndex >= 0 ? configuredDbUrl.slice(0, queryIndex) : configuredDbUrl;
+        const dbUrlBaseNoQuery = dbUrlWithoutQuery.replace(/\/+$/, "");
+        const querySuffix = queryIndex >= 0 ? configuredDbUrl.slice(queryIndex) : "";
+        const encodedSegments = safePath
+            ? safePath.split("/").filter((segment) => segment).map((segment) => encodeURIComponent(segment))
+            : [];
+
+        if (/\.json$/i.test(dbUrlBaseNoQuery)) {
+            if (!encodedSegments.length) return dbUrlBaseNoQuery + querySuffix;
+            const base = dbUrlBaseNoQuery.replace(/\/+\.json$/i, "");
+            return base + "/" + encodedSegments.join("/") + ".json" + querySuffix;
+        }
+        if (!encodedSegments.length) return dbUrlBaseNoQuery + "/.json" + querySuffix;
+        return dbUrlBaseNoQuery + "/" + encodedSegments.join("/") + ".json" + querySuffix;
+    };
+
+    const parseJsonTextStrict = (textRaw, sourceLabelRaw) => {
+        const sourceLabel = toStr(sourceLabelRaw).trim() || "JSON response";
+        const text = toStr(textRaw);
+        if (!text.trim()) {
+            throw new Error(sourceLabel + " returned an empty response.");
+        }
+        try {
+            return JSON.parse(text);
+        } catch (err) {
+            throw new Error(sourceLabel + " returned invalid JSON: " + ((err && err.message) ? err.message : String(err)));
+        }
+    };
+
+    const fetchFirebaseJsonPublic = async (pathRaw) => {
+        const safePath = normalizeFirebasePath(pathRaw);
+        const pathLabel = "/" + (safePath || "");
+        if (typeof fetch !== "function") {
+            throw new Error("window.fetch is unavailable for Firebase public hydration.");
+        }
+        const response = await fetch(buildFirebasePublicJsonUrl(safePath), {
+            method: "GET",
+            cache: "no-store",
+            credentials: "omit",
+        });
+        if (!response || !response.ok) {
+            throw new Error(
+                "Firebase public fetch failed for " +
+                pathLabel +
+                " (" +
+                (response ? response.status : "unknown") +
+                ")."
+            );
+        }
+        const responseText = await response.text();
+        return parseJsonTextStrict(responseText, "Firebase public fetch for " + pathLabel);
+    };
+
+    const base64UrlDecodeToUtf8 = (valueRaw) => {
+        let value = toStr(valueRaw).trim();
+        if (!value) return "";
+        const mod = value.length % 4;
+        if (mod === 1) throw new Error("Invalid base64url payload length.");
+        if (mod > 0) value += "====".slice(mod);
+        const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+        if (typeof atob !== "function") throw new Error("Base64 decoder is unavailable in this browser.");
+
+        let binary = "";
+        try {
+            binary = atob(base64);
+        } catch (err) {
+            throw new Error(err && err.message ? err.message : String(err));
+        }
+
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+
+        if (typeof TextDecoder === "function") {
+            return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        }
+
+        let escaped = "";
+        for (let i = 0; i < bytes.length; i++) {
+            escaped += "%" + bytes[i].toString(16).padStart(2, "0");
+        }
+        try {
+            return decodeURIComponent(escaped);
+        } catch (err) {
+            throw new Error(err && err.message ? err.message : String(err));
+        }
+    };
+
+    const decodeFirebaseObjectKey = (keyRaw) => {
+        const key = toStr(keyRaw);
+        if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) !== 0) return key;
+        const encodedPart = key.slice(FIREBASE_KEY_ENCODING_PREFIX.length);
+        if (!encodedPart) throw new Error("Invalid Firebase encoded key with empty payload.");
+        try {
+            return base64UrlDecodeToUtf8(encodedPart);
+        } catch (err) {
+            throw new Error("Invalid Firebase encoded key '" + key + "': " + ((err && err.message) ? err.message : String(err)));
+        }
+    };
+
+    const decodeFirebaseObjectKeysRecursive = (valueRaw) => {
+        if (Array.isArray(valueRaw)) {
+            const outArray = [];
+            for (let i = 0; i < valueRaw.length; i++) outArray.push(decodeFirebaseObjectKeysRecursive(valueRaw[i]));
+            return outArray;
+        }
+        if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
+        const out = {};
+        const keys = Object.keys(valueRaw);
+        for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            const decodedKey = decodeFirebaseObjectKey(key);
+            if (Object.prototype.hasOwnProperty.call(out, decodedKey) && decodedKey !== key) {
+                throw new Error("Firebase key decoding collision for object key '" + key + "'.");
+            }
+            out[decodedKey] = decodeFirebaseObjectKeysRecursive(valueRaw[key]);
+        }
+        return out;
+    };
+
+    const decodeAndValidateActiveRosterPayloadFromFirebasePublic = (encodedPayloadRaw, sourceLabelRaw) => {
+        const sourceLabel = toStr(sourceLabelRaw).trim() || "firebase-public";
+        if (!encodedPayloadRaw || typeof encodedPayloadRaw !== "object" || Array.isArray(encodedPayloadRaw)) {
+            throw new Error("Missing or invalid active roster payload at " + sourceLabel + ".");
+        }
+        const decodedPayload = decodeFirebaseObjectKeysRecursive(encodedPayloadRaw);
+        return assertValidRosterPayload(decodedPayload, sourceLabel);
+    };
+
+    const shouldTryLegacyRootFallbackForActivePayload = (encodedPayloadRaw) => {
+        if (encodedPayloadRaw == null) return true;
+        if (encodedPayloadRaw === "") return true;
+        if (
+            encodedPayloadRaw &&
+            typeof encodedPayloadRaw === "object" &&
+            !Array.isArray(encodedPayloadRaw) &&
+            Object.keys(encodedPayloadRaw).length === 0
+        ) {
+            return true;
+        }
+        return false;
+    };
+
+    const loadRosterDataViaFirebasePublic = async () => {
+        const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
+        if (!shouldTryLegacyRootFallbackForActivePayload(activePayload)) {
+            return {
+                source: FIREBASE_PUBLIC_SOURCE,
+                data: decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active"),
+            };
+        }
+
+        if (typeof console !== "undefined" && console && typeof console.debug === "function") {
+            console.debug("[RosterBoot] firebase-public /active missing, trying legacy-root compatibility fallback.");
+        }
+
+        let legacyPayload = null;
+        try {
+            legacyPayload = await fetchFirebaseJsonPublic("");
+        } catch (err) {
+            throw new Error(
+                "Missing active roster payload at /active and no valid legacy root payload fallback was found: " +
+                ((err && err.message) ? err.message : String(err))
+            );
+        }
+
+        try {
+            return {
+                source: FIREBASE_PUBLIC_LEGACY_SOURCE,
+                data: decodeAndValidateActiveRosterPayloadFromFirebasePublic(legacyPayload, "Firebase public / (legacy-root)"),
+            };
+        } catch (err) {
+            throw new Error(
+                "Missing active roster payload at /active and no valid legacy root payload fallback was found: " +
+                ((err && err.message) ? err.message : String(err))
+            );
+        }
+    };
+
+    const normalizeStaticAssetBaseUrl = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        if (!value) return "";
+        if (/^https?:\/\//i.test(value)) {
+            return value.replace(/[\/\\]+$/, "");
+        }
+        if (value.startsWith("/")) {
+            return value.replace(/[\/\\]+$/, "");
+        }
+        return "";
+    };
+
+    const deriveSameOriginStaticAssetBaseUrl = () => {
+        if (typeof window === "undefined" || !window || !window.location) return "";
+        const origin = toStr(window.location.origin).trim();
+        if (!origin || origin === "null") return "";
+        return origin.replace(/[\/\\]+$/, "");
+    };
+
     const buildStaticAssetUrl = (relativePathRaw) => {
         const relativePath = toStr(relativePathRaw)
             .trim()
@@ -5442,34 +5834,30 @@
             .replace(/\\/g, "/");
         if (!relativePath) return "";
 
-        const configuredBaseUrl = toStr(
+        const configuredBaseUrl = normalizeStaticAssetBaseUrl(
             (typeof window !== "undefined" && window && window.ROSTER_STATIC_BASE_URL)
                 ? window.ROSTER_STATIC_BASE_URL
                 : ""
-        ).trim();
-        const baseUrl = (configuredBaseUrl || STATIC_ASSET_BASE_FALLBACK_URL || "")
-            .trim()
-            .replace(/[\/\\]+$/, "");
+        );
+        const sameOriginBaseUrl = deriveSameOriginStaticAssetBaseUrl();
+        const fallbackBaseUrl = normalizeStaticAssetBaseUrl(STATIC_ASSET_BASE_FALLBACK_URL);
+        const baseUrl = configuredBaseUrl || sameOriginBaseUrl || fallbackBaseUrl;
         if (!baseUrl) return "";
         return baseUrl + "/" + relativePath;
     };
 
-    const buildScriptAssetUrl = (assetNameRaw) => {
-        const assetName = toStr(assetNameRaw).trim();
-        if (!assetName) return "";
-
-        let baseUrl = toStr(
+    const resolveConfiguredScriptBaseUrl = () =>
+        toStr(
             (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
                 ? (window.ROSTER_BASE_URL || window.BASE_URL)
                 : ""
         ).trim();
 
-        if (!baseUrl && typeof window !== "undefined" && window && window.location) {
-            const origin = toStr(window.location.origin).trim();
-            const pathname = toStr(window.location.pathname).trim();
-            if (origin && pathname) baseUrl = origin + pathname;
-            else baseUrl = pathname;
-        }
+    const buildScriptAssetUrl = (assetNameRaw) => {
+        const assetName = toStr(assetNameRaw).trim();
+        if (!assetName) return "";
+
+        const baseUrl = resolveConfiguredScriptBaseUrl();
         if (!baseUrl) return "";
 
         const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
@@ -5515,37 +5903,38 @@
     };
 
     const loadRosterDataWithFallback = async () => {
-        const inlineData = readInlineBootstrapData();
-        if (inlineData) {
-            return {
-                source: "inline",
-                data: assertValidRosterPayload(inlineData, "Inline bootstrap"),
-            };
-        }
-
-        let assetError = null;
+        let firebaseError = null;
         try {
-            const assetData = await loadRosterDataViaAssetRoute();
+            const loaded = await loadRosterDataViaFirebasePublic();
             return {
-                source: "asset",
-                data: assertValidRosterPayload(assetData, "Asset route"),
+                source: toStr(loaded && loaded.source).trim() || FIREBASE_PUBLIC_SOURCE,
+                data: assertValidRosterPayload(loaded && loaded.data, "Firebase public hydration"),
             };
         } catch (err) {
-            assetError = err;
-            if (typeof console !== "undefined" && console && typeof console.debug === "function") {
-                console.debug("[RosterBoot] asset-hydration failed, using getRosterData fallback.", err && (err.message || err.stack) ? (err.message || err.stack) : String(err));
-            }
+            firebaseError = err;
         }
 
-        const serverData = await loadRosterDataViaServer();
-        const validated = assertValidRosterPayload(serverData, "Server getRosterData fallback");
-        if (assetError && typeof console !== "undefined" && console && typeof console.debug === "function") {
-            console.debug("[RosterBoot] server fallback succeeded after asset failure.");
+        const configuredScriptBaseUrl = resolveConfiguredScriptBaseUrl();
+        if (!configuredScriptBaseUrl) {
+            throw firebaseError || new Error("Firebase public hydration failed and no Apps Script fallback base URL is configured.");
         }
-        return {
-            source: "server-fallback",
-            data: validated,
-        };
+
+        try {
+            const legacyData = await loadRosterDataViaAssetRoute();
+            return {
+                source: ASSET_ROUTE_FALLBACK_SOURCE,
+                data: assertValidRosterPayload(legacyData, "Apps Script asset fallback"),
+            };
+        } catch (assetErr) {
+            const firebaseMessage = firebaseError && firebaseError.message ? firebaseError.message : toStr(firebaseError);
+            const assetMessage = assetErr && assetErr.message ? assetErr.message : toStr(assetErr);
+            throw new Error(
+                "Firebase public hydration failed: " +
+                firebaseMessage +
+                " | Apps Script asset fallback failed: " +
+                assetMessage
+            );
+        }
     };
 
     window.renderRosterData = render;
@@ -5605,7 +5994,19 @@
             } catch (err) {
                 rosterHydrationInFlight = false;
                 hideShellLoadingNotice();
-                showError("Roster app crashed while loading roster-data.json.", err);
+                if (cachedSnapshot && cachedSnapshot.data) {
+                    markBootTiming("roster-fetch-failed-using-cache", { source: cachedSnapshot.source || "cache" });
+                    if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                        console.warn(
+                            "[RosterBoot] firebase-public refresh failed; continuing with cached roster snapshot.",
+                            err && (err.message || err.stack) ? (err.message || err.stack) : String(err)
+                        );
+                    }
+                    promoteLandingMediaStart_("hydration-cache-fallback");
+                    return;
+                }
+                promoteLandingMediaStart_("hydration-error");
+                showError("Roster app failed while loading fresh public data from Firebase.", err);
             }
         })();
     }

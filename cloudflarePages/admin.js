@@ -1,4 +1,4 @@
-(() => {
+﻿(() => {
   const $ = (sel) => document.querySelector(sel);
   const toStr = (v) => (v == null ? "" : String(v));
 
@@ -18,6 +18,8 @@
     importCompareBusy: false,
     importApplyBusy: false,
     importLoadWarning: null,
+    activeAdminTab: "rosters",
+    modalFocusReturnByPanel: {},
   };
 
   const setStatus = (msg) => {
@@ -69,6 +71,103 @@
     const el = $(sel);
     if (!el) return;
     el.classList.toggle("hidden", !on);
+  };
+
+  const getConnectedRostersMount = () => {
+    return $("#connectedRostersList") || $("#connectedRostersTable tbody") || $("#connectedRostersTable");
+  };
+
+  const getClanMappingMount = () => {
+    return $("#clanMappingList") || $("#clanMappingTable tbody") || $("#clanMappingTable");
+  };
+
+  const ADMIN_TAB_KEYS = ["rosters", "import", "preview"];
+  const getAdminTabButtons = () => Array.from(document.querySelectorAll('[data-admin-tab]'));
+
+  const getAdminTabPanelByKey = (tabKeyRaw) => {
+    const tabKey = toStr(tabKeyRaw).trim().toLowerCase();
+    if (!tabKey) return null;
+    return $("#adminTab" + tabKey.charAt(0).toUpperCase() + tabKey.slice(1));
+  };
+
+  const setActiveAdminTab = (tabKeyRaw, optionsRaw) => {
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const tabKey = toStr(tabKeyRaw).trim().toLowerCase();
+    const nextTab = ADMIN_TAB_KEYS.includes(tabKey) ? tabKey : "rosters";
+    state.activeAdminTab = nextTab;
+
+    const buttons = getAdminTabButtons();
+    for (const btn of buttons) {
+      const key = toStr(btn && btn.dataset && btn.dataset.adminTab).trim().toLowerCase();
+      const active = key === nextTab;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+      btn.tabIndex = active ? 0 : -1;
+      if (active && options.focusButton !== false) btn.focus();
+    }
+
+    for (const key of ADMIN_TAB_KEYS) {
+      const panel = getAdminTabPanelByKey(key);
+      if (!panel) continue;
+      const active = key === nextTab;
+      panel.classList.toggle("hidden", !active);
+      panel.setAttribute("aria-hidden", active ? "false" : "true");
+    }
+  };
+
+  const setAuthCardUnlocked = (unlocked) => {
+    const authCard = $("#unlockCard");
+    if (!authCard) return;
+    authCard.classList.toggle("is-unlocked", !!unlocked);
+  };
+
+  const syncOverlayBodyState = () => {
+    const hasOpenOverlay = !!document.querySelector(".admin-overlay.is-open");
+    document.body.classList.toggle("admin-overlay-open", hasOpenOverlay);
+  };
+
+  const setAdminOverlayOpen = (panelIdRaw, toggleBtnIdRaw, openRaw, optionsRaw) => {
+    const panelId = toStr(panelIdRaw).trim();
+    if (!panelId) return;
+    const panel = $("#" + panelId);
+    const toggleBtnId = toStr(toggleBtnIdRaw).trim();
+    const toggleBtn = toggleBtnId ? $("#" + toggleBtnId) : null;
+    if (!panel) return;
+
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const shouldOpen = !!openRaw;
+    const wasOpen = panel.classList.contains("is-open") && !panel.classList.contains("hidden");
+
+    if (shouldOpen && !wasOpen) {
+      state.modalFocusReturnByPanel[panelId] = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+
+    panel.classList.toggle("hidden", !shouldOpen);
+    panel.classList.toggle("is-open", shouldOpen);
+    panel.setAttribute("aria-hidden", shouldOpen ? "false" : "true");
+    if (toggleBtn) {
+      toggleBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    }
+
+    if (shouldOpen) {
+      const focusSelector = toStr(options.focusSelector).trim();
+      const target = focusSelector
+        ? panel.querySelector(focusSelector)
+        : panel.querySelector("input,select,textarea,button");
+      if (target && typeof target.focus === "function") {
+        setTimeout(() => target.focus(), 0);
+      }
+    } else if (options.restoreFocus !== false) {
+      const prevFocus = state.modalFocusReturnByPanel[panelId];
+      if (prevFocus && typeof prevFocus.focus === "function") {
+        prevFocus.focus();
+      }
+    }
+
+    if (!shouldOpen || options.clearFocusRecord === true) {
+      delete state.modalFocusReturnByPanel[panelId];
+    }
+    syncOverlayBodyState();
   };
 
   const clearPendingProfileReopen = () => {
@@ -143,17 +242,111 @@
   };
 
   const setAddPreviewRosterPanelOpen = (open) => {
-    const panel = $("#addPreviewRosterPanel");
-    const btn = $("#toggleAddPreviewRosterPanelBtn");
-    if (panel) panel.classList.toggle("hidden", !open);
-    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      setAdminOverlayOpen("addPlayerPanel", "toggleAddPlayerPanelBtn", false, {
+        restoreFocus: false,
+      });
+    }
+    setAdminOverlayOpen("addPreviewRosterPanel", "toggleAddPreviewRosterPanelBtn", !!open, {
+      focusSelector: "#addPreviewRosterId",
+    });
   };
 
   const setAddPlayerPanelOpen = (open) => {
-    const panel = $("#addPlayerPanel");
-    const btn = $("#toggleAddPlayerPanelBtn");
-    if (panel) panel.classList.toggle("hidden", !open);
-    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      setAdminOverlayOpen("addPreviewRosterPanel", "toggleAddPreviewRosterPanelBtn", false, {
+        restoreFocus: false,
+      });
+    }
+    setAdminOverlayOpen("addPlayerPanel", "toggleAddPlayerPanelBtn", !!open, {
+      focusSelector: "#addPlayerRoster",
+    });
+  };
+
+  const bindAdminTabs = () => {
+    const buttons = getAdminTabButtons();
+    if (!buttons.length) return;
+
+    const focusButtonByIndex = (indexRaw) => {
+      if (!buttons.length) return;
+      const max = buttons.length - 1;
+      const nextIndex = Math.max(0, Math.min(max, indexRaw));
+      const btn = buttons[nextIndex];
+      if (btn && typeof btn.focus === "function") btn.focus();
+    };
+
+    buttons.forEach((btn, index) => {
+      btn.addEventListener("click", () => {
+        const key = toStr(btn && btn.dataset && btn.dataset.adminTab).trim().toLowerCase();
+        setActiveAdminTab(key, { focusButton: false });
+      });
+
+      btn.addEventListener("keydown", (e) => {
+        if (!e) return;
+        const key = toStr(e.key).trim();
+        if (key === "ArrowRight") {
+          e.preventDefault();
+          const nextIndex = index >= buttons.length - 1 ? 0 : index + 1;
+          const nextBtn = buttons[nextIndex];
+          const nextKey = toStr(nextBtn && nextBtn.dataset && nextBtn.dataset.adminTab).trim().toLowerCase();
+          setActiveAdminTab(nextKey, { focusButton: false });
+          focusButtonByIndex(nextIndex);
+        } else if (key === "ArrowLeft") {
+          e.preventDefault();
+          const nextIndex = index <= 0 ? buttons.length - 1 : index - 1;
+          const nextBtn = buttons[nextIndex];
+          const nextKey = toStr(nextBtn && nextBtn.dataset && nextBtn.dataset.adminTab).trim().toLowerCase();
+          setActiveAdminTab(nextKey, { focusButton: false });
+          focusButtonByIndex(nextIndex);
+        } else if (key === "Home") {
+          e.preventDefault();
+          const first = buttons[0];
+          const firstKey = toStr(first && first.dataset && first.dataset.adminTab).trim().toLowerCase();
+          setActiveAdminTab(firstKey, { focusButton: false });
+          focusButtonByIndex(0);
+        } else if (key === "End") {
+          e.preventDefault();
+          const lastIndex = buttons.length - 1;
+          const last = buttons[lastIndex];
+          const lastKey = toStr(last && last.dataset && last.dataset.adminTab).trim().toLowerCase();
+          setActiveAdminTab(lastKey, { focusButton: false });
+          focusButtonByIndex(lastIndex);
+        }
+      });
+    });
+  };
+
+  const bindOverlayCloseHandlers = () => {
+    const closeViaAttribute = (target) => {
+      const node = target && target.closest ? target.closest("[data-overlay-close]") : null;
+      const panelId = toStr(node && node.getAttribute("data-overlay-close")).trim();
+      if (!panelId) return false;
+      if (panelId === "addPreviewRosterPanel") {
+        setAddPreviewRosterPanelOpen(false);
+      } else if (panelId === "addPlayerPanel") {
+        setAddPlayerPanelOpen(false);
+      } else {
+        setAdminOverlayOpen(panelId, "", false, {});
+      }
+      return true;
+    };
+
+    document.addEventListener("click", (e) => {
+      closeViaAttribute(e && e.target);
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (!e || e.key !== "Escape") return;
+      if (document.querySelector("#addPlayerPanel.is-open")) {
+        e.preventDefault();
+        setAddPlayerPanelOpen(false);
+        return;
+      }
+      if (document.querySelector("#addPreviewRosterPanel.is-open")) {
+        e.preventDefault();
+        setAddPreviewRosterPanelOpen(false);
+      }
+    });
   };
 
   const getRosters = () => {
@@ -601,7 +794,10 @@
   };
 
   const persistClanSyncTagInputs = () => {
-    const inputs = Array.from(document.querySelectorAll('#connectedRostersTable [data-clan-sync-tag-input="1"]'));
+    const host = getConnectedRostersMount();
+    const inputs = host
+      ? Array.from(host.querySelectorAll('[data-clan-sync-tag-input="1"]'))
+      : [];
     for (const input of inputs) {
       const rosterId = toStr(input && input.dataset && input.dataset.rosterId).trim();
       const roster = getRosterById(rosterId);
@@ -2933,20 +3129,28 @@
   };
 
   const renderClanMappingTable = () => {
-    const tbody = $("#clanMappingTable tbody");
-    if (!tbody) return;
-    tbody.textContent = "";
+    const mount = getClanMappingMount();
+    if (!mount) return;
+    mount.textContent = "";
+    const isLegacyTableBody = mount.tagName === "TBODY";
 
     const session = state.importSession;
     const clans = session && Array.isArray(session.importedClanValues) ? session.importedClanValues : [];
     if (!clans.length) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 3;
-      td.className = "small muted";
-      td.textContent = "Import a file to build clan mapping.";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+      if (isLegacyTableBody) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 3;
+        td.className = "small muted";
+        td.textContent = "Import a file to build clan mapping.";
+        tr.appendChild(td);
+        mount.appendChild(tr);
+      } else {
+        const empty = document.createElement("div");
+        empty.className = "small muted";
+        empty.textContent = "Import a file to build clan mapping.";
+        mount.appendChild(empty);
+      }
       return;
     }
 
@@ -2958,15 +3162,8 @@
       const label = toStr(clanEntry && clanEntry.label).trim() || "(blank clan)";
       const count = Number.isFinite(Number(clanEntry && clanEntry.count)) ? Number(clanEntry.count) : 0;
 
-      const tr = document.createElement("tr");
-      const tdClan = document.createElement("td");
-      tdClan.textContent = label;
-      const tdCount = document.createElement("td");
-      tdCount.textContent = String(count);
-      const tdMapping = document.createElement("td");
-
       const select = document.createElement("select");
-      select.className = "admin-select mapping-table-select";
+      select.className = "admin-select mapping-table-select clan-mapping-item__select";
       select.dataset.importClanKey = key;
 
       const unmapped = document.createElement("option");
@@ -3000,11 +3197,41 @@
         renderImportUi();
       });
 
-      tdMapping.appendChild(select);
-      tr.appendChild(tdClan);
-      tr.appendChild(tdCount);
-      tr.appendChild(tdMapping);
-      tbody.appendChild(tr);
+      if (isLegacyTableBody) {
+        const tr = document.createElement("tr");
+        const tdClan = document.createElement("td");
+        tdClan.textContent = label;
+        const tdCount = document.createElement("td");
+        tdCount.textContent = String(count);
+        const tdMapping = document.createElement("td");
+        tdMapping.appendChild(select);
+        tr.appendChild(tdClan);
+        tr.appendChild(tdCount);
+        tr.appendChild(tdMapping);
+        mount.appendChild(tr);
+      } else {
+        const row = document.createElement("div");
+        row.className = "clan-mapping-item";
+
+        const meta = document.createElement("div");
+        meta.className = "clan-mapping-item__meta";
+
+        const name = document.createElement("span");
+        name.className = "clan-mapping-item__name";
+        name.textContent = label;
+
+        const countPill = document.createElement("span");
+        countPill.className = "clan-mapping-item__count";
+        countPill.textContent = String(count);
+        countPill.title = count + " imported row(s)";
+
+        meta.appendChild(name);
+        meta.appendChild(countPill);
+
+        row.appendChild(meta);
+        row.appendChild(select);
+        mount.appendChild(row);
+      }
     }
   };
 
@@ -3181,37 +3408,163 @@
     }
   };
 
-  const loadActiveRosterData = () =>
-    new Promise((resolve, reject) => {
-      if (!window.google || !google.script || !google.script.run) {
-        reject(new Error("google.script.run is not available."));
-        return;
-      }
-      google.script.run
-        .withSuccessHandler(resolve)
-        .withFailureHandler((err) => reject(err && err.message ? new Error(err.message) : err))
-        .getRosterData();
+  const normalizeAdminApiEndpoint = (valueRaw) => {
+    const value = toStr(valueRaw).trim();
+    if (!value) return "";
+    if (/^https?:\/\//i.test(value) || value.startsWith("/")) return value;
+    return "";
+  };
+
+  const resolveScriptServerBaseUrl = () => {
+    const value = toStr(
+      (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
+        ? (window.ROSTER_BASE_URL || window.BASE_URL)
+        : ""
+    ).trim();
+    if (!/^https?:\/\//i.test(value)) return "";
+    return value;
+  };
+
+  const isLikelyWorkerAdminApiEndpoint = (endpointRaw) => {
+    const endpoint = toStr(endpointRaw).trim().toLowerCase();
+    if (!endpoint) return false;
+    return endpoint.indexOf("/api/admin") >= 0;
+  };
+
+  const isAbsoluteHttpEndpoint = (endpointRaw) =>
+    /^https?:\/\//i.test(toStr(endpointRaw).trim());
+
+  const resolveAdminApiEndpoints = () => {
+    const configured = normalizeAdminApiEndpoint(
+      typeof window !== "undefined" && window
+        ? window.ROSTER_ADMIN_API_BASE
+        : ""
+    );
+    const endpoints = [];
+    const seen = Object.create(null);
+    const pushUnique = (endpointRaw) => {
+      const endpoint = normalizeAdminApiEndpoint(endpointRaw);
+      if (!endpoint) return;
+      if (seen[endpoint]) return;
+      seen[endpoint] = true;
+      endpoints.push(endpoint);
+    };
+
+    pushUnique(configured || "/api/admin");
+    pushUnique(resolveScriptServerBaseUrl());
+    return endpoints;
+  };
+
+  const createAdminApiError = (messageRaw, retryableRaw) => {
+    const err = new Error(toStr(messageRaw).trim() || "Admin API call failed.");
+    err.retryable = !!retryableRaw;
+    return err;
+  };
+
+  const callAdminApiEndpoint = async (endpoint, methodName, args) => {
+    const list = Array.isArray(args) ? args : [];
+    let response = null;
+    let rawText = "";
+    const payloadText = JSON.stringify({
+      method: methodName,
+      args: list,
     });
+    const isCrossOrigin = isAbsoluteHttpEndpoint(endpoint);
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": isCrossOrigin ? "text/plain;charset=utf-8" : "application/json",
+        },
+        body: payloadText,
+        redirect: "follow",
+      });
+      rawText = await response.text();
+    } catch (err) {
+      const endpointIsProxy = isLikelyWorkerAdminApiEndpoint(endpoint);
+      const msg = err && err.message
+        ? err.message
+        : ("Network error while calling " + methodName + ".");
+      throw createAdminApiError(msg, endpointIsProxy);
+    }
+
+    let payload = null;
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      payload = null;
+    }
+
+    const inferUpstreamError = () => {
+      const text = toStr(rawText).toLowerCase();
+      if (!text) return "";
+      if (response.status === 404 && isLikelyWorkerAdminApiEndpoint(endpoint)) {
+        return "Admin API route is missing at /api/admin. Falling back to Apps Script endpoint.";
+      }
+      if (text.indexOf("script-funktion nicht gefunden: dopost") >= 0 || text.indexOf("script function not found: dopost") >= 0) {
+        return "Apps Script is missing doPost. Deploy the latest script version and redeploy the web app.";
+      }
+      return "";
+    };
+
+    const endpointIsProxy = isLikelyWorkerAdminApiEndpoint(endpoint);
+    if (!response.ok) {
+      const errMsg = payload && payload.error
+        ? toStr(payload.error).trim()
+        : (inferUpstreamError() || ("HTTP " + response.status + " while calling " + methodName + "."));
+      const retryable = endpointIsProxy && (response.status === 404 || response.status === 405 || response.status >= 500);
+      throw createAdminApiError(errMsg, retryable);
+    }
+    if (!payload || payload.ok !== true) {
+      const errMsg = payload && payload.error
+        ? toStr(payload.error).trim()
+        : (inferUpstreamError() || ("Server method failed: " + methodName));
+      const retryable = endpointIsProxy && !payload;
+      throw createAdminApiError(errMsg || ("Server method failed: " + methodName), retryable);
+    }
+    return payload.result;
+  };
+
+  const runServerMethodViaHttp = async (methodName, args) => {
+    const endpoints = resolveAdminApiEndpoints();
+    let lastError = null;
+    for (let i = 0; i < endpoints.length; i++) {
+      const endpoint = endpoints[i];
+      try {
+        return await callAdminApiEndpoint(endpoint, methodName, args);
+      } catch (err) {
+        lastError = err;
+        const hasNext = i < endpoints.length - 1;
+        if (!hasNext || !(err && err.retryable)) {
+          throw err;
+        }
+      }
+    }
+    if (lastError) throw lastError;
+    throw new Error("No admin API endpoints are configured.");
+  };
 
   const runServerMethod = (methodName, args) =>
     new Promise((resolve, reject) => {
-      if (!window.google || !google.script || !google.script.run) {
-        reject(new Error("google.script.run is not available."));
+      if (window.google && google.script && google.script.run) {
+        const runner = google.script.run
+          .withSuccessHandler((r) => resolve(r))
+          .withFailureHandler((e) => reject(e && e.message ? new Error(e.message) : e));
+
+        if (!runner || typeof runner[methodName] !== "function") {
+          reject(new Error("Server method is not available: " + methodName));
+          return;
+        }
+
+        const list = Array.isArray(args) ? args : [];
+        runner[methodName](...list);
         return;
       }
 
-      const runner = google.script.run
-        .withSuccessHandler((r) => resolve(r))
-        .withFailureHandler((e) => reject(e && e.message ? new Error(e.message) : e));
-
-      if (!runner || typeof runner[methodName] !== "function") {
-        reject(new Error("Server method is not available: " + methodName));
-        return;
-      }
-
-      const list = Array.isArray(args) ? args : [];
-      runner[methodName](...list);
+      runServerMethodViaHttp(methodName, args).then(resolve).catch(reject);
     });
+
+  const loadActiveRosterData = () => runServerMethod("getRosterData", []);
 
   const applyServerSyncedPreview = (nextRosterData, statusMsg) => {
     if (!nextRosterData || !Array.isArray(nextRosterData.rosters)) {
@@ -3233,20 +3586,17 @@
   };
 
   const renderConnectedRostersTable = () => {
-    const tbody = $("#connectedRostersTable tbody");
-    if (!tbody) return;
+    const mount = getConnectedRostersMount();
+    if (!mount) return;
 
     const rosters = getRosters();
-    tbody.textContent = "";
+    mount.textContent = "";
 
     if (!rosters.length) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 6;
-      td.className = "small muted";
-      td.textContent = "Load active config first.";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+      const empty = document.createElement("div");
+      empty.className = "roster-card-empty";
+      empty.textContent = "Load active config first.";
+      mount.appendChild(empty);
       return;
     }
 
@@ -3262,12 +3612,32 @@
       const prepSummary = trackingMode === "cwl" ? getRosterPreparationSummaryLocal_(r) : null;
       const prepActive = !!(prepSummary && prepSummary.enabled);
 
-      const tr = document.createElement("tr");
+      const card = document.createElement("article");
+      card.className = "roster-admin-card";
+      card.dataset.rosterId = rosterId;
 
-      const tdRoster = document.createElement("td");
-      tdRoster.textContent = label;
+      const header = document.createElement("div");
+      header.className = "roster-admin-card__header";
 
-      const tdOrder = document.createElement("td");
+      const titleWrap = document.createElement("div");
+      titleWrap.className = "roster-admin-card__title-wrap";
+      const title = document.createElement("h3");
+      title.className = "roster-admin-card__title";
+      title.textContent = rosterTitle || rosterId;
+      const idLine = document.createElement("div");
+      idLine.className = "roster-admin-card__id";
+      idLine.textContent = rosterId;
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(idLine);
+
+      const orderWrap = document.createElement("div");
+      orderWrap.className = "roster-admin-card__order";
+
+      const orderPill = document.createElement("span");
+      orderPill.className = "roster-order-pill";
+      orderPill.textContent = (rosterIndex + 1) + "/" + rosters.length;
+      orderPill.title = "Display order";
+
       const orderControls = document.createElement("div");
       orderControls.className = "roster-order-controls";
 
@@ -3276,23 +3646,31 @@
       moveUpBtn.className = "clan-sync-btn secondary";
       moveUpBtn.textContent = "Up";
       moveUpBtn.title = "Move roster up";
+      moveUpBtn.setAttribute("aria-label", "Move " + label + " up");
 
       const moveDownBtn = document.createElement("button");
       moveDownBtn.type = "button";
       moveDownBtn.className = "clan-sync-btn secondary";
       moveDownBtn.textContent = "Down";
       moveDownBtn.title = "Move roster down";
-
-      const orderPos = document.createElement("span");
-      orderPos.className = "roster-order-pos";
-      orderPos.textContent = (rosterIndex + 1) + "/" + rosters.length;
+      moveDownBtn.setAttribute("aria-label", "Move " + label + " down");
 
       orderControls.appendChild(moveUpBtn);
       orderControls.appendChild(moveDownBtn);
-      orderControls.appendChild(orderPos);
-      tdOrder.appendChild(orderControls);
+      orderWrap.appendChild(orderPill);
+      orderWrap.appendChild(orderControls);
+      header.appendChild(titleWrap);
+      header.appendChild(orderWrap);
+      card.appendChild(header);
 
-      const tdTracking = document.createElement("td");
+      const configGrid = document.createElement("div");
+      configGrid.className = "roster-admin-card__config";
+
+      const trackingField = document.createElement("label");
+      trackingField.className = "admin-field";
+      const trackingLabel = document.createElement("span");
+      trackingLabel.className = "admin-field-label";
+      trackingLabel.textContent = "Tracking mode";
       const trackingSelect = document.createElement("select");
       trackingSelect.className = "admin-select";
       trackingSelect.dataset.rosterId = rosterId;
@@ -3306,9 +3684,14 @@
         trackingSelect.appendChild(option);
       });
       trackingSelect.value = trackingMode;
-      tdTracking.appendChild(trackingSelect);
+      trackingField.appendChild(trackingLabel);
+      trackingField.appendChild(trackingSelect);
 
-      const tdTag = document.createElement("td");
+      const tagField = document.createElement("label");
+      tagField.className = "admin-field";
+      const tagLabel = document.createElement("span");
+      tagLabel.className = "admin-field-label";
+      tagLabel.textContent = "Connected clan tag";
       const tagInput = document.createElement("input");
       tagInput.className = "admin-input";
       tagInput.type = "text";
@@ -3317,11 +3700,15 @@
       tagInput.dataset.clanSyncTagInput = "1";
       tagInput.dataset.rosterId = rosterId;
       r.connectedClanTag = tagInput.value;
-      tdTag.appendChild(tagInput);
+      tagField.appendChild(tagLabel);
+      tagField.appendChild(tagInput);
 
-      const tdActions = document.createElement("td");
-      const actions = document.createElement("div");
-      actions.className = "clan-sync-actions";
+      const prepField = document.createElement("div");
+      prepField.className = "roster-admin-card__prep";
+      const prepLabel = document.createElement("span");
+      prepLabel.className = "admin-field-label";
+      prepLabel.textContent = "CWL preparation";
+      prepField.appendChild(prepLabel);
 
       const prepStrip = document.createElement("div");
       prepStrip.className = "cwl-prep-strip";
@@ -3332,8 +3719,8 @@
         prepToggleBtn.className = "clan-sync-btn secondary cwl-prep-toggle" + (prepActive ? " is-on" : " is-off");
         prepToggleBtn.textContent = prepActive ? "Prep ON" : "Prep OFF";
         prepToggleBtn.title = prepActive
-          ? "Disable CWL Preparation Mode"
-          : "Enable CWL Preparation Mode for this roster";
+          ? "Disable CWL preparation mode"
+          : "Enable CWL preparation mode for this roster";
 
         const prepStepper = document.createElement("div");
         prepStepper.className = "cwl-prep-stepper";
@@ -3361,7 +3748,7 @@
         prepSummaryPill.className = "cwl-prep-summary-pill" + (prepSummary && prepSummary.underfilled ? " is-underfilled" : "");
         prepSummaryPill.textContent = prepSummary ? prepSummary.summaryText : "off";
         if (prepSummary) {
-          prepSummaryPill.title = "locked In " + prepSummary.lockedInCount + " • locked Out " + prepSummary.lockedOutCount;
+          prepSummaryPill.title = "locked in " + prepSummary.lockedInCount + ", locked out " + prepSummary.lockedOutCount;
         }
 
         prepToggleBtn.onclick = () => {
@@ -3414,22 +3801,33 @@
         prepStrip.appendChild(prepDisabled);
         prepStrip.appendChild(prepInfo);
       }
-      tdActions.appendChild(prepStrip);
+
+      prepField.appendChild(prepStrip);
+      configGrid.appendChild(trackingField);
+      configGrid.appendChild(tagField);
+      configGrid.appendChild(prepField);
+      card.appendChild(configGrid);
+
+      const actions = document.createElement("div");
+      actions.className = "roster-actions-grid";
 
       const testBtn = document.createElement("button");
       testBtn.type = "button";
       testBtn.className = "clan-sync-btn secondary";
-      testBtn.textContent = "Test connection";
+      testBtn.textContent = "Test";
+      testBtn.title = "Test clan connection";
 
       const syncPoolBtn = document.createElement("button");
       syncPoolBtn.type = "button";
       syncPoolBtn.className = "clan-sync-btn";
-      syncPoolBtn.textContent = "Sync roster pool";
+      syncPoolBtn.textContent = "Sync pool";
+      syncPoolBtn.title = "Sync roster pool from connected clan";
 
       const syncLineupBtn = document.createElement("button");
       syncLineupBtn.type = "button";
       syncLineupBtn.className = "clan-sync-btn";
-      syncLineupBtn.textContent = trackingMode === "regularWar" ? "Sync current war lineup" : "Sync lineup";
+      syncLineupBtn.textContent = trackingMode === "regularWar" ? "Sync war" : "Sync lineup";
+      syncLineupBtn.title = trackingMode === "regularWar" ? "Sync current war lineup" : "Sync lineup";
       if (trackingMode === "cwl" && prepActive) {
         syncLineupBtn.disabled = true;
         syncLineupBtn.title = "CWL Preparation Mode active; live CWL lineup sync blocked";
@@ -3438,12 +3836,16 @@
       const refreshBtn = document.createElement("button");
       refreshBtn.type = "button";
       refreshBtn.className = "clan-sync-btn";
-      refreshBtn.textContent = "Refresh tracking stats";
+      refreshBtn.textContent = "Refresh stats";
+      refreshBtn.title = "Refresh tracking stats";
 
       const suggestBtn = document.createElement("button");
       suggestBtn.type = "button";
       suggestBtn.className = "clan-sync-btn";
-      suggestBtn.textContent = trackingMode === "cwl" ? "Suggest bench" : "Suggest bench (CWL only)";
+      suggestBtn.textContent = "Bench";
+      suggestBtn.title = trackingMode === "cwl"
+        ? "Suggest bench swaps"
+        : "Suggest bench (CWL only)";
       if (trackingMode !== "cwl" || prepActive) suggestBtn.disabled = true;
       if (trackingMode === "cwl" && prepActive) {
         suggestBtn.title = "CWL Preparation Mode active; bench suggestions are disabled";
@@ -3453,6 +3855,7 @@
       clearBtn.type = "button";
       clearBtn.className = "clan-sync-btn secondary";
       clearBtn.textContent = "Clear marks";
+      clearBtn.title = "Clear saved bench and swap marks";
 
       actions.appendChild(testBtn);
       actions.appendChild(syncPoolBtn);
@@ -3460,20 +3863,21 @@
       actions.appendChild(refreshBtn);
       actions.appendChild(suggestBtn);
       actions.appendChild(clearBtn);
-      tdActions.appendChild(actions);
+      card.appendChild(actions);
 
-      const tdStatus = document.createElement("td");
-      tdStatus.className = "small muted";
+      const statusLine = document.createElement("div");
+      statusLine.className = "roster-admin-card__status";
+      statusLine.setAttribute("aria-live", "polite");
 
       const applyRowStatus = () => {
         const saved = state.rosterStatusByRoster[rosterId];
         if (!saved || !saved.msg) {
-          tdStatus.textContent = "";
-          tdStatus.style.color = "#6b7280";
+          statusLine.textContent = "";
+          statusLine.style.color = "#94a3b8";
           return;
         }
-        tdStatus.textContent = saved.msg;
-        tdStatus.style.color = saved.isError ? "#fca5a5" : "#6b7280";
+        statusLine.textContent = saved.msg;
+        statusLine.style.color = saved.isError ? "#fca5a5" : "#94a3b8";
       };
 
       const setRowStatus = (msg, isError) => {
@@ -3747,13 +4151,8 @@
       };
 
       setBusy(false);
-      tr.appendChild(tdRoster);
-      tr.appendChild(tdOrder);
-      tr.appendChild(tdTracking);
-      tr.appendChild(tdTag);
-      tr.appendChild(tdActions);
-      tr.appendChild(tdStatus);
-      tbody.appendChild(tr);
+      card.appendChild(statusLine);
+      mount.appendChild(card);
     }
   };
 
@@ -4077,6 +4476,10 @@
     window.ROSTER_GET_ADMIN_PASSWORD = () => state.password || "";
     window.ROSTER_OPEN_PLAYER_EDIT = openPlayerEditPanel;
 
+    bindAdminTabs();
+    bindOverlayCloseHandlers();
+    setActiveAdminTab(state.activeAdminTab, { focusButton: false });
+    setAuthCardUnlocked(false);
     renderPreviewFromState();
     renderImportUi();
 
@@ -4112,18 +4515,16 @@
 
       try {
         setLoginStatus("Verifying...");
-        await new Promise((resolve, reject) => {
-          if (!window.google || !google.script || !google.script.run) {
-            reject(new Error("google.script.run is not available."));
-            return;
-          }
-          google.script.run
-            .withSuccessHandler((r) => resolve(r))
-            .withFailureHandler((e) => reject(e && e.message ? new Error(e.message) : e))
-            .verifyAdminPassword(state.password);
-        });
+        await runServerMethod("verifyAdminPassword", [state.password]);
 
         show("#adminPanel", true);
+        setAuthCardUnlocked(true);
+        setActiveAdminTab(state.activeAdminTab, { focusButton: false });
+        if (loginBtn) {
+          loginBtn.disabled = true;
+          loginBtn.textContent = "Unlocked";
+        }
+        if (pwInput) pwInput.disabled = true;
         setLoginStatus("Unlocked.");
         refreshAdminWorkflowUi();
         try {
@@ -4133,10 +4534,16 @@
         }
       } catch (err) {
         show("#adminPanel", false);
+        setAuthCardUnlocked(false);
         setLoginStatus("Authentication failed.");
         state.password = "";
         state.autoRefreshSettings = null;
         state.autoRefreshBusy = false;
+        if (loginBtn) {
+          loginBtn.disabled = false;
+          loginBtn.textContent = "Unlock";
+        }
+        if (pwInput) pwInput.disabled = false;
         renderAutoRefreshUi();
         alert("Unlock failed: " + toErrorMessage(err));
       }
@@ -4369,17 +4776,7 @@
         $("#publishBtn").disabled = true;
         setStatus("Publishing...");
 
-        const publishResult = await new Promise((resolve, reject) => {
-          if (!window.google || !google.script || !google.script.run) {
-            reject(new Error("google.script.run is not available."));
-            return;
-          }
-
-          google.script.run
-            .withSuccessHandler((r) => resolve(r))
-            .withFailureHandler((e) => reject(e && e.message ? new Error(e.message) : e))
-            .publishRosterData(state.lastRosterData, pw);
-        });
+        const publishResult = await runServerMethod("publishRosterData", [state.lastRosterData, pw]);
 
         state.publishCooldownUntil = Date.now() + 10_000;
         const playerCount = publishResult && Number.isFinite(Number(publishResult.playerCount)) ? Number(publishResult.playerCount) : null;
@@ -4409,3 +4806,4 @@
 
   document.addEventListener("DOMContentLoaded", init);
 })();
+

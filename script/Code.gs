@@ -50,12 +50,13 @@ function doGet(e) {
 		return ContentService.createTextOutput(JSON.stringify(info, null, 2)).setMimeType(ContentService.MimeType.JSON);
 	}
 
-	const buildStamp = new Date().toISOString();
-	const assetVersion = getStaticAssetVersion_();
 	const baseUrl = ScriptApp.getService().getUrl();
 	const staticBaseUrl = STATIC_ASSET_BASE_URL;
+	const page = String(p.page || "").trim().toLowerCase();
 
-	if (String(p.page || "") === "admin") {
+	if (page === "admin") {
+		const buildStamp = new Date().toISOString();
+		const assetVersion = getStaticAssetVersion_();
 		const t = HtmlService.createTemplateFromFile("Admin");
 		t.buildStamp = buildStamp;
 		t.assetVersion = assetVersion;
@@ -64,94 +65,132 @@ function doGet(e) {
 		return t.evaluate().setTitle("Roster Admin").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 	}
 
-	const cloudflareStylesUrl = buildStaticAssetUrl_("styles.css", assetVersion);
-	const cloudflareClientJsUrl = buildStaticAssetUrl_("client.js", assetVersion);
-	const cloudflareAppHtml = getCloudflareTextAsset_("app.html", assetVersion);
-	if (!cloudflareAppHtml) {
-		return HtmlService.createHtmlOutput(
-			[
-				"<!doctype html>",
-				"<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
-				"<title>CWL Roster</title></head>",
-				"<body style='font-family:system-ui,sans-serif;padding:24px'>",
-				"<h1>Static Shell Unavailable</h1>",
-				"<p>Unable to load <code>app.html</code> from Cloudflare static origin.</p>",
-				"<p>Try again shortly.</p>",
-				"</body></html>",
-			].join(""),
-		).setTitle("CWL Roster");
-	}
-	const appHtmlSource = cloudflareAppHtml;
-	const appHtml = String(appHtmlSource || "").replace(/__ADMIN_URL__/g, baseUrl + "?page=admin");
-	const shouldInlineRosterData = /^(1|true|yes|on)$/i.test(String(p.inlineRosterData || p.inlineRoster || p.inline || "").trim());
-	let inlineRosterData = null;
-	if (shouldInlineRosterData) {
-		const rosterDataText = getAssetText_(ACTIVE_ROSTER_FILENAME);
-		if (rosterDataText) {
-			try {
-				inlineRosterData = JSON.parse(rosterDataText);
-			} catch (err) {
-				Logger.log("Unable to parse %s for inline bootstrap: %s", ACTIVE_ROSTER_FILENAME, err && (err.message || err.stack) ? err.message || err.stack : String(err));
-			}
-		}
-	}
-	const html = buildIndexHtml_({
-		stylesUrl: cloudflareStylesUrl,
-		appHtml: appHtml,
-		clientJsUrl: cloudflareClientJsUrl,
-		buildStamp: buildStamp,
-		baseUrl: baseUrl,
-		staticBaseUrl: staticBaseUrl,
-		inlineRosterData: inlineRosterData,
-	});
-
-	return HtmlService.createHtmlOutput(html).setTitle("CWL Roster").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+	const queryString = e && typeof e.queryString === "string" ? e.queryString : "";
+	const redirectUrl = buildPublicSiteRedirectUrl_(staticBaseUrl, queryString);
+	const redirectHtml = buildPublicSiteRedirectHtml_(redirectUrl);
+	return HtmlService.createHtmlOutput(redirectHtml).setTitle("Redirecting to CWL Roster").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function buildIndexHtml_(view) {
-	const model = view && typeof view === "object" ? view : {};
-	const stylesUrl = typeof model.stylesUrl === "string" ? model.stylesUrl : "";
-	const appHtml = typeof model.appHtml === "string" ? model.appHtml : "";
-	const clientJsUrl = typeof model.clientJsUrl === "string" ? model.clientJsUrl : "";
-	const buildStamp = typeof model.buildStamp === "string" ? model.buildStamp : "";
-	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : "";
-	const staticBaseUrl = typeof model.staticBaseUrl === "string" ? model.staticBaseUrl : "";
-	const inlineRosterData = model && typeof model.inlineRosterData === "object" && model.inlineRosterData ? model.inlineRosterData : null;
-	const inlineRosterScriptJson = serializeJsonForScriptEmbedding_(inlineRosterData);
+/**
+ * Cloudflare admin bridge endpoint.
+ * Accepts JSON: { method: string, args: any[] } and returns { ok, result|error }.
+ */
+function doPost(e) {
+	let payload = {};
+	try {
+		payload = parseAdminApiPayload_(e);
+	} catch (err) {
+		return createAdminApiJsonResponse_({
+			ok: false,
+			error: errorMessage_(err),
+		});
+	}
 
+	try {
+		const method = String(payload.method == null ? "" : payload.method).trim();
+		const args = Array.isArray(payload.args) ? payload.args : [];
+		const result = runAdminApiMethod_(method, args);
+		return createAdminApiJsonResponse_({
+			ok: true,
+			result: result == null ? null : result,
+		});
+	} catch (err) {
+		return createAdminApiJsonResponse_({
+			ok: false,
+			error: errorMessage_(err),
+		});
+	}
+}
+
+function parseAdminApiPayload_(e) {
+	const raw = e && e.postData && typeof e.postData.contents === "string" ? e.postData.contents : "";
+	if (!raw) return {};
+	let parsed = null;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (err) {
+		throw new Error("Invalid JSON payload.");
+	}
+	if (!parsed || typeof parsed !== "object") {
+		throw new Error("Payload must be an object.");
+	}
+	return parsed;
+}
+
+function createAdminApiJsonResponse_(payload) {
+	const safePayload = payload && typeof payload === "object" ? payload : { ok: false, error: "Invalid response payload." };
+	return ContentService
+		.createTextOutput(JSON.stringify(safePayload))
+		.setMimeType(ContentService.MimeType.JSON);
+}
+
+function runAdminApiMethod_(methodNameRaw, argsRaw) {
+	const methodName = String(methodNameRaw == null ? "" : methodNameRaw).trim();
+	const args = Array.isArray(argsRaw) ? argsRaw : [];
+	switch (methodName) {
+		case "getRosterData":
+			return getRosterData();
+		case "verifyAdminPassword":
+			return verifyAdminPassword(args[0]);
+		case "getAutoRefreshSettings":
+			return getAutoRefreshSettings(args[0]);
+		case "setAutoRefreshEnabled":
+			return setAutoRefreshEnabled(args[0], args[1]);
+		case "testClanConnection":
+			return testClanConnection(args[0], args[1], args[2]);
+		case "syncClanRosterPool":
+			return syncClanRosterPool(args[0], args[1], args[2]);
+		case "syncClanTodayLineup":
+			return syncClanTodayLineup(args[0], args[1], args[2]);
+		case "refreshTrackingStats":
+			return refreshTrackingStats(args[0], args[1], args[2]);
+		case "computeBenchSuggestions":
+			return computeBenchSuggestions(args[0], args[1], args[2]);
+		case "publishRosterData":
+			return publishRosterData(args[0], args[1]);
+		case "getPlayerProfile":
+			return getPlayerProfile(args[0], args[1]);
+		default:
+			throw new Error("Unsupported admin method: " + methodName);
+	}
+}
+
+function buildPublicSiteRedirectHtml_(targetUrlRaw) {
+	const targetUrl = String(targetUrlRaw == null ? "" : targetUrlRaw).trim() || "/";
+	const escapedTargetUrl = escapeHtmlAttribute_(targetUrl);
+	const targetUrlJson = escapeInlineScriptText_(JSON.stringify(targetUrl));
 	return [
 		"<!doctype html>",
 		"<html>",
-		"",
 		"<head>",
 		'    <meta charset="utf-8" />',
 		'    <meta name="viewport" content="width=device-width, initial-scale=1" />',
-		"    <title>CWL Roster</title>",
-		'    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />',
-		'    <meta http-equiv="Pragma" content="no-cache" />',
-		'    <meta http-equiv="Expires" content="0" />',
-		'    <meta name="build-stamp" content="' + escapeHtmlAttribute_(buildStamp) + '" />',
-		'    <link rel="stylesheet" href="' + escapeHtmlAttribute_(stylesUrl) + '" />',
+		"    <title>Redirecting to CWL Roster</title>",
+		'    <meta http-equiv="refresh" content="0;url=' + escapedTargetUrl + '" />',
+		'    <meta name="robots" content="noindex" />',
+		'    <link rel="canonical" href="' + escapedTargetUrl + '" />',
 		"</head>",
-		"",
-		'<body style="margin:0;">',
-		'    <div id="app">',
-		appHtml,
-		"    </div>",
-		"",
+		'<body style="margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;background:#0b0f17;color:#e5e7eb;">',
+		'    <p style="margin:0 0 6px;">Redirecting to the public roster site.</p>',
+		'    <p style="margin:0;"><a style="color:#93c5fd;" href="' + escapedTargetUrl + '">Continue</a></p>',
 		"    <script>",
-		"        // useful for debugging caching in devtools",
-		"        window.BUILD_STAMP = " + JSON.stringify(buildStamp) + ";",
-		"        window.ROSTER_BASE_URL = " + JSON.stringify(baseUrl) + ";",
-		"        window.ROSTER_STATIC_BASE_URL = " + JSON.stringify(staticBaseUrl) + ";",
-		"        window.__ROSTER_DATA__ = " + inlineRosterScriptJson + ";",
+		"        (function () {",
+		"            var target = " + targetUrlJson + ";",
+		"            if (typeof window === 'undefined' || !window.location) return;",
+		"            window.location.replace(target);",
+		"        })();",
 		"    </script>",
-		"",
-		'    <script defer src="' + escapeHtmlAttribute_(clientJsUrl) + '"></script>',
 		"</body>",
-		"",
 		"</html>",
 	].join("\n");
+}
+
+function buildPublicSiteRedirectUrl_(publicBaseUrlRaw, queryStringRaw) {
+	const baseUrl = String(publicBaseUrlRaw == null ? "" : publicBaseUrlRaw).trim().replace(/[\/\\]+$/, "");
+	const queryString = String(queryStringRaw == null ? "" : queryStringRaw).replace(/^\?+/, "");
+	const targetBase = baseUrl ? baseUrl + "/" : "/";
+	if (!queryString) return targetBase;
+	return targetBase + "?" + queryString;
 }
 
 function buildScriptAssetUrl_(baseUrlRaw, assetNameRaw) {
@@ -197,21 +236,6 @@ function buildStaticAssetUrl_(relativePathRaw, versionRaw) {
 		url += sep + "v=" + encodeURIComponent(version);
 	}
 	return url;
-}
-
-function getCloudflareTextAsset_(relativePathRaw, versionRaw) {
-	const url = buildStaticAssetUrl_(relativePathRaw, versionRaw);
-	if (!url) return "";
-	try {
-		const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-		const code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
-		if (!code || code < 200 || code >= 300) return "";
-		const text = response && typeof response.getContentText === "function" ? String(response.getContentText() || "") : "";
-		return text.trim() ? text : "";
-	} catch (err) {
-		Logger.log("Cloudflare static fetch failed for %s: %s", url, err && (err.message || err.stack) ? err.message || err.stack : String(err));
-		return "";
-	}
 }
 
 function getRequiredScriptProperty_(keyRaw) {
@@ -484,10 +508,6 @@ function escapeHtmlAttribute_(value) {
 		.replace(/"/g, "&quot;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;");
-}
-
-function serializeJsonForScriptEmbedding_(value) {
-	return JSON.stringify(value == null ? null : value).replace(/</g, "\\u003c");
 }
 
 function escapeInlineScriptText_(value) {

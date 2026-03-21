@@ -1,0 +1,11 @@
+name = "roster-app"
+main = "worker.js"
+compatibility_date = "2026-03-21"
+
+[assets]
+directory = "."
+binding = "ASSETS"
+
+[vars]
+# Optional. If omitted, worker.js uses the fallback URL embedded in code.
+# ROSTER_APPS_SCRIPT_URL = "https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec"
