@@ -1,1 +1,3 @@
 drive/roster-data.json
+__pycache__/
+*.pyc
