@@ -138,14 +138,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return setAutoRefreshEnabled(args[0], args[1]);
 		case "testClanConnection":
 			return testClanConnection(args[0], args[1], args[2]);
-		case "syncClanRosterPool":
-			return syncClanRosterPool(args[0], args[1], args[2]);
-		case "syncClanTodayLineup":
-			return syncClanTodayLineup(args[0], args[1], args[2]);
-		case "refreshTrackingStats":
-			return refreshTrackingStats(args[0], args[1], args[2]);
-		case "computeBenchSuggestions":
-			return computeBenchSuggestions(args[0], args[1], args[2]);
+		case "refreshAllRosters":
+			return refreshAllRosters(args[0], args[1], args[2]);
 		case "publishRosterData":
 			return publishRosterData(args[0], args[1]);
 		case "getPlayerProfile":
@@ -1022,6 +1016,44 @@ function tryAcquireActiveRosterJobLock_(ownerRaw, waitMsRaw) {
 	return null;
 }
 
+function createActiveRosterJobLockBusyError_(ownerRaw, waitMsRaw) {
+	const owner = String(ownerRaw == null ? "unknown" : ownerRaw).trim() || "unknown";
+	const waitMs = Math.max(0, Number(waitMsRaw) || 0);
+	const err = new Error("Another active roster refresh/publish flow is running. Please wait and try again.");
+	err.code = "activeRosterJobLockBusy";
+	err.lockOwner = owner;
+	err.lockWaitMs = waitMs;
+	return err;
+}
+
+function renewActiveRosterJobLockLeaseForToken_(props, tokenRaw, ownerRaw) {
+	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
+	if (!token) return false;
+	const owner = String(ownerRaw == null ? "unknown" : ownerRaw).trim() || "unknown";
+	const renewLock = LockService.getScriptLock();
+	const didLock = renewLock.tryLock(5000);
+	if (!didLock) return false;
+	try {
+		const nowMs = Date.now();
+		const current = parseActiveRosterJobLockState_(props.getProperty(ACTIVE_ROSTER_JOB_LOCK_KEY));
+		if (!current || current.token !== token) {
+			Logger.log("withActiveRosterJobLock: unable to renew lease for owner '%s' (lock token changed or missing).", owner);
+			return false;
+		}
+		props.setProperty(
+			ACTIVE_ROSTER_JOB_LOCK_KEY,
+			JSON.stringify({
+				token: token,
+				owner: current.owner || owner,
+				expiresAt: nowMs + ACTIVE_ROSTER_JOB_LOCK_LEASE_MS,
+			}),
+		);
+		return true;
+	} finally {
+		renewLock.releaseLock();
+	}
+}
+
 function releaseActiveRosterJobLock_(tokenRaw) {
 	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
 	if (!token) return false;
@@ -1045,13 +1077,28 @@ function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 	if (typeof callback !== "function") {
 		throw new Error("Active roster job callback is required.");
 	}
-	const acquired = tryAcquireActiveRosterJobLock_(ownerRaw, waitMsRaw);
+	const owner = String(ownerRaw == null ? "unknown" : ownerRaw).trim() || "unknown";
+	const waitMs = Math.max(0, Number(waitMsRaw) || 0);
+	const acquired = tryAcquireActiveRosterJobLock_(owner, waitMs);
 	if (!acquired) {
-		throw new Error("Another active roster refresh/publish flow is running. Please wait and try again.");
+		throw createActiveRosterJobLockBusyError_(owner, waitMs);
 	}
+	const props = PropertiesService.getScriptProperties();
+	const contextToken = Utilities.getUuid();
+	const lockContext = {
+		token: contextToken,
+		owner: owner,
+		rosterId: "active-job:" + owner,
+		lastTouchedAtMs: 0,
+		touch: function () {
+			return renewActiveRosterJobLockLeaseForToken_(props, acquired.token, acquired.owner);
+		},
+	};
+	pushActiveRosterLockContext_(lockContext);
 	try {
 		return callback();
 	} finally {
+		popActiveRosterLockContext_(contextToken);
 		releaseActiveRosterJobLock_(acquired.token);
 	}
 }
@@ -1642,7 +1689,7 @@ function rethrowWithDuplicateRosterTagDetails_(stepLabelRaw, err, rosterDataRaw)
 	throw new Error(detailedMessage);
 }
 
-function buildAutoRefreshPrefetchBundle_(sourceRostersRaw) {
+function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
 	const connectedClanTagSet = {};
 	const regularWarClanTagSet = {};
@@ -1701,100 +1748,140 @@ function buildAutoRefreshPrefetchBundle_(sourceRostersRaw) {
 	};
 }
 
-function runAutoRefreshAllRosters_(rosterDataRaw) {
-	let rosterData = null;
-	try {
-		rosterData = validateRosterData_(rosterDataRaw);
-	} catch (err) {
-		rethrowWithDuplicateRosterTagDetails_("initialize refresh payload", err, rosterDataRaw);
-	}
-	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-	const rosterIds = [];
-	for (let i = 0; i < sourceRosters.length; i++) {
-		const rosterId = String((sourceRosters[i] && sourceRosters[i].id) || "").trim();
-		if (!rosterId) continue;
-		rosterIds.push(rosterId);
-	}
-	const issues = [];
-	const perRoster = [];
-	let processedRosters = 0;
-	let rostersWithIssues = 0;
-	const autoRefreshPrefetch = buildAutoRefreshPrefetchBundle_(sourceRosters);
-	const pipelinePrefetchOptions = {
-		prefetchedClanSnapshotsByTag: autoRefreshPrefetch.clanMembersSnapshotByTag,
-		prefetchedClanErrorsByTag: autoRefreshPrefetch.clanMembersErrorByTag,
-		prefetchedCurrentRegularWarByClanTag: autoRefreshPrefetch.currentRegularWarByClanTag,
-		prefetchedRegularWarErrorByClanTag: autoRefreshPrefetch.currentRegularWarErrorByClanTag,
-		prefetchedLeaguegroupRawByClanTag: autoRefreshPrefetch.leaguegroupRawByClanTag,
-		prefetchedLeaguegroupErrorByClanTag: autoRefreshPrefetch.leaguegroupErrorByClanTag,
-		prefetchedCwlWarRawByTag: autoRefreshPrefetch.cwlWarRawByTag,
-		prefetchedCwlWarErrorByTag: autoRefreshPrefetch.cwlWarErrorByTag,
-	};
-	const ownershipSnapshot = buildLiveRosterOwnershipSnapshot_(rosterData, {
-		prefetchedClanSnapshotsByTag: autoRefreshPrefetch.clanMembersSnapshotByTag,
-		prefetchedClanErrorsByTag: autoRefreshPrefetch.clanMembersErrorByTag,
-	});
-	const rosterStates = [];
-	const rosterQueue = [];
+function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
+	const stepResult = stepResultRaw && typeof stepResultRaw === "object" ? stepResultRaw : {};
+	const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
+	let message = "";
 
-	const addIssueForState = (state, stepRaw, messageRaw) => {
+	const stepError = Object.prototype.hasOwnProperty.call(stepResult, "error") ? stepResult.error : null;
+	if (stepError && typeof stepError === "object") {
+		message = errorMessage_(stepError);
+	} else if (stepError != null) {
+		message = String(stepError);
+	}
+
+	const result = stepResult.result && typeof stepResult.result === "object" ? stepResult.result : {};
+	if (!message) {
+		message = String(result.warRefreshError == null ? "" : result.warRefreshError).trim();
+	}
+	if (!message) {
+		const resultError = Object.prototype.hasOwnProperty.call(result, "error") ? result.error : null;
+		if (resultError && typeof resultError === "object") {
+			message = errorMessage_(resultError);
+		} else if (resultError != null) {
+			message = String(resultError);
+		}
+	}
+	if (!message) {
+		message = String(result.message == null ? "" : result.message).trim();
+	}
+	if (!message) {
+		message = stepLabel + " failed.";
+	}
+	return message;
+}
+
+function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const skipInitialValidation = options.skipInitialValidation === true;
+	let rosterData = null;
+	if (skipInitialValidation) {
+		rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+		if (!rosterData || !Array.isArray(rosterData.rosters)) {
+			throw new Error("Refresh pipeline payload is invalid.");
+		}
+	} else {
+		try {
+			rosterData = validateRosterData_(rosterDataRaw);
+		} catch (err) {
+			rethrowWithDuplicateRosterTagDetails_("initialize refresh pipeline payload", err, rosterDataRaw);
+		}
+	}
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) throw new Error("Roster ID is required.");
+	const ownershipSnapshot = options.ownershipSnapshot && typeof options.ownershipSnapshot === "object" ? options.ownershipSnapshot : null;
+	const touchPipelineLockLease = () => {
+		touchActiveRosterLockLease_("refresh pipeline");
+	};
+	const pipelinePrefetchOptions = {
+		prefetchedClanSnapshotsByTag: options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {},
+		prefetchedClanErrorsByTag: options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {},
+		prefetchedCurrentRegularWarByClanTag:
+			options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object" ? options.prefetchedCurrentRegularWarByClanTag : {},
+		prefetchedRegularWarErrorByClanTag:
+			options.prefetchedRegularWarErrorByClanTag && typeof options.prefetchedRegularWarErrorByClanTag === "object" ? options.prefetchedRegularWarErrorByClanTag : {},
+		prefetchedLeaguegroupRawByClanTag:
+			options.prefetchedLeaguegroupRawByClanTag && typeof options.prefetchedLeaguegroupRawByClanTag === "object" ? options.prefetchedLeaguegroupRawByClanTag : {},
+		prefetchedLeaguegroupErrorByClanTag:
+			options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {},
+		prefetchedCwlWarRawByTag: options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {},
+		prefetchedCwlWarErrorByTag: options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {},
+		metricsRunState: options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null,
+	};
+
+	const steps = {
+		pool: { ok: false, skipped: false, message: "", result: null },
+		lineup: { ok: false, skipped: false, message: "", result: null },
+		stats: { ok: false, skipped: false, partialFailure: false, message: "", result: null },
+		bench: { ok: false, skipped: false, message: "", result: null },
+	};
+	const issues = [];
+	const getCurrentRoster = () => findRosterInDataById_(rosterData, rosterId);
+	const getCurrentTrackingMode = () => {
+		const roster = getCurrentRoster();
+		return roster ? getRosterTrackingMode_(roster) : "cwl";
+	};
+	const isCwlPreparationActiveForCurrentRoster = () => {
+		const roster = getCurrentRoster();
+		return !!(roster && getRosterTrackingMode_(roster) === "cwl" && isCwlPreparationActive_(roster));
+	};
+
+	const initialRoster = getCurrentRoster();
+	const rosterName = String((initialRoster && initialRoster.title) || "").trim() || rosterId;
+	const initialTrackingMode = getCurrentTrackingMode();
+	const poolStepLabel = "sync clan roster pool";
+	const lineupStepLabel = initialTrackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup";
+	const statsStepLabel = initialTrackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats";
+	const benchStepLabel = "compute bench suggestions";
+
+	const addIssue = (stepRaw, messageRaw) => {
 		const step = String(stepRaw == null ? "" : stepRaw).trim() || "pipeline";
 		const message = shortenIssueMessage_(messageRaw, 200);
 		if (!message) return;
-		const issue = {
-			rosterId: state.rosterId,
-			rosterName: state.rosterName,
+		issues.push({
+			rosterId: rosterId,
+			rosterName: rosterName,
 			step: step,
 			message: message,
-		};
-		state.rosterIssues.push(issue);
-		issues.push(issue);
+		});
 	};
 
-	const addSkippedIssueForState = (state, stepLabelRaw, prerequisiteStepLabelRaw) => {
+	const markSkippedAfterFailedStep = (stepKey, stepLabelRaw, prerequisiteStepLabelRaw) => {
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
 		const prerequisiteStepLabel = String(prerequisiteStepLabelRaw == null ? "" : prerequisiteStepLabelRaw).trim();
-		const suffix = prerequisiteStepLabel ? ": " + prerequisiteStepLabel : "";
-		addIssueForState(state, stepLabel, "skipped because previous step failed" + suffix + ".");
+		const skipMessage = "skipped because previous step failed" + (prerequisiteStepLabel ? ": " + prerequisiteStepLabel : "") + ".";
+		const step = steps[stepKey];
+		step.ok = false;
+		step.skipped = true;
+		step.message = skipMessage;
+		if (stepKey === "stats") step.partialFailure = false;
+		addIssue(stepLabel, skipMessage);
 	};
 
-	const getStepFailureMessageForState_ = (stepResultRaw, stepLabelRaw) => {
-		const stepResult = stepResultRaw && typeof stepResultRaw === "object" ? stepResultRaw : {};
-		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
-		let message = "";
-
-		const stepError = Object.prototype.hasOwnProperty.call(stepResult, "error") ? stepResult.error : null;
-		if (stepError && typeof stepError === "object") {
-			message = errorMessage_(stepError);
-		} else if (stepError != null) {
-			message = String(stepError);
-		}
-
-		const result = stepResult.result && typeof stepResult.result === "object" ? stepResult.result : {};
-		if (!message) {
-			message = String(result.warRefreshError == null ? "" : result.warRefreshError).trim();
-		}
-		if (!message) {
-			const resultError = Object.prototype.hasOwnProperty.call(result, "error") ? result.error : null;
-			if (resultError && typeof resultError === "object") {
-				message = errorMessage_(resultError);
-			} else if (resultError != null) {
-				message = String(resultError);
-			}
-		}
-		if (!message) {
-			message = String(result.message == null ? "" : result.message).trim();
-		}
-		if (!message) {
-			message = stepLabel + " failed.";
-		}
-		return message;
+	const markIntentionalSkip = (stepKey, messageRaw) => {
+		const step = steps[stepKey];
+		step.ok = true;
+		step.skipped = true;
+		step.message = String(messageRaw == null ? "" : messageRaw).trim();
+		if (stepKey === "stats") step.partialFailure = false;
 	};
 
-	const runStepWithRollbackForState = (state, stepLabelRaw, stepFn) => {
+	const runStepWithRollback = (stepKey, stepLabelRaw, stepFn) => {
+		const step = steps[stepKey];
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
 		const beforeStep = cloneRosterDataForRefresh_(rosterData);
 		try {
+			touchPipelineLockLease();
 			const stepResult = stepFn();
 			const stepReportedFailure = !!(stepResult && typeof stepResult === "object" && stepResult.ok === false);
 			if (stepReportedFailure) {
@@ -1807,145 +1894,302 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 						failureRosterValidationErr = validationErr;
 					}
 				}
-				if (failureRosterData) {
-					rosterData = failureRosterData;
-				} else {
-					rosterData = beforeStep;
-				}
+				rosterData = failureRosterData || beforeStep;
 				const failureMessage = failureRosterValidationErr
 					? stepLabel + " failed and returned invalid rosterData: " + errorMessage_(failureRosterValidationErr)
-					: getStepFailureMessageForState_(stepResult, stepLabel);
+					: getRefreshPipelineStepFailureMessage_(stepResult, stepLabel);
 				const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabel, new Error(failureMessage), rosterData);
-				addIssueForState(state, stepLabel, detailedMessage);
-				return {
-					ok: false,
-					result: stepResult,
-					error: failureRosterValidationErr || (stepResult && stepResult.error ? stepResult.error : new Error(detailedMessage)),
-				};
+				step.ok = false;
+				step.skipped = false;
+				step.message = detailedMessage;
+				step.result = stepResult && stepResult.result && typeof stepResult.result === "object" ? stepResult.result : null;
+				if (stepKey === "stats") {
+					const statsResult = step.result && typeof step.result === "object" ? step.result : {};
+					step.partialFailure = !!(statsResult.partialFailure || (statsResult.memberTrackingPreserved && statsResult.warRefreshFailed));
+				}
+				addIssue(stepLabel, detailedMessage);
+				return false;
 			}
+
 			if (stepResult && stepResult.rosterData) {
-				rosterData = stepResult.rosterData;
+				rosterData = validateRosterData_(stepResult.rosterData);
 			}
-			return { ok: true, result: stepResult };
+			touchPipelineLockLease();
+			step.ok = true;
+			step.skipped = false;
+			step.result = stepResult && stepResult.result && typeof stepResult.result === "object" ? stepResult.result : null;
+			step.message = String(step.result && step.result.message != null ? step.result.message : "").trim();
+			if (stepKey === "stats") step.partialFailure = false;
+			return true;
 		} catch (err) {
 			const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabel, err, rosterData);
 			rosterData = beforeStep;
-			addIssueForState(state, stepLabel, detailedMessage);
-			return { ok: false, error: err };
+			step.ok = false;
+			step.skipped = false;
+			step.message = detailedMessage;
+			if (stepKey === "stats") step.partialFailure = false;
+			addIssue(stepLabel, detailedMessage);
+			return false;
 		}
 	};
 
+	if (!initialRoster) {
+		const notFoundMessage = "Roster not found in current refresh payload.";
+		steps.pool.message = notFoundMessage;
+		addIssue("pipeline", notFoundMessage);
+		markSkippedAfterFailedStep("lineup", lineupStepLabel, poolStepLabel);
+		markSkippedAfterFailedStep("stats", statsStepLabel, poolStepLabel);
+		markSkippedAfterFailedStep("bench", benchStepLabel, poolStepLabel);
+	} else {
+		const hasConnectedClanTag = !!normalizeTag_(initialRoster.connectedClanTag);
+		if (!hasConnectedClanTag) {
+			const missingTagMessage = "Connected clan tag is missing.";
+			steps.pool.ok = false;
+			steps.pool.skipped = false;
+			steps.pool.message = missingTagMessage;
+			addIssue(poolStepLabel, missingTagMessage);
+		} else {
+			runStepWithRollback("pool", poolStepLabel, () => syncClanRosterPoolCore_(rosterData, rosterId, { ownershipSnapshot: ownershipSnapshot }));
+		}
+
+		const poolStepOk = !!steps.pool.ok;
+		const trackingModeForPipeline = getCurrentTrackingMode();
+		if (trackingModeForPipeline === "cwl" && isCwlPreparationActiveForCurrentRoster()) {
+			markIntentionalSkip("lineup", "live CWL lineup sync blocked by CWL Preparation Mode");
+		} else if (!hasConnectedClanTag || !poolStepOk) {
+			markSkippedAfterFailedStep("lineup", lineupStepLabel, poolStepLabel);
+		} else {
+			runStepWithRollback("lineup", lineupStepLabel, () => syncClanTodayLineupCore_(rosterData, rosterId, pipelinePrefetchOptions));
+		}
+
+		const lineupStepOk = !!steps.lineup.ok;
+		const allowStatsWithoutLineup = trackingModeForPipeline === "regularWar";
+		if (!hasConnectedClanTag || !poolStepOk || (!lineupStepOk && !allowStatsWithoutLineup)) {
+			markSkippedAfterFailedStep("stats", statsStepLabel, !poolStepOk || !hasConnectedClanTag ? poolStepLabel : lineupStepLabel);
+		} else {
+			if (!lineupStepOk && allowStatsWithoutLineup) {
+				Logger.log(
+					"refreshRosterPipeline: roster '%s' running regular-war stats/repair despite lineup sync issue so history repair can proceed.",
+					rosterId,
+				);
+			}
+			runStepWithRollback("stats", statsStepLabel, () => refreshTrackingStatsCore_(rosterData, rosterId, pipelinePrefetchOptions));
+		}
+
+		const statsStepOk = !!steps.stats.ok;
+		const statsResult = steps.stats.result && typeof steps.stats.result === "object" ? steps.stats.result : {};
+		const skipBenchForNoActiveCwl = trackingModeForPipeline === "cwl" && statsStepOk && !!statsResult.cwlUnavailable && !!statsResult.statsUnchanged;
+		if (trackingModeForPipeline !== "cwl") {
+			markIntentionalSkip("bench", "bench suggestions are disabled for regular war rosters");
+		} else if (isCwlPreparationActiveForCurrentRoster()) {
+			markIntentionalSkip("bench", "bench suggestions disabled during CWL Preparation Mode");
+		} else if (!hasConnectedClanTag || !poolStepOk || !lineupStepOk || !statsStepOk) {
+			const failedStepLabel = !poolStepOk || !hasConnectedClanTag ? poolStepLabel : !lineupStepOk ? lineupStepLabel : statsStepLabel;
+			markSkippedAfterFailedStep("bench", benchStepLabel, failedStepLabel);
+		} else if (skipBenchForNoActiveCwl) {
+			markIntentionalSkip("bench", "compute bench suggestions skipped: no active CWL available");
+		} else {
+			runStepWithRollback("bench", benchStepLabel, () => computeBenchSuggestionsCore_(rosterData, rosterId));
+		}
+	}
+
+	let validatedRosterData = null;
+	try {
+		touchPipelineLockLease();
+		validatedRosterData = validateRosterData_(rosterData);
+	} catch (err) {
+		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh pipeline payload", err, rosterData));
+	}
+	const finalRoster = findRosterInDataById_(validatedRosterData, rosterId);
+	const finalTrackingMode = finalRoster ? getRosterTrackingMode_(finalRoster) : initialTrackingMode;
+	const partialFailure = !!steps.stats.partialFailure;
+	return {
+		ok: issues.length < 1,
+		rosterData: validatedRosterData,
+		result: {
+			rosterId: rosterId,
+			rosterName: rosterName,
+			trackingMode: finalTrackingMode,
+			partialFailure: partialFailure,
+			issues: issues,
+			steps: steps,
+		},
+	};
+}
+
+function buildRefreshAllRunSummary_(processedRostersRaw, rostersWithIssuesRaw, issueCountRaw) {
+	const processed = Math.max(0, toNonNegativeInt_(processedRostersRaw));
+	const withIssues = Math.max(0, toNonNegativeInt_(rostersWithIssuesRaw));
+	const issueCount = Math.max(0, toNonNegativeInt_(issueCountRaw));
+	return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s).";
+}
+
+function buildRefreshAllPipelinePrefetchOptions_(prefetchBundleRaw) {
+	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
+	return {
+		prefetchedClanSnapshotsByTag:
+			prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {},
+		prefetchedClanErrorsByTag: prefetch.clanMembersErrorByTag && typeof prefetch.clanMembersErrorByTag === "object" ? prefetch.clanMembersErrorByTag : {},
+		prefetchedCurrentRegularWarByClanTag:
+			prefetch.currentRegularWarByClanTag && typeof prefetch.currentRegularWarByClanTag === "object" ? prefetch.currentRegularWarByClanTag : {},
+		prefetchedRegularWarErrorByClanTag:
+			prefetch.currentRegularWarErrorByClanTag && typeof prefetch.currentRegularWarErrorByClanTag === "object" ? prefetch.currentRegularWarErrorByClanTag : {},
+		prefetchedLeaguegroupRawByClanTag: prefetch.leaguegroupRawByClanTag && typeof prefetch.leaguegroupRawByClanTag === "object" ? prefetch.leaguegroupRawByClanTag : {},
+		prefetchedLeaguegroupErrorByClanTag:
+			prefetch.leaguegroupErrorByClanTag && typeof prefetch.leaguegroupErrorByClanTag === "object" ? prefetch.leaguegroupErrorByClanTag : {},
+		prefetchedCwlWarRawByTag: prefetch.cwlWarRawByTag && typeof prefetch.cwlWarRawByTag === "object" ? prefetch.cwlWarRawByTag : {},
+		prefetchedCwlWarErrorByTag: prefetch.cwlWarErrorByTag && typeof prefetch.cwlWarErrorByTag === "object" ? prefetch.cwlWarErrorByTag : {},
+	};
+}
+
+function buildRefreshAllOwnershipSnapshot_(rosterData, prefetchBundleRaw, optionsRaw) {
+	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null;
+	return buildLiveRosterOwnershipSnapshot_(rosterData, {
+		recordMetrics: false,
+		metricsRunState: metricsRunState,
+		prefetchedClanSnapshotsByTag: prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {},
+		prefetchedClanErrorsByTag: prefetch.clanMembersErrorByTag && typeof prefetch.clanMembersErrorByTag === "object" ? prefetch.clanMembersErrorByTag : {},
+	});
+}
+
+function buildRefreshAllRosterResultMessage_(pipelineResultRaw, rosterIssuesRaw) {
+	const pipelineResult = pipelineResultRaw && typeof pipelineResultRaw === "object" ? pipelineResultRaw : {};
+	const rosterIssues = Array.isArray(rosterIssuesRaw) ? rosterIssuesRaw : [];
+	if (rosterIssues.length > 0) {
+		return shortenIssueMessage_(rosterIssues[0] && rosterIssues[0].message, 180) || "Refresh pipeline completed with issues.";
+	}
+	if (pipelineResult.partialFailure === true) {
+		return "Refresh pipeline completed with partial failure.";
+	}
+	const trackingMode = String(pipelineResult.trackingMode == null ? "" : pipelineResult.trackingMode).trim().toLowerCase();
+	if (trackingMode === "regularwar") return "Refresh pipeline complete (regular war).";
+	if (trackingMode === "cwl") return "Refresh pipeline complete (CWL).";
+	return "Refresh pipeline complete.";
+}
+
+function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
+	let rosterData = null;
+	try {
+		rosterData = validateRosterData_(rosterDataRaw);
+	} catch (err) {
+		rethrowWithDuplicateRosterTagDetails_("initialize refresh payload", err, rosterDataRaw);
+	}
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : {};
+	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
+	if (!metricsRunState.profileSnapshotByTag || typeof metricsRunState.profileSnapshotByTag !== "object") metricsRunState.profileSnapshotByTag = {};
+	if (!metricsRunState.profileSnapshotErrorByTag || typeof metricsRunState.profileSnapshotErrorByTag !== "object") metricsRunState.profileSnapshotErrorByTag = {};
+	if (typeof metricsRunState.profileFetchBlocked !== "boolean") metricsRunState.profileFetchBlocked = false;
+	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const rosterIds = [];
+	for (let i = 0; i < sourceRosters.length; i++) {
+		const rosterId = String((sourceRosters[i] && sourceRosters[i].id) || "").trim();
+		if (!rosterId) continue;
+		rosterIds.push(rosterId);
+	}
+
+	const issues = [];
+	const perRoster = [];
+	let processedRosters = 0;
+	let rostersWithIssues = 0;
+	touchActiveRosterLockLease_("refresh all prefetch");
+	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(sourceRosters);
+	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
+	const ownershipSnapshot = buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
+		metricsRunState: metricsRunState,
+	});
+
 	for (let i = 0; i < rosterIds.length; i++) {
+		touchActiveRosterLockLease_("refresh all roster " + (i + 1) + "/" + rosterIds.length);
 		const rosterId = rosterIds[i];
 		processedRosters++;
 		const currentRoster = findRosterInDataById_(rosterData, rosterId);
 		const rosterTitle = String((currentRoster && currentRoster.title) || "").trim();
-		const trackingMode = currentRoster ? getRosterTrackingMode_(currentRoster) : "cwl";
-		const state = {
-			rosterId: rosterId,
-			rosterName: rosterTitle ? rosterTitle : rosterId,
-			trackingMode: trackingMode,
-			prepActive: trackingMode === "cwl" && !!(currentRoster && isCwlPreparationActive_(currentRoster)),
-			poolStepLabel: "sync clan roster pool",
-			lineupStepLabel: trackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup",
-			statsStepLabel: trackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats",
-			benchStepLabel: "compute bench suggestions",
-			noCurrentWarMessage: trackingMode === "regularWar" ? "no current regular war found" : "no current cwl war found",
-			hasConnectedClanTag: !!normalizeTag_(currentRoster && currentRoster.connectedClanTag),
-			rosterIssues: [],
-			poolStepOk: false,
-			lineupStepOk: false,
-			statsStepOk: false,
-			nextStepIndex: 0,
-			done: false,
-		};
-		rosterStates.push(state);
-
-		if (!currentRoster) {
-			addIssueForState(state, "pipeline", "Roster not found in current refresh payload.");
-			state.done = true;
-			continue;
-		}
-		if (!state.hasConnectedClanTag) {
-			addIssueForState(state, state.poolStepLabel, "Connected clan tag is missing.");
-		}
-		rosterQueue.push(state);
-	}
-
-	while (rosterQueue.length > 0) {
-		const state = rosterQueue.shift();
-		if (!state || state.done) continue;
-
-		if (state.nextStepIndex === 0) {
-			if (state.hasConnectedClanTag) {
-				const poolStep = runStepWithRollbackForState(state, state.poolStepLabel, () => {
-					return syncClanRosterPoolInternal_(rosterData, state.rosterId, { ownershipSnapshot: ownershipSnapshot });
-				});
-				state.poolStepOk = !!poolStep.ok;
-			} else {
-				state.poolStepOk = false;
+		const rosterName = rosterTitle || rosterId;
+		const rosterIssues = [];
+		let pipelineResult = {};
+		let partialFailure = false;
+		let trackingMode = getRosterTrackingMode_(currentRoster);
+		try {
+			const pipelineRun = runRosterRefreshPipelineCore_(
+				rosterData,
+				rosterId,
+				Object.assign(
+					{
+						ownershipSnapshot: ownershipSnapshot,
+						skipInitialValidation: true,
+						metricsRunState: metricsRunState,
+					},
+					pipelinePrefetchOptions,
+				),
+			);
+			if (pipelineRun && pipelineRun.rosterData) {
+				rosterData = pipelineRun.rosterData;
 			}
-		} else if (state.nextStepIndex === 1) {
-			if (state.trackingMode === "cwl" && state.prepActive) {
-				state.lineupStepOk = true;
-				Logger.log("autoRefresh: roster '%s' lineup sync intentionally suppressed because CWL Preparation Mode is active.", state.rosterId);
-			} else if (!state.hasConnectedClanTag || !state.poolStepOk) {
-				addSkippedIssueForState(state, state.lineupStepLabel, state.poolStepLabel);
-			} else {
-				const syncTodayStep = runStepWithRollbackForState(state, state.lineupStepLabel, () => syncClanTodayLineupInternal_(rosterData, state.rosterId, pipelinePrefetchOptions));
-				state.lineupStepOk = !!syncTodayStep.ok;
-				if (syncTodayStep.ok) {
-					const syncToday = syncTodayStep.result;
-					const message = String((syncToday && syncToday.result && syncToday.result.message) || "")
-						.trim()
-						.toLowerCase();
-					if (message === state.noCurrentWarMessage) {
-						Logger.log("autoRefresh: roster '%s' has no current war for mode '%s'; treated as non-fatal.", state.rosterId, state.trackingMode);
-					}
-				}
+			pipelineResult = pipelineRun && pipelineRun.result && typeof pipelineRun.result === "object" ? pipelineRun.result : {};
+			partialFailure = pipelineResult.partialFailure === true;
+			trackingMode = String(pipelineResult.trackingMode == null ? trackingMode : pipelineResult.trackingMode).trim() || trackingMode;
+			const pipelineIssues = Array.isArray(pipelineResult.issues) ? pipelineResult.issues : [];
+			for (let j = 0; j < pipelineIssues.length; j++) {
+				const issueRaw = pipelineIssues[j] && typeof pipelineIssues[j] === "object" ? pipelineIssues[j] : {};
+				const step = String(issueRaw.step == null ? "" : issueRaw.step).trim() || "pipeline";
+				const message = shortenIssueMessage_(issueRaw.message, 200);
+				if (!message) continue;
+				const issue = {
+					rosterId: rosterId,
+					rosterName: rosterName,
+					step: step,
+					message: message,
+				};
+				rosterIssues.push(issue);
+				issues.push(issue);
 			}
-		} else if (state.nextStepIndex === 2) {
-			const allowStatsWithoutLineup = state.trackingMode === "regularWar";
-			if (!state.hasConnectedClanTag || !state.poolStepOk || (!state.lineupStepOk && !allowStatsWithoutLineup)) {
-				addSkippedIssueForState(state, state.statsStepLabel, !state.poolStepOk || !state.hasConnectedClanTag ? state.poolStepLabel : state.lineupStepLabel);
-			} else {
-				if (!state.lineupStepOk && allowStatsWithoutLineup) {
-					Logger.log(
-						"autoRefresh: roster '%s' running regular-war stats/repair despite lineup sync issue so history repair can proceed.",
-						state.rosterId,
-					);
-				}
-				const statsStep = runStepWithRollbackForState(state, state.statsStepLabel, () => refreshTrackingStatsInternal_(rosterData, state.rosterId, pipelinePrefetchOptions));
-				state.statsStepOk = !!statsStep.ok;
+			if (pipelineIssues.length < 1 && pipelineRun && pipelineRun.ok === false) {
+				const fallbackMessage = "refresh pipeline failed.";
+				const issue = {
+					rosterId: rosterId,
+					rosterName: rosterName,
+					step: "pipeline",
+					message: fallbackMessage,
+				};
+				rosterIssues.push(issue);
+				issues.push(issue);
 			}
-		} else if (state.nextStepIndex === 3 && state.trackingMode === "cwl") {
-			if (state.prepActive) {
-				Logger.log("autoRefresh: roster '%s' bench suggestions intentionally suppressed because CWL Preparation Mode is active.", state.rosterId);
-			} else if (!state.hasConnectedClanTag || !state.poolStepOk || !state.lineupStepOk || !state.statsStepOk) {
-				const failedStepLabel = !state.poolStepOk || !state.hasConnectedClanTag ? state.poolStepLabel : !state.lineupStepOk ? state.lineupStepLabel : state.statsStepLabel;
-				addSkippedIssueForState(state, state.benchStepLabel, failedStepLabel);
-			} else {
-				runStepWithRollbackForState(state, state.benchStepLabel, () => computeBenchSuggestionsInternal_(rosterData, state.rosterId));
+			if (partialFailure && rosterIssues.length < 1) {
+				const issue = {
+					rosterId: rosterId,
+					rosterName: rosterName,
+					step: "refresh tracking stats",
+					message: "refresh pipeline completed with partial failure.",
+				};
+				rosterIssues.push(issue);
+				issues.push(issue);
 			}
+		} catch (err) {
+			const detailedMessage = appendDuplicateRosterTagDetailsToError_("refresh roster pipeline", err, rosterData);
+			const issue = {
+				rosterId: rosterId,
+				rosterName: rosterName,
+				step: "pipeline",
+				message: shortenIssueMessage_(detailedMessage, 200),
+			};
+			rosterIssues.push(issue);
+			issues.push(issue);
 		}
-
-		state.nextStepIndex++;
-		const totalSteps = state.trackingMode === "cwl" ? 4 : 3;
-		if (state.nextStepIndex < totalSteps) {
-			rosterQueue.push(state);
-		} else {
-			state.done = true;
-		}
-	}
-
-	for (let i = 0; i < rosterStates.length; i++) {
-		const state = rosterStates[i];
-		if (state.rosterIssues.length > 0) rostersWithIssues++;
+		const rosterHasIssues = rosterIssues.length > 0 || partialFailure;
+		if (rosterHasIssues) rostersWithIssues++;
+		const rosterMessage = buildRefreshAllRosterResultMessage_(pipelineResult, rosterIssues);
 		perRoster.push({
-			rosterId: state.rosterId,
-			rosterName: state.rosterName,
-			issueCount: state.rosterIssues.length,
-			issues: state.rosterIssues,
+			rosterId: rosterId,
+			rosterName: rosterName,
+			trackingMode: trackingMode,
+			ok: !rosterHasIssues,
+			partialFailure: partialFailure,
+			issueCount: rosterIssues.length,
+			message: rosterMessage,
+			issues: rosterIssues,
 		});
 	}
 
@@ -1957,28 +2201,58 @@ function runAutoRefreshAllRosters_(rosterDataRaw) {
 	}
 
 	return {
+		ok: issues.length < 1,
 		rosterData: validatedRosterData,
 		processedRosters: processedRosters,
 		rostersWithIssues: rostersWithIssues,
 		issueCount: issues.length,
 		issues: issues,
 		issueSummary: buildAutoRefreshIssueSummary_(issues),
+		summary: buildRefreshAllRunSummary_(processedRosters, rostersWithIssues, issues.length),
 		perRoster: perRoster,
 	};
+}
+
+function runRefreshAllRostersCore_(rosterDataOrLoaderRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const lockOwner = String(options.lockOwner == null ? "refresh-all" : options.lockOwner).trim() || "refresh-all";
+	const lockWaitRaw = Number(options.lockWaitMs);
+	const lockWaitMs = Math.max(0, isFinite(lockWaitRaw) ? lockWaitRaw : ACTIVE_ROSTER_JOB_LOCK_WAIT_MS);
+	const beforeRun = typeof options.beforeRun === "function" ? options.beforeRun : null;
+	const onAfterRun = typeof options.onAfterRun === "function" ? options.onAfterRun : null;
+	const rosterDataLoader = typeof rosterDataOrLoaderRaw === "function" ? rosterDataOrLoaderRaw : null;
+	return withActiveRosterJobLock_(lockOwner, lockWaitMs, function () {
+		touchActiveRosterLockLease_("refresh all start");
+		if (beforeRun) {
+			const beforeResult = beforeRun();
+			if (beforeResult && typeof beforeResult === "object" && beforeResult.skip === true) {
+				return {
+					skipped: true,
+					reason: String(beforeResult.reason == null ? "skipped" : beforeResult.reason).trim() || "skipped",
+					lastWriteAt: String(beforeResult.lastWriteAt == null ? "" : beforeResult.lastWriteAt).trim(),
+				};
+			}
+		}
+		const sourceRosterData = rosterDataLoader ? rosterDataLoader() : rosterDataOrLoaderRaw;
+		const runResult = runRefreshAllRostersUnlockedCore_(sourceRosterData, options);
+		if (onAfterRun) {
+			onAfterRun(runResult);
+		}
+		touchActiveRosterLockLease_("refresh all complete");
+		return runResult;
+	});
 }
 
 function buildAutoRefreshSummary_(runResult, writeResult) {
 	const run = runResult && typeof runResult === "object" ? runResult : {};
 	const write = writeResult && typeof writeResult === "object" ? writeResult : {};
-	const processed = Math.max(0, toNonNegativeInt_(run.processedRosters));
-	const withIssues = Math.max(0, toNonNegativeInt_(run.rostersWithIssues));
-	const issueCount = Math.max(0, toNonNegativeInt_(run.issueCount));
+	const baseSummary = buildRefreshAllRunSummary_(run.processedRosters, run.rostersWithIssues, run.issueCount);
 	const changed = !!write.changed;
 	if (!changed) {
-		return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s), no active payload change.";
+		return baseSummary + " no active payload change.";
 	}
 	const rostersWritten = Math.max(0, toNonNegativeInt_(write.rosterCount));
-	return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s), wrote " + rostersWritten + " roster(s).";
+	return baseSummary + " wrote " + rostersWritten + " roster(s).";
 }
 
 function setAutoRefreshRunResult_(statusRaw, summaryRaw, errorRaw, issueCountRaw, issueSummaryRaw, startedAtRaw, finishedAtRaw) {
@@ -2162,6 +2436,13 @@ function setAutoRefreshEnabled(enabledRaw, password) {
 	}
 }
 
+function isActiveRosterJobLockBusyError_(errRaw) {
+	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
+	if (err && String(err.code || "").trim() === "activeRosterJobLockBusy") return true;
+	const message = errorMessage_(errRaw).toLowerCase();
+	return message.indexOf("another active roster refresh/publish flow is running") >= 0;
+}
+
 function autoRefreshActiveRosterTick() {
 	const startedAt = new Date().toISOString();
 	let runIssueCount = 0;
@@ -2172,31 +2453,60 @@ function autoRefreshActiveRosterTick() {
 		return { ok: true, skipped: true, reason: "disabled" };
 	}
 
-	const acquired = tryAcquireActiveRosterJobLock_("auto-refresh", 0);
-	if (!acquired) {
-		setAutoRefreshRunResult_("skipped", "Auto-refresh skipped due to overlap with another active roster refresh/publish flow.", "", 0, "", startedAt, new Date().toISOString());
-		return { ok: true, skipped: true, reason: "overlap" };
-	}
-
 	try {
 		PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY, startedAt);
-		if (isRecentSuccessfulActiveWrite_()) {
-			const lastWriteAt = getLastSuccessfulActiveWriteAt_();
-			const summary = "Auto-refresh skipped: active data was written recently (" + (lastWriteAt || "unknown") + ").";
-			try {
-				cleanupOldAutoRefreshDailyArchives_();
-			} catch (cleanupErr) {
-				Logger.log("Unable to cleanup stale auto-refresh archives: %s", errorMessage_(cleanupErr));
+		let sourceSnapshot = null;
+		let writeResult = null;
+		const runResult = runRefreshAllRostersCore_(
+			function () {
+				sourceSnapshot = readActiveRosterSnapshot_();
+				return sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
+			},
+			{
+				lockOwner: "auto-refresh",
+				lockWaitMs: 0,
+				beforeRun: function () {
+					if (!isRecentSuccessfulActiveWrite_()) return null;
+					return {
+						skip: true,
+						reason: "cooldown",
+						lastWriteAt: getLastSuccessfulActiveWriteAt_(),
+					};
+				},
+				onAfterRun: function (resultRaw) {
+					const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
+					if (!result || result.skipped) return;
+					if (!sourceSnapshot || !sourceSnapshot.rosterData) {
+						throw new Error("Auto-refresh source snapshot is missing.");
+					}
+					writeResult = writeAutoRefreshedActiveRosterData_(sourceSnapshot, result.rosterData);
+				},
+			},
+		);
+		if (runResult && runResult.skipped) {
+			const reason = String(runResult.reason == null ? "" : runResult.reason).trim().toLowerCase();
+			if (reason === "cooldown") {
+				const lastWriteAt = String(runResult.lastWriteAt || "").trim();
+				let summary = "Auto-refresh skipped: active data was written recently (" + (lastWriteAt || "unknown") + ").";
+				try {
+					const cleanupDeleted = cleanupOldAutoRefreshDailyArchives_();
+					if (cleanupDeleted > 0) {
+						summary += " Cleaned " + cleanupDeleted + " stale daily archive(s).";
+					}
+				} catch (cleanupErr) {
+					Logger.log("Unable to cleanup stale auto-refresh archives: %s", errorMessage_(cleanupErr));
+				}
+				setAutoRefreshRunResult_("skipped", summary, "", 0, "", startedAt, new Date().toISOString());
+				return { ok: true, skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
 			}
-			setAutoRefreshRunResult_("skipped", summary, "", 0, "", startedAt, new Date().toISOString());
-			return { ok: true, skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
+			setAutoRefreshRunResult_("skipped", "Auto-refresh skipped.", "", 0, "", startedAt, new Date().toISOString());
+			return { ok: true, skipped: true, reason: reason || "skipped" };
 		}
-
-		const sourceSnapshot = readActiveRosterSnapshot_();
-		const runResult = runAutoRefreshAllRosters_(sourceSnapshot.rosterData);
 		runIssueCount = runResult.issueCount;
 		runIssueSummary = String(runResult.issueSummary || "").trim();
-		const writeResult = writeAutoRefreshedActiveRosterData_(sourceSnapshot, runResult.rosterData);
+		if (!writeResult) {
+			throw new Error("Auto-refresh write result is missing.");
+		}
 
 		let summary = buildAutoRefreshSummary_(runResult, writeResult);
 		if (writeResult.changed && writeResult.archiveCreated) {
@@ -2226,12 +2536,14 @@ function autoRefreshActiveRosterTick() {
 			issueCount: runIssueCount,
 		};
 	} catch (err) {
+		if (isActiveRosterJobLockBusyError_(err)) {
+			setAutoRefreshRunResult_("skipped", "Auto-refresh skipped due to overlap with another active roster refresh/publish flow.", "", 0, "", startedAt, new Date().toISOString());
+			return { ok: true, skipped: true, reason: "overlap" };
+		}
 		const message = errorMessage_(err);
 		setAutoRefreshRunResult_("error", "Auto-refresh run failed.", message, runIssueCount, runIssueSummary, startedAt, new Date().toISOString());
 		Logger.log("autoRefreshActiveRosterTick failed: %s", message);
 		return { ok: false, error: message };
-	} finally {
-		releaseActiveRosterJobLock_(acquired.token);
 	}
 }
 
@@ -2440,12 +2752,13 @@ const CWL_PREPARATION_ROSTER_SIZE_STEP = 5;
 const REGULAR_WAR_MISSING_GRACE_MS = 28 * 24 * 60 * 60 * 1000; // 28 days
 const REGULAR_WAR_WARLOG_LIMIT = 25;
 const REGULAR_WAR_REPAIR_GRACE_MS = 6 * 60 * 60 * 1000; // 6 hours
-const ROSTER_LOCK_KEY_PREFIX = "ROSTER_LOCK:";
-const ROSTER_LOCK_WAIT_MS = 30 * 1000;
-const ROSTER_LOCK_LEASE_MS = 10 * 60 * 1000;
-const ROSTER_LOCK_POLL_MS = 250;
+const ACTIVE_ROSTER_LOCK_HEARTBEAT_MIN_INTERVAL_MS = 15 * 1000;
 const AUTO_REFRESH_PREFETCH_BATCH_SIZE = 8;
 const AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS = 1000;
+const COC_FETCH_MAX_ATTEMPTS = 3;
+const COC_FETCH_RETRY_BASE_DELAY_MS = 300;
+const COC_FETCH_RETRY_MIN_DELAY_MS = 150;
+const COC_FETCH_RETRY_MAX_DELAY_MS = 2500;
 const PLAYER_METRICS_SCHEMA_VERSION = 1;
 const PLAYER_METRICS_TROPHY_HISTORY_MAX_DAYS = 120;
 const PLAYER_METRICS_DONATION_MONTHS_MAX = 12;
@@ -2457,85 +2770,46 @@ const PLAYER_METRICS_PROFILE_ENRICH_MIN_MEMBER_COUNT = 8;
 const PLAYER_METRICS_PROFILE_ENRICH_MAX_NONZERO_RATIO = 0.2;
 const PLAYER_METRICS_PROFILE_ENRICH_MIN_UNRANKED_RATIO = 0.7;
 const PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH = 0.9;
+let activeRosterLockContextStack_ = [];
 
-function parseRosterLockState_(raw) {
-	const text = String(raw == null ? "" : raw).trim();
-	if (!text) return null;
+function pushActiveRosterLockContext_(ctxRaw) {
+	const ctx = ctxRaw && typeof ctxRaw === "object" ? ctxRaw : null;
+	if (!ctx || typeof ctx.touch !== "function") return;
+	if (!Array.isArray(activeRosterLockContextStack_)) activeRosterLockContextStack_ = [];
+	activeRosterLockContextStack_.push(ctx);
+}
 
-	try {
-		const parsed = JSON.parse(text);
-		const token = String((parsed && parsed.token) || "").trim();
-		const expiresAt = Number(parsed && parsed.expiresAt);
-		if (!token || !isFinite(expiresAt)) return null;
-		return {
-			token: token,
-			expiresAt: Math.floor(expiresAt),
-		};
-	} catch (err) {
-		return null;
+function popActiveRosterLockContext_(tokenRaw) {
+	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
+	if (!token) return;
+	if (!Array.isArray(activeRosterLockContextStack_) || !activeRosterLockContextStack_.length) return;
+	for (let i = activeRosterLockContextStack_.length - 1; i >= 0; i--) {
+		const ctx = activeRosterLockContextStack_[i] && typeof activeRosterLockContextStack_[i] === "object" ? activeRosterLockContextStack_[i] : null;
+		if (!ctx) continue;
+		if (String(ctx.token == null ? "" : ctx.token).trim() === token) {
+			activeRosterLockContextStack_.splice(i, 1);
+			return;
+		}
 	}
 }
 
-function withRosterLock_(rosterIdRaw, callback) {
-	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
-	if (!rosterId) throw new Error("Roster ID is required.");
-	if (typeof callback !== "function") throw new Error("Roster lock callback is required.");
-
-	const props = PropertiesService.getScriptProperties();
-	const lockKey = ROSTER_LOCK_KEY_PREFIX + rosterId;
-	const token = Utilities.getUuid();
-	const deadlineMs = Date.now() + ROSTER_LOCK_WAIT_MS;
-	let acquired = false;
-
-	while (!acquired && Date.now() < deadlineMs) {
-		const scriptLock = LockService.getScriptLock();
-		const remainingMs = Math.max(250, deadlineMs - Date.now());
-		const didLock = scriptLock.tryLock(Math.min(5000, remainingMs));
-		if (!didLock) {
-			Utilities.sleep(ROSTER_LOCK_POLL_MS);
-			continue;
-		}
-
-		try {
-			const nowMs = Date.now();
-			const current = parseRosterLockState_(props.getProperty(lockKey));
-			if (!current || current.expiresAt <= nowMs) {
-				props.setProperty(
-					lockKey,
-					JSON.stringify({
-						token: token,
-						expiresAt: nowMs + ROSTER_LOCK_LEASE_MS,
-					}),
-				);
-				acquired = true;
-			}
-		} finally {
-			scriptLock.releaseLock();
-		}
-
-		if (!acquired) Utilities.sleep(ROSTER_LOCK_POLL_MS);
-	}
-
-	if (!acquired) {
-		throw new Error("Roster refresh is already running for '" + rosterId + "'. Please wait and try again.");
-	}
-
+function touchActiveRosterLockLease_(reasonRaw) {
+	if (!Array.isArray(activeRosterLockContextStack_) || !activeRosterLockContextStack_.length) return false;
+	const ctx = activeRosterLockContextStack_[activeRosterLockContextStack_.length - 1];
+	if (!ctx || typeof ctx.touch !== "function") return false;
+	const nowMs = Date.now();
+	const lastTouchedAtMs = Number(ctx.lastTouchedAtMs);
+	if (isFinite(lastTouchedAtMs) && nowMs - lastTouchedAtMs < ACTIVE_ROSTER_LOCK_HEARTBEAT_MIN_INTERVAL_MS) return true;
 	try {
-		return callback();
-	} finally {
-		const releaseLock = LockService.getScriptLock();
-		const didLock = releaseLock.tryLock(5000);
-		if (!didLock) return;
-
-		try {
-			const current = parseRosterLockState_(props.getProperty(lockKey));
-			if (current && current.token === token) {
-				props.deleteProperty(lockKey);
-			}
-		} finally {
-			releaseLock.releaseLock();
+		const touched = ctx.touch(reasonRaw);
+		if (touched !== false) {
+			ctx.lastTouchedAtMs = nowMs;
+			return true;
 		}
+	} catch (err) {
+		Logger.log("touchActiveRosterLockLease heartbeat failed for owner '%s': %s", String(ctx.owner || ""), errorMessage_(err));
 	}
+	return false;
 }
 
 function hasValidAdminPassword_(password) {
@@ -2673,6 +2947,74 @@ function buildCocFetchRequestConfig_(pathRaw, tokenRaw) {
 	};
 }
 
+function parseCocRetryAfterMs_(retryAfterRaw) {
+	const retryAfter = String(retryAfterRaw == null ? "" : retryAfterRaw).trim();
+	if (!retryAfter) return 0;
+	const deltaSeconds = Number(retryAfter);
+	if (isFinite(deltaSeconds) && deltaSeconds >= 0) {
+		return Math.max(0, Math.floor(deltaSeconds * 1000));
+	}
+	const retryAtMs = new Date(retryAfter).getTime();
+	if (!isFinite(retryAtMs)) return 0;
+	return Math.max(0, Math.floor(retryAtMs - Date.now()));
+}
+
+function isCocTransientStatusCode_(statusCodeRaw) {
+	const statusCode = Number(statusCodeRaw);
+	if (!isFinite(statusCode)) return false;
+	return statusCode === 0 || statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504;
+}
+
+function shouldRetryCocFetchError_(errRaw) {
+	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
+	if (!err) return false;
+	const statusCode = Number(err.statusCode);
+	if (isFinite(statusCode)) return isCocTransientStatusCode_(statusCode);
+	// Transport/no-response failures can throw plain Error values without statusCode.
+	return true;
+}
+
+function computeCocRetryDelayMs_(errRaw, attemptIndexRaw) {
+	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
+	const retryAfterMs = parseCocRetryAfterMs_(err && err.retryAfter);
+	if (retryAfterMs > 0) {
+		return Math.max(COC_FETCH_RETRY_MIN_DELAY_MS, Math.min(COC_FETCH_RETRY_MAX_DELAY_MS, retryAfterMs));
+	}
+	const attemptIndex = Math.max(1, toNonNegativeInt_(attemptIndexRaw) || 1);
+	const exponentialBackoffMs = COC_FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, attemptIndex - 1));
+	return Math.max(COC_FETCH_RETRY_MIN_DELAY_MS, Math.min(COC_FETCH_RETRY_MAX_DELAY_MS, Math.floor(exponentialBackoffMs)));
+}
+
+function cocFetchWithRetry_(requestConfigRaw, labelRaw, optionsRaw) {
+	const requestConfig = requestConfigRaw && typeof requestConfigRaw === "object" ? requestConfigRaw : null;
+	if (!requestConfig || !requestConfig.url || !requestConfig.params) {
+		throw new Error("Clash API request config is required.");
+	}
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const maxAttempts = Math.max(1, toNonNegativeInt_(options.maxAttempts) || COC_FETCH_MAX_ATTEMPTS);
+	const label = String(labelRaw == null ? "" : labelRaw).trim() || String(requestConfig.url || "");
+
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		try {
+			touchActiveRosterLockLease_("cocFetch");
+			const res = UrlFetchApp.fetch(requestConfig.url, requestConfig.params);
+			return parseCocFetchResponse_(res);
+		} catch (err) {
+			if (!shouldRetryCocFetchError_(err) || attempt >= maxAttempts) throw err;
+			const waitMs = computeCocRetryDelayMs_(err, attempt);
+			const statusCode = Number(err && err.statusCode);
+			const statusLabel = isFinite(statusCode) ? String(Math.floor(statusCode)) : "transport";
+			Logger.log("cocFetch retry %s/%s path=%s status=%s waitMs=%s", attempt + 1, maxAttempts, label, statusLabel, waitMs);
+			if (waitMs > 0) {
+				touchActiveRosterLockLease_("cocFetch retry wait");
+				Utilities.sleep(waitMs);
+			}
+		}
+	}
+
+	throw new Error("Clash API request failed after retries.");
+}
+
 function parseCocFetchResponse_(resRaw) {
 	const res = resRaw && typeof resRaw === "object" ? resRaw : null;
 	if (!res || typeof res.getResponseCode !== "function") {
@@ -2719,8 +3061,7 @@ function parseCocFetchResponse_(resRaw) {
 function cocFetch_(path) {
 	const token = getCocApiToken_();
 	const req = buildCocFetchRequestConfig_(path, token);
-	const res = UrlFetchApp.fetch(req.url, req.params);
-	return parseCocFetchResponse_(res);
+	return cocFetchWithRetry_(req, path);
 }
 
 function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
@@ -2779,9 +3120,13 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 	if (!runnableEntries.length) return out;
 
 	for (let offset = 0; offset < runnableEntries.length; offset += batchSize) {
+		touchActiveRosterLockLease_("cocFetchAll batch");
 		const batch = runnableEntries.slice(offset, offset + batchSize);
 		if (!batch.length) continue;
-		if (out.batchCount > 0 && batchDelayMs > 0) Utilities.sleep(batchDelayMs);
+		if (out.batchCount > 0 && batchDelayMs > 0) {
+			touchActiveRosterLockLease_("cocFetchAll batch delay");
+			Utilities.sleep(batchDelayMs);
+		}
 		out.batchCount++;
 
 		const fetchAllRequests = [];
@@ -2792,6 +3137,7 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 
 		let responses = null;
 		try {
+			touchActiveRosterLockLease_("cocFetchAll fetch");
 			responses = UrlFetchApp.fetchAll(fetchAllRequests);
 		} catch (err) {
 			Logger.log("cocFetchAllByPathEntries: fetchAll batch failed (%s request(s)): %s", batch.length, errorMessage_(err));
@@ -2802,11 +3148,30 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 			const entry = batch[i];
 			const config = requestConfigByKey[entry.key];
 			try {
-				const response =
-					responses && Array.isArray(responses) && responses[i] && typeof responses[i].getResponseCode === "function"
-						? responses[i]
-						: UrlFetchApp.fetch(config.url, config.params);
-				out.dataByKey[entry.key] = parseCocFetchResponse_(response);
+				const response = responses && Array.isArray(responses) && responses[i] && typeof responses[i].getResponseCode === "function" ? responses[i] : null;
+				if (response) {
+					try {
+						out.dataByKey[entry.key] = parseCocFetchResponse_(response);
+						continue;
+					} catch (err) {
+						if (!shouldRetryCocFetchError_(err)) throw err;
+						const remainingAttempts = Math.max(1, COC_FETCH_MAX_ATTEMPTS - 1);
+						const initialWaitMs = computeCocRetryDelayMs_(err, 1);
+						Logger.log(
+							"cocFetchAllByPathEntries: retrying path=%s after transient fetchAll response error (waitMs=%s): %s",
+							entry.path,
+							initialWaitMs,
+							errorMessage_(err),
+						);
+						if (initialWaitMs > 0) {
+							touchActiveRosterLockLease_("cocFetchAll response retry wait");
+							Utilities.sleep(initialWaitMs);
+						}
+						out.dataByKey[entry.key] = cocFetchWithRetry_(config, entry.path, { maxAttempts: remainingAttempts });
+						continue;
+					}
+				}
+				out.dataByKey[entry.key] = cocFetchWithRetry_(config, entry.path);
 			} catch (err) {
 				out.errorByKey[entry.key] = err;
 			}
@@ -3726,6 +4091,8 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 		continueOnError: options.continueOnError !== false,
 		metricsProfileMode: metricsProfileMode,
 		runState: options.runState,
+		prefetchedClanSnapshotsByTag: options.prefetchedClanSnapshotsByTag,
+		prefetchedClanErrorsByTag: options.prefetchedClanErrorsByTag,
 	});
 	if (metricsProfileMode !== "always") return primary;
 
@@ -8121,7 +8488,10 @@ function testClanConnection(rosterData, rosterId, password) {
 function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const ownershipSnapshot = options.ownershipSnapshot && typeof options.ownershipSnapshot === "object" ? options.ownershipSnapshot : buildLiveRosterOwnershipSnapshot_(ctx.rosterData);
+	const ownershipSnapshot =
+		options.ownershipSnapshot && typeof options.ownershipSnapshot === "object"
+			? options.ownershipSnapshot
+			: buildLiveRosterOwnershipSnapshot_(ctx.rosterData, { recordMetrics: false });
 	const memberTrackingByRosterId = ownershipSnapshot && ownershipSnapshot.memberTrackingByRosterId && typeof ownershipSnapshot.memberTrackingByRosterId === "object" ? ownershipSnapshot.memberTrackingByRosterId : {};
 	const nowIso = new Date().toISOString();
 	let result = null;
@@ -8141,17 +8511,6 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 	updateWarPerformanceMembership_(ctx.roster, nowIso);
 	const outRosterData = validateRosterData_(ctx.rosterData);
 	return { ok: true, rosterData: outRosterData, result: result };
-}
-
-function syncClanRosterPoolInternal_(rosterData, rosterId, optionsRaw) {
-	return withRosterLock_(rosterId, function () {
-		return syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw);
-	});
-}
-
-function syncClanRosterPool(rosterData, rosterId, password) {
-	assertAdminPassword_(password);
-	return syncClanRosterPoolInternal_(rosterData, rosterId);
 }
 
 function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
@@ -8320,17 +8679,6 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		rosterData: outRosterData,
 		result: Object.assign({ mode: "cwl" }, result),
 	};
-}
-
-function syncClanTodayLineupInternal_(rosterData, rosterId, optionsRaw) {
-	return withRosterLock_(rosterId, function () {
-		return syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw);
-	});
-}
-
-function syncClanTodayLineup(rosterData, rosterId, password) {
-	assertAdminPassword_(password);
-	return syncClanTodayLineupInternal_(rosterData, rosterId);
 }
 
 function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
@@ -8759,6 +9107,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
+	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null;
 	const ctx = findRosterById_(rosterData, rosterId);
 	let capture = null;
 	let postCaptureRosterData = null;
@@ -8766,6 +9115,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 		capture = captureMemberTrackingForRoster_(ctx.rosterData, ctx.rosterId, {
 			continueOnError: true,
 			metricsProfileMode: "always",
+			runState: metricsRunState,
 			prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
 			prefetchedClanErrorsByTag: prefetchedClanErrorsByTag,
 		});
@@ -8838,26 +9188,17 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	return refresh;
 }
 
-function refreshCwlStatsInternal_(rosterData, rosterId, optionsRaw) {
-	return withRosterLock_(rosterId, function () {
-		return refreshCwlStatsCore_(rosterData, rosterId, optionsRaw);
-	});
-}
-
-function refreshCwlStats(rosterData, rosterId, password) {
+function refreshAllRosters(rosterData, password, optionsRaw) {
 	assertAdminPassword_(password);
-	return refreshCwlStatsInternal_(rosterData, rosterId);
-}
-
-function refreshTrackingStatsInternal_(rosterData, rosterId, optionsRaw) {
-	return withRosterLock_(rosterId, function () {
-		return refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw);
-	});
-}
-
-function refreshTrackingStats(rosterData, rosterId, password) {
-	assertAdminPassword_(password);
-	return refreshTrackingStatsInternal_(rosterData, rosterId);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const runOptions = Object.assign({}, options);
+	runOptions.lockOwner = "manual-refresh-all";
+	runOptions.lockWaitMs = ACTIVE_ROSTER_JOB_LOCK_WAIT_MS;
+	const runResult = runRefreshAllRostersCore_(rosterData, runOptions);
+	if (runResult && runResult.skipped) {
+		throw new Error("Refresh all was skipped.");
+	}
+	return runResult;
 }
 
 const CWL_BENCH_PLANNER_CONFIG = {
@@ -10140,17 +10481,6 @@ function computeBenchSuggestionsCore_(rosterData, rosterId) {
 		targetMainTags: benchSuggestions.targetMainTags,
 		actionableTargetMainTags: benchSuggestions.actionableTargetMainTags,
 	};
-}
-
-function computeBenchSuggestionsInternal_(rosterData, rosterId) {
-	return withRosterLock_(rosterId, function () {
-		return computeBenchSuggestionsCore_(rosterData, rosterId);
-	});
-}
-
-function computeBenchSuggestions(rosterData, rosterId, password) {
-	assertAdminPassword_(password);
-	return computeBenchSuggestionsInternal_(rosterData, rosterId);
 }
 
 function createDebugPlayer_(tag, name, th, opts) {
