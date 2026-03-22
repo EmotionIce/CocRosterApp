@@ -182,8 +182,28 @@ function computeStrengthScore_(playerStats, planningContext, config) {
 	};
 }
 
-function buildCwlSeasonContext_(roster, config) {
+function buildCwlSeasonContext_(roster, config, optionsRaw) {
 	const rosterSafe = roster && typeof roster === "object" ? roster : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : null;
+	const prefetchOptionsProvided = !!(
+		options &&
+		(Object.prototype.hasOwnProperty.call(options, "prefetchedLeaguegroupRawByClanTag") ||
+			Object.prototype.hasOwnProperty.call(options, "prefetchedLeaguegroupErrorByClanTag") ||
+			Object.prototype.hasOwnProperty.call(options, "prefetchedCwlWarRawByTag") ||
+			Object.prototype.hasOwnProperty.call(options, "prefetchedCwlWarErrorByTag"))
+	);
+	const prefetchedLeaguegroupRawByClanTag =
+		options && options.prefetchedLeaguegroupRawByClanTag && typeof options.prefetchedLeaguegroupRawByClanTag === "object"
+			? options.prefetchedLeaguegroupRawByClanTag
+			: {};
+	const prefetchedLeaguegroupErrorByClanTag =
+		options && options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object"
+			? options.prefetchedLeaguegroupErrorByClanTag
+			: {};
+	const prefetchedCwlWarRawByTag =
+		options && options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
+	const prefetchedCwlWarErrorByTag =
+		options && options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
 	const rosterStatsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object" ? rosterSafe.cwlStats.byTag : {};
 	const defaultSeasonDays = Math.max(1, toNonNegativeInt_((config && config.defaultSeasonDays) || 7));
 	let maxResolvedWarDays = 0;
@@ -217,7 +237,18 @@ function buildCwlSeasonContext_(roster, config) {
 	}
 
 	try {
-		const leaguegroup = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup");
+		let leaguegroup = null;
+		if (prefetchOptionsProvided) {
+			if (Object.prototype.hasOwnProperty.call(prefetchedLeaguegroupErrorByClanTag, clanTag)) {
+				throw prefetchedLeaguegroupErrorByClanTag[clanTag];
+			}
+			if (!Object.prototype.hasOwnProperty.call(prefetchedLeaguegroupRawByClanTag, clanTag)) {
+				throw new Error("Missing prefetched CWL league group for clan " + clanTag + ".");
+			}
+			leaguegroup = prefetchedLeaguegroupRawByClanTag[clanTag];
+		} else {
+			leaguegroup = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup");
+		}
 		const rounds = Array.isArray(leaguegroup && leaguegroup.rounds) ? leaguegroup.rounds : [];
 		const totalSeasonDays = rounds.length > 0 ? rounds.length : fallbackContext.totalSeasonDays;
 		const roundStates = [];
@@ -233,11 +264,23 @@ function buildCwlSeasonContext_(roster, config) {
 				if (!warTag || warTag === "#0") continue;
 
 				let war = null;
-				try {
-					war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
-				} catch (err) {
-					if (err && err.statusCode === 404) continue;
-					throw err;
+				if (prefetchOptionsProvided) {
+					if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarErrorByTag, warTag)) {
+						const prefetchedErr = prefetchedCwlWarErrorByTag[warTag];
+						if (prefetchedErr && Number(prefetchedErr.statusCode) === 404) continue;
+						throw prefetchedErr;
+					}
+					if (!Object.prototype.hasOwnProperty.call(prefetchedCwlWarRawByTag, warTag)) {
+						throw new Error("Missing prefetched CWL war for tag " + warTag + ".");
+					}
+					war = prefetchedCwlWarRawByTag[warTag];
+				} else {
+					try {
+						war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
+					} catch (err) {
+						if (err && err.statusCode === 404) continue;
+						throw err;
+					}
 				}
 				if (!pickWarSideForClan_(war, clanTag)) continue;
 				foundClanWar = true;
@@ -1155,7 +1198,8 @@ function buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, confi
 	};
 }
 
-function computeBenchSuggestionsCore_(rosterData, rosterId) {
+function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const ctx = findRosterById_(rosterData, rosterId);
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
 	if (trackingMode === "regularWar") {
@@ -1210,7 +1254,7 @@ function computeBenchSuggestionsCore_(rosterData, rosterId) {
 	}
 	const config = getBenchPlannerConfig_();
 	const updatedAt = new Date().toISOString();
-	const seasonContext = buildCwlSeasonContext_(ctx.roster, config);
+	const seasonContext = buildCwlSeasonContext_(ctx.roster, config, options);
 	const snapshot = buildCwlPlanningSnapshot_(ctx.roster, seasonContext, config);
 	const plan = solveSeasonLineupPlan_(snapshot, config);
 	const suggestions = deriveNextDaySwapSuggestionsFromPlan_(ctx.roster, plan, snapshot, config);

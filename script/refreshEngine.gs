@@ -154,6 +154,122 @@ function rethrowWithDuplicateRosterTagDetails_(stepLabelRaw, err, rosterDataRaw)
 	throw new Error(detailedMessage);
 }
 
+function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarClanTagsRaw, cwlClanTagsRaw, optionsRaw) {
+	const connectedClanTags = Array.isArray(connectedClanTagsRaw) ? connectedClanTagsRaw : [];
+	const regularWarClanTags = Array.isArray(regularWarClanTagsRaw) ? regularWarClanTagsRaw : [];
+	const cwlClanTags = Array.isArray(cwlClanTagsRaw) ? cwlClanTagsRaw : [];
+	const entries = [];
+	const membersKeyByClanTag = {};
+	const regularWarKeyByClanTag = {};
+	const leagueGroupKeyByClanTag = {};
+
+	for (let i = 0; i < connectedClanTags.length; i++) {
+		const clanTag = normalizeTag_(connectedClanTags[i]);
+		if (!clanTag) continue;
+		const key = "members:" + clanTag;
+		membersKeyByClanTag[clanTag] = key;
+		entries.push({
+			key: key,
+			path: "/clans/" + encodeTagForPath_(clanTag) + "/members",
+		});
+	}
+	for (let i = 0; i < regularWarClanTags.length; i++) {
+		const clanTag = normalizeTag_(regularWarClanTags[i]);
+		if (!clanTag) continue;
+		const key = "regularWar:" + clanTag;
+		regularWarKeyByClanTag[clanTag] = key;
+		entries.push({
+			key: key,
+			path: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar",
+		});
+	}
+	for (let i = 0; i < cwlClanTags.length; i++) {
+		const clanTag = normalizeTag_(cwlClanTags[i]);
+		if (!clanTag) continue;
+		const key = "leagueGroup:" + clanTag;
+		leagueGroupKeyByClanTag[clanTag] = key;
+		entries.push({
+			key: key,
+			path: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup",
+		});
+	}
+
+	const fetched = cocFetchAllByPathEntries_(entries, optionsRaw);
+	const clanMembersSnapshotByTag = {};
+	const clanMembersErrorByTag = {};
+	const currentRegularWarByClanTag = {};
+	const currentRegularWarErrorByClanTag = {};
+	const leaguegroupRawByClanTag = {};
+	const leaguegroupErrorByClanTag = {};
+	const capturedAt = new Date().toISOString();
+
+	for (let i = 0; i < connectedClanTags.length; i++) {
+		const clanTag = normalizeTag_(connectedClanTags[i]);
+		if (!clanTag) continue;
+		const key = membersKeyByClanTag[clanTag];
+		if (!key) continue;
+		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, key)) {
+			const data = fetched.dataByKey[key];
+			const items = Array.isArray(data && data.items) ? data.items : [];
+			clanMembersSnapshotByTag[clanTag] = {
+				clanTag: clanTag,
+				capturedAt: capturedAt,
+				members: mapApiMembers_(items),
+				metricsMembers: mapApiMembersForMetricsSnapshot_(items),
+			};
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(fetched.errorByKey, key)) {
+			clanMembersErrorByTag[clanTag] = fetched.errorByKey[key];
+		}
+	}
+
+	for (let i = 0; i < regularWarClanTags.length; i++) {
+		const clanTag = normalizeTag_(regularWarClanTags[i]);
+		if (!clanTag) continue;
+		const key = regularWarKeyByClanTag[clanTag];
+		if (!key) continue;
+		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, key)) {
+			currentRegularWarByClanTag[clanTag] = mapCurrentRegularWarFromApiData_(clanTag, fetched.dataByKey[key]);
+			continue;
+		}
+		if (!Object.prototype.hasOwnProperty.call(fetched.errorByKey, key)) continue;
+		const err = fetched.errorByKey[key];
+		if (err && Number(err.statusCode) === 404) {
+			currentRegularWarByClanTag[clanTag] = buildNoCurrentRegularWarResult_(clanTag);
+			continue;
+		}
+		if (isPrivateWarLogError_(err)) {
+			currentRegularWarByClanTag[clanTag] = buildPrivateRegularWarResult_(clanTag);
+			continue;
+		}
+		currentRegularWarErrorByClanTag[clanTag] = err;
+	}
+
+	for (let i = 0; i < cwlClanTags.length; i++) {
+		const clanTag = normalizeTag_(cwlClanTags[i]);
+		if (!clanTag) continue;
+		const key = leagueGroupKeyByClanTag[clanTag];
+		if (!key) continue;
+		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, key)) {
+			leaguegroupRawByClanTag[clanTag] = fetched.dataByKey[key];
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(fetched.errorByKey, key)) {
+			leaguegroupErrorByClanTag[clanTag] = fetched.errorByKey[key];
+		}
+	}
+
+	return {
+		clanMembersSnapshotByTag: clanMembersSnapshotByTag,
+		clanMembersErrorByTag: clanMembersErrorByTag,
+		currentRegularWarByClanTag: currentRegularWarByClanTag,
+		currentRegularWarErrorByClanTag: currentRegularWarErrorByClanTag,
+		leaguegroupRawByClanTag: leaguegroupRawByClanTag,
+		leaguegroupErrorByClanTag: leaguegroupErrorByClanTag,
+	};
+}
+
 function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
 	const connectedClanTagSet = {};
@@ -182,16 +298,14 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	const connectedClanTags = Object.keys(connectedClanTagSet);
 	const regularWarClanTags = Object.keys(regularWarClanTagSet);
 	const cwlClanTags = Object.keys(cwlClanTagSet);
-	const memberPrefetch = prefetchClanMembersSnapshotsByTag_(connectedClanTags, prefetchOptions);
-	const regularWarPrefetch = prefetchCurrentRegularWarByClanTag_(regularWarClanTags, prefetchOptions);
-	const leaguegroupPrefetch = prefetchLeagueGroupRawByClanTag_(cwlClanTags, prefetchOptions);
+	const waveOnePrefetch = buildRefreshAllMixedWaveOnePrefetch_(connectedClanTags, regularWarClanTags, cwlClanTags, prefetchOptions);
 
 	const cwlWarTagSet = {};
-	const leaguegroupTags = Object.keys(leaguegroupPrefetch.rawByClanTag);
+	const leaguegroupTags = Object.keys(waveOnePrefetch.leaguegroupRawByClanTag);
 	for (let i = 0; i < leaguegroupTags.length; i++) {
 		const clanTag = leaguegroupTags[i];
-		if (Object.prototype.hasOwnProperty.call(leaguegroupPrefetch.errorByClanTag, clanTag)) continue;
-		const leaguegroup = leaguegroupPrefetch.rawByClanTag[clanTag];
+		if (Object.prototype.hasOwnProperty.call(waveOnePrefetch.leaguegroupErrorByClanTag, clanTag)) continue;
+		const leaguegroup = waveOnePrefetch.leaguegroupRawByClanTag[clanTag];
 		const warTags = extractLeagueGroupWarTags_(leaguegroup);
 		for (let j = 0; j < warTags.length; j++) {
 			const warTag = normalizeTag_(warTags[j]);
@@ -202,12 +316,12 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	const cwlWarPrefetch = prefetchCwlWarRawByTag_(Object.keys(cwlWarTagSet), prefetchOptions);
 
 	return {
-		clanMembersSnapshotByTag: memberPrefetch.snapshotByClanTag,
-		clanMembersErrorByTag: memberPrefetch.errorByClanTag,
-		currentRegularWarByClanTag: regularWarPrefetch.currentWarByClanTag,
-		currentRegularWarErrorByClanTag: regularWarPrefetch.errorByClanTag,
-		leaguegroupRawByClanTag: leaguegroupPrefetch.rawByClanTag,
-		leaguegroupErrorByClanTag: leaguegroupPrefetch.errorByClanTag,
+		clanMembersSnapshotByTag: waveOnePrefetch.clanMembersSnapshotByTag,
+		clanMembersErrorByTag: waveOnePrefetch.clanMembersErrorByTag,
+		currentRegularWarByClanTag: waveOnePrefetch.currentRegularWarByClanTag,
+		currentRegularWarErrorByClanTag: waveOnePrefetch.currentRegularWarErrorByClanTag,
+		leaguegroupRawByClanTag: waveOnePrefetch.leaguegroupRawByClanTag,
+		leaguegroupErrorByClanTag: waveOnePrefetch.leaguegroupErrorByClanTag,
 		cwlWarRawByTag: cwlWarPrefetch.rawByWarTag,
 		cwlWarErrorByTag: cwlWarPrefetch.errorByWarTag,
 	};
@@ -454,7 +568,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		} else if (skipBenchForNoActiveCwl) {
 			markIntentionalSkip("bench", "compute bench suggestions skipped: no active CWL available");
 		} else {
-			runStepWithRollback("bench", benchStepLabel, () => computeBenchSuggestionsCore_(rosterData, rosterId));
+			runStepWithRollback("bench", benchStepLabel, () => computeBenchSuggestionsCore_(rosterData, rosterId, pipelinePrefetchOptions));
 		}
 	}
 
