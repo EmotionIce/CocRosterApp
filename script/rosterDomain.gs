@@ -1,5 +1,6 @@
 // Core roster-domain normalization and manipulation helpers.
 
+// Compare by ordering rule.
 function compareByOrderingRule_(a, b) {
 	const aTh = a && typeof a.th === "number" && isFinite(a.th) ? a.th : -1;
 	const bTh = b && typeof b.th === "number" && isFinite(b.th) ? b.th : -1;
@@ -9,12 +10,14 @@ function compareByOrderingRule_(a, b) {
 	return aTag < bTag ? -1 : aTag > bTag ? 1 : 0;
 }
 
+// Convert a value to non negative int.
 function toNonNegativeInt_(value) {
 	const n = Number(value);
 	if (!isFinite(n)) return 0;
 	return Math.max(0, Math.floor(n));
 }
 
+// Convert a value to boolean flag.
 function toBooleanFlag_(value) {
 	if (value === true || value === false) return value;
 	const text = String(value == null ? "" : value)
@@ -24,6 +27,7 @@ function toBooleanFlag_(value) {
 	return text === "true" || text === "1" || text === "yes" || text === "on";
 }
 
+// Handle collect roster pool players.
 function collectRosterPoolPlayers_(roster) {
 	const main = Array.isArray(roster && roster.main) ? roster.main : [];
 	const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
@@ -41,6 +45,7 @@ function collectRosterPoolPlayers_(roster) {
 	return out;
 }
 
+// Build roster pool tag set.
 function buildRosterPoolTagSet_(roster) {
 	const out = {};
 	const players = collectRosterPoolPlayers_(roster);
@@ -52,6 +57,7 @@ function buildRosterPoolTagSet_(roster) {
 	return out;
 }
 
+// Sanitize roster bench suggestions.
 function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	if (rawSuggestions == null) return null;
 	const suggestions = rawSuggestions && typeof rawSuggestions === "object" ? rawSuggestions : {};
@@ -66,6 +72,7 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	const benchTags = [];
 	const swapInTags = [];
 	const pairs = [];
+	// Sanitize tag list.
 	const sanitizeTagList = (rawList) => {
 		const list = Array.isArray(rawList) ? rawList : [];
 		const out = [];
@@ -78,6 +85,7 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 		}
 		return out;
 	};
+	// Sanitize string list.
 	const sanitizeStringList = (rawList, limit) => {
 		const list = Array.isArray(rawList) ? rawList : [];
 		const maxLen = Math.max(0, toNonNegativeInt_(limit || 0));
@@ -92,11 +100,13 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 		}
 		return out;
 	};
+	// Convert a value to finite number or null.
 	const toFiniteNumberOrNull = (value) => {
 		const n = Number(value);
 		return isFinite(n) ? n : null;
 	};
 
+	// Add bench tag.
 	const addBenchTag = (tagRaw) => {
 		const tag = normalizeTag_(tagRaw);
 		if (!tag || !allowedTags[tag] || seenBenchTags[tag]) return;
@@ -104,6 +114,7 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 		benchTags.push(tag);
 	};
 
+	// Add swap in tag.
 	const addSwapInTag = (tagRaw) => {
 		const tag = normalizeTag_(tagRaw);
 		if (!tag || !allowedTags[tag] || seenSwapInTags[tag]) return;
@@ -201,6 +212,7 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	return out;
 }
 
+// Normalize roster slots.
 function normalizeRosterSlots_(roster) {
 	if (!roster || typeof roster !== "object") return;
 	if (!Array.isArray(roster.main)) roster.main = [];
@@ -222,6 +234,7 @@ function normalizeRosterSlots_(roster) {
 	roster.badges = { main: roster.main.length, subs: roster.subs.length, missing: roster.missing.length };
 }
 
+// Deduplicate roster sections by tag.
 function dedupeRosterSectionsByTag_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
 	if (!roster) return { changed: false, removedCount: 0, removed: [] };
@@ -271,6 +284,7 @@ function dedupeRosterSectionsByTag_(rosterRaw) {
 	};
 }
 
+// Summarize roster section dedupe.
 function summarizeRosterSectionDedupe_(dedupeRaw, maxItemsRaw) {
 	const dedupe = dedupeRaw && typeof dedupeRaw === "object" ? dedupeRaw : {};
 	const removed = Array.isArray(dedupe.removed) ? dedupe.removed : [];
@@ -290,6 +304,7 @@ function summarizeRosterSectionDedupe_(dedupeRaw, maxItemsRaw) {
 	return parts.join(" ; ");
 }
 
+// Clear roster bench suggestions.
 function clearRosterBenchSuggestions_(roster) {
 	if (!roster || typeof roster !== "object") return;
 	if (Object.prototype.hasOwnProperty.call(roster, "benchSuggestions")) {
@@ -297,7 +312,9 @@ function clearRosterBenchSuggestions_(roster) {
 	}
 }
 
+// Normalize preparation roster size.
 function normalizePreparationRosterSize_(rawValue, fallbackValue) {
+	// Normalize state.
 	const normalize = (value) => {
 		const n = Number(value);
 		if (!isFinite(n)) return 0;
@@ -314,6 +331,7 @@ function normalizePreparationRosterSize_(rawValue, fallbackValue) {
 	return CWL_PREPARATION_MIN_ROSTER_SIZE;
 }
 
+// Normalize preparation lock state.
 function normalizePreparationLockState_(rawValue, rosterPoolTagSetRaw) {
 	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
 	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
@@ -331,6 +349,7 @@ function normalizePreparationLockState_(rawValue, rosterPoolTagSetRaw) {
 	return out;
 }
 
+// Sanitize roster CWL preparation.
 function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingModeRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : null;
@@ -360,6 +379,7 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 	return out;
 }
 
+// Handle collect roster pool players with section.
 function collectRosterPoolPlayersWithSection_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
 	const main = Array.isArray(roster.main) ? roster.main : [];
@@ -393,6 +413,7 @@ function collectRosterPoolPlayersWithSection_(rosterRaw) {
 	return out;
 }
 
+// Get roster CWL preparation.
 function getRosterCwlPreparation_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
 	const trackingMode = getRosterTrackingMode_(roster);
@@ -418,6 +439,7 @@ function getRosterCwlPreparation_(rosterRaw) {
 	return sanitized;
 }
 
+// Return whether CWL preparation active.
 function isCwlPreparationActive_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
 	if (getRosterTrackingMode_(roster) !== "cwl") return false;
@@ -425,6 +447,7 @@ function isCwlPreparationActive_(rosterRaw) {
 	return !!(prep && prep.enabled);
 }
 
+// Build CWL preparation ranking.
 function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -515,6 +538,7 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	};
 }
 
+// Apply CWL preparation rebalance.
 function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
 	if (!roster) throw new Error("Roster is required.");
@@ -663,6 +687,7 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 	};
 }
 
+// Find roster by ID.
 function findRosterById_(rosterData, rosterIdRaw) {
 	const rosterDataSafe = validateRosterData_(rosterData);
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();

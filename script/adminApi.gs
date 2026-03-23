@@ -1,5 +1,6 @@
 // Admin API dispatcher and public callable wrappers.
 
+// Handle run admin API method.
 function runAdminApiMethod_(methodNameRaw, argsRaw) {
 	const methodName = String(methodNameRaw == null ? "" : methodNameRaw).trim();
 	const args = Array.isArray(argsRaw) ? argsRaw : [];
@@ -25,15 +26,18 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 	}
 }
 
+// Get roster data.
 function getRosterData() {
 	return parseRosterDataText_(getAssetText_(ACTIVE_ROSTER_FILENAME), ACTIVE_ROSTER_FILENAME);
 }
 
+// Handle verify admin password.
 function verifyAdminPassword(password) {
 	assertAdminPassword_(password);
 	return { ok: true };
 }
 
+// Get player profile.
 function getPlayerProfile(playerTag, password) {
 	const normalizedTag = normalizeTag_(playerTag);
 	if (!isValidPlayerTag_(normalizedTag)) {
@@ -80,6 +84,7 @@ function getPlayerProfile(playerTag, password) {
 	}
 }
 
+// Get auto refresh settings.
 function getAutoRefreshSettings(password) {
 	assertAdminPassword_(password);
 	const scriptLock = LockService.getScriptLock();
@@ -92,6 +97,7 @@ function getAutoRefreshSettings(password) {
 	}
 }
 
+// Set auto refresh enabled.
 function setAutoRefreshEnabled(enabledRaw, password) {
 	assertAdminPassword_(password);
 	const enabled = toBooleanFlag_(enabledRaw);
@@ -108,6 +114,7 @@ function setAutoRefreshEnabled(enabledRaw, password) {
 	}
 }
 
+// Publish roster data.
 function publishRosterData(rosterData, password) {
 	assertAdminPassword_(password);
 	checkPublishCooldown_();
@@ -127,6 +134,7 @@ function testClanConnection(rosterData, rosterId, password) {
 	return { ok: true, memberCount: members.length };
 }
 
+// Refresh all rosters.
 function refreshAllRosters(rosterData, password, optionsRaw) {
 	assertAdminPassword_(password);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};

@@ -1,3 +1,4 @@
+# Example Wrangler config for serving the static assets with the worker entrypoint.
 name = "roster-app"
 main = "worker.js"
 compatibility_date = "2026-03-21"

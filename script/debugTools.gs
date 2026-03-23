@@ -1,5 +1,6 @@
 // Debug-only helpers retained from current monolith.
 
+// Handle list Firebase data debug info.
 function listFirebaseDataDebugInfo_() {
 	let activeExists = false;
 	let activeLastUpdatedAt = "";
@@ -21,6 +22,7 @@ function listFirebaseDataDebugInfo_() {
 	};
 }
 
+// Create a debug player.
 function createDebugPlayer_(tag, name, th, opts) {
 	const options = opts && typeof opts === "object" ? opts : {};
 	return {
@@ -35,6 +37,7 @@ function createDebugPlayer_(tag, name, th, opts) {
 	};
 }
 
+// Create a debug stats.
 function createDebugStats_(opts) {
 	const options = opts && typeof opts === "object" ? opts : {};
 	const out = createEmptyCwlStatEntry_();
@@ -46,8 +49,10 @@ function createDebugStats_(opts) {
 	return out;
 }
 
+// Handle run bench planner debug scenarios.
 function runBenchPlannerDebugScenarios() {
 	const config = getBenchPlannerConfig_();
+	// Handle run scenario.
 	const runScenario = (name, roster, remainingEditableDays, check) => {
 		const seasonContext = {
 			source: "debug",

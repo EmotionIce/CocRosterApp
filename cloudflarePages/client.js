@@ -1,6 +1,11 @@
+// Cloudflare public client state, rendering, and interaction helpers.
+
 (() => {
+    // Select the first element that matches a selector.
     const $ = (sel) => document.querySelector(sel);
+    // Convert a value to a string safely.
     const toStr = (v) => (v == null ? "" : String(v));
+    // Choose the singular or plural label for a count.
     const pluralize = (count, singular, plural) => (count === 1 ? singular : plural);
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
     const DAY_MS = 24 * 60 * 60 * 1000;
@@ -155,6 +160,7 @@
         "Unranked",
     ];
 
+    // Update admin link.
     const updateAdminLink = () => {
         const adminLink = $("#openAdminLink");
         if (!adminLink) return;
@@ -197,6 +203,7 @@
         adminLink.classList.remove("is-disabled");
     };
 
+    // Normalize http URL.
     const normalizeHttpUrl = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return "";
@@ -204,6 +211,7 @@
         return "";
     };
 
+    // Handle pick first http URL.
     const pickFirstHttpUrl = (...values) => {
         for (let i = 0; i < values.length; i++) {
             const normalized = normalizeHttpUrl(values[i]);
@@ -212,6 +220,7 @@
         return "";
     };
 
+    // Resolve landing media source.
     const resolveLandingMediaSource = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return { kind: "none", value: "" };
@@ -221,6 +230,7 @@
         return { kind: "none", value: "" };
     };
 
+    // Get public config from data.
     const getPublicConfigFromData = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const configRoot = data.publicConfig && typeof data.publicConfig === "object" ? data.publicConfig : {};
@@ -255,6 +265,7 @@
         };
     };
 
+    // Set discord link target.
     const setDiscordLinkTarget = (anchor, url) => {
         if (!anchor) return;
         if (!url) {
@@ -270,6 +281,7 @@
         anchor.classList.remove("is-disabled");
     };
 
+    // Apply discord links.
     const applyDiscordLinks = (urlRaw) => {
         const url = normalizeHttpUrl(urlRaw);
         setDiscordLinkTarget($("#openDiscordLink"), url);
@@ -277,6 +289,7 @@
         setDiscordLinkTarget($("#landingBottomDiscordCta"), url);
     };
 
+    // Create a DOM element with optional class and text content.
     const el = (tag, className, text) => {
         const node = document.createElement(tag);
         if (className) node.className = className;
@@ -284,12 +297,14 @@
         return node;
     };
 
+    // Remove all child nodes from a container.
     const clearNode = (node) => {
         if (!node) return node;
         while (node.firstChild) node.removeChild(node.firstChild);
         return node;
     };
 
+    // Mark boot timing.
     const markBootTiming = (labelRaw, detailsRaw) => {
         const label = toStr(labelRaw).trim();
         if (!label) return;
@@ -308,6 +323,7 @@
         }
     };
 
+    // Handle measure boot timing.
     const measureBootTiming = (measureLabelRaw, startLabelRaw, endLabelRaw) => {
         const measureLabel = toStr(measureLabelRaw).trim();
         const startLabel = toStr(startLabelRaw).trim();
@@ -333,6 +349,7 @@
         }
     };
 
+    // Handle escape HTML.
     const escapeHtml = (value) =>
         toStr(value)
             .replace(/&/g, "&amp;")
@@ -341,17 +358,21 @@
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#39;");
 
+    // Handle escape attr.
     const escapeAttr = (value) => escapeHtml(value).replace(/`/g, "&#96;");
 
+    // Normalize clan tag.
     const normalizeClanTag = (tagRaw) => {
         const tag = toStr(tagRaw).trim().toUpperCase();
         if (!tag) return "";
         return tag.startsWith("#") ? tag : ("#" + tag);
     };
 
+    // Get roster tracking mode.
     const getRosterTrackingMode = (rosterRaw) =>
         rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
 
+    // Get roster CWL preparation model.
     const getRosterCwlPreparationModel = (rosterRaw) => {
         const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
         const raw = roster && roster.cwlPreparation && typeof roster.cwlPreparation === "object" && !Array.isArray(roster.cwlPreparation)
@@ -369,11 +390,13 @@
         };
     };
 
+    // Return whether CWL preparation active public.
     const isCwlPreparationActivePublic_ = (rosterRaw) => {
         const prep = getRosterCwlPreparationModel(rosterRaw);
         return !!(prep && prep.enabled);
     };
 
+    // Build default public view state.
     const buildDefaultPublicViewState = () => ({
         view: PUBLIC_VIEW_VALUES.landing,
         leaderboard: {
@@ -383,6 +406,7 @@
         },
     });
 
+    // Sanitize public view value.
     const sanitizePublicViewValue = (valueRaw) => {
         const value = toStr(valueRaw).trim().toLowerCase();
         if (!value) return PUBLIC_VIEW_VALUES.landing;
@@ -391,6 +415,7 @@
         return PUBLIC_VIEW_VALUES.rosters;
     };
 
+    // Sanitize leaderboard sort mode.
     const sanitizeLeaderboardSortMode = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (Object.prototype.hasOwnProperty.call(LEADERBOARD_SORT_MODE_VALUES, value)) {
@@ -402,17 +427,20 @@
         return LEADERBOARD_SORT_MODE_VALUES.trophiesLeague;
     };
 
+    // Sanitize leaderboard month mode.
     const sanitizeLeaderboardMonthMode = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (value === LEADERBOARD_MONTH_MODE_VALUES.last) return LEADERBOARD_MONTH_MODE_VALUES.last;
         return LEADERBOARD_MONTH_MODE_VALUES.current;
     };
 
+    // Sanitize leaderboard roster filter.
     const sanitizeLeaderboardRosterFilter = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         return value ? value : "all";
     };
 
+    // Sanitize public view state.
     const sanitizePublicViewState = (stateRaw) => {
         const defaults = buildDefaultPublicViewState();
         const state = stateRaw && typeof stateRaw === "object" ? stateRaw : {};
@@ -427,6 +455,7 @@
         };
     };
 
+    // Handle read local storage JSON.
     const readLocalStorageJson = (key) => {
         if (!key || typeof window === "undefined" || !window.localStorage) return null;
         try {
@@ -438,6 +467,7 @@
         }
     };
 
+    // Handle write local storage JSON.
     const writeLocalStorageJson = (key, value) => {
         if (!key || typeof window === "undefined" || !window.localStorage) return;
         try {
@@ -447,10 +477,12 @@
         }
     };
 
+    // Load public view state.
     const loadPublicViewState = () => sanitizePublicViewState(readLocalStorageJson(PUBLIC_VIEW_STORAGE_KEY));
 
     let publicViewState = loadPublicViewState();
 
+    // Handle read public page query value.
     const readPublicPageQueryValue = () => {
         if (typeof window === "undefined" || !window.location) return "";
         const query = toStr(window.location.search).trim();
@@ -463,6 +495,7 @@
         }
     };
 
+    // Resolve load time public view.
     const resolveLoadTimePublicView = () => {
         if (typeof window !== "undefined" && window && window.ROSTER_ADMIN_MODE) {
             return PUBLIC_VIEW_VALUES.rosters;
@@ -478,11 +511,13 @@
         return savedView || PUBLIC_VIEW_VALUES.landing;
     };
 
+    // Handle persist public view state.
     const persistPublicViewState = () => {
         publicViewState = sanitizePublicViewState(publicViewState);
         writeLocalStorageJson(PUBLIC_VIEW_STORAGE_KEY, publicViewState);
     };
 
+    // Apply load time public view selection.
     const applyLoadTimePublicViewSelection = () => {
         if (!publicViewState || typeof publicViewState !== "object") {
             publicViewState = buildDefaultPublicViewState();
@@ -491,11 +526,13 @@
         persistPublicViewState();
     };
 
+    // Return whether donation sort mode.
     const isDonationSortMode = (sortModeRaw) => {
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
         return sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived;
     };
 
+    // Get current month key.
     const getCurrentMonthKey = (dateRaw) => {
         const date = dateRaw instanceof Date ? dateRaw : new Date();
         const year = date.getFullYear();
@@ -503,18 +540,21 @@
         return String(year) + "-" + month;
     };
 
+    // Get previous month key.
     const getPreviousMonthKey = (dateRaw) => {
         const date = dateRaw instanceof Date ? dateRaw : new Date();
         const previous = new Date(date.getFullYear(), date.getMonth() - 1, 1);
         return getCurrentMonthKey(previous);
     };
 
+    // Get public view buttons.
     const getPublicViewButtons = () => ({
         landing: $("#openLandingViewBtn"),
         rosters: $("#openRostersViewBtn"),
         leaderboard: $("#openLeaderboardViewBtn"),
     });
 
+    // Get effective public view.
     const getEffectivePublicView = () => {
         if (typeof window !== "undefined" && window && window.ROSTER_ADMIN_MODE) {
             return PUBLIC_VIEW_VALUES.rosters;
@@ -522,6 +562,7 @@
         return sanitizePublicViewValue(publicViewState && publicViewState.view);
     };
 
+    // Sync public view buttons UI.
     const syncPublicViewButtonsUi = () => {
         const buttons = getPublicViewButtons();
         const activeView = getEffectivePublicView();
@@ -530,6 +571,7 @@
         if (buttons.leaderboard) buttons.leaderboard.classList.toggle("is-active", activeView === PUBLIC_VIEW_VALUES.leaderboard);
     };
 
+    // Get ordered rosters from data.
     const getOrderedRostersFromData = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const rosters = Array.isArray(data.rosters) ? data.rosters : [];
@@ -545,6 +587,7 @@
 
         const consumedIndexes = Object.create(null);
         const ordered = [];
+        // Push roster index.
         const pushRosterIndex = (index) => {
             if (!Number.isInteger(index) || consumedIndexes[index]) return;
             consumedIndexes[index] = true;
@@ -566,6 +609,7 @@
         return ordered;
     };
 
+    // Build roster order from rosters.
     const buildRosterOrderFromRosters = (rostersRaw) => {
         const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
         const order = [];
@@ -579,12 +623,14 @@
         return order;
     };
 
+    // Convert a value to non negative int.
     const toNonNegativeInt = (value) => {
         const num = Number(value);
         if (!Number.isFinite(num)) return 0;
         return Math.max(0, Math.floor(num));
     };
 
+    // Convert a value to bool flag.
     const toBoolFlag = (value) => {
         if (value === true || value === false) return value;
         const text = toStr(value).trim().toLowerCase();
@@ -592,24 +638,28 @@
         return text === "true" || text === "1" || text === "yes" || text === "on";
     };
 
+    // Handle clamp01.
     const clamp01 = (value) => {
         const num = Number(value);
         if (!Number.isFinite(num)) return 0;
         return Math.max(0, Math.min(1, num));
     };
 
+    // Handle clamp signed unit.
     const clampSignedUnit = (value) => {
         const num = Number(value);
         if (!Number.isFinite(num)) return 0;
         return Math.max(-1, Math.min(1, num));
     };
 
+    // Format a number with the shared locale formatter.
     const formatNumber = (value) => {
         const num = Number(value);
         if (!Number.isFinite(num)) return "-";
         return numberFormatter.format(Math.round(num));
     };
 
+    // Format a numeric value as a percentage.
     const formatPercent = (value, digits) => {
         const num = Number(value);
         if (!Number.isFinite(num)) return "-";
@@ -618,6 +668,7 @@
         return pct.toFixed(places) + "%";
     };
 
+    // Format a number with a fixed decimal count.
     const formatFixed = (value, digits) => {
         const num = Number(value);
         if (!Number.isFinite(num)) return "-";
@@ -625,6 +676,7 @@
         return num.toFixed(places);
     };
 
+    // Handle title case.
     const titleCase = (value) => {
         const text = toStr(value).trim();
         if (!text) return "";
@@ -637,6 +689,7 @@
             .join(" ");
     };
 
+    // Format a roster role label for display.
     const formatRole = (value) => {
         const role = toStr(value).trim();
         if (!role) return "";
@@ -645,6 +698,7 @@
         return titleCase(role);
     };
 
+    // Format war state label.
     const formatWarStateLabel = (value) => {
         const state = toStr(value).trim().toLowerCase();
         if (!state) return "-";
@@ -655,6 +709,7 @@
         return titleCase(state);
     };
 
+    // Build placement label.
     const buildPlacementLabel = (ctx) => {
         if (!ctx || !ctx.player) return "-";
         const trackingMode = toStr(ctx.trackingMode).trim() === "regularWar" ? "regularWar" : "cwl";
@@ -668,6 +723,7 @@
         return ctx.player.slot == null ? "Main" : ("Main #" + toStr(ctx.player.slot));
     };
 
+    // Build long term war stats layer.
     const buildLongTermWarStatsLayer = (entryRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const warsInLineup = toNonNegativeInt(entry.warsInLineup);
@@ -707,22 +763,26 @@
         };
     };
 
+    // Get war performance by tag.
     const getWarPerformanceByTag = (warPerformanceRaw) =>
         warPerformanceRaw && typeof warPerformanceRaw === "object" && warPerformanceRaw.byTag && typeof warPerformanceRaw.byTag === "object"
             ? warPerformanceRaw.byTag
             : {};
 
+    // Get war performance player entry.
     const getWarPerformancePlayerEntry = (warPerformanceRaw, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         const byTag = getWarPerformanceByTag(warPerformanceRaw);
         return tag && byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : {};
     };
 
+    // Get war performance meta.
     const getWarPerformanceMeta = (warPerformanceRaw) =>
         warPerformanceRaw && typeof warPerformanceRaw === "object" && warPerformanceRaw.meta && typeof warPerformanceRaw.meta === "object"
             ? warPerformanceRaw.meta
             : {};
 
+    // Get player long term war stats.
     const getPlayerLongTermWarStats = (warPerformanceRaw, tagRaw) => {
         const entry = getWarPerformancePlayerEntry(warPerformanceRaw, tagRaw);
         const meta = getWarPerformanceMeta(warPerformanceRaw);
@@ -742,6 +802,7 @@
         };
     };
 
+    // Get player CWL stats.
     const getPlayerCwlStats = (cwlStatsRaw, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         const byTag = cwlStatsRaw && typeof cwlStatsRaw === "object" && cwlStatsRaw.byTag && typeof cwlStatsRaw.byTag === "object"
@@ -777,6 +838,7 @@
         };
     };
 
+    // Get player regular war stats.
     const getPlayerRegularWarStats = (regularWarRaw, tagRaw, warPerformanceRaw) => {
         const tag = normalizeClanTag(tagRaw);
         const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
@@ -886,18 +948,21 @@
         };
     };
 
+    // Get clan profile URL.
     const getClanProfileUrl = (tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return "";
         return "https://link.clashofclans.com/en/?action=OpenClanProfile&tag=" + encodeURIComponent(tag);
     };
 
+    // Get player profile URL.
     const getPlayerProfileUrl = (tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return "";
         return "https://link.clashofclans.com/en/?action=OpenPlayerProfile&tag=" + encodeURIComponent(tag);
     };
 
+    // Get player action builder.
     const getPlayerActionBuilder = () => {
         if (typeof window !== "undefined" && typeof window.ROSTER_PLAYER_ACTION_BUILDER === "function") {
             return window.ROSTER_PLAYER_ACTION_BUILDER;
@@ -905,6 +970,7 @@
         return null;
     };
 
+    // Get roster action builder.
     const getRosterActionBuilder = () => {
         if (typeof window !== "undefined" && typeof window.ROSTER_ROSTER_ACTION_BUILDER === "function") {
             return window.ROSTER_ROSTER_ACTION_BUILDER;
@@ -912,6 +978,7 @@
         return null;
     };
 
+    // Get admin password.
     const getAdminPassword = () => {
         if (typeof window !== "undefined" && typeof window.ROSTER_GET_ADMIN_PASSWORD === "function") {
             return toStr(window.ROSTER_GET_ADMIN_PASSWORD()).trim();
@@ -919,6 +986,7 @@
         return "";
     };
 
+    // Handle show shell loading notice.
     const showShellLoadingNotice = (viewRaw) => {
         const notice = $("#shellLoadingNotice");
         if (!notice) return;
@@ -939,6 +1007,7 @@
         notice.setAttribute("aria-hidden", "false");
     };
 
+    // Handle hide shell loading notice.
     const hideShellLoadingNotice = () => {
         const notice = $("#shellLoadingNotice");
         if (!notice) return;
@@ -946,6 +1015,7 @@
         notice.setAttribute("aria-hidden", "true");
     };
 
+    // Handle show error.
     const showError = (title, err) => {
         const card = $("#load-error");
         if (card) {
@@ -965,6 +1035,7 @@
         clearGlobalLastUpdatedTimer();
     };
 
+    // Normalize player.
     const normalizePlayer = (p) => {
         const obj = p && typeof p === "object" ? p : {};
         const rawNotes = obj.notes != null ? obj.notes : obj.note;
@@ -982,6 +1053,7 @@
         };
     };
 
+    // Find roster player by tag.
     const findRosterPlayerByTag = (roster, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return null;
@@ -996,6 +1068,7 @@
         return null;
     };
 
+    // Get roster player label.
     const getRosterPlayerLabel = (roster, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return "";
@@ -1004,6 +1077,7 @@
         return name || tag;
     };
 
+    // Get roster bench suggestion model.
     const getRosterBenchSuggestionModel = (roster) => {
         if (getRosterTrackingMode(roster) !== "cwl") return null;
         if (isCwlPreparationActivePublic_(roster)) return null;
@@ -1023,6 +1097,7 @@
         const seenSwapInTags = Object.create(null);
         const seenPairs = Object.create(null);
 
+        // Add bench tag.
         const addBenchTag = (tagRaw) => {
             const tag = normalizeClanTag(tagRaw);
             if (!tag || seenBenchTags[tag]) return "";
@@ -1032,6 +1107,7 @@
             return tag;
         };
 
+        // Add swap in tag.
         const addSwapInTag = (tagRaw) => {
             const tag = normalizeClanTag(tagRaw);
             if (!tag || seenSwapInTags[tag]) return "";
@@ -1118,6 +1194,7 @@
         };
     };
 
+    // Get player bench suggestion.
     const getPlayerBenchSuggestion = (suggestionModel, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag || !suggestionModel) return null;
@@ -1137,12 +1214,14 @@
         };
     };
 
+    // Find player context.
     const findPlayerContext = (tagRaw, rosterIdRaw) => {
         const tag = normalizeClanTag(tagRaw);
         const rosterId = toStr(rosterIdRaw).trim();
         const rosters = lastRenderedData && Array.isArray(lastRenderedData.rosters) ? lastRenderedData.rosters : [];
         if (!tag || !rosters.length) return null;
 
+        // Handle scan roster.
         const scanRoster = (roster) => {
             const main = Array.isArray(roster && roster.main) ? roster.main : [];
             const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
@@ -1195,13 +1274,16 @@
         return null;
     };
 
+    // Render a small profile chip label.
     const renderChip = (text, extraClass) =>
         '<span class="profile-chip' + (extraClass ? (" " + extraClass) : "") + '">' + escapeHtml(text) + "</span>";
 
+    // Render a compact progress bar fragment.
     const renderProgress = (value, tone) =>
         '<div class="profile-progress' + (tone ? (" profile-progress--" + tone) : "") + '"><div class="profile-progress__fill" style="width:' +
         Math.round(clamp01(value) * 100) + '%"></div></div>';
 
+    // Render stat card.
     const renderStatCard = (label, value, options) => {
         const opts = options && typeof options === "object" ? options : {};
         const valueText = toStr(value).trim() || "-";
@@ -1220,6 +1302,7 @@
         ].join("");
     };
 
+    // Render long term stats cards.
     const renderLongTermStatsCards = (statsRaw, options) => {
         const stats = statsRaw && typeof statsRaw === "object" ? statsRaw : {};
         const opts = options && typeof options === "object" ? options : {};
@@ -1241,6 +1324,7 @@
         ].join("");
     };
 
+    // Render meta card.
     const renderMetaCard = (label, value, options) => {
         const opts = options && typeof options === "object" ? options : {};
         const valueText = toStr(value).trim();
@@ -1258,6 +1342,7 @@
         ].join("");
     };
 
+    // Render summary item.
     const renderSummaryItem = (label, value, options) => {
         const opts = options && typeof options === "object" ? options : {};
         const valueText = toStr(value).trim();
@@ -1274,6 +1359,7 @@
         ].join("");
     };
 
+    // Render hero snapshot item.
     const renderHeroSnapshotItem = (label, value, options) => {
         const opts = options && typeof options === "object" ? options : {};
         const valueText = toStr(value).trim();
@@ -1290,10 +1376,12 @@
         ].join("");
     };
 
+    // Render a profile notice fragment.
     const renderNotice = (label, text, tone) =>
         '<div class="profile-notice' + (tone ? (" profile-notice--" + tone) : "") + '"><div class="profile-notice__label">' +
         escapeHtml(label) + '</div><div class="profile-notice__text">' + escapeHtml(text) + "</div></div>";
 
+    // Format signed number.
     const formatSignedNumber = (valueRaw) => {
         const value = Number(valueRaw);
         if (!Number.isFinite(value)) return "-";
@@ -1304,8 +1392,10 @@
     const LEGEND_WINDOW_OPTIONS = [7, 14, 30];
     const LEGEND_EMPTY_STATE_TEXT = "Not enough local history yet, tracking just started recently.";
 
+    // Return whether valid day key.
     const isValidDayKey = (valueRaw) => /^\d{4}-\d{2}-\d{2}$/.test(toStr(valueRaw).trim());
 
+    // Parse time ms.
     const parseTimeMs = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return 0;
@@ -1313,6 +1403,7 @@
         return Number.isFinite(ms) ? ms : 0;
     };
 
+    // Parse day key ms.
     const parseDayKeyMs = (dayKeyRaw) => {
         const dayKey = toStr(dayKeyRaw).trim();
         if (!isValidDayKey(dayKey)) return 0;
@@ -1320,6 +1411,7 @@
         return Number.isFinite(ms) ? ms : 0;
     };
 
+    // Get player metrics entry.
     const getPlayerMetricsEntry = (tagRaw, dataRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return null;
@@ -1355,10 +1447,12 @@
         return null;
     };
 
+    // Normalize local history points.
     const normalizeLocalHistoryPoints = (historyRaw, latestSnapshotRaw) => {
         const pointsByDay = Object.create(null);
         const history = Array.isArray(historyRaw) ? historyRaw : [];
 
+        // Push point.
         const pushPoint = (rawPoint) => {
             const point = rawPoint && typeof rawPoint === "object" ? rawPoint : {};
             const trophiesRaw = point.trophies != null ? point.trophies : point.trophyCount;
@@ -1408,6 +1502,7 @@
             .map((dayKey) => pointsByDay[dayKey]);
     };
 
+    // Get local trophy history for tag.
     const getLocalTrophyHistoryForTag = (tagRaw, dataRaw) => {
         const entry = getPlayerMetricsEntry(tagRaw, dataRaw);
         if (!entry) return [];
@@ -1424,6 +1519,7 @@
         return normalizeLocalHistoryPoints(history, latestSnapshot);
     };
 
+    // Get legend window coverage.
     const getLegendWindowCoverage = (pointsRaw, windowDaysRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
         const windowDays = Math.max(1, toNonNegativeInt(windowDaysRaw));
@@ -1445,6 +1541,7 @@
         };
     };
 
+    // Get legend window availability.
     const getLegendWindowAvailability = (pointsRaw) =>
         LEGEND_WINDOW_OPTIONS.map((days) => {
             const coverage = getLegendWindowCoverage(pointsRaw, days);
@@ -1454,9 +1551,11 @@
             };
         });
 
+    // Get legend default window days.
     const getLegendDefaultWindowDays = (pointsRaw) =>
         getLegendWindowCoverage(pointsRaw, 30).supported ? 30 : 0;
 
+    // Get legend trend points.
     const getLegendTrendPoints = (pointsRaw, windowDaysRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
         const windowDays = toNonNegativeInt(windowDaysRaw);
@@ -1467,6 +1566,7 @@
         return points.filter((point) => Number.isFinite(point && point.dayMs) && point.dayMs >= coverage.cutoffDayMs);
     };
 
+    // Compute legend delta.
     const computeLegendDelta = (pointsRaw, selectedIndexRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
         const selectedIndex = Math.max(0, Math.min(points.length - 1, toNonNegativeInt(selectedIndexRaw)));
@@ -1480,6 +1580,7 @@
         };
     };
 
+    // Render legend trend sparkline.
     const renderLegendTrendSparkline = (pointsRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
         if (points.length < 2) {
@@ -1593,6 +1694,7 @@
         };
     };
 
+    // Render legend window toggle button.
     const renderLegendWindowToggleButton = (daysRaw, enabledRaw, activeRaw) => {
         const days = Math.max(1, toNonNegativeInt(daysRaw));
         const enabled = !!enabledRaw;
@@ -1608,6 +1710,7 @@
         ].join("");
     };
 
+    // Parse legend points payload.
     const parseLegendPointsPayload = (payloadTextRaw) => {
         const payloadText = toStr(payloadTextRaw).trim();
         if (!payloadText) return [];
@@ -1619,6 +1722,7 @@
         }
     };
 
+    // Update legend chart selection.
     const updateLegendChartSelection = (stageEl, chartState, selectedIndexRaw) => {
         const stage = stageEl && stageEl.querySelector ? stageEl : null;
         if (!stage || !chartState || !chartState.hasData) return;
@@ -1649,6 +1753,7 @@
         }
     };
 
+    // Bind legend chart interaction.
     const bindLegendChartInteraction = (stageEl, chartState) => {
         const stage = stageEl && stageEl.querySelector ? stageEl : null;
         if (!stage || !chartState || !chartState.hasData) return;
@@ -1659,6 +1764,7 @@
         if (!chartPoints.length) return;
         updateLegendChartSelection(stage, chartState, chartState.selectedIndex);
 
+        // Handle pick index from client X.
         const pickIndexFromClientX = (clientXRaw) => {
             const clientX = Number(clientXRaw);
             if (!Number.isFinite(clientX)) return;
@@ -1729,6 +1835,7 @@
         }, { passive: false });
     };
 
+    // Bind legends journey section.
     const bindLegendsJourneySection = (sectionEl) => {
         const section = sectionEl && sectionEl.querySelector ? sectionEl : null;
         if (!section || section.dataset.legendJourneyBound === "1") return;
@@ -1745,6 +1852,7 @@
         };
         state.activeWindowDays = getLegendDefaultWindowDays(state.allPoints);
 
+        // Re-render the current view state.
         const rerender = () => {
             const availability = getLegendWindowAvailability(state.allPoints);
             const supportByDays = Object.create(null);
@@ -1786,6 +1894,7 @@
         rerender();
     };
 
+    // Initialize legends journey sections.
     const initLegendsJourneySections = (containerRaw) => {
         const container = containerRaw && containerRaw.querySelectorAll ? containerRaw : null;
         if (!container) return;
@@ -1794,12 +1903,14 @@
         });
     };
 
+    // Return whether legend league name.
     const isLegendLeagueName = (nameRaw) => {
         const text = toStr(nameRaw).trim();
         if (!text) return false;
         return normalizeLeagueFamilyKey(text).indexOf("legend") >= 0 || normalizeLeagueMatchText(text).indexOf("legend") >= 0;
     };
 
+    // Handle read league name for legend check.
     const readLeagueNameForLegendCheck = (leagueRaw) => {
         const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
         if (!league) return toStr(leagueRaw).trim();
@@ -1818,6 +1929,7 @@
         return "";
     };
 
+    // Return whether show legends journey.
     const shouldShowLegendsJourney = (playerRaw) => {
         const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
         const legend = player.legendStatistics && typeof player.legendStatistics === "object" ? player.legendStatistics : null;
@@ -1827,6 +1939,7 @@
         return isLegendLeagueName(leagueName) || isLegendLeagueName(leagueTierName);
     };
 
+    // Render legends journey section.
     const renderLegendsJourneySection = (playerRaw, tagRaw) => {
         const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
         if (!shouldShowLegendsJourney(player)) return "";
@@ -1874,6 +1987,7 @@
         });
     };
 
+    // Render profile loading screen.
     const renderProfileLoadingScreen = (context, displayName, tag) => {
         const rosterTitle = toStr(context && context.rosterTitle).trim();
         const placement = buildPlacementLabel(context);
@@ -1898,6 +2012,7 @@
         ].join("");
     };
 
+    // Render disclosure section.
     const renderDisclosureSection = (options) => {
         const opts = options && typeof options === "object" ? options : {};
         const summaryItems = Array.isArray(opts.summaryItems) ? opts.summaryItems.filter(Boolean).join("") : "";
@@ -1924,6 +2039,7 @@
         ].join("");
     };
 
+    // Format profile timestamp.
     const formatProfileTimestamp = (value) => {
         const text = toStr(value).trim();
         if (!text) return "";
@@ -1931,6 +2047,7 @@
         return Number.isNaN(date.getTime()) ? text : date.toLocaleString();
     };
 
+    // Format global relative timestamp.
     const formatGlobalRelativeTimestamp = (value) => {
         const text = toStr(value).trim();
         if (!text) return "";
@@ -1960,6 +2077,7 @@
         return "just now";
     };
 
+    // Clear global last updated timer.
     const clearGlobalLastUpdatedTimer = () => {
         if (!globalLastUpdatedTimerId || typeof window === "undefined" || !window.clearInterval) return;
         window.clearInterval(globalLastUpdatedTimerId);
@@ -1967,6 +2085,7 @@
         globalLastUpdatedTimerValue = "";
     };
 
+    // Render global last updated value.
     const renderGlobalLastUpdatedValue = (valueEl, valueRaw) => {
         if (!valueEl) return;
         const value = toStr(valueRaw).trim();
@@ -1980,6 +2099,7 @@
         valueEl.title = formatProfileTimestamp(value) || value;
     };
 
+    // Render global last updated.
     const renderGlobalLastUpdated = (dataRaw) => {
         const card = $("#globalLastUpdated");
         const valueEl = $("#globalLastUpdatedValue");
@@ -2005,6 +2125,7 @@
         }, 60 * 1000);
     };
 
+    // Normalize league family key.
     const normalizeLeagueFamilyKey = (value) => {
         const raw = toStr(value).trim().toLowerCase();
         if (!raw) return "";
@@ -2014,6 +2135,7 @@
             .replace(/[^a-z0-9]+/g, "");
     };
 
+    // Normalize league match text.
     const normalizeLeagueMatchText = (value) => {
         const raw = toStr(value).trim().toLowerCase();
         if (!raw) return "";
@@ -2025,11 +2147,14 @@
             .trim();
     };
 
+    // Resolve home league asset family.
     const resolveHomeLeagueAssetFamily = (leagueNameRaw) => {
         const text = normalizeLeagueMatchText(leagueNameRaw);
         const compact = normalizeLeagueFamilyKey(leagueNameRaw);
         if (!text) return "";
+        // Return whether word.
         const hasWord = (word) => new RegExp("(^|\\s)" + String(word) + "(\\s|$)").test(text);
+        // Return whether compact.
         const hasCompact = (fragment) => compact.indexOf(String(fragment)) >= 0;
         if (hasWord("unranked")) return "unranked";
         if (hasWord("skeleton")) return "skeleton";
@@ -2047,6 +2172,7 @@
         return "";
     };
 
+    // Get town hall icon URL.
     const getTownHallIconUrl = (levelRaw) => {
         const level = toNonNegativeInt(levelRaw);
         if (level < 1 || level > 18) return "";
@@ -2069,6 +2195,7 @@
         legend: "assets/icons/league-legend.webp",
     };
 
+    // Get league icon URL from family.
     const getLeagueIconUrlFromFamily = (familyRaw) => {
         const family = normalizeLeagueFamilyKey(familyRaw);
         if (!family) return "";
@@ -2077,6 +2204,7 @@
         return buildStaticAssetUrl(assetPath);
     };
 
+    // Handle read league display name.
     const readLeagueDisplayName = (leagueObj) => {
         const league = leagueObj && typeof leagueObj === "object" ? leagueObj : null;
         if (!league) return "";
@@ -2094,6 +2222,7 @@
         return "";
     };
 
+    // Resolve home league object from player.
     const resolveHomeLeagueObjectFromPlayer = (playerRaw) => {
         const player = playerRaw && typeof playerRaw === "object" ? playerRaw : null;
         if (!player) {
@@ -2138,6 +2267,7 @@
         return null;
     };
 
+    // Extract home league badge source.
     const extractHomeLeagueBadgeSource = (playerRaw) => {
         const league = resolveHomeLeagueObjectFromPlayer(playerRaw);
         if (!league) return null;
@@ -2156,6 +2286,7 @@
         };
     };
 
+    // Get home league badge meta.
     const getHomeLeagueBadgeMeta = (playerRaw) => {
         const source = extractHomeLeagueBadgeSource(playerRaw);
         if (!source || !source.name) return null;
@@ -2196,6 +2327,7 @@
         return { accent: "#60a5fa", accentStrong: "#38bdf8", shadow: "rgba(59,130,246,.24)" };
     };
 
+    // Render town hall badge.
     const renderTownHallBadge = (levelRaw, weaponLevelRaw) => {
         const level = toNonNegativeInt(levelRaw);
         const iconDataUrl = townHallIconCache[level] || "";
@@ -2211,6 +2343,7 @@
         ].join("");
     };
 
+    // Sort army items.
     const sortArmyItems = (itemsRaw, type, village) => {
         const list = Array.isArray(itemsRaw) ? itemsRaw.slice() : [];
         const preferred = {
@@ -2232,6 +2365,7 @@
         });
     };
 
+    // Render profile content.
     const renderProfileContent = (ctx, response, mode, errorText) => {
         const context = ctx && typeof ctx === "object" ? ctx : null;
         const player = response && response.player && typeof response.player === "object" ? response.player : {};
@@ -2593,6 +2727,7 @@
             renderStatCard("Clan capital contributions", formatNumber(player.clanCapitalContributions)),
         ].join("");
 
+        // Build army village.
         const buildArmyVillage = (label, key) => {
             const isBuilder = key === "builderBase";
             const heroes = sortArmyItems((player.heroes || []).filter((item) => toStr(item && item.village).toLowerCase().indexOf(isBuilder ? "builder" : "home") >= 0 || (!item.village && !isBuilder)), "heroes", key);
@@ -2742,6 +2877,7 @@
         initLegendsJourneySections(profileState.bodyEl);
     };
 
+    // Normalize admin API endpoint.
     const normalizeAdminApiEndpoint = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return "";
@@ -2749,6 +2885,7 @@
         return "";
     };
 
+    // Resolve Script server base URL.
     const resolveScriptServerBaseUrl = () => {
         const value = toStr(
             (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
@@ -2759,15 +2896,18 @@
         return value;
     };
 
+    // Return whether likely worker admin API endpoint.
     const isLikelyWorkerAdminApiEndpoint = (endpointRaw) => {
         const endpoint = toStr(endpointRaw).trim().toLowerCase();
         if (!endpoint) return false;
         return endpoint.indexOf("/api/admin") >= 0;
     };
 
+    // Return whether absolute http endpoint.
     const isAbsoluteHttpEndpoint = (endpointRaw) =>
         /^https?:\/\//i.test(toStr(endpointRaw).trim());
 
+    // Resolve admin API endpoints.
     const resolveAdminApiEndpoints = () => {
         const configured = normalizeAdminApiEndpoint(
             typeof window !== "undefined" && window
@@ -2776,6 +2916,7 @@
         );
         const endpoints = [];
         const seen = Object.create(null);
+        // Push a value only when it is not already present.
         const pushUnique = (endpointRaw) => {
             const endpoint = normalizeAdminApiEndpoint(endpointRaw);
             if (!endpoint) return;
@@ -2789,12 +2930,14 @@
         return endpoints;
     };
 
+    // Create an admin API error.
     const createAdminApiError = (messageRaw, retryableRaw) => {
         const err = new Error(toStr(messageRaw).trim() || "Admin API call failed.");
         err.retryable = !!retryableRaw;
         return err;
     };
 
+    // Handle call admin API endpoint.
     const callAdminApiEndpoint = async (endpoint, methodName, args) => {
         let response = null;
         let rawText = "";
@@ -2828,6 +2971,7 @@
             payload = null;
         }
 
+        // Handle infer upstream error.
         const inferUpstreamError = () => {
             const text = toStr(rawText).toLowerCase();
             if (!text) return "";
@@ -2858,6 +3002,7 @@
         return payload.result;
     };
 
+    // Handle run server method via http.
     const runServerMethodViaHttp = async (methodName, args) => {
         const endpoints = resolveAdminApiEndpoints();
         let lastError = null;
@@ -2877,6 +3022,7 @@
         throw new Error("No admin API endpoints are configured.");
     };
 
+    // Handle run server method.
     const runServerMethod = (methodName, args) =>
         new Promise((resolve, reject) => {
             if (window.google && google.script && google.script.run) {
@@ -2893,6 +3039,7 @@
             runServerMethodViaHttp(methodName, args).then(resolve).catch(reject);
         });
 
+    // Handle request league icon.
     const requestLeagueIcon = (playerRaw) => {
         const source = extractHomeLeagueBadgeSource(playerRaw);
         if (!source || !source.name) return;
@@ -2906,6 +3053,7 @@
         }
     };
 
+    // Handle request town hall icon.
     const requestTownHallIcon = (levelRaw) => {
         const level = toNonNegativeInt(levelRaw);
         if (level < 1 || level > 18) return;
@@ -2917,6 +3065,7 @@
         }
     };
 
+    // Set active profile trigger.
     const setActiveProfileTrigger = (triggerEl) => {
         if (profileState.triggerEl && profileState.triggerEl.setAttribute) {
             profileState.triggerEl.setAttribute("aria-expanded", "false");
@@ -2927,6 +3076,7 @@
         }
     };
 
+    // Handle lock body scroll.
     const lockBodyScroll = () => {
         const body = document.body;
         if (!body) return;
@@ -2938,6 +3088,7 @@
         if (scrollbarWidth > 0) body.style.paddingRight = scrollbarWidth + "px";
     };
 
+    // Unlock body scroll.
     const unlockBodyScroll = () => {
         const body = document.body;
         if (!body) return;
@@ -2946,6 +3097,7 @@
         body.style.paddingRight = profileState.bodyPaddingRight || "";
     };
 
+    // Set profile disclosure state.
     const setProfileDisclosureState = (section, open) => {
         if (!section) return;
         const summary = section.querySelector(".profile-disclosure__summary[data-profile-section-toggle='1']");
@@ -2957,6 +3109,7 @@
         body.setAttribute("aria-hidden", isOpen ? "false" : "true");
     };
 
+    // Sync profile disclosure state.
     const syncProfileDisclosureState = (container) => {
         if (!container || !container.querySelectorAll) return;
         container.querySelectorAll(".profile-disclosure").forEach((section) => {
@@ -2981,6 +3134,7 @@
         });
     };
 
+    // Ensure profile modal.
     const ensureProfileModal = () => {
         if (profileState.root) return profileState.root;
 
@@ -3026,6 +3180,7 @@
         return root;
     };
 
+    // Close profile modal.
     const closeProfileModal = (opts) => {
         const options = opts && typeof opts === "object" ? opts : {};
         if (!profileState.open || !profileState.root) return;
@@ -3044,6 +3199,7 @@
         if (options.restoreFocus !== false && focusTarget) focusTarget.focus();
     };
 
+    // Open profile modal.
     const openProfileModal = (ctx, triggerEl) => {
         const context = ctx && typeof ctx === "object" ? ctx : null;
         const tag = normalizeClanTag(context && context.player && context.player.tag);
@@ -3098,6 +3254,7 @@
             });
     };
 
+    // Sync profile modal from render.
     const syncProfileModalFromRender = () => {
         if (!profileState.open || !profileState.activeTag) return;
         profileState.activeContext = findPlayerContext(profileState.activeTag, profileState.activeRosterId) || profileState.activeContext;
@@ -3106,6 +3263,7 @@
         }
     };
 
+    // Bind profile UI.
     const bindProfileUi = () => {
         if (profileUiBound) return;
         profileUiBound = true;
@@ -3145,6 +3303,7 @@
         });
     };
 
+    // Handle count players in rosters.
     const countPlayersInRosters = (rosters) => {
         let count = 0;
         for (const roster of rosters) {
@@ -3157,6 +3316,7 @@
         return count;
     };
 
+    // Handle player matches query.
     const playerMatchesQuery = (rawPlayer, normalizedQuery) => {
         if (!normalizedQuery) return true;
         const player = normalizePlayer(rawPlayer);
@@ -3165,6 +3325,7 @@
         return name.includes(normalizedQuery) || tag.includes(normalizedQuery);
     };
 
+    // Handle filter rosters by query.
     const filterRostersByQuery = (rosters, rawQuery) => {
         const query = toStr(rawQuery).trim().toLowerCase();
         if (!query) {
@@ -3208,6 +3369,7 @@
         };
     };
 
+    // Update search info.
     const updateSearchInfo = (ctx) => {
         const info = $("#rosterSearchInfo");
         const clearBtn = $("#clearRosterSearchBtn");
@@ -3233,6 +3395,7 @@
             " in " + matchedRosters + " " + pluralize(matchedRosters, "roster", "rosters") + ".";
     };
 
+    // Normalize leaderboard league text.
     const normalizeLeaderboardLeagueText = (valueRaw) => {
         const raw = toStr(valueRaw).trim().toLowerCase();
         if (!raw) return "";
@@ -3244,6 +3407,7 @@
             .trim();
     };
 
+    // Normalize leaderboard league compact.
     const normalizeLeaderboardLeagueCompact = (valueRaw) => {
         const raw = toStr(valueRaw).trim().toLowerCase();
         if (!raw) return "";
@@ -3253,6 +3417,7 @@
 
     let leaderboardLeagueOrderConfigCache = null;
 
+    // Get leaderboard league display name.
     const getLeaderboardLeagueDisplayName = (valueRaw) => {
         if (typeof valueRaw === "string") return valueRaw.trim();
         const value = valueRaw && typeof valueRaw === "object" ? valueRaw : null;
@@ -3273,11 +3438,14 @@
         return "";
     };
 
+    // Get leaderboard league family by name.
     const getLeaderboardLeagueFamilyByName = (leagueNameRaw) => {
         const text = normalizeLeaderboardLeagueText(leagueNameRaw);
         const compact = normalizeLeaderboardLeagueCompact(leagueNameRaw);
         if (!text && !compact) return "";
+        // Return whether word.
         const hasWord = (word) => new RegExp("(^|\\s)" + String(word) + "(\\s|$)").test(text);
+        // Return whether compact.
         const hasCompact = (fragment) => compact.indexOf(String(fragment)) >= 0;
         if (hasWord("legend") || hasCompact("legend")) return "legend";
         if (hasWord("electro") || hasCompact("electro")) return "electro";
@@ -3295,6 +3463,7 @@
         return "";
     };
 
+    // Parse leaderboard league tier number.
     const parseLeaderboardLeagueTierNumber = (leagueNameRaw) => {
         const text = normalizeLeaderboardLeagueText(leagueNameRaw);
         const compact = normalizeLeaderboardLeagueCompact(leagueNameRaw);
@@ -3309,6 +3478,7 @@
         return Number.isFinite(value) ? Math.floor(value) : 0;
     };
 
+    // Build leaderboard league rank key.
     const buildLeaderboardLeagueRankKey = (familyRaw, tierRaw) => {
         const family = toStr(familyRaw).trim().toLowerCase();
         if (!family) return "";
@@ -3318,6 +3488,7 @@
         return family + ":" + tier;
     };
 
+    // Parse leaderboard league order entry label.
     const parseLeaderboardLeagueOrderEntryLabel = (labelRaw) => {
         const label = toStr(labelRaw).trim();
         if (!label) return null;
@@ -3330,6 +3501,7 @@
         return { family: family, tierValue: tierValue, label: label };
     };
 
+    // Get leaderboard league order config.
     const getLeaderboardLeagueOrderConfig = () => {
         if (leaderboardLeagueOrderConfigCache) return leaderboardLeagueOrderConfigCache;
         const rankByKey = Object.create(null);
@@ -3359,6 +3531,7 @@
         return leaderboardLeagueOrderConfigCache;
     };
 
+    // Handle read structured tier from value.
     const readStructuredTierFromValue = (valueRaw, depthRaw) => {
         const depth = toNonNegativeInt(depthRaw);
         if (depth > 2) return null;
@@ -3398,6 +3571,7 @@
         return null;
     };
 
+    // Handle read structured league tier value.
     const readStructuredLeagueTierValue = (leagueRaw) => {
         const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
         if (!league) return 0;
@@ -3426,6 +3600,7 @@
         return 0;
     };
 
+    // Handle read structured league family.
     const readStructuredLeagueFamily = (leagueRaw) => {
         const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
         if (!league) return "";
@@ -3453,6 +3628,7 @@
         return "";
     };
 
+    // Handle read leaderboard league descriptor from source.
     const readLeaderboardLeagueDescriptorFromSource = (leagueRaw, sourceLabelRaw) => {
         const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
         if (!league) return null;
@@ -3468,6 +3644,7 @@
         };
     };
 
+    // Resolve leaderboard league descriptor from snapshot.
     const resolveLeaderboardLeagueDescriptorFromSnapshot = (snapshotRaw) => {
         const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
         const fromLeagueTier = readLeaderboardLeagueDescriptorFromSource(snapshot.leagueTier, "leagueTier");
@@ -3491,6 +3668,7 @@
         };
     };
 
+    // Parse leaderboard league sort key.
     const parseLeaderboardLeagueSortKey = (leagueInputRaw) => {
         const config = getLeaderboardLeagueOrderConfig();
         const leagueInput = leagueInputRaw && typeof leagueInputRaw === "object" && !Array.isArray(leagueInputRaw)
@@ -3549,6 +3727,7 @@
         };
     };
 
+    // Handle read metrics latest snapshot.
     const readMetricsLatestSnapshot = (entryRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         if (entry.latestSnapshot && typeof entry.latestSnapshot === "object") return entry.latestSnapshot;
@@ -3556,6 +3735,7 @@
         return null;
     };
 
+    // Handle read monthly donation ledger.
     const readMonthlyDonationLedger = (entryRaw, monthKeyRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const monthKey = toStr(monthKeyRaw).trim();
@@ -3572,6 +3752,7 @@
         return null;
     };
 
+    // Handle read monthly donation totals.
     const readMonthlyDonationTotals = (entryRaw, monthKeyRaw) => {
         const ledger = readMonthlyDonationLedger(entryRaw, monthKeyRaw);
         if (!ledger) {
@@ -3588,6 +3769,7 @@
         };
     };
 
+    // Handle read snapshot town hall level.
     const readSnapshotTownHallLevel = (snapshotRaw) => {
         const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
         if (snapshot.townHallLevel != null) return toNonNegativeInt(snapshot.townHallLevel);
@@ -3595,12 +3777,14 @@
         return 0;
     };
 
+    // Handle read snapshot trophies.
     const readSnapshotTrophies = (snapshotRaw) => {
         const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
         if (snapshot.trophies != null) return toNonNegativeInt(snapshot.trophies);
         return 0;
     };
 
+    // Compare affiliation priority.
     const compareAffiliationPriority = (leftRaw, rightRaw) => {
         const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
         const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
@@ -3615,6 +3799,7 @@
         return leftTitle.localeCompare(rightTitle);
     };
 
+    // Format affiliation role label.
     const formatAffiliationRoleLabel = (roleRaw) => {
         const role = toStr(roleRaw).trim().toLowerCase();
         if (role === "main") return "Main";
@@ -3622,6 +3807,7 @@
         return "Sub";
     };
 
+    // Compare leaderboard name.
     const compareLeaderboardName = (leftRaw, rightRaw) => {
         const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
         const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
@@ -3631,6 +3817,7 @@
         return toStr(left.tag).localeCompare(toStr(right.tag));
     };
 
+    // Build leaderboard entries model.
     const buildLeaderboardEntriesModel = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const rosters = getOrderedRostersFromData(data);
@@ -3639,6 +3826,7 @@
         const lastMonthKey = getPreviousMonthKey(new Date());
         let hasLastMonthData = false;
 
+        // Handle upsert affiliation.
         const upsertAffiliation = (entry, roster, rosterIndex, roleRaw) => {
             const rosterId = toStr(roster && roster.id).trim();
             const rosterTitle = toStr(roster && roster.title).trim() || (rosterId || "Roster");
@@ -3655,6 +3843,7 @@
             if (rosterId) entry.rosterIdSet[rosterId] = true;
         };
 
+        // Handle collect players.
         const collectPlayers = (playersRaw, roster, rosterIndex, role) => {
             const players = Array.isArray(playersRaw) ? playersRaw : [];
             for (let i = 0; i < players.length; i++) {
@@ -3743,6 +3932,7 @@
         };
     };
 
+    // Handle filter leaderboard entries by roster.
     const filterLeaderboardEntriesByRoster = (entriesRaw, rosterFilterRaw) => {
         const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
         const rosterFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
@@ -3750,6 +3940,7 @@
         return entries.filter((entry) => !!(entry && entry.rosterIdSet && entry.rosterIdSet[rosterFilter]));
     };
 
+    // Format leaderboard affiliation label.
     const formatLeaderboardAffiliationLabel = (affiliationRaw) => {
         const affiliation = affiliationRaw && typeof affiliationRaw === "object" ? affiliationRaw : null;
         if (!affiliation) return "No roster";
@@ -3757,6 +3948,7 @@
         return rosterTitle + " • " + formatAffiliationRoleLabel(affiliation.role);
     };
 
+    // Resolve leaderboard card affiliation.
     const resolveLeaderboardCardAffiliation = (entryRaw, rosterFilterRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const rosterFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
@@ -3776,6 +3968,7 @@
         return sortedAffiliations.length ? sortedAffiliations[0] : null;
     };
 
+    // Compare leaderboard fallback.
     const compareLeaderboardFallback = (leftRaw, rightRaw) => {
         const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
         const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
@@ -3784,6 +3977,7 @@
         return compareLeaderboardName(left, right);
     };
 
+    // Sort leaderboard entries.
     const sortLeaderboardEntries = (entriesRaw, sortModeRaw, monthModeRaw) => {
         const entries = Array.isArray(entriesRaw) ? entriesRaw.slice() : [];
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
@@ -3825,6 +4019,7 @@
         return entries;
     };
 
+    // Build leaderboard primary metric label.
     const buildLeaderboardPrimaryMetricLabel = (entryRaw, sortModeRaw, monthModeRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
@@ -3843,6 +4038,7 @@
         return formatNumber(entry.trophies) + " trophies";
     };
 
+    // Build leaderboard secondary metric label.
     const buildLeaderboardSecondaryMetricLabel = (entryRaw, sortModeRaw, monthModeRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
@@ -3862,6 +4058,7 @@
         return leagueLabel;
     };
 
+    // Render leaderboard card.
     const renderLeaderboardCard = (entryRaw, optionsRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -3904,6 +4101,7 @@
         return wrap;
     };
 
+    // Create a chip button.
     const createChipButton = (labelRaw, active, onClick, disabled) => {
         const button = document.createElement("button");
         button.type = "button";
@@ -3916,6 +4114,7 @@
         return button;
     };
 
+    // Ensure leaderboard state validity.
     const ensureLeaderboardStateValidity = (modelRaw) => {
         const model = modelRaw && typeof modelRaw === "object" ? modelRaw : {};
         const rosters = Array.isArray(model.rosters) ? model.rosters : [];
@@ -3949,6 +4148,7 @@
         if (changed) persistPublicViewState();
     };
 
+    // Render roster suggestion banner.
     const renderRosterSuggestionBanner = (roster, suggestionModel) => {
         if (!suggestionModel) return null;
 
@@ -3986,6 +4186,7 @@
         return banner;
     };
 
+    // Render player card.
     const renderPlayerCard = (rawPlayer, ctx) => {
         const context = ctx && typeof ctx === "object" ? ctx : {};
         const trackingMode = toStr(context.trackingMode).trim() === "regularWar" ? "regularWar" : "cwl";
@@ -4154,6 +4355,7 @@
         return wrap;
     };
 
+    // Get missing section state key.
     const getMissingSectionStateKey = (rosterIdRaw, rosterTitleRaw) => {
         const rosterId = toStr(rosterIdRaw).trim();
         if (rosterId) return "id:" + rosterId;
@@ -4161,6 +4363,7 @@
         return rosterTitle ? ("title:" + rosterTitle) : "unknown";
     };
 
+    // Get missing section expanded state.
     const getMissingSectionExpandedState = (rosterIdRaw, rosterTitleRaw, defaultExpanded) => {
         const key = getMissingSectionStateKey(rosterIdRaw, rosterTitleRaw);
         if (Object.prototype.hasOwnProperty.call(missingSectionExpandedByRoster, key)) {
@@ -4169,11 +4372,13 @@
         return !!defaultExpanded;
     };
 
+    // Set missing section expanded state.
     const setMissingSectionExpandedState = (rosterIdRaw, rosterTitleRaw, expanded) => {
         const key = getMissingSectionStateKey(rosterIdRaw, rosterTitleRaw);
         missingSectionExpandedByRoster[key] = !!expanded;
     };
 
+    // Render roster section.
     const renderRosterSection = (label, players, optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const role = options.role;
@@ -4211,6 +4416,7 @@
         return frag;
     };
 
+    // Render collapsible missing roster section.
     const renderCollapsibleMissingRosterSection = (label, players, optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const listPlayers = Array.isArray(players) ? players : [];
@@ -4279,6 +4485,7 @@
         return section;
     };
 
+    // Render roster card.
     const renderRosterCard = (roster, opts) => {
         const options = opts && typeof opts === "object" ? opts : {};
         const showEmptySections = options.showEmptySections !== false;
@@ -4455,17 +4662,20 @@
         return card;
     };
 
+    // Get public view containers.
     const getPublicViewContainers = () => ({
         landing: $("#publicViewLanding"),
         rosters: $("#publicViewRosters"),
         leaderboard: $("#publicViewLeaderboard"),
     });
 
+    // Ensure landing effects active.
     const ensureLandingEffectsActive = () => {
         bindLandingScrollEffects();
         queueLandingScrollEffectsFrame();
     };
 
+    // Sync public view visibility.
     const syncPublicViewVisibility = (viewRaw) => {
         const activeView = sanitizePublicViewValue(viewRaw);
         const containers = getPublicViewContainers();
@@ -4481,6 +4691,7 @@
         }
     };
 
+    // Normalize landing asset path.
     const normalizeLandingAssetPath = (assetPathRaw) =>
         toStr(assetPathRaw)
             .trim()
@@ -4489,6 +4700,7 @@
             .replace(/\\/g, "/")
             .replace(/^drive\//i, "");
 
+    // Handle guess landing asset mime type.
     const guessLandingAssetMimeType = (assetPathRaw) => {
         const assetPath = toStr(assetPathRaw).trim().toLowerCase();
         if (!assetPath) return "";
@@ -4499,6 +4711,7 @@
         return "";
     };
 
+    // Get landing media load token.
     const getLandingMediaLoadToken = (slotIdRaw) => {
         const slotId = toStr(slotIdRaw).trim();
         if (!slotId) return 0;
@@ -4507,6 +4720,7 @@
         return Math.floor(value);
     };
 
+    // Handle begin landing media load.
     const beginLandingMediaLoad = (slotIdRaw) => {
         const slotId = toStr(slotIdRaw).trim();
         if (!slotId) return 0;
@@ -4515,12 +4729,14 @@
         return nextToken;
     };
 
+    // Return whether landing media load active.
     const isLandingMediaLoadActive = (slotIdRaw, tokenRaw) => {
         const slotId = toStr(slotIdRaw).trim();
         if (!slotId) return false;
         return getLandingMediaLoadToken(slotId) === Number(tokenRaw);
     };
 
+    // Clear landing media host.
     const clearLandingMediaHost = (host, keepNode) => {
         if (!host) return;
         const children = Array.prototype.slice.call(host.childNodes || []);
@@ -4542,6 +4758,7 @@
         }
     };
 
+    // Set landing media placeholder.
     const setLandingMediaPlaceholder = (slot, host, isLoading) => {
         if (!slot || !host) return;
         slot.classList.toggle("is-loading", !!isLoading);
@@ -4549,6 +4766,7 @@
         clearLandingMediaHost(host);
     };
 
+    // Handle show landing media element.
     const showLandingMediaElement = (slot, host, mediaNode, sourceKey) => {
         if (!slot || !host || !mediaNode) return;
         clearLandingMediaHost(host, mediaNode);
@@ -4559,6 +4777,7 @@
         slot.classList.remove("is-placeholder");
     };
 
+    // Normalize landing fallback candidates.
     const normalizeLandingFallbackCandidates = (candidatesRaw) => {
         const candidates = Array.isArray(candidatesRaw) ? candidatesRaw : [];
         const out = [];
@@ -4572,6 +4791,7 @@
         return out;
     };
 
+    // Get landing media asset data.
     const getLandingMediaAssetData = (assetPathRaw) => {
         const assetPath = normalizeLandingAssetPath(assetPathRaw);
         if (!assetPath) return Promise.resolve(null);
@@ -4600,6 +4820,7 @@
         return landingMediaAssetPending[assetPath];
     };
 
+    // Load landing remote iframe.
     const loadLandingRemoteIframe = (slotId, loadToken, slot, host, remoteUrlRaw, mediaLabelRaw) =>
         new Promise((resolve) => {
             const remoteUrl = toStr(remoteUrlRaw).trim();
@@ -4623,6 +4844,7 @@
 
             let settled = false;
             let timeoutId = 0;
+            // Clean up listeners, timers, or transient state for the current operation.
             const cleanup = () => {
                 iframe.onload = null;
                 iframe.onerror = null;
@@ -4631,6 +4853,7 @@
                     timeoutId = 0;
                 }
             };
+            // Finish the current operation exactly once.
             const finish = (ok) => {
                 if (settled) return;
                 settled = true;
@@ -4659,6 +4882,7 @@
             iframe.src = remoteUrl;
         });
 
+    // Get cloudinary direct video URL.
     const getCloudinaryDirectVideoUrl = (remoteUrlRaw) => {
         const remoteUrl = toStr(remoteUrlRaw).trim();
         if (!remoteUrl || typeof URL === "undefined") return "";
@@ -4682,6 +4906,7 @@
         }
     };
 
+    // Load landing remote video URL.
     const loadLandingRemoteVideoUrl = (slotId, loadToken, slot, host, mediaUrlRaw, mediaLabelRaw) =>
         new Promise((resolve) => {
             const mediaUrl = toStr(mediaUrlRaw).trim();
@@ -4708,6 +4933,7 @@
 
             let settled = false;
             let timeoutId = 0;
+            // Clean up listeners, timers, or transient state for the current operation.
             const cleanup = () => {
                 video.onloadeddata = null;
                 video.oncanplay = null;
@@ -4717,11 +4943,13 @@
                     timeoutId = 0;
                 }
             };
+            // Handle dispose video.
             const disposeVideo = () => {
                 try { video.pause(); } catch (err) { }
                 video.removeAttribute("src");
                 try { video.load(); } catch (err) { }
             };
+            // Finish the current operation exactly once.
             const finish = (ok) => {
                 if (settled) return;
                 settled = true;
@@ -4748,6 +4976,7 @@
             if (video.readyState >= 2) finish(true);
         });
 
+    // Load landing remote media.
     const loadLandingRemoteMedia = async (slotId, loadToken, slot, host, remoteUrlRaw, mediaLabelRaw) => {
         const remoteUrl = toStr(remoteUrlRaw).trim();
         if (!remoteUrl) return false;
@@ -4766,6 +4995,7 @@
         return loadLandingRemoteIframe(slotId, loadToken, slot, host, remoteUrl, mediaLabelRaw);
     };
 
+    // Create a landing local media node.
     const createLandingLocalMediaNode = (assetRaw, mediaLabelRaw) => {
         const asset = assetRaw && typeof assetRaw === "object" ? assetRaw : {};
         const mimeType = toStr(asset.mimeType).trim().toLowerCase();
@@ -4794,6 +5024,7 @@
         return null;
     };
 
+    // Load landing local media asset.
     const loadLandingLocalMediaAsset = (slotId, loadToken, slot, host, assetRaw, mediaLabelRaw) =>
         new Promise((resolve) => {
             const asset = assetRaw && typeof assetRaw === "object" ? assetRaw : {};
@@ -4807,6 +5038,7 @@
 
             let settled = false;
             let timeoutId = 0;
+            // Clean up listeners, timers, or transient state for the current operation.
             const cleanup = () => {
                 node.onload = null;
                 node.onerror = null;
@@ -4817,6 +5049,7 @@
                     timeoutId = 0;
                 }
             };
+            // Handle dispose node.
             const disposeNode = () => {
                 if (node.tagName === "VIDEO") {
                     try { node.pause(); } catch (err) { }
@@ -4826,6 +5059,7 @@
                     node.removeAttribute("src");
                 }
             };
+            // Finish the current operation exactly once.
             const finish = (ok) => {
                 if (settled) return;
                 settled = true;
@@ -4862,6 +5096,7 @@
             if (node.complete && node.naturalWidth > 0) finish(true);
         });
 
+    // Set landing media slot source.
     const setLandingMediaSlotSource = (optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const slotId = toStr(options.slotId).trim();
@@ -4883,10 +5118,12 @@
         }
 
         const loadToken = beginLandingMediaLoad(slotId);
+        // Finish the current media load with the placeholder state.
         const finishWithPlaceholder = () => {
             if (!isLandingMediaLoadActive(slotId, loadToken)) return;
             setLandingMediaPlaceholder(slot, host, false);
         };
+        // Try local fallback assets in order.
         const tryLocalFallbacks = async () => {
             for (let i = 0; i < fallbackCandidates.length; i++) {
                 if (!isLandingMediaLoadActive(slotId, loadToken)) return false;
@@ -4913,6 +5150,7 @@
         });
     };
 
+    // Handle count unique tags across active roster roles.
     const countUniqueTagsAcrossActiveRosterRoles = (rosterRaw) => {
         const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
         const pool = []
@@ -4929,6 +5167,7 @@
         return count;
     };
 
+    // Render landing clan family.
     const renderLandingClanFamily = (dataRaw) => {
         const target = $("#landingClanFamilyGrid");
         const familyMeta = $("#landingFamilyMeta");
@@ -4971,6 +5210,7 @@
         }
     };
 
+    // Set landing square story step.
     const setLandingSquareStoryStep = (storyRoot, stepIndexRaw) => {
         const story = storyRoot || $("#publicViewLanding [data-landing-square-story]");
         if (!story) return;
@@ -4988,6 +5228,7 @@
         }
     };
 
+    // Apply landing square story effects.
     const applyLandingSquareStoryEffects = (landingRoot, optionsRaw) => {
         const root = landingRoot || $("#publicViewLanding");
         if (!root) return;
@@ -5020,6 +5261,7 @@
         setLandingSquareStoryStep(story, stepIndex);
     };
 
+    // Refresh landing reveal targets.
     const refreshLandingRevealTargets = () => {
         const landingRoot = $("#publicViewLanding");
         if (!landingRoot) return;
@@ -5057,6 +5299,7 @@
         }
     };
 
+    // Apply landing scroll effects frame.
     const applyLandingScrollEffectsFrame = () => {
         landingScrollRafId = 0;
         if (typeof window === "undefined" || typeof document === "undefined") return;
@@ -5115,15 +5358,18 @@
         });
     };
 
+    // Queue landing scroll effects frame.
     const queueLandingScrollEffectsFrame = () => {
         if (typeof window === "undefined") return;
         if (landingScrollRafId) return;
         landingScrollRafId = window.requestAnimationFrame(applyLandingScrollEffectsFrame);
     };
 
+    // Bind landing scroll effects.
     const bindLandingScrollEffects = () => {
         if (landingScrollEffectsBound || typeof window === "undefined") return;
         landingScrollEffectsBound = true;
+        // Queue the next scheduled update.
         const queue = () => queueLandingScrollEffectsFrame();
         window.addEventListener("scroll", queue, { passive: true });
         window.addEventListener("resize", queue);
@@ -5131,6 +5377,7 @@
         queueLandingScrollEffectsFrame();
     };
 
+    // Set landing media slots to placeholder.
     const setLandingMediaSlotsToPlaceholder = () => {
         const bannerSlot = $("#landingBannerSlot");
         const bannerHost = $("#landingBannerMediaHost");
@@ -5140,6 +5387,7 @@
         if (squareSlot && squareHost) setLandingMediaPlaceholder(squareSlot, squareHost, false);
     };
 
+    // Apply landing media from data.
     const applyLandingMediaFromData = (dataRaw, optionsRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -5166,6 +5414,7 @@
         });
     };
 
+    // Handle promote landing media start.
     const promoteLandingMediaStart_ = (reasonRaw) => {
         if (landingMediaCanStart) return;
         landingMediaCanStart = true;
@@ -5174,6 +5423,7 @@
         applyLandingMediaFromData(lastRenderedData || {}, { allowMediaLoading: true });
     };
 
+    // Handle schedule deferred landing media start.
     const scheduleDeferredLandingMediaStart_ = () => {
         if (landingMediaCanStart || landingMediaDeferredStartScheduled || typeof window === "undefined") return;
         landingMediaDeferredStartScheduled = true;
@@ -5184,6 +5434,7 @@
         window.setTimeout(() => promoteLandingMediaStart_("timeout"), 1800);
     };
 
+    // Render landing view.
     const renderLandingView = (dataRaw, optionsRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -5196,11 +5447,13 @@
         }
     };
 
+    // Remove global loading card.
     const removeGlobalLoadingCard = () => {
         const loading = $("#loading");
         if (loading) loading.remove();
     };
 
+    // Render rosters loading state.
     const renderRostersLoadingState = () => {
         const target = $("#rosters");
         if (!target) return;
@@ -5219,6 +5472,7 @@
         });
     };
 
+    // Render leaderboard loading state.
     const renderLeaderboardLoadingState = () => {
         const target = $("#leaderboard");
         if (!target) return;
@@ -5228,6 +5482,7 @@
         target.appendChild(card);
     };
 
+    // Render data pending view state.
     const renderDataPendingViewState = (viewRaw) => {
         const activeView = sanitizePublicViewValue(viewRaw);
         showShellLoadingNotice(activeView);
@@ -5245,6 +5500,7 @@
         removeGlobalLoadingCard();
     };
 
+    // Set public view.
     const setPublicView = (viewRaw) => {
         const nextView = sanitizePublicViewValue(viewRaw);
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
@@ -5262,6 +5518,7 @@
         else renderDataPendingViewState(nextView);
     };
 
+    // Set leaderboard roster filter.
     const setLeaderboardRosterFilter = (rosterFilterRaw) => {
         const nextFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
@@ -5274,6 +5531,7 @@
         if (lastRenderedData) render(lastRenderedData);
     };
 
+    // Set leaderboard sort mode.
     const setLeaderboardSortMode = (sortModeRaw) => {
         const nextSortMode = sanitizeLeaderboardSortMode(sortModeRaw);
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
@@ -5286,6 +5544,7 @@
         if (lastRenderedData) render(lastRenderedData);
     };
 
+    // Set leaderboard month mode.
     const setLeaderboardMonthMode = (monthModeRaw) => {
         const nextMonthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
@@ -5298,6 +5557,7 @@
         if (lastRenderedData) render(lastRenderedData);
     };
 
+    // Render rosters view.
     const renderRostersView = (dataRaw) => {
         const target = $("#rosters");
         if (!target) return;
@@ -5340,6 +5600,7 @@
         }
     };
 
+    // Render leaderboard view.
     const renderLeaderboardView = (dataRaw) => {
         const target = $("#leaderboard");
         if (!target) return;
@@ -5432,6 +5693,7 @@
         target.appendChild(list);
     };
 
+    // Render public app.
     const renderPublicApp = (data) => {
         const rostersTarget = $("#rosters");
         const leaderboardTarget = $("#leaderboard");
@@ -5484,6 +5746,7 @@
 
     const render = renderPublicApp;
 
+    // Bind public view UI.
     const bindPublicViewUi = () => {
         if (publicViewUiBound) return;
         publicViewUiBound = true;
@@ -5519,6 +5782,7 @@
         syncPublicViewVisibility(getEffectivePublicView());
     };
 
+    // Bind search UI.
     const bindSearchUi = () => {
         if (searchUiBound) return;
 
@@ -5546,8 +5810,10 @@
         }
     };
 
+    // Load roster data via server.
     const loadRosterDataViaServer = () => runServerMethod("getRosterData", []);
 
+    // Handle assert valid roster payload.
     const assertValidRosterPayload = (dataRaw, sourceLabelRaw) => {
         const sourceLabel = toStr(sourceLabelRaw).trim() || "Roster source";
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
@@ -5557,6 +5823,7 @@
         return data;
     };
 
+    // Get roster payload freshness key.
     const getRosterPayloadFreshnessKey = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const lastUpdatedAt = toStr(data.lastUpdatedAt).trim();
@@ -5564,6 +5831,7 @@
         return "";
     };
 
+    // Handle read cached roster snapshot.
     const readCachedRosterSnapshot = () => {
         try {
             const payload = readLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY);
@@ -5587,6 +5855,7 @@
         }
     };
 
+    // Handle write cached roster snapshot.
     const writeCachedRosterSnapshot = (dataRaw, sourceRaw) => {
         try {
             const data = assertValidRosterPayload(dataRaw, "Roster snapshot cache write");
@@ -5602,12 +5871,14 @@
         }
     };
 
+    // Normalize Firebase db URL.
     const normalizeFirebaseDbUrl = (urlRaw) => {
         const raw = toStr(urlRaw).trim();
         if (!raw) return "";
         return raw.replace(/\/+$/, "");
     };
 
+    // Normalize Firebase path.
     const normalizeFirebasePath = (pathRaw) =>
         toStr(pathRaw)
             .trim()
@@ -5615,6 +5886,7 @@
             .replace(/^[\/]+|[\/]+$/g, "")
             .replace(/\.\./g, "");
 
+    // Build Firebase public JSON URL.
     const buildFirebasePublicJsonUrl = (pathRaw) => {
         const configuredDbUrl = normalizeFirebaseDbUrl(
             (typeof window !== "undefined" && window && window.ROSTER_FIREBASE_DB_URL)
@@ -5643,6 +5915,7 @@
         return dbUrlBaseNoQuery + "/" + encodedSegments.join("/") + ".json" + querySuffix;
     };
 
+    // Parse JSON text strict.
     const parseJsonTextStrict = (textRaw, sourceLabelRaw) => {
         const sourceLabel = toStr(sourceLabelRaw).trim() || "JSON response";
         const text = toStr(textRaw);
@@ -5656,6 +5929,7 @@
         }
     };
 
+    // Fetch Firebase JSON public.
     const fetchFirebaseJsonPublic = async (pathRaw) => {
         const safePath = normalizeFirebasePath(pathRaw);
         const pathLabel = "/" + (safePath || "");
@@ -5680,6 +5954,7 @@
         return parseJsonTextStrict(responseText, "Firebase public fetch for " + pathLabel);
     };
 
+    // Handle base64 URL decode to utf8.
     const base64UrlDecodeToUtf8 = (valueRaw) => {
         let value = toStr(valueRaw).trim();
         if (!value) return "";
@@ -5716,6 +5991,7 @@
         }
     };
 
+    // Decode Firebase object key.
     const decodeFirebaseObjectKey = (keyRaw) => {
         const key = toStr(keyRaw);
         if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) !== 0) return key;
@@ -5728,6 +6004,7 @@
         }
     };
 
+    // Decode Firebase object keys recursive.
     const decodeFirebaseObjectKeysRecursive = (valueRaw) => {
         if (Array.isArray(valueRaw)) {
             const outArray = [];
@@ -5748,6 +6025,7 @@
         return out;
     };
 
+    // Decode and validate active roster payload from Firebase public.
     const decodeAndValidateActiveRosterPayloadFromFirebasePublic = (encodedPayloadRaw, sourceLabelRaw) => {
         const sourceLabel = toStr(sourceLabelRaw).trim() || "firebase-public";
         if (!encodedPayloadRaw || typeof encodedPayloadRaw !== "object" || Array.isArray(encodedPayloadRaw)) {
@@ -5757,6 +6035,7 @@
         return assertValidRosterPayload(decodedPayload, sourceLabel);
     };
 
+    // Return whether try legacy root fallback for active payload.
     const shouldTryLegacyRootFallbackForActivePayload = (encodedPayloadRaw) => {
         if (encodedPayloadRaw == null) return true;
         if (encodedPayloadRaw === "") return true;
@@ -5771,6 +6050,7 @@
         return false;
     };
 
+    // Load roster data via Firebase public.
     const loadRosterDataViaFirebasePublic = async () => {
         const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
         if (!shouldTryLegacyRootFallbackForActivePayload(activePayload)) {
@@ -5807,6 +6087,7 @@
         }
     };
 
+    // Normalize static asset base URL.
     const normalizeStaticAssetBaseUrl = (valueRaw) => {
         const value = toStr(valueRaw).trim();
         if (!value) return "";
@@ -5819,6 +6100,7 @@
         return "";
     };
 
+    // Derive same origin static asset base URL.
     const deriveSameOriginStaticAssetBaseUrl = () => {
         if (typeof window === "undefined" || !window || !window.location) return "";
         const origin = toStr(window.location.origin).trim();
@@ -5826,6 +6108,7 @@
         return origin.replace(/[\/\\]+$/, "");
     };
 
+    // Build static asset URL.
     const buildStaticAssetUrl = (relativePathRaw) => {
         const relativePath = toStr(relativePathRaw)
             .trim()
@@ -5846,6 +6129,7 @@
         return baseUrl + "/" + relativePath;
     };
 
+    // Resolve configured Script base URL.
     const resolveConfiguredScriptBaseUrl = () =>
         toStr(
             (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
@@ -5853,6 +6137,7 @@
                 : ""
         ).trim();
 
+    // Build Script asset URL.
     const buildScriptAssetUrl = (assetNameRaw) => {
         const assetName = toStr(assetNameRaw).trim();
         if (!assetName) return "";
@@ -5864,6 +6149,7 @@
         return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
     };
 
+    // Load roster data via asset route.
     const loadRosterDataViaAssetRoute = async () => {
         if (typeof fetch !== "function") {
             throw new Error("window.fetch is unavailable for asset hydration.");
@@ -5894,6 +6180,7 @@
         }
     };
 
+    // Handle read inline bootstrap data.
     const readInlineBootstrapData = () => {
         if (typeof window === "undefined" || !window) return null;
         const inlineData = window.__ROSTER_DATA__;
@@ -5902,6 +6189,7 @@
         return inlineData;
     };
 
+    // Load roster data with fallback.
     const loadRosterDataWithFallback = async () => {
         let firebaseError = null;
         try {

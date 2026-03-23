@@ -1,5 +1,6 @@
 // War domain models, aggregation, finalization, and repair helpers.
 
+// Create an empty CWL stat entry.
 function createEmptyCwlStatEntry_() {
 	return {
 		starsTotal: 0,
@@ -17,6 +18,7 @@ function createEmptyCwlStatEntry_() {
 	};
 }
 
+// Create an empty regular war current entry.
 function createEmptyRegularWarCurrentEntry_(attacksAllowedRaw) {
 	const attacksAllowed = toNonNegativeInt_(attacksAllowedRaw);
 	return {
@@ -38,6 +40,7 @@ function createEmptyRegularWarCurrentEntry_(attacksAllowedRaw) {
 	};
 }
 
+// Create an empty regular war aggregate entry.
 function createEmptyRegularWarAggregateEntry_() {
 	return {
 		warsInLineup: 0,
@@ -53,6 +56,7 @@ function createEmptyRegularWarAggregateEntry_() {
 	};
 }
 
+// Sanitize regular war current entry.
 function sanitizeRegularWarCurrentEntry_(entryRaw, attacksAllowedRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const out = createEmptyRegularWarCurrentEntry_(entry.attacksAllowed != null ? entry.attacksAllowed : attacksAllowedRaw);
@@ -74,6 +78,7 @@ function sanitizeRegularWarCurrentEntry_(entryRaw, attacksAllowedRaw) {
 	return out;
 }
 
+// Sanitize regular war aggregate entry.
 function sanitizeRegularWarAggregateEntry_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const out = createEmptyRegularWarAggregateEntry_();
@@ -90,6 +95,7 @@ function sanitizeRegularWarAggregateEntry_(entryRaw) {
 	return out;
 }
 
+// Create an empty war-performance stats entry.
 function createEmptyWarPerformanceStats_() {
 	return {
 		warsInLineup: 0,
@@ -107,6 +113,7 @@ function createEmptyWarPerformanceStats_() {
 	};
 }
 
+// Create an empty war performance entry.
 function createEmptyWarPerformanceEntry_() {
 	return {
 		overall: createEmptyWarPerformanceStats_(),
@@ -115,6 +122,7 @@ function createEmptyWarPerformanceEntry_() {
 	};
 }
 
+// Create an empty regular war membership entry.
 function createEmptyRegularWarMembershipEntry_() {
 	return {
 		firstSeenAt: "",
@@ -124,6 +132,7 @@ function createEmptyRegularWarMembershipEntry_() {
 	};
 }
 
+// Create an empty regular war lifecycle state.
 function createEmptyRegularWarLifecycleState_() {
 	return {
 		activeWarKey: "",
@@ -136,6 +145,7 @@ function createEmptyRegularWarLifecycleState_() {
 	};
 }
 
+// Sanitize war performance stats entry.
 function sanitizeWarPerformanceStatsEntry_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const out = createEmptyWarPerformanceStats_();
@@ -154,6 +164,7 @@ function sanitizeWarPerformanceStatsEntry_(entryRaw) {
 	return out;
 }
 
+// Sanitize war performance entry.
 function sanitizeWarPerformanceEntry_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const out = createEmptyWarPerformanceEntry_();
@@ -163,6 +174,7 @@ function sanitizeWarPerformanceEntry_(entryRaw) {
 	return out;
 }
 
+// Sanitize regular war lifecycle state.
 function sanitizeRegularWarLifecycleState_(rawState) {
 	const state = rawState && typeof rawState === "object" ? rawState : {};
 	return {
@@ -179,6 +191,7 @@ function sanitizeRegularWarLifecycleState_(rawState) {
 	};
 }
 
+// Sanitize war performance meta.
 function sanitizeWarPerformanceMeta_(rawMeta) {
 	const meta = rawMeta && typeof rawMeta === "object" ? rawMeta : {};
 	const out = {};
@@ -219,6 +232,7 @@ function sanitizeWarPerformanceMeta_(rawMeta) {
 	return out;
 }
 
+// Create an empty regular war history entry.
 function createEmptyRegularWarHistoryEntry_(warKeyRaw) {
 	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
 	return {
@@ -236,6 +250,7 @@ function createEmptyRegularWarHistoryEntry_(warKeyRaw) {
 	};
 }
 
+// Sanitize regular war history stats by tag.
 function sanitizeRegularWarHistoryStatsByTag_(statsByTagRaw) {
 	const statsByTag = statsByTagRaw && typeof statsByTagRaw === "object" ? statsByTagRaw : {};
 	const out = {};
@@ -250,6 +265,7 @@ function sanitizeRegularWarHistoryStatsByTag_(statsByTagRaw) {
 	return out;
 }
 
+// Sanitize regular war history entry.
 function sanitizeRegularWarHistoryEntry_(entryRaw, warKeyRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const fallbackWarKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
@@ -273,6 +289,7 @@ function sanitizeRegularWarHistoryEntry_(entryRaw, warKeyRaw) {
 	return out;
 }
 
+// Sanitize regular war history by key.
 function sanitizeRegularWarHistoryByKey_(historyRaw) {
 	const history = historyRaw && typeof historyRaw === "object" ? historyRaw : {};
 	const out = {};
@@ -287,6 +304,7 @@ function sanitizeRegularWarHistoryByKey_(historyRaw) {
 	return out;
 }
 
+// Sanitize regular war legacy baseline by tag.
 function sanitizeRegularWarLegacyBaselineByTag_(baselineRaw) {
 	const baseline = baselineRaw && typeof baselineRaw === "object" ? baselineRaw : {};
 	const out = {};
@@ -301,6 +319,7 @@ function sanitizeRegularWarLegacyBaselineByTag_(baselineRaw) {
 	return out;
 }
 
+// Sanitize regular war snapshot.
 function sanitizeRegularWarSnapshot_(rawSnapshot) {
 	const snapshot = rawSnapshot && typeof rawSnapshot === "object" ? rawSnapshot : null;
 	if (!snapshot) return null;
@@ -337,6 +356,7 @@ function sanitizeRegularWarSnapshot_(rawSnapshot) {
 	};
 }
 
+// Sanitize roster war performance.
 function sanitizeRosterWarPerformance_(rawWarPerformance) {
 	if (rawWarPerformance == null) return null;
 	const warPerformance = rawWarPerformance && typeof rawWarPerformance === "object" ? rawWarPerformance : {};
@@ -410,6 +430,7 @@ function sanitizeRosterWarPerformance_(rawWarPerformance) {
 	};
 }
 
+// Create an empty roster war performance.
 function createEmptyRosterWarPerformance_() {
 	return {
 		lastRefreshedAt: "",
@@ -428,6 +449,7 @@ function createEmptyRosterWarPerformance_() {
 	};
 }
 
+// Ensure war performance.
 function ensureWarPerformance_(roster) {
 	if (!roster || typeof roster !== "object") return null;
 	const next = sanitizeRosterWarPerformance_(roster.warPerformance) || createEmptyRosterWarPerformance_();
@@ -443,6 +465,7 @@ function ensureWarPerformance_(roster) {
 	return next;
 }
 
+// Return whether war performance stats data.
 function hasWarPerformanceStatsData_(statsRaw) {
 	const stats = sanitizeWarPerformanceStatsEntry_(statsRaw);
 	return (
@@ -461,6 +484,7 @@ function hasWarPerformanceStatsData_(statsRaw) {
 	);
 }
 
+// Map regular aggregate to war performance stats.
 function mapRegularAggregateToWarPerformanceStats_(aggregateRaw) {
 	const aggregate = sanitizeRegularWarAggregateEntry_(aggregateRaw);
 	const out = createEmptyWarPerformanceStats_();
@@ -477,6 +501,7 @@ function mapRegularAggregateToWarPerformanceStats_(aggregateRaw) {
 	return out;
 }
 
+// Build regular war legacy baseline from war performance by tag.
 function buildRegularWarLegacyBaselineFromWarPerformanceByTag_(warPerformanceRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	const byTagRaw = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
@@ -493,6 +518,7 @@ function buildRegularWarLegacyBaselineFromWarPerformanceByTag_(warPerformanceRaw
 	return out;
 }
 
+// Build regular war legacy baseline from regular war compat.
 function buildRegularWarLegacyBaselineFromRegularWarCompat_(regularWarRaw) {
 	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
 	const byTagRaw = regularWar.byTag && typeof regularWar.byTag === "object" ? regularWar.byTag : {};
@@ -509,6 +535,7 @@ function buildRegularWarLegacyBaselineFromRegularWarCompat_(regularWarRaw) {
 	return out;
 }
 
+// Ensure regular war legacy baseline.
 function ensureRegularWarLegacyBaseline_(warPerformanceRaw, regularWarRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
 	if (!warPerformance) return { changed: false, baselineByTag: {} };
@@ -543,6 +570,7 @@ function ensureRegularWarLegacyBaseline_(warPerformanceRaw, regularWarRaw) {
 	return { changed: true, baselineByTag: baselineByTag };
 }
 
+// Summarize regular war history state.
 function summarizeRegularWarHistoryState_(warPerformanceRaw, nowIsoRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	const nowIso = typeof nowIsoRaw === "string" && nowIsoRaw ? nowIsoRaw : new Date().toISOString();
@@ -613,6 +641,7 @@ function summarizeRegularWarHistoryState_(warPerformanceRaw, nowIsoRaw) {
 	};
 }
 
+// Apply regular war history summary to meta.
 function applyRegularWarHistorySummaryToMeta_(warPerformanceRaw, summaryRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
 	if (!warPerformance) return sanitizeWarPerformanceMeta_(null);
@@ -641,6 +670,7 @@ function applyRegularWarHistorySummaryToMeta_(warPerformanceRaw, summaryRaw) {
 	return meta;
 }
 
+// Build regular war aggregate meta from war performance.
 function buildRegularWarAggregateMetaFromWarPerformance_(warPerformanceRaw, repairResultRaw, nowIsoRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	const repairResult = repairResultRaw && typeof repairResultRaw === "object" ? repairResultRaw : {};
@@ -666,6 +696,7 @@ function buildRegularWarAggregateMetaFromWarPerformance_(warPerformanceRaw, repa
 	});
 }
 
+// Handle hydrate war performance overall from breakdown.
 function hydrateWarPerformanceOverallFromBreakdown_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : null;
 	if (!entry) return false;
@@ -685,6 +716,7 @@ function hydrateWarPerformanceOverallFromBreakdown_(entryRaw) {
 	return true;
 }
 
+// Handle rebuild regular war aggregates from history.
 function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
 	if (!warPerformance) return { changed: false, summary: summarizeRegularWarHistoryState_(null, nowIsoRaw) };
@@ -757,6 +789,7 @@ function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
 	return { changed: true, summary: summary };
 }
 
+// Handle backfill war performance from legacy regular aggregate.
 function backfillWarPerformanceFromLegacyRegularAggregate_(warPerformanceRaw, regularWarRaw) {
 	const sourceWarPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
 	const hasLegacyCompatibilityData = Object.keys(buildRegularWarLegacyBaselineFromRegularWarCompat_(regularWarRaw)).length > 0;
@@ -768,6 +801,7 @@ function backfillWarPerformanceFromLegacyRegularAggregate_(warPerformanceRaw, re
 	return warPerformance;
 }
 
+// Handle prepare war performance for refresh.
 function prepareWarPerformanceForRefresh_(roster, nowIso) {
 	if (!roster || typeof roster !== "object") return null;
 	let warPerformance = ensureWarPerformance_(roster);
@@ -782,6 +816,7 @@ function prepareWarPerformanceForRefresh_(roster, nowIso) {
 	return warPerformance;
 }
 
+// Merge war performance stats.
 function mergeWarPerformanceStats_(dest, src) {
 	if (!dest || typeof dest !== "object" || !src || typeof src !== "object") return;
 	dest.warsInLineup = toNonNegativeInt_(dest.warsInLineup) + toNonNegativeInt_(src.warsInLineup);
@@ -798,6 +833,7 @@ function mergeWarPerformanceStats_(dest, src) {
 	dest.hitDownCount = toNonNegativeInt_(dest.hitDownCount) + toNonNegativeInt_(src.hitDownCount);
 }
 
+// Get war sides for clan.
 function getWarSidesForClan_(warRaw, clanTagRaw) {
 	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
 	const clanTag = normalizeTag_(clanTagRaw);
@@ -824,6 +860,7 @@ function getWarSidesForClan_(warRaw, clanTagRaw) {
 	return null;
 }
 
+// Build war stats from members.
 function buildWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThByTagRaw, trackedTagSet, modeRaw) {
 	const out = {};
 	const members = Array.isArray(membersRaw) ? membersRaw : [];
@@ -872,6 +909,7 @@ function buildWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThBy
 	return out;
 }
 
+// Compute regular war stats from war.
 function computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet) {
 	const sides = getWarSidesForClan_(war, clanTag);
 	if (!sides) return {};
@@ -879,6 +917,7 @@ function computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet) {
 	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "regular");
 }
 
+// Compute CWL war stats from war.
 function computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet) {
 	const sides = getWarSidesForClan_(war, clanTag);
 	if (!sides) return {};
@@ -886,6 +925,7 @@ function computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet) {
 	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "cwl");
 }
 
+// Get stable regular war key.
 function getStableRegularWarKey_(warLikeRaw, clanTagRaw) {
 	const warLike = warLikeRaw && typeof warLikeRaw === "object" ? warLikeRaw : {};
 	const clanTagFallback = normalizeTag_(clanTagRaw);
@@ -924,6 +964,7 @@ function getStableRegularWarKey_(warLikeRaw, clanTagRaw) {
 	return (clanTag || clanTagFallback || "") + "|" + (opponentTag || "") + "|" + keySeed;
 }
 
+// Find war log entry by war key.
 function findWarLogEntryByWarKey_(clanTag, warKey, limitRaw) {
 	if (!clanTag || !warKey) return null;
 	const entries = fetchClanWarLog_(clanTag, limitRaw || REGULAR_WAR_WARLOG_LIMIT);
@@ -935,6 +976,7 @@ function findWarLogEntryByWarKey_(clanTag, warKey, limitRaw) {
 	return null;
 }
 
+// Handle war has member level data for clan.
 function warHasMemberLevelDataForClan_(war, clanTag) {
 	const sides = getWarSidesForClan_(war, clanTag);
 	if (!sides) return false;
@@ -942,6 +984,7 @@ function warHasMemberLevelDataForClan_(war, clanTag) {
 	return members.length > 0;
 }
 
+// Ensure war performance player entry.
 function ensureWarPerformancePlayerEntry_(warPerformance, tagRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag || !warPerformance || typeof warPerformance !== "object") return null;
@@ -952,6 +995,7 @@ function ensureWarPerformancePlayerEntry_(warPerformance, tagRaw) {
 	return warPerformance.byTag[tag];
 }
 
+// Build tag set from raw.
 function buildTagSetFromRaw_(tagSetRaw) {
 	const tagSet = tagSetRaw && typeof tagSetRaw === "object" ? tagSetRaw : {};
 	const out = {};
@@ -964,6 +1008,7 @@ function buildTagSetFromRaw_(tagSetRaw) {
 	return out;
 }
 
+// Build regular war finalize tag set.
 function buildRegularWarFinalizeTagSet_(warPerformanceRaw, warKeyRaw, trackedTagSetRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
@@ -981,6 +1026,7 @@ function buildRegularWarFinalizeTagSet_(warPerformanceRaw, warKeyRaw, trackedTag
 	return out;
 }
 
+// Handle upsert regular war history entry.
 function upsertRegularWarHistoryEntry_(warPerformanceRaw, warKeyRaw, statsByTagRaw, optionsRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
 	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
@@ -1046,6 +1092,7 @@ function upsertRegularWarHistoryEntry_(warPerformanceRaw, warKeyRaw, statsByTagR
 	};
 }
 
+// Mark regular war history repair attempt.
 function markRegularWarHistoryRepairAttempt_(warPerformanceRaw, warKeyRaw, nowIsoRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
 	const warKey = String(warKeyRaw == null ? "" : warKeyRaw).trim();
@@ -1061,6 +1108,7 @@ function markRegularWarHistoryRepairAttempt_(warPerformanceRaw, warKeyRaw, nowIs
 	return true;
 }
 
+// Build war log entry map by war key.
 function buildWarLogEntryMapByWarKey_(entriesRaw, clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
@@ -1074,6 +1122,7 @@ function buildWarLogEntryMapByWarKey_(entriesRaw, clanTagRaw) {
 	return out;
 }
 
+// Record regular war finalization attempt.
 function recordRegularWarFinalizationAttempt_(warPerformance, warKey, source, reason, incomplete, finalized, nowIso) {
 	if (!warPerformance || typeof warPerformance !== "object") return;
 	const nowText = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
@@ -1088,6 +1137,7 @@ function recordRegularWarFinalizationAttempt_(warPerformance, warKey, source, re
 	warPerformance.meta = meta;
 }
 
+// Resolve war performance finalization target.
 function resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw) {
 	const mode = String(modeRaw == null ? "" : modeRaw)
 		.trim()
@@ -1096,6 +1146,7 @@ function resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw) {
 	return { mode: mode, identifier: identifier };
 }
 
+// Mark war performance finalization.
 function markWarPerformanceFinalization_(warPerformance, modeRaw, identifierRaw, nowIso, sourceRaw, reasonRaw, incompleteFlag) {
 	if (!warPerformance || typeof warPerformance !== "object") return;
 	const target = resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw);
@@ -1136,6 +1187,7 @@ function markWarPerformanceFinalization_(warPerformance, modeRaw, identifierRaw,
 	warPerformance.regularWarLifecycle = lifecycle;
 }
 
+// Apply war snapshot to long term aggregate.
 function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifierRaw, statsByTagRaw, nowIso, source, reason, incomplete) {
 	const target = resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw);
 	const mode = target.mode;
@@ -1187,6 +1239,7 @@ function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifie
 	return { applied: true, identifier: identifier, mode: mode, reason: "applied" };
 }
 
+// Handle finalize regular war into war performance.
 function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, trackedTagSet, nowIso, source, reason, incomplete) {
 	const warKey = getStableRegularWarKey_(war, clanTag);
 	if (!warKey) return false;
@@ -1195,6 +1248,7 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 	return !!result.applied;
 }
 
+// Handle finalize regular war from snapshot.
 function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTagSet, nowIso, source, reason, incomplete) {
 	const snapshot = sanitizeRegularWarSnapshot_(snapshotRaw);
 	if (!snapshot || !snapshot.warMeta || !snapshot.warMeta.warKey) return false;
@@ -1212,6 +1266,7 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 	return !!result.applied;
 }
 
+// Ingest CWL war into war performance.
 function ingestCwlWarIntoWarPerformance_(warPerformance, war, warTagRaw, clanTag, trackedTagSet, nowIso, source) {
 	const warTag = normalizeTag_(warTagRaw) || normalizeTag_(war && war.warTag);
 	if (!warTag) return false;
@@ -1220,6 +1275,7 @@ function ingestCwlWarIntoWarPerformance_(warPerformance, war, warTagRaw, clanTag
 	return !!result.applied;
 }
 
+// Build regular war live snapshot.
 function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, nowIso) {
 	const currentWar = currentWarRaw && typeof currentWarRaw === "object" ? currentWarRaw : null;
 	if (!currentWar) return null;
@@ -1298,6 +1354,7 @@ function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, now
 	};
 }
 
+// Return whether finalize previous regular war.
 function shouldFinalizePreviousRegularWar_(previousWarKeyRaw, currentWarKeyRaw, currentWarStateRaw) {
 	const previousWarKey = String(previousWarKeyRaw == null ? "" : previousWarKeyRaw).trim();
 	if (!previousWarKey) return false;
@@ -1309,6 +1366,7 @@ function shouldFinalizePreviousRegularWar_(previousWarKeyRaw, currentWarKeyRaw, 
 	return true;
 }
 
+// Handle finalize regular war from live or fallback.
 function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const warPerformance = options.warPerformance && typeof options.warPerformance === "object" ? options.warPerformance : null;
@@ -1357,10 +1415,12 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	return { attempted: true, finalized: false, source: "noFinalData", incomplete: true, reason: "noFinalDataAvailable" };
 }
 
+// Try to finalize previous regular war.
 function tryFinalizePreviousRegularWar_(optionsRaw) {
 	return finalizeRegularWarFromLiveOrFallback_(optionsRaw);
 }
 
+// Handle attempt repair incomplete regular war history.
 function attemptRepairIncompleteRegularWarHistory_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const warPerformance = options.warPerformance && typeof options.warPerformance === "object" ? options.warPerformance : null;
@@ -1443,6 +1503,7 @@ function attemptRepairIncompleteRegularWarHistory_(optionsRaw) {
 	};
 }
 
+// Ensure tracked war membership.
 function ensureTrackedWarMembership_(warPerformance, activeTagSetRaw, nowIso) {
 	if (!warPerformance || typeof warPerformance !== "object") return;
 	const activeTagSet = activeTagSetRaw && typeof activeTagSetRaw === "object" ? activeTagSetRaw : {};
@@ -1473,6 +1534,7 @@ function ensureTrackedWarMembership_(warPerformance, activeTagSetRaw, nowIso) {
 	warPerformance.membershipByTag = membershipByTag;
 }
 
+// Mark tracked member missing.
 function markTrackedMemberMissing_(warPerformance, missingTagSetRaw, nowIso) {
 	if (!warPerformance || typeof warPerformance !== "object") return;
 	const missingTagSet = missingTagSetRaw && typeof missingTagSetRaw === "object" ? missingTagSetRaw : {};
@@ -1491,6 +1553,7 @@ function markTrackedMemberMissing_(warPerformance, missingTagSetRaw, nowIso) {
 	warPerformance.membershipByTag = membershipByTag;
 }
 
+// Prune expired tracked war members.
 function pruneExpiredTrackedWarMembers_(warPerformance, nowIso) {
 	if (!warPerformance || typeof warPerformance !== "object") return [];
 	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
@@ -1514,6 +1577,7 @@ function pruneExpiredTrackedWarMembers_(warPerformance, nowIso) {
 	return removedTags;
 }
 
+// Build roster active tag set.
 function buildRosterActiveTagSet_(roster) {
 	const out = {};
 	const rosterObj = roster && typeof roster === "object" ? roster : {};
@@ -1526,6 +1590,7 @@ function buildRosterActiveTagSet_(roster) {
 	return out;
 }
 
+// Build roster missing tag set.
 function buildRosterMissingTagSet_(roster) {
 	const out = {};
 	const missing = Array.isArray(roster && roster.missing) ? roster.missing : [];
@@ -1537,10 +1602,12 @@ function buildRosterMissingTagSet_(roster) {
 	return out;
 }
 
+// Remove roster players by tag set.
 function removeRosterPlayersByTagSet_(roster, tagSetRaw) {
 	if (!roster || typeof roster !== "object") return false;
 	const tagSet = tagSetRaw && typeof tagSetRaw === "object" ? tagSetRaw : {};
 	let changed = false;
+	// Handle filter players.
 	const filterPlayers = (playersRaw) => {
 		const players = Array.isArray(playersRaw) ? playersRaw : [];
 		const out = [];
@@ -1561,6 +1628,7 @@ function removeRosterPlayersByTagSet_(roster, tagSetRaw) {
 	return changed;
 }
 
+// Build tracked war history tag set.
 function buildTrackedWarHistoryTagSet_(roster, warPerformanceRaw, nowIso) {
 	const out = buildRosterPoolTagSet_(roster);
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
@@ -1581,6 +1649,7 @@ function buildTrackedWarHistoryTagSet_(roster, warPerformanceRaw, nowIso) {
 	return out;
 }
 
+// Update war performance membership.
 function updateWarPerformanceMembership_(roster, nowIso) {
 	if (!roster || typeof roster !== "object") return;
 	const warPerformance = ensureWarPerformance_(roster);
@@ -1608,6 +1677,7 @@ function updateWarPerformanceMembership_(roster, nowIso) {
 	roster.warPerformance = warPerformance;
 }
 
+// Sanitize regular war membership entry.
 function sanitizeRegularWarMembershipEntry_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const out = createEmptyRegularWarMembershipEntry_();
@@ -1621,6 +1691,7 @@ function sanitizeRegularWarMembershipEntry_(entryRaw) {
 	return out;
 }
 
+// Sanitize regular war current war.
 function sanitizeRegularWarCurrentWar_(rawCurrentWar) {
 	const currentWar = rawCurrentWar && typeof rawCurrentWar === "object" ? rawCurrentWar : {};
 	const state = String(currentWar.state == null ? "" : currentWar.state)
@@ -1650,6 +1721,7 @@ function sanitizeRegularWarCurrentWar_(rawCurrentWar) {
 	};
 }
 
+// Sanitize regular war aggregate meta.
 function sanitizeRegularWarAggregateMeta_(rawMeta) {
 	const meta = rawMeta && typeof rawMeta === "object" ? rawMeta : {};
 	const statusLevelRaw = String(meta.statusLevel == null ? "" : meta.statusLevel)
@@ -1672,6 +1744,7 @@ function sanitizeRegularWarAggregateMeta_(rawMeta) {
 	};
 }
 
+// Sanitize CWL stat entry.
 function sanitizeCwlStatEntry_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const resolvedWarDays = entry.resolvedWarDays != null ? toNonNegativeInt_(entry.resolvedWarDays) : toNonNegativeInt_(entry.daysInLineup);
@@ -1691,6 +1764,7 @@ function sanitizeCwlStatEntry_(entryRaw) {
 	return out;
 }
 
+// Derive CWL metrics.
 function deriveCwlMetrics_(entryRaw) {
 	const entry = sanitizeCwlStatEntry_(entryRaw);
 	const possibleStars = 3 * entry.resolvedWarDays;
@@ -1714,12 +1788,14 @@ function deriveCwlMetrics_(entryRaw) {
 	};
 }
 
+// Handle read attack destruction.
 function readAttackDestruction_(attackRaw) {
 	const attack = attackRaw && typeof attackRaw === "object" ? attackRaw : {};
 	const raw = attack.destructionPercentage != null ? attack.destructionPercentage : attack.destruction;
 	return toNonNegativeInt_(raw);
 }
 
+// Build member TH by tag.
 function buildMemberThByTag_(membersRaw) {
 	const out = {};
 	const members = Array.isArray(membersRaw) ? membersRaw : [];
@@ -1733,10 +1809,12 @@ function buildMemberThByTag_(membersRaw) {
 	return out;
 }
 
+// Handle metric compare value.
 function metricCompareValue_(value) {
 	return value == null ? -1 : value;
 }
 
+// Build history retention tag set.
 function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, regularWarRaw, nowIso) {
 	const out = {};
 	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
@@ -1747,6 +1825,7 @@ function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, re
 	}
 
 	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	// Add membership.
 	const addMembership = (membershipRaw) => {
 		const membershipByTag = membershipRaw && typeof membershipRaw === "object" ? membershipRaw : {};
 		const keys = Object.keys(membershipByTag);
@@ -1772,6 +1851,7 @@ function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, re
 	return out;
 }
 
+// Sanitize roster CWL stats.
 function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
 	if (rawStats == null) return null;
 	const stats = rawStats && typeof rawStats === "object" ? rawStats : {};
@@ -1794,6 +1874,7 @@ function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
 	};
 }
 
+// Sanitize roster regular war.
 function sanitizeRosterRegularWar_(regularWarRaw, retainedTagSet) {
 	if (regularWarRaw == null) return null;
 	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};

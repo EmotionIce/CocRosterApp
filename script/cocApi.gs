@@ -1,5 +1,6 @@
 // Clash API transport and related tag/war fetch helpers.
 
+// Normalize tag.
 function normalizeTag_(tagRaw) {
 	const t = String(tagRaw == null ? "" : tagRaw)
 		.trim()
@@ -8,26 +9,31 @@ function normalizeTag_(tagRaw) {
 	return t.startsWith("#") ? t : "#" + t;
 }
 
+// Get roster tracking mode.
 function getRosterTrackingMode_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
 	return roster.trackingMode === "regularWar" ? "regularWar" : "cwl";
 }
 
+// Return whether valid player tag.
 function isValidPlayerTag_(tagRaw) {
 	const tag = normalizeTag_(tagRaw);
 	return /^#[PYLQGRJCUV0289]{3,15}$/.test(tag);
 }
 
+// Return whether valid clan tag.
 function isValidClanTag_(tagRaw) {
 	return isValidPlayerTag_(tagRaw);
 }
 
+// Encode tag for path.
 function encodeTagForPath_(tagRaw) {
 	const normalized = normalizeTag_(tagRaw);
 	if (!normalized) return "";
 	return encodeURIComponent(normalized);
 }
 
+// Return whether published roster tag.
 function isPublishedRosterTag_(tagRaw) {
 	const wantedTag = normalizeTag_(tagRaw);
 	if (!wantedTag) return false;
@@ -49,6 +55,7 @@ function isPublishedRosterTag_(tagRaw) {
 	return false;
 }
 
+// Normalize player profile error.
 function normalizePlayerProfileError_(playerTag, err) {
 	const tag = normalizeTag_(playerTag);
 	if (err && err.statusCode === 404) {
@@ -68,6 +75,7 @@ function normalizePlayerProfileError_(playerTag, err) {
 	return new Error("Player profile request failed for " + tag + ".");
 }
 
+// Handle read town hall level.
 function readTownHallLevel_(obj) {
 	const raw = obj && obj.townHallLevel != null ? obj.townHallLevel : obj && obj.townhallLevel != null ? obj.townhallLevel : null;
 	const n = Number(raw);
@@ -75,6 +83,7 @@ function readTownHallLevel_(obj) {
 	return Math.max(0, Math.floor(n));
 }
 
+// Get CoC API token.
 function getCocApiToken_() {
 	const token = String(PropertiesService.getScriptProperties().getProperty("COC_API_TOKEN") || "").trim();
 	if (!token) {
@@ -83,6 +92,7 @@ function getCocApiToken_() {
 	return token;
 }
 
+// Build CoC fetch request config.
 function buildCocFetchRequestConfig_(pathRaw, tokenRaw) {
 	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
 	if (!token) throw new Error("Missing Clash API token.");
@@ -103,6 +113,7 @@ function buildCocFetchRequestConfig_(pathRaw, tokenRaw) {
 	};
 }
 
+// Parse CoC retry after ms.
 function parseCocRetryAfterMs_(retryAfterRaw) {
 	const retryAfter = String(retryAfterRaw == null ? "" : retryAfterRaw).trim();
 	if (!retryAfter) return 0;
@@ -115,12 +126,14 @@ function parseCocRetryAfterMs_(retryAfterRaw) {
 	return Math.max(0, Math.floor(retryAtMs - Date.now()));
 }
 
+// Return whether CoC transient status code.
 function isCocTransientStatusCode_(statusCodeRaw) {
 	const statusCode = Number(statusCodeRaw);
 	if (!isFinite(statusCode)) return false;
 	return statusCode === 0 || statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504;
 }
 
+// Return whether retry CoC fetch error.
 function shouldRetryCocFetchError_(errRaw) {
 	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
 	if (!err) return false;
@@ -130,6 +143,7 @@ function shouldRetryCocFetchError_(errRaw) {
 	return true;
 }
 
+// Compute CoC retry delay ms.
 function computeCocRetryDelayMs_(errRaw, attemptIndexRaw) {
 	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
 	const retryAfterMs = parseCocRetryAfterMs_(err && err.retryAfter);
@@ -141,6 +155,7 @@ function computeCocRetryDelayMs_(errRaw, attemptIndexRaw) {
 	return Math.max(COC_FETCH_RETRY_MIN_DELAY_MS, Math.min(COC_FETCH_RETRY_MAX_DELAY_MS, Math.floor(exponentialBackoffMs)));
 }
 
+// Handle CoC fetch with retry.
 function cocFetchWithRetry_(requestConfigRaw, labelRaw, optionsRaw) {
 	const requestConfig = requestConfigRaw && typeof requestConfigRaw === "object" ? requestConfigRaw : null;
 	if (!requestConfig || !requestConfig.url || !requestConfig.params) {
@@ -171,6 +186,7 @@ function cocFetchWithRetry_(requestConfigRaw, labelRaw, optionsRaw) {
 	throw new Error("Clash API request failed after retries.");
 }
 
+// Parse CoC fetch response.
 function parseCocFetchResponse_(resRaw) {
 	const res = resRaw && typeof resRaw === "object" ? resRaw : null;
 	if (!res || typeof res.getResponseCode !== "function") {
@@ -214,12 +230,14 @@ function parseCocFetchResponse_(resRaw) {
 	throw err;
 }
 
+// Handle CoC fetch.
 function cocFetch_(path) {
 	const token = getCocApiToken_();
 	const req = buildCocFetchRequestConfig_(path, token);
 	return cocFetchWithRetry_(req, path);
 }
 
+// Handle CoC fetch all by path entries.
 function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 	const entriesInput = Array.isArray(entriesRaw) ? entriesRaw : [];
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -337,6 +355,7 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 	return out;
 }
 
+// Map API members.
 function mapApiMembers_(membersRaw) {
 	const out = [];
 	const seen = {};
@@ -358,6 +377,7 @@ function mapApiMembers_(membersRaw) {
 	return out;
 }
 
+// Get opponent side for clan.
 function getOpponentSideForClan_(war, clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (war && war.clan && normalizeTag_(war.clan.tag) === clanTag) return war.opponent || null;
@@ -365,6 +385,7 @@ function getOpponentSideForClan_(war, clanTagRaw) {
 	return null;
 }
 
+// Fetch clan members snapshot.
 function fetchClanMembersSnapshot_(clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
@@ -378,10 +399,12 @@ function fetchClanMembersSnapshot_(clanTagRaw) {
 	};
 }
 
+// Fetch clan members.
 function fetchClanMembers_(clanTagRaw) {
 	return fetchClanMembersSnapshot_(clanTagRaw).members;
 }
 
+// Handle prefetch clan members snapshots by tag.
 function prefetchClanMembersSnapshotsByTag_(clanTagsRaw, optionsRaw) {
 	const tagsRaw = Array.isArray(clanTagsRaw) ? clanTagsRaw : [];
 	const entries = [];
@@ -424,6 +447,7 @@ function prefetchClanMembersSnapshotsByTag_(clanTagsRaw, optionsRaw) {
 	};
 }
 
+// Map league group data for clan.
 function mapLeagueGroupDataForClan_(clanTagRaw, leaguegroupRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
@@ -448,6 +472,7 @@ function mapLeagueGroupDataForClan_(clanTagRaw, leaguegroupRaw) {
 	};
 }
 
+// Fetch league group data.
 function fetchLeagueGroupData_(clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
@@ -455,6 +480,7 @@ function fetchLeagueGroupData_(clanTagRaw) {
 	return mapLeagueGroupDataForClan_(clanTag, data);
 }
 
+// Handle prefetch league group raw by clan tag.
 function prefetchLeagueGroupRawByClanTag_(clanTagsRaw, optionsRaw) {
 	const tagsRaw = Array.isArray(clanTagsRaw) ? clanTagsRaw : [];
 	const entries = [];
@@ -489,10 +515,12 @@ function prefetchLeagueGroupRawByClanTag_(clanTagsRaw, optionsRaw) {
 	};
 }
 
+// Return whether private war log error.
 function isPrivateWarLogError_(err) {
 	return !!(err && Number(err.statusCode) === 403);
 }
 
+// Build no current regular war result.
 function buildNoCurrentRegularWarResult_(clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	return {
@@ -518,6 +546,7 @@ function buildNoCurrentRegularWarResult_(clanTagRaw) {
 	};
 }
 
+// Build private regular war result.
 function buildPrivateRegularWarResult_(clanTagRaw) {
 	const base = buildNoCurrentRegularWarResult_(clanTagRaw);
 	base.currentWarMeta.unavailableReason = "privateWarLog";
@@ -525,6 +554,7 @@ function buildPrivateRegularWarResult_(clanTagRaw) {
 	return base;
 }
 
+// Map current regular war from API data.
 function mapCurrentRegularWarFromApiData_(clanTagRaw, warRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const warObj = warRaw && typeof warRaw === "object" ? warRaw : {};
@@ -576,6 +606,7 @@ function mapCurrentRegularWarFromApiData_(clanTagRaw, warRaw) {
 	};
 }
 
+// Fetch current regular war.
 function fetchCurrentRegularWar_(clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
@@ -595,6 +626,7 @@ function fetchCurrentRegularWar_(clanTagRaw) {
 	return mapCurrentRegularWarFromApiData_(clanTag, war);
 }
 
+// Handle prefetch current regular war by clan tag.
 function prefetchCurrentRegularWarByClanTag_(clanTagsRaw, optionsRaw) {
 	const tagsRaw = Array.isArray(clanTagsRaw) ? clanTagsRaw : [];
 	const entries = [];
@@ -637,6 +669,7 @@ function prefetchCurrentRegularWarByClanTag_(clanTagsRaw, optionsRaw) {
 	};
 }
 
+// Handle prefetch CWL war raw by tag.
 function prefetchCwlWarRawByTag_(warTagsRaw, optionsRaw) {
 	const tagsRaw = Array.isArray(warTagsRaw) ? warTagsRaw : [];
 	const entries = [];
@@ -671,6 +704,7 @@ function prefetchCwlWarRawByTag_(warTagsRaw, optionsRaw) {
 	};
 }
 
+// Fetch clan war log.
 function fetchClanWarLog_(clanTagRaw, limitRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
@@ -685,6 +719,7 @@ function fetchClanWarLog_(clanTagRaw, limitRaw) {
 	return out;
 }
 
+// Extract league group war tags.
 function extractLeagueGroupWarTags_(leaguegroupRaw) {
 	const rounds = Array.isArray(leaguegroupRaw && leaguegroupRaw.rounds) ? leaguegroupRaw.rounds : [];
 	const warTags = [];
@@ -702,6 +737,7 @@ function extractLeagueGroupWarTags_(leaguegroupRaw) {
 	return warTags;
 }
 
+// Handle league group contains clan.
 function leagueGroupContainsClan_(leaguegroupRaw, clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const clans = Array.isArray(leaguegroupRaw && leaguegroupRaw.clans) ? leaguegroupRaw.clans : [];
@@ -712,6 +748,7 @@ function leagueGroupContainsClan_(leaguegroupRaw, clanTagRaw) {
 	return false;
 }
 
+// Handle pick war side for clan.
 function pickWarSideForClan_(war, clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const clanSide = war && war.clan && normalizeTag_(war.clan.tag) === clanTag ? war.clan : null;

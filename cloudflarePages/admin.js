@@ -1,5 +1,9 @@
-﻿(() => {
+// Cloudflare admin client state, rendering, and interaction helpers.
+
+(() => {
+  // Select the first element that matches a selector.
   const $ = (sel) => document.querySelector(sel);
+  // Convert a value to a string safely.
   const toStr = (v) => (v == null ? "" : String(v));
 
   const state = {
@@ -22,11 +26,13 @@
     modalFocusReturnByPanel: {},
   };
 
+  // Set the global status message.
   const setStatus = (msg) => {
     const el = $("#status");
     if (el) el.textContent = msg || "";
   };
 
+  // Set the add player status message.
   const setAddPlayerStatus = (msg, isError) => {
     const el = $("#addPlayerStatus");
     if (!el) return;
@@ -34,6 +40,7 @@
     el.style.color = isError ? "#fca5a5" : "#6b7280";
   };
 
+  // Set the add preview roster status message.
   const setAddPreviewRosterStatus = (msg, isError) => {
     const el = $("#addPreviewRosterStatus");
     if (!el) return;
@@ -41,6 +48,7 @@
     el.style.color = isError ? "#fca5a5" : "#6b7280";
   };
 
+  // Set the roster status message.
   const setRosterStatus = (rosterIdRaw, msg, isError) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return;
@@ -50,25 +58,30 @@
     };
   };
 
+  // Clear roster statuses.
   const clearRosterStatuses = () => {
     state.rosterStatusByRoster = {};
   };
 
+  // Set the login status message.
   const setLoginStatus = (msg) => {
     const el = $("#loginStatus");
     if (el) el.textContent = msg || "";
   };
 
+  // Toggle the visibility of an element matched by selector.
   const show = (sel, on) => {
     const el = $(sel);
     if (!el) return;
     el.classList.toggle("hidden", !on);
   };
 
+  // Get the connected-roster list or table mount element.
   const getConnectedRostersMount = () => {
     return $("#connectedRostersList") || $("#connectedRostersTable tbody") || $("#connectedRostersTable");
   };
 
+  // Apply roster status to visible row.
   const applyRosterStatusToVisibleRow_ = (rosterIdRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return;
@@ -97,19 +110,23 @@
     statusLine.style.color = saved.isError ? "#fca5a5" : "#94a3b8";
   };
 
+  // Get the clan-mapping list or table mount element.
   const getClanMappingMount = () => {
     return $("#clanMappingList") || $("#clanMappingTable tbody") || $("#clanMappingTable");
   };
 
   const ADMIN_TAB_KEYS = ["rosters", "import", "preview"];
+  // Get admin tab buttons.
   const getAdminTabButtons = () => Array.from(document.querySelectorAll('[data-admin-tab]'));
 
+  // Get admin tab panel by key.
   const getAdminTabPanelByKey = (tabKeyRaw) => {
     const tabKey = toStr(tabKeyRaw).trim().toLowerCase();
     if (!tabKey) return null;
     return $("#adminTab" + tabKey.charAt(0).toUpperCase() + tabKey.slice(1));
   };
 
+  // Set active admin tab.
   const setActiveAdminTab = (tabKeyRaw, optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     const tabKey = toStr(tabKeyRaw).trim().toLowerCase();
@@ -135,17 +152,20 @@
     }
   };
 
+  // Set auth card unlocked.
   const setAuthCardUnlocked = (unlocked) => {
     const authCard = $("#unlockCard");
     if (!authCard) return;
     authCard.classList.toggle("is-unlocked", !!unlocked);
   };
 
+  // Sync overlay body state.
   const syncOverlayBodyState = () => {
     const hasOpenOverlay = !!document.querySelector(".admin-overlay.is-open");
     document.body.classList.toggle("admin-overlay-open", hasOpenOverlay);
   };
 
+  // Set admin overlay open.
   const setAdminOverlayOpen = (panelIdRaw, toggleBtnIdRaw, openRaw, optionsRaw) => {
     const panelId = toStr(panelIdRaw).trim();
     if (!panelId) return;
@@ -190,16 +210,20 @@
     syncOverlayBodyState();
   };
 
+  // Clear pending profile reopen.
   const clearPendingProfileReopen = () => {
     state.pendingProfileReopen = null;
   };
 
+  // Handle JSON pretty.
   const jsonPretty = (obj) => {
     try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
   };
 
+  // Convert a value to error message.
   const toErrorMessage = (err) => (err && err.message ? err.message : String(err));
 
+  // Deep-clone a JSON-safe value.
   const cloneJson = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
   const CWL_PREPARATION_ALGORITHM = "strength_top_x_v1";
   const CWL_PREPARATION_MIN_ROSTER_SIZE = 5;
@@ -221,17 +245,21 @@
     reliabilityPriorWeight: 2.5,
   };
 
+  // Normalize tag.
   const normalizeTag = (tag) => {
     const t = toStr(tag).trim().toUpperCase();
     if (!t) return "";
     return t.startsWith("#") ? t : ("#" + t);
   };
 
+  // Return whether valid CoC tag.
   const isValidCocTag = (tagRaw) => /^#[PYLQGRJCUV0289]{3,15}$/.test(normalizeTag(tagRaw));
 
+  // Get roster tracking mode.
   const getRosterTrackingMode = (rosterRaw) =>
     rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
 
+  // Normalize notes.
   const normalizeNotes = (rawNotes) => {
     if (Array.isArray(rawNotes)) {
       return rawNotes.map((n) => toStr(n).trim()).filter(Boolean);
@@ -240,6 +268,7 @@
     return one ? [one] : [];
   };
 
+  // Convert a value to bool flag.
   const toBoolFlag = (value) => {
     if (value === true || value === false) return value;
     const text = toStr(value).trim().toLowerCase();
@@ -247,6 +276,7 @@
     return text === "true" || text === "1" || text === "yes" || text === "on";
   };
 
+  // Normalize player flags in place.
   const normalizePlayerFlagsInPlace = (player) => {
     if (!player || typeof player !== "object") return player;
     player.excludeAsSwapTarget = toBoolFlag(player.excludeAsSwapTarget);
@@ -254,11 +284,13 @@
     return player;
   };
 
+  // Parse notes from textarea.
   const parseNotesFromTextarea = (raw) => {
     const lines = toStr(raw).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
     return normalizeNotes(lines);
   };
 
+  // Set add preview roster panel open.
   const setAddPreviewRosterPanelOpen = (open) => {
     if (open) {
       setAdminOverlayOpen("addPlayerPanel", "toggleAddPlayerPanelBtn", false, {
@@ -270,6 +302,7 @@
     });
   };
 
+  // Set add player panel open.
   const setAddPlayerPanelOpen = (open) => {
     if (open) {
       setAdminOverlayOpen("addPreviewRosterPanel", "toggleAddPreviewRosterPanelBtn", false, {
@@ -281,10 +314,12 @@
     });
   };
 
+  // Bind admin tabs.
   const bindAdminTabs = () => {
     const buttons = getAdminTabButtons();
     if (!buttons.length) return;
 
+    // Handle focus button by index.
     const focusButtonByIndex = (indexRaw) => {
       if (!buttons.length) return;
       const max = buttons.length - 1;
@@ -334,7 +369,9 @@
     });
   };
 
+  // Bind overlay close handlers.
   const bindOverlayCloseHandlers = () => {
+    // Close via attribute.
     const closeViaAttribute = (target) => {
       const node = target && target.closest ? target.closest("[data-overlay-close]") : null;
       const panelId = toStr(node && node.getAttribute("data-overlay-close")).trim();
@@ -367,11 +404,13 @@
     });
   };
 
+  // Get the current roster list from cached state.
   const getRosters = () => {
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return [];
     return state.lastRosterData.rosters;
   };
 
+  // Normalize roster order in data.
   const normalizeRosterOrderInData_ = (rosterDataRaw) => {
     const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
     if (!rosterData || !Array.isArray(rosterData.rosters)) return [];
@@ -387,6 +426,7 @@
 
     const consumedIndexes = {};
     const orderedRosters = [];
+    // Push roster index.
     const pushRosterIndex = (index) => {
       if (!Number.isInteger(index) || consumedIndexes[index]) return;
       consumedIndexes[index] = true;
@@ -419,6 +459,7 @@
     return normalizedRosterOrder;
   };
 
+  // Sync roster order from current array.
   const syncRosterOrderFromCurrentArray_ = (rosterDataRaw) => {
     const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
     if (!rosterData || !Array.isArray(rosterData.rosters)) return [];
@@ -434,6 +475,7 @@
     return out;
   };
 
+  // Refresh refresh all UI.
   const refreshRefreshAllUi = () => {
     const btn = $("#refreshAllBtn");
     if (!btn) return;
@@ -442,6 +484,7 @@
     btn.textContent = state.bulkRefreshBusy ? "Refreshing..." : "Refresh all";
   };
 
+  // Format local timestamp.
   const formatLocalTimestamp = (isoRaw) => {
     const iso = toStr(isoRaw).trim();
     if (!iso) return "";
@@ -450,6 +493,7 @@
     return parsed.toLocaleString();
   };
 
+  // Build auto refresh status text.
   const buildAutoRefreshStatusText = (settings) => {
     const cfg = settings && typeof settings === "object" ? settings : null;
     if (!cfg) return "Disabled";
@@ -474,6 +518,7 @@
     return lines.join("\n");
   };
 
+  // Render auto refresh UI.
   const renderAutoRefreshUi = () => {
     const toggle = $("#autoRefreshToggle");
     const statusEl = $("#autoRefreshStatus");
@@ -496,6 +541,7 @@
     }
   };
 
+  // Load auto refresh settings.
   const loadAutoRefreshSettings = async () => {
     if (!state.password) {
       state.autoRefreshSettings = null;
@@ -514,6 +560,7 @@
     }
   };
 
+  // Update auto refresh enabled.
   const updateAutoRefreshEnabled = async (enabled) => {
     if (!state.password) {
       throw new Error("Unlock admin first.");
@@ -531,18 +578,21 @@
     }
   };
 
+  // Get roster by ID.
   const getRosterById = (rosterIdRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return null;
     return getRosters().find((roster) => toStr(roster && roster.id).trim() === rosterId) || null;
   };
 
+  // Get roster index in roster data.
   const getRosterIndexInRosterData_ = (rosterData, rosterIdRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
     return rosters.findIndex((roster) => toStr(roster && roster.id).trim() === rosterId);
   };
 
+  // Clone current roster data for server.
   const cloneCurrentRosterDataForServer_ = () => {
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
       throw new Error("No roster preview is loaded.");
@@ -550,6 +600,7 @@
     return cloneJson(state.lastRosterData);
   };
 
+  // Find roster player by tag.
   const findRosterPlayerByTag = (rosterIdRaw, tagRaw) => {
     const roster = getRosterById(rosterIdRaw);
     const tag = normalizeTag(tagRaw);
@@ -558,6 +609,7 @@
     return roster.main.concat(roster.subs, roster.missing).find((player) => normalizeTag(player && player.tag) === tag) || null;
   };
 
+  // Format player display label.
   const formatPlayerDisplayLabel = (rosterIdRaw, tagRaw) => {
     const tag = normalizeTag(tagRaw);
     if (!tag) return "";
@@ -566,6 +618,7 @@
     return name ? (name + " (" + tag + ")") : tag;
   };
 
+  // Format roster display label.
   const formatRosterDisplayLabel = (rosterIdRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return "";
@@ -574,6 +627,7 @@
     return title ? (title + " (" + rosterId + ")") : rosterId;
   };
 
+  // Handle persist clan sync tag inputs.
   const persistClanSyncTagInputs = () => {
     const host = getConnectedRostersMount();
     const inputs = host
@@ -589,6 +643,7 @@
     }
   };
 
+  // Apply suggestion tags to state.
   const applySuggestionTagsToState_ = (rosterIdRaw, benchTagsRaw, swapInTagsRaw, pairsRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) {
@@ -640,6 +695,7 @@
     }
   };
 
+  // Sync suggestion state from roster data.
   const syncSuggestionStateFromRosterData_ = () => {
     state.benchMarksByRoster = {};
     state.swapInMarksByRoster = {};
@@ -662,6 +718,7 @@
     }
   };
 
+  // Clear saved bench suggestions for roster.
   const clearSavedBenchSuggestionsForRoster_ = (rosterIdRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return;
@@ -672,6 +729,7 @@
     }
   };
 
+  // Clear saved bench suggestions from preview.
   const clearSavedBenchSuggestionsFromPreview_ = () => {
     const rosters = getRosters();
     for (const roster of rosters) {
@@ -682,6 +740,7 @@
     }
   };
 
+  // Refresh add preview roster UI.
   const refreshAddPreviewRosterUi = () => {
     const addBtn = $("#addPreviewRosterBtn");
     const hint = $("#addPreviewRosterHint");
@@ -701,6 +760,7 @@
     if (hint) hint.textContent = "Creates a new empty roster in the current preview.";
   };
 
+  // Refresh add player UI.
   const refreshAddPlayerUi = () => {
     const rosterSelect = $("#addPlayerRoster");
     const addBtn = $("#addPlayerBtn");
@@ -738,6 +798,7 @@
       rosterSelect.value = prevSelected;
     }
 
+    // Update mode hint.
     const updateModeHint = () => {
       if (!hint) return;
       const selectedId = toStr(rosterSelect.value).trim();
@@ -758,6 +819,7 @@
     updateModeHint();
   };
 
+  // Ensure roster arrays.
   const ensureRosterArrays = (roster) => {
     if (!roster || typeof roster !== "object") return;
     roster.trackingMode = getRosterTrackingMode(roster);
@@ -766,12 +828,14 @@
     if (!Array.isArray(roster.missing)) roster.missing = [];
   };
 
+  // Convert a value to non negative int local.
   const toNonNegativeIntLocal_ = (valueRaw) => {
     const n = Number(valueRaw);
     if (!Number.isFinite(n)) return 0;
     return Math.max(0, Math.floor(n));
   };
 
+  // Compare tags asc local.
   const compareTagsAscLocal_ = (leftRaw, rightRaw) => {
     const left = toStr(leftRaw);
     const right = toStr(rightRaw);
@@ -780,6 +844,7 @@
     return 0;
   };
 
+  // Handle clamp number local.
   const clampNumberLocal_ = (valueRaw, minValue, maxValue) => {
     const n = Number(valueRaw);
     if (!Number.isFinite(n)) return Number(minValue);
@@ -788,6 +853,7 @@
     return n;
   };
 
+  // Normalize unit metric local.
   const normalizeUnitMetricLocal_ = (valueRaw, fallbackRaw) => {
     const fallback = clampNumberLocal_(fallbackRaw, 0, 1);
     const n = Number(valueRaw);
@@ -795,6 +861,7 @@
     return clampNumberLocal_(n, 0, 1);
   };
 
+  // Handle shrink toward local.
   const shrinkTowardLocal_ = (observedValueRaw, priorMeanRaw, sampleSizeRaw, priorWeightRaw) => {
     const observed = Number(observedValueRaw);
     const prior = Number(priorMeanRaw);
@@ -807,6 +874,7 @@
     return (w * safePrior + n * safeObserved) / denom;
   };
 
+  // Create an empty CWL stat entry local.
   const createEmptyCwlStatEntryLocal_ = () => ({
     starsTotal: 0,
     daysInLineup: 0,
@@ -822,6 +890,7 @@
     sameThHitCount: 0,
   });
 
+  // Sanitize CWL stat entry local.
   const sanitizeCwlStatEntryLocal_ = (entryRaw) => {
     const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
     const resolvedWarDays = entry.resolvedWarDays != null
@@ -843,6 +912,7 @@
     return out;
   };
 
+  // Derive CWL metrics local.
   const deriveCwlMetricsLocal_ = (entryRaw) => {
     const entry = sanitizeCwlStatEntryLocal_(entryRaw);
     const possibleStars = 3 * entry.resolvedWarDays;
@@ -864,6 +934,7 @@
     };
   };
 
+  // Compute strength score local.
   const computeStrengthScoreLocal_ = (playerStatsRaw, planningContextRaw, configRaw) => {
     const stats = playerStatsRaw && typeof playerStatsRaw === "object" ? playerStatsRaw : {};
     const ctx = planningContextRaw && typeof planningContextRaw === "object" ? planningContextRaw : {};
@@ -917,7 +988,9 @@
     };
   };
 
+  // Normalize preparation roster size local.
   const normalizePreparationRosterSizeLocal_ = (rawValue, fallbackValue) => {
+    // Normalize state.
     const normalize = (valueRaw) => {
       const n = Number(valueRaw);
       if (!Number.isFinite(n)) return 0;
@@ -934,11 +1007,13 @@
     return CWL_PREPARATION_MIN_ROSTER_SIZE;
   };
 
+  // Get initial preparation roster size for enable local.
   const getInitialPreparationRosterSizeForEnableLocal_ = (roster) => {
     const mainCount = Array.isArray(roster && roster.main) ? roster.main.length : 0;
     return normalizePreparationRosterSizeLocal_(mainCount, CWL_PREPARATION_MIN_ROSTER_SIZE);
   };
 
+  // Get roster pool entries for preparation local.
   const getRosterPoolEntriesForPreparationLocal_ = (roster) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : {};
     const main = Array.isArray(rosterSafe.main) ? rosterSafe.main : [];
@@ -972,6 +1047,7 @@
     return out;
   };
 
+  // Build roster pool tag set for preparation local.
   const buildRosterPoolTagSetForPreparationLocal_ = (roster) => {
     const out = {};
     const entries = getRosterPoolEntriesForPreparationLocal_(roster);
@@ -979,6 +1055,7 @@
     return out;
   };
 
+  // Normalize preparation lock state local.
   const normalizePreparationLockStateLocal_ = (rawValue, rosterPoolTagSetRaw) => {
     const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
     const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
@@ -994,6 +1071,7 @@
     return out;
   };
 
+  // Sanitize roster CWL preparation local.
   const sanitizeRosterCwlPreparationLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return null;
@@ -1033,6 +1111,7 @@
     return out;
   };
 
+  // Get roster CWL preparation local.
   const getRosterCwlPreparationLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return null;
@@ -1040,6 +1119,7 @@
     return prep && typeof prep === "object" ? prep : null;
   };
 
+  // Return whether CWL preparation active local.
   const isCwlPreparationActiveLocal_ = (roster) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return false;
@@ -1048,6 +1128,7 @@
     return !!(prep && prep.enabled);
   };
 
+  // Build CWL preparation ranking local.
   const buildCwlPreparationRankingLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : {};
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -1131,6 +1212,7 @@
     return { ranked, byTag };
   };
 
+  // Apply CWL preparation rebalance local.
   const applyCwlPreparationRebalanceLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return null;
@@ -1255,6 +1337,7 @@
     };
   };
 
+  // Handle rebalance roster if preparation active local.
   const rebalanceRosterIfPreparationActiveLocal_ = (roster, optionsRaw) => {
     if (!roster || typeof roster !== "object") return null;
     const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
@@ -1262,6 +1345,7 @@
     return applyCwlPreparationRebalanceLocal_(roster, Object.assign({ enforceLockedInLimit: true }, optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {}));
   };
 
+  // Handle rebalance all active CWL preparation rosters local.
   const rebalanceAllActiveCwlPreparationRostersLocal_ = (optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     const rosters = getRosters();
@@ -1278,6 +1362,7 @@
     return summariesByRosterId;
   };
 
+  // Migrate missing players to subs for CWL local.
   const migrateMissingPlayersToSubsForCwlLocal_ = (roster) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return false;
@@ -1288,6 +1373,7 @@
       return false;
     }
     const tagSet = {};
+    // Mark tags in the current working set.
     const mark = (playersRaw) => {
       const players = Array.isArray(playersRaw) ? playersRaw : [];
       for (let i = 0; i < players.length; i++) {
@@ -1313,6 +1399,7 @@
     return moved.length > 0;
   };
 
+  // Handle transfer preparation lock on explicit move local.
   const transferPreparationLockOnExplicitMoveLocal_ = (sourceRoster, destinationRoster, playerTagRaw) => {
     const source = sourceRoster && typeof sourceRoster === "object" ? sourceRoster : null;
     const destination = destinationRoster && typeof destinationRoster === "object" ? destinationRoster : null;
@@ -1339,6 +1426,7 @@
     }
   };
 
+  // Handle move preparation lock for edited tag local.
   const movePreparationLockForEditedTagLocal_ = (roster, previousTagRaw, nextTagRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return;
@@ -1354,6 +1442,7 @@
     rosterSafe.cwlPreparation = prep;
   };
 
+  // Handle reindex roster.
   const reindexRoster = (roster) => {
     if (!roster || typeof roster !== "object") return;
     ensureRosterArrays(roster);
@@ -1384,11 +1473,13 @@
     roster.badges = { main: roster.main.length, subs: roster.subs.length, missing: roster.missing.length };
   };
 
+  // Handle reindex all rosters.
   const reindexAllRosters = () => {
     const rosters = getRosters();
     for (const roster of rosters) reindexRoster(roster);
   };
 
+  // Prune bench marks.
   const pruneBenchMarks_ = () => {
     const rosters = getRosters();
     if (!rosters.length) {
@@ -1413,6 +1504,7 @@
         tagSet[tag] = true;
       }
 
+      // Prune tag map.
       const pruneTagMap = (source) => {
         const kept = {};
         const map = source && typeof source === "object" ? source : {};
@@ -1448,6 +1540,7 @@
     state.suggestionNotesByRoster = nextSuggestionNotesByRoster;
   };
 
+  // Apply bench marks.
   const applyBenchMarks_ = () => {
     pruneBenchMarks_();
 
@@ -1491,12 +1584,14 @@
     }
   };
 
+  // Clear suggestion marks.
   const clearSuggestionMarks_ = () => {
     state.benchMarksByRoster = {};
     state.swapInMarksByRoster = {};
     state.suggestionNotesByRoster = {};
   };
 
+  // Clear suggestion marks for roster.
   const clearSuggestionMarksForRoster_ = (rosterIdRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) return;
@@ -1505,6 +1600,7 @@
     delete state.suggestionNotesByRoster[rosterId];
   };
 
+  // Render preview from state.
   const renderPreviewFromState = () => {
     if (!window.renderRosterData) return;
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
@@ -1528,6 +1624,7 @@
     applyBenchMarks_();
   };
 
+  // Mark report stale.
   const markReportStale = (reasonRaw) => {
     const reason = toStr(reasonRaw).trim() || "Preview changed. Re-run compare with preview before applying XLSX updates.";
     if (!state.importSession || !state.importSession.comparison) return;
@@ -1536,6 +1633,7 @@
     renderImportUi();
   };
 
+  // Apply preview mutation.
   const applyPreviewMutation = (msg) => {
     syncRosterOrderFromCurrentArray_(state.lastRosterData);
     normalizeRosterOrderInData_(state.lastRosterData);
@@ -1550,6 +1648,7 @@
     setStatus(msg || "Preview updated.");
   };
 
+  // Find player location by tag.
   const findPlayerLocationByTag = (tagRaw) => {
     const tag = normalizeTag(tagRaw);
     if (!tag) return null;
@@ -1580,6 +1679,7 @@
     return null;
   };
 
+  // Get roster preparation summary local.
   const getRosterPreparationSummaryLocal_ = (roster) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return null;
@@ -1609,6 +1709,7 @@
     };
   };
 
+  // Set roster preparation enabled local.
   const setRosterPreparationEnabledLocal_ = (rosterIdRaw, enabledRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) throw new Error("Roster ID is required.");
@@ -1640,6 +1741,7 @@
     return getRosterPreparationSummaryLocal_(roster);
   };
 
+  // Handle adjust roster preparation size local.
   const adjustRosterPreparationSizeLocal_ = (rosterIdRaw, deltaRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) throw new Error("Roster ID is required.");
@@ -1671,6 +1773,7 @@
     return getRosterPreparationSummaryLocal_(roster);
   };
 
+  // Set player preparation lock state local.
   const setPlayerPreparationLockStateLocal_ = (rosterIdRaw, playerTagRaw, nextStateRaw) => {
     const rosterId = toStr(rosterIdRaw).trim();
     const playerTag = normalizeTag(playerTagRaw);
@@ -1709,6 +1812,7 @@
     return getRosterPreparationSummaryLocal_(roster);
   };
 
+  // Handle move player to roster.
   const movePlayerToRoster = (playerTagRaw, targetRosterIdRaw) => {
     const rosters = getRosters();
     if (!rosters.length) throw new Error("No roster preview is loaded.");
@@ -1754,6 +1858,7 @@
     applyPreviewMutation(playerTag + " moved to " + targetName + ".");
   };
 
+  // Remove player from preview.
   const removePlayerFromPreview = (playerTagRaw) => {
     const rosters = getRosters();
     if (!rosters.length) throw new Error("No roster preview is loaded.");
@@ -1785,6 +1890,7 @@
     applyPreviewMutation(playerTag + " removed from preview.");
   };
 
+  // Update player info.
   const updatePlayerInfo = (currentTagRaw, draft) => {
     const rosters = getRosters();
     if (!rosters.length) throw new Error("No roster preview is loaded.");
@@ -1844,6 +1950,7 @@
     }
   };
 
+  // Set player swap exclusion flag.
   const setPlayerSwapExclusionFlag = (playerTagRaw, flagName, nextValue) => {
     const playerTag = normalizeTag(playerTagRaw);
     if (!playerTag) throw new Error("Player tag is missing.");
@@ -1869,6 +1976,7 @@
     applyPreviewMutation(playerTag + " " + label + " " + stateLabel + ".");
   };
 
+  // Add player to preview.
   const addPlayerToPreview = (draft) => {
     const rosters = getRosters();
     if (!rosters.length) throw new Error("No roster preview is loaded.");
@@ -1917,6 +2025,7 @@
     applyPreviewMutation(tag + " added to " + targetName + ".");
   };
 
+  // Add roster to preview.
   const addRosterToPreview = (draft) => {
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
       throw new Error("No roster preview is loaded.");
@@ -1952,6 +2061,7 @@
     applyPreviewMutation(title + " added.");
   };
 
+  // Remove roster from preview.
   const removeRosterFromPreview = (rosterIdRaw) => {
     const rosters = getRosters();
     if (!rosters.length) throw new Error("No roster preview is loaded.");
@@ -1971,6 +2081,7 @@
     applyPreviewMutation(rosterLabel + " removed. Publish to apply this change to live data.");
   };
 
+  // Handle move roster in preview.
   const moveRosterInPreview = (rosterIdRaw, directionRaw) => {
     const rosters = getRosters();
     if (!rosters.length) throw new Error("No roster preview is loaded.");
@@ -1996,6 +2107,7 @@
     return true;
   };
 
+  // Handle mk player action button.
   const mkPlayerActionButton = (label, extraClass) => {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -2004,6 +2116,7 @@
     return btn;
   };
 
+  // Handle mk player form row.
   const mkPlayerFormRow = (labelText, fieldNode) => {
     const row = document.createElement("div");
     row.className = "player-admin-row";
@@ -2016,6 +2129,7 @@
     return row;
   };
 
+  // Handle mk note editor.
   const mkNoteEditor = (initialNotes) => {
     const wrap = document.createElement("div");
     wrap.className = "player-admin-notes";
@@ -2023,6 +2137,7 @@
     const list = document.createElement("div");
     list.className = "player-admin-notes-list";
 
+    // Add note row.
     const addNoteRow = (value) => {
       const noteRow = document.createElement("div");
       noteRow.className = "player-admin-note-row";
@@ -2051,6 +2166,7 @@
     wrap.appendChild(list);
     wrap.appendChild(addBtn);
 
+    // Get the normalized note list from the editor.
     const getNotes = () => {
       const inputs = Array.from(list.querySelectorAll('[data-note-input="1"]'));
       return normalizeNotes(inputs.map((x) => x && x.value));
@@ -2059,11 +2175,13 @@
     return { element: wrap, getNotes };
   };
 
+  // Get player admin panel node.
   const getPlayerAdminPanelNode = (actionNode, panelName) => {
     if (!actionNode || !panelName) return null;
     return actionNode.querySelector('[data-player-admin-panel="' + panelName + '"]');
   };
 
+  // Set player admin tray expanded.
   const setPlayerAdminTrayExpanded = (actionNode, expanded) => {
     if (!actionNode) return;
     const isExpanded = !!expanded;
@@ -2082,6 +2200,7 @@
     }
   };
 
+  // Open player admin panel.
   const openPlayerAdminPanel = (actionNode, panelName) => {
     if (!actionNode) return;
     const editPanel = getPlayerAdminPanelNode(actionNode, "edit");
@@ -2104,6 +2223,7 @@
     if (movePanel) movePanel.classList.add("hidden");
   };
 
+  // Open player edit panel.
   const openPlayerEditPanel = (ctx) => {
     const playerTag = normalizeTag(ctx && ctx.tag);
     const rosterId = toStr(ctx && ctx.rosterId).trim();
@@ -2145,6 +2265,7 @@
     if (firstField && typeof firstField.focus === "function") firstField.focus();
   };
 
+  // Build roster action controls.
   const buildRosterActionControls = (ctx) => {
     if (!ctx || !ctx.roster) return null;
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return null;
@@ -2185,6 +2306,7 @@
     return wrap;
   };
 
+  // Build player action controls.
   const buildPlayerActionControls = (ctx) => {
     if (!ctx || !ctx.player) return null;
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return null;
@@ -2216,6 +2338,7 @@
 
     const summaryMeta = document.createElement("span");
     summaryMeta.className = "player-admin-summary-meta";
+    // Add summary pill.
     const addSummaryPill = (text) => {
       const pill = document.createElement("span");
       pill.className = "player-admin-summary-pill";
@@ -2311,6 +2434,7 @@
       const toggleRow = document.createElement("div");
       toggleRow.className = "player-admin-toggle-row";
 
+      // Handle mk swap toggle.
       const mkSwapToggle = (labelText, flagName, enabled) => {
         const btn = mkPlayerActionButton(labelText + ": " + (enabled ? "ON" : "OFF"), "secondary");
         btn.classList.add("player-admin-toggle");
@@ -2482,6 +2606,7 @@
     return wrap;
   };
 
+  // Set the import action status message.
   const setImportActionStatus = (msg, isError) => {
     const el = $("#importActionStatus");
     if (!el) return;
@@ -2489,6 +2614,7 @@
     el.style.color = isError ? "#fca5a5" : "#6b7280";
   };
 
+  // Build import session label.
   const buildImportSessionLabel = (sessionRaw) => {
     const session = sessionRaw && typeof sessionRaw === "object" ? sessionRaw : null;
     if (!session) return "";
@@ -2500,10 +2626,12 @@
     return "previous import session";
   };
 
+  // Clear import load warning.
   const clearImportLoadWarning = () => {
     state.importLoadWarning = null;
   };
 
+  // Set import load failure warning.
   const setImportLoadFailureWarning = (failedFileNameRaw, err) => {
     const failedFileName = toStr(failedFileNameRaw).trim();
     const activeSessionLabel = buildImportSessionLabel(state.importSession);
@@ -2520,6 +2648,7 @@
     };
   };
 
+  // Render import load warning.
   const renderImportLoadWarning = () => {
     const el = $("#importLoadWarning");
     if (!el) return;
@@ -2538,6 +2667,7 @@
     el.classList.remove("hidden");
   };
 
+  // Get import allowed clan keys from UI.
   const getImportAllowedClanKeysFromUi = () => {
     const checks = Array.from(document.querySelectorAll('[data-allowed-clan-checkbox="1"]'));
     return checks
@@ -2546,12 +2676,14 @@
       .filter(Boolean);
   };
 
+  // Handle read import filters from UI.
   const readImportFiltersFromUi = () => ({
     excludeWarOut: !!($("#excludeWarOut") && $("#excludeWarOut").checked),
     requireDiscord: !!($("#requireDiscord") && $("#requireDiscord").checked),
     allowedClanKeys: getImportAllowedClanKeysFromUi(),
   });
 
+  // Get default import filters.
   const getDefaultImportFilters = () => {
     const previous = state.importSession && state.importSession.filters ? state.importSession.filters : {};
     return {
@@ -2561,6 +2693,7 @@
     };
   };
 
+  // Load XLSX import session.
   const loadXlsxImportSession = async (file) => {
     if (!file) throw new Error("No XLSX file selected.");
     const buf = await file.arrayBuffer();
@@ -2613,6 +2746,7 @@
     };
   };
 
+  // Handle align import mapping with preview.
   const alignImportMappingWithPreview = () => {
     if (!state.importSession) return false;
     const session = state.importSession;
@@ -2628,12 +2762,14 @@
     return changed;
   };
 
+  // Handle invalidate import comparison.
   const invalidateImportComparison = (reasonRaw) => {
     if (!state.importSession || !state.importSession.comparison) return;
     state.importSession.stale = true;
     state.importSession.staleReason = toStr(reasonRaw).trim() || "Preview changed. Re-run compare with preview.";
   };
 
+  // Render import summary.
   const renderImportSummary = () => {
     const wrap = $("#importSummaryWrap");
     const linesEl = $("#importSummaryLines");
@@ -2655,6 +2791,7 @@
     wrap.classList.remove("hidden");
     linesEl.textContent = "";
 
+    // Add line.
     const addLine = (text) => {
       const row = document.createElement("div");
       row.textContent = text;
@@ -2706,6 +2843,7 @@
     });
   };
 
+  // Render allowed clans filter.
   const renderAllowedClansFilter = () => {
     const wrap = $("#allowedClansWrap");
     if (!wrap) return;
@@ -2756,12 +2894,14 @@
     }
   };
 
+  // Build roster option label.
   const buildRosterOptionLabel = (roster) => {
     const id = toStr(roster && roster.id).trim();
     const title = toStr(roster && roster.title).trim();
     return title ? (title + " (" + id + ")") : id;
   };
 
+  // Render clan mapping table.
   const renderClanMappingTable = () => {
     const mount = getClanMappingMount();
     if (!mount) return;
@@ -2869,6 +3009,7 @@
     }
   };
 
+  // Refresh import actions UI.
   const refreshImportActionsUi = () => {
     const compareBtn = $("#compareImportBtn");
     const applyBtn = $("#applyImportBtn");
@@ -2899,6 +3040,7 @@
     }
   };
 
+  // Render XLSX meta.
   const renderXlsxMeta = () => {
     const meta = $("#xlsxMeta");
     if (!meta) return;
@@ -2915,6 +3057,7 @@
     meta.textContent = filePrefix + "using sheet '" + (session.sheetName || "first sheet") + "', rows read " + session.totalRowsRead + ", parsed " + parsedCount + ", invalid " + invalidCount + ", blank rows " + ignoredCount + ".";
   };
 
+  // Render import UI.
   const renderImportUi = () => {
     const mappingChanged = alignImportMappingWithPreview();
     if (mappingChanged) {
@@ -2928,6 +3071,7 @@
     refreshImportActionsUi();
   };
 
+  // Handle run import comparison.
   const runImportComparison = async () => {
     if (state.bulkRefreshBusy) {
       throw new Error("Wait for refresh all to finish before running compare.");
@@ -2987,6 +3131,7 @@
     }
   };
 
+  // Apply import comparison.
   const applyImportComparison = async () => {
     if (state.bulkRefreshBusy) {
       throw new Error("Wait for refresh all to finish before applying import updates.");
@@ -3042,6 +3187,7 @@
     }
   };
 
+  // Normalize admin API endpoint.
   const normalizeAdminApiEndpoint = (valueRaw) => {
     const value = toStr(valueRaw).trim();
     if (!value) return "";
@@ -3049,6 +3195,7 @@
     return "";
   };
 
+  // Resolve Script server base URL.
   const resolveScriptServerBaseUrl = () => {
     const value = toStr(
       (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
@@ -3059,15 +3206,18 @@
     return value;
   };
 
+  // Return whether likely worker admin API endpoint.
   const isLikelyWorkerAdminApiEndpoint = (endpointRaw) => {
     const endpoint = toStr(endpointRaw).trim().toLowerCase();
     if (!endpoint) return false;
     return endpoint.indexOf("/api/admin") >= 0;
   };
 
+  // Return whether absolute http endpoint.
   const isAbsoluteHttpEndpoint = (endpointRaw) =>
     /^https?:\/\//i.test(toStr(endpointRaw).trim());
 
+  // Resolve admin API endpoints.
   const resolveAdminApiEndpoints = () => {
     const configured = normalizeAdminApiEndpoint(
       typeof window !== "undefined" && window
@@ -3076,6 +3226,7 @@
     );
     const endpoints = [];
     const seen = Object.create(null);
+    // Push a value only when it is not already present.
     const pushUnique = (endpointRaw) => {
       const endpoint = normalizeAdminApiEndpoint(endpointRaw);
       if (!endpoint) return;
@@ -3089,12 +3240,14 @@
     return endpoints;
   };
 
+  // Create an admin API error.
   const createAdminApiError = (messageRaw, retryableRaw) => {
     const err = new Error(toStr(messageRaw).trim() || "Admin API call failed.");
     err.retryable = !!retryableRaw;
     return err;
   };
 
+  // Handle call admin API endpoint.
   const callAdminApiEndpoint = async (endpoint, methodName, args) => {
     const list = Array.isArray(args) ? args : [];
     let response = null;
@@ -3129,6 +3282,7 @@
       payload = null;
     }
 
+    // Handle infer upstream error.
     const inferUpstreamError = () => {
       const text = toStr(rawText).toLowerCase();
       if (!text) return "";
@@ -3159,10 +3313,12 @@
     return payload.result;
   };
 
+  // Handle run server method via http.
   const runServerMethodViaHttp = async (methodName, args) => {
     const endpoints = resolveAdminApiEndpoints();
     let lastError = null;
     let bestError = null;
+    // Handle error priority.
     const errorPriority = (errRaw) => {
       const msg = toStr(errRaw && errRaw.message).trim().toLowerCase();
       if (!msg) return 0;
@@ -3191,6 +3347,7 @@
     throw new Error("No admin API endpoints are configured.");
   };
 
+  // Handle run server method.
   const runServerMethod = (methodName, args) =>
     new Promise((resolve, reject) => {
       if (window.google && google.script && google.script.run) {
@@ -3211,8 +3368,10 @@
       runServerMethodViaHttp(methodName, args).then(resolve).catch(reject);
     });
 
+  // Load active roster data.
   const loadActiveRosterData = () => runServerMethod("getRosterData", []);
 
+  // Apply server synced preview.
   const applyServerSyncedPreview = (nextRosterData, statusMsg) => {
     if (!nextRosterData || !Array.isArray(nextRosterData.rosters)) {
       throw new Error("Sync returned invalid roster data.");
@@ -3232,6 +3391,7 @@
     if (statusMsg) setStatus(statusMsg);
   };
 
+  // Render connected rosters table.
   const renderConnectedRostersTable = () => {
     const mount = getConnectedRostersMount();
     if (!mount) return;
@@ -3466,6 +3626,7 @@
       statusLine.className = "roster-admin-card__status";
       statusLine.setAttribute("aria-live", "polite");
 
+      // Apply row status.
       const applyRowStatus = () => {
         const saved = state.rosterStatusByRoster[rosterId];
         if (!saved || !saved.msg) {
@@ -3477,6 +3638,7 @@
         statusLine.style.color = saved.isError ? "#fca5a5" : "#94a3b8";
       };
 
+      // Set the row status message.
       const setRowStatus = (msg, isError) => {
         setRosterStatus(rosterId, msg, isError);
         applyRosterStatusToVisibleRow_(rosterId);
@@ -3484,6 +3646,7 @@
       };
       applyRowStatus();
 
+      // Toggle busy state for the current control set.
       const setBusy = (busy) => {
         const disabled = !!busy || state.bulkRefreshBusy;
         moveUpBtn.disabled = disabled || rosterIndex === 0;
@@ -3505,6 +3668,7 @@
         }
       };
 
+      // Handle persist connected tag.
       const persistConnectedTag = () => {
         const normalized = normalizeTag(tagInput.value);
         tagInput.value = normalized;
@@ -3580,6 +3744,7 @@
         renderPreviewFromState();
       });
 
+      // Ensure server ready.
       const ensureServerReady = () => {
         if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
           throw new Error("No roster preview is loaded.");
@@ -3630,6 +3795,7 @@
     }
   };
 
+  // Refresh admin workflow UI.
   const refreshAdminWorkflowUi = () => {
     refreshRefreshAllUi();
     renderConnectedRostersTable();
@@ -3637,6 +3803,7 @@
     applyBenchMarks_();
   };
 
+  // Handle run refresh all.
   const runRefreshAll = async () => {
     if (state.bulkRefreshBusy) {
       throw new Error("Refresh all is already running.");
@@ -3729,6 +3896,7 @@
     }
   };
 
+  // Load active config into preview.
   const loadActiveConfigIntoPreview = async (optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     const silentError = !!options.silentError;
@@ -3773,6 +3941,7 @@
     }
   };
 
+  // Initialize the surrounding UI and bind startup behavior.
   const init = () => {
     window.ROSTER_ROSTER_ACTION_BUILDER = buildRosterActionControls;
     window.ROSTER_PLAYER_ACTION_BUILDER = buildPlayerActionControls;
@@ -3815,6 +3984,7 @@
       };
     }
 
+    // Unlock state.
     const handleUnlock = async () => {
       state.password = toStr($("#pw") && $("#pw").value).trim();
       if (!state.password) {
@@ -3914,6 +4084,7 @@
 
     const pageTitleInput = $("#pageTitle");
     if (pageTitleInput) {
+      // Handle commit page title.
       const commitPageTitle = () => {
         if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return;
         const nextTitle = toStr(pageTitleInput.value).trim() || "Roster Overview";
@@ -3932,6 +4103,7 @@
 
     const excludeWarOutInput = $("#excludeWarOut");
     const requireDiscordInput = $("#requireDiscord");
+    // Handle import filter change.
     const handleImportFilterChange = () => {
       if (!state.importSession) return;
       state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());

@@ -1,5 +1,8 @@
+// Apps Script asset shell for the public Cloudflare client bundle.
+
 const FOLDER_ID = "1NrNOgGhK-hsrF7FPFQ7ck2NT9h6DGidH";
 
+// Handle do get.
 function doGet(e) {
   const asset = (e && e.parameter && e.parameter.asset) ? String(e.parameter.asset) : "";
   if (asset) return serveAsset_(asset);
@@ -8,6 +11,7 @@ function doGet(e) {
     .setTitle("CWL Roster");
 }
 
+// Handle serve asset.
 function serveAsset_(name) {
   const safeName = name.replace(/^[\/\\]+/, "").replace(/\.\./g, "");
   const file = findFileByName_(safeName);
@@ -29,18 +33,21 @@ function serveAsset_(name) {
   return ContentService.createTextOutput(text).setMimeType(mime);
 }
 
+// Find file by name.
 function findFileByName_(filename) {
   const folder = DriveApp.getFolderById(FOLDER_ID);
   const it = folder.getFilesByName(filename);
   return it.hasNext() ? it.next() : null;
 }
 
+// Get asset text.
 function getAssetText_(filename) {
   const file = findFileByName_(filename);
   if (!file) return "";
   return file.getBlob().getDataAsString("UTF-8");
 }
 
+// Render the HTML shell from stored app assets.
 function renderShell_() {
   // Read the HTML/CSS fragments from Drive at request time so edits take effect immediately.
   const appHtml = getAssetText_("app.html");

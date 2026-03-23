@@ -1,5 +1,6 @@
 // Bench planner scoring and optimization logic.
 
+// Get bench planner config.
 function getBenchPlannerConfig_() {
 	const out = {};
 	const keys = Object.keys(CWL_BENCH_PLANNER_CONFIG);
@@ -10,12 +11,14 @@ function getBenchPlannerConfig_() {
 	return out;
 }
 
+// Compare tags asc.
 function compareTagsAsc_(a, b) {
 	const left = String(a == null ? "" : a);
 	const right = String(b == null ? "" : b);
 	return left < right ? -1 : left > right ? 1 : 0;
 }
 
+// Handle clamp number.
 function clampNumber_(value, minValue, maxValue) {
 	const n = Number(value);
 	if (!isFinite(n)) return Number(minValue);
@@ -24,6 +27,7 @@ function clampNumber_(value, minValue, maxValue) {
 	return n;
 }
 
+// Normalize unit metric.
 function normalizeUnitMetric_(value, fallbackValue) {
 	const fallback = clampNumber_(fallbackValue, 0, 1);
 	const n = Number(value);
@@ -31,6 +35,7 @@ function normalizeUnitMetric_(value, fallbackValue) {
 	return clampNumber_(n, 0, 1);
 }
 
+// Handle shrink toward.
 function shrinkToward_(observedValue, priorMean, sampleSize, priorWeight) {
 	const observed = Number(observedValue);
 	const prior = Number(priorMean);
@@ -43,6 +48,7 @@ function shrinkToward_(observedValue, priorMean, sampleSize, priorWeight) {
 	return (w * safePrior + n * safeObserved) / denom;
 }
 
+// Deduplicate tag list.
 function dedupeTagList_(tagsRaw) {
 	const list = Array.isArray(tagsRaw) ? tagsRaw : [];
 	const out = [];
@@ -56,6 +62,7 @@ function dedupeTagList_(tagsRaw) {
 	return out;
 }
 
+// Deduplicate string list.
 function dedupeStringList_(listRaw, limit) {
 	const list = Array.isArray(listRaw) ? listRaw : [];
 	const maxLen = Math.max(0, toNonNegativeInt_(limit || 0));
@@ -71,6 +78,7 @@ function dedupeStringList_(listRaw, limit) {
 	return out;
 }
 
+// Handle list to tag set.
 function listToTagSet_(listRaw) {
 	const tags = Array.isArray(listRaw) ? listRaw : [];
 	const out = {};
@@ -82,6 +90,7 @@ function listToTagSet_(listRaw) {
 	return out;
 }
 
+// Handle tag list diff.
 function tagListDiff_(leftListRaw, rightSetRaw) {
 	const leftList = Array.isArray(leftListRaw) ? leftListRaw : [];
 	const rightSet = rightSetRaw && typeof rightSetRaw === "object" ? rightSetRaw : {};
@@ -96,6 +105,7 @@ function tagListDiff_(leftListRaw, rightSetRaw) {
 	return out;
 }
 
+// Handle safe round number.
 function safeRoundNumber_(value, digits) {
 	const n = Number(value);
 	if (!isFinite(n)) return 0;
@@ -103,6 +113,7 @@ function safeRoundNumber_(value, digits) {
 	return Math.round(n * p) / p;
 }
 
+// Compute expected stars per start.
 function computeExpectedStarsPerStart_(playerStats, config) {
 	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
 	const priorMean = isFinite(Number(config && config.priorMeanStarsPerStart)) ? Number(config.priorMeanStarsPerStart) : 2.0;
@@ -117,6 +128,7 @@ function computeExpectedStarsPerStart_(playerStats, config) {
 	return clampNumber_(raw, minExpected, maxExpected);
 }
 
+// Compute starts needed for reward.
 function computeStartsNeededForReward_(playerStats, remainingDays, config) {
 	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
 	const starsTotal = toNonNegativeInt_(stats.starsTotal);
@@ -136,6 +148,7 @@ function computeStartsNeededForReward_(playerStats, remainingDays, config) {
 	};
 }
 
+// Compute strength score.
 function computeStrengthScore_(playerStats, planningContext, config) {
 	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
 	const ctx = planningContext && typeof planningContext === "object" ? planningContext : {};
@@ -182,6 +195,7 @@ function computeStrengthScore_(playerStats, planningContext, config) {
 	};
 }
 
+// Build CWL season context.
 function buildCwlSeasonContext_(roster, config, optionsRaw) {
 	const rosterSafe = roster && typeof roster === "object" ? roster : {};
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : null;
@@ -329,6 +343,7 @@ function buildCwlSeasonContext_(roster, config, optionsRaw) {
 	}
 }
 
+// Build CWL planning snapshot.
 function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
 	const rosterSafe = roster && typeof roster === "object" ? roster : {};
 	const season = seasonContext && typeof seasonContext === "object" ? seasonContext : {};
@@ -442,6 +457,7 @@ function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
 	};
 }
 
+// Parse planner state key.
 function parsePlannerStateKey_(stateKey) {
 	const parts = String(stateKey == null ? "" : stateKey).split("|");
 	const starts = Math.max(0, parseInt(parts[0] || "0", 10) || 0);
@@ -449,6 +465,7 @@ function parsePlannerStateKey_(stateKey) {
 	return { starts: starts, coverage: coverage };
 }
 
+// Compare planner state keys.
 function comparePlannerStateKeys_(a, b) {
 	const pa = parsePlannerStateKey_(a);
 	const pb = parsePlannerStateKey_(b);
@@ -457,6 +474,7 @@ function comparePlannerStateKeys_(a, b) {
 	return compareTagsAsc_(String(a), String(b));
 }
 
+// Handle calculate covered starts.
 function calculateCoveredStarts_(players, startCountsByTag) {
 	const list = Array.isArray(players) ? players : [];
 	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
@@ -470,6 +488,7 @@ function calculateCoveredStarts_(players, startCountsByTag) {
 	return covered;
 }
 
+// Build day zero target lineup.
 function buildDayZeroTargetLineup_(snapshot, remainingByTag) {
 	const remaining = remainingByTag && typeof remainingByTag === "object" ? remainingByTag : {};
 	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
@@ -511,6 +530,7 @@ function buildDayZeroTargetLineup_(snapshot, remainingByTag) {
 	return candidates.slice(0, mainSize).map((p) => p.tag);
 }
 
+// Build day assignments from start counts.
 function buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag) {
 	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
 	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
@@ -556,6 +576,7 @@ function buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag) {
 	return assignments;
 }
 
+// Handle optimize season plan by dynamic programming.
 function optimizeSeasonPlanByDynamicProgramming_(snapshot, coverageTarget, config) {
 	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
 	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
@@ -641,6 +662,7 @@ function optimizeSeasonPlanByDynamicProgramming_(snapshot, coverageTarget, confi
 	};
 }
 
+// Handle boost fallback coverage toward target.
 function boostFallbackCoverageTowardTarget_(players, startCountsByTag, coverageTarget, days) {
 	const list = Array.isArray(players) ? players : [];
 	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
@@ -701,6 +723,7 @@ function boostFallbackCoverageTowardTarget_(players, startCountsByTag, coverageT
 	}
 }
 
+// Build fallback season lineup plan.
 function buildFallbackSeasonLineupPlan_(snapshot, coverageTarget) {
 	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
 	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
@@ -770,6 +793,7 @@ function buildFallbackSeasonLineupPlan_(snapshot, coverageTarget) {
 	};
 }
 
+// Build emergency season plan.
 function buildEmergencySeasonPlan_(snapshot) {
 	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
 	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
@@ -807,6 +831,7 @@ function buildEmergencySeasonPlan_(snapshot) {
 	};
 }
 
+// Handle solve season lineup plan.
 function solveSeasonLineupPlan_(snapshot, config) {
 	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
 	const remainingEditableDays = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
@@ -871,6 +896,7 @@ function solveSeasonLineupPlan_(snapshot, config) {
 	return plan;
 }
 
+// Compare actionable removal priority.
 function compareActionableRemovalPriority_(tagA, tagB, snapshot, forcedKeepSet) {
 	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
 	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
@@ -891,6 +917,7 @@ function compareActionableRemovalPriority_(tagA, tagB, snapshot, forcedKeepSet) 
 	return compareTagsAsc_(tagA, tagB);
 }
 
+// Handle order target main tags.
 function orderTargetMainTags_(selectedSet, snapshot) {
 	const set = selectedSet && typeof selectedSet === "object" ? selectedSet : {};
 	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
@@ -920,6 +947,7 @@ function orderTargetMainTags_(selectedSet, snapshot) {
 	return out;
 }
 
+// Build actionable target main tags.
 function buildActionableTargetMainTags_(snapshot, idealTargetTagsRaw) {
 	const idealTargetTags = dedupeTagList_(idealTargetTagsRaw);
 	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
@@ -1002,6 +1030,7 @@ function buildActionableTargetMainTags_(snapshot, idealTargetTagsRaw) {
 	};
 }
 
+// Handle reason rank for code.
 function reasonRankForCode_(code) {
 	const c = String(code == null ? "" : code);
 	if (c === "reward_critical") return 4;
@@ -1012,6 +1041,7 @@ function reasonRankForCode_(code) {
 	return -1;
 }
 
+// Build swap explanation.
 function buildSwapExplanation_(swapInPlayer, benchOutPlayer, config) {
 	const inPlayer = swapInPlayer && typeof swapInPlayer === "object" ? swapInPlayer : {};
 	const outPlayer = benchOutPlayer && typeof benchOutPlayer === "object" ? benchOutPlayer : {};
@@ -1052,6 +1082,7 @@ function buildSwapExplanation_(swapInPlayer, benchOutPlayer, config) {
 	};
 }
 
+// Build pairs from delta.
 function buildPairsFromDelta_(swapInTagsRaw, benchOutTagsRaw, snapshot, config) {
 	const swapInTags = dedupeTagList_(swapInTagsRaw);
 	const benchOutTags = dedupeTagList_(benchOutTagsRaw);
@@ -1118,6 +1149,7 @@ function buildPairsFromDelta_(swapInTagsRaw, benchOutTagsRaw, snapshot, config) 
 	return pairs;
 }
 
+// Derive next day swap suggestions from plan.
 function deriveNextDaySwapSuggestionsFromPlan_(roster, plan, snapshot, config) {
 	const currentMainTags = dedupeTagList_(snapshot && snapshot.currentMainTags);
 	const currentMainSet = listToTagSet_(currentMainTags);
@@ -1150,6 +1182,7 @@ function deriveNextDaySwapSuggestionsFromPlan_(roster, plan, snapshot, config) {
 	};
 }
 
+// Build bench suggestion summary.
 function buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, config) {
 	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
 	const rewardCriticalPlayerTags = players.filter((p) => p.rewardCritical).map((p) => p.tag);
@@ -1198,6 +1231,7 @@ function buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, confi
 	};
 }
 
+// Compute bench suggestions core.
 function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const ctx = findRosterById_(rosterData, rosterId);

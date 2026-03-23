@@ -1,5 +1,6 @@
 // Request entrypoints and response helpers.
 
+// Handle do get.
 function doGet(e) {
 	const p = e && e.parameter ? e.parameter : {};
 	const asset = p.asset ? String(p.asset) : "";
@@ -38,6 +39,7 @@ function doGet(e) {
  * Accepts JSON: { method: string, args: any[] } and returns { ok, result|error }.
  */
 
+// Handle do post.
 function doPost(e) {
 	let payload = {};
 	try {
@@ -65,6 +67,7 @@ function doPost(e) {
 	}
 }
 
+// Parse admin API payload.
 function parseAdminApiPayload_(e) {
 	const raw = e && e.postData && typeof e.postData.contents === "string" ? e.postData.contents : "";
 	if (!raw) return {};
@@ -80,6 +83,7 @@ function parseAdminApiPayload_(e) {
 	return parsed;
 }
 
+// Create an admin API JSON response.
 function createAdminApiJsonResponse_(payload) {
 	const safePayload = payload && typeof payload === "object" ? payload : { ok: false, error: "Invalid response payload." };
 	return ContentService
@@ -87,6 +91,7 @@ function createAdminApiJsonResponse_(payload) {
 		.setMimeType(ContentService.MimeType.JSON);
 }
 
+// Build public site redirect HTML.
 function buildPublicSiteRedirectHtml_(targetUrlRaw) {
 	const targetUrl = String(targetUrlRaw == null ? "" : targetUrlRaw).trim() || "/";
 	const escapedTargetUrl = escapeHtmlAttribute_(targetUrl);
@@ -117,6 +122,7 @@ function buildPublicSiteRedirectHtml_(targetUrlRaw) {
 	].join("\n");
 }
 
+// Build public site redirect URL.
 function buildPublicSiteRedirectUrl_(publicBaseUrlRaw, queryStringRaw) {
 	const baseUrl = String(publicBaseUrlRaw == null ? "" : publicBaseUrlRaw).trim().replace(/[\/\\]+$/, "");
 	const queryString = String(queryStringRaw == null ? "" : queryStringRaw).replace(/^\?+/, "");
@@ -125,6 +131,7 @@ function buildPublicSiteRedirectUrl_(publicBaseUrlRaw, queryStringRaw) {
 	return targetBase + "?" + queryString;
 }
 
+// Build Script asset URL.
 function buildScriptAssetUrl_(baseUrlRaw, assetNameRaw) {
 	const baseUrl = String(baseUrlRaw == null ? "" : baseUrlRaw).trim();
 	const assetName = String(assetNameRaw == null ? "" : assetNameRaw)
@@ -136,6 +143,7 @@ function buildScriptAssetUrl_(baseUrlRaw, assetNameRaw) {
 	return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
 }
 
+// Handle escape HTML attribute.
 function escapeHtmlAttribute_(value) {
 	return String(value == null ? "" : value)
 		.replace(/&/g, "&amp;")
@@ -144,10 +152,12 @@ function escapeHtmlAttribute_(value) {
 		.replace(/>/g, "&gt;");
 }
 
+// Handle escape inline Script text.
 function escapeInlineScriptText_(value) {
 	return String(value == null ? "" : value).replace(/<\/script/gi, "<\\/script");
 }
 
+// Handle error message.
 function errorMessage_(err) {
 	return err && (err.message || err.stack) ? err.message || err.stack : String(err);
 }

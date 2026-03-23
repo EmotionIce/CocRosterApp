@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- Apps Script admin shell with inline admin-only layout and styling overrides. -->
 <html>
 
 <head>
@@ -1324,7 +1325,8 @@
       </a>
     </header>
 
-    <section id="unlockCard" class="card admin-auth-card">
+<!-- Authentication gate shown before the admin UI unlocks. -->
+<section id="unlockCard" class="card admin-auth-card">
       <div class="admin-auth-grid">
         <label class="admin-field" for="pw">
           <span class="admin-field-label">Admin password</span>
@@ -1392,7 +1394,8 @@
         </button>
       </nav>
 
-      <section id="adminTabRosters" class="admin-tab-panel card" role="tabpanel" aria-labelledby="adminTabBtnRosters">
+<!-- Primary roster-management tab content. -->
+<section id="adminTabRosters" class="admin-tab-panel card" role="tabpanel" aria-labelledby="adminTabBtnRosters">
         <div class="admin-section-head">
           <h2>Rosters</h2>
           <p class="small muted">
@@ -1402,7 +1405,8 @@
         <div id="connectedRostersList" class="roster-card-list"></div>
       </section>
 
-      <section id="adminTabImport" class="admin-tab-panel card hidden" role="tabpanel"
+<!-- Spreadsheet import workflow and diff tools. -->
+<section id="adminTabImport" class="admin-tab-panel card hidden" role="tabpanel"
         aria-labelledby="adminTabBtnImport">
         <div class="admin-section-head admin-section-head--row">
           <div>
@@ -1471,7 +1475,8 @@
         </div>
       </section>
 
-      <section id="adminTabPreview" class="admin-tab-panel card hidden" role="tabpanel"
+<!-- Draft preview and publish controls for staged roster edits. -->
+<section id="adminTabPreview" class="admin-tab-panel card hidden" role="tabpanel"
         aria-labelledby="adminTabBtnPreview">
         <div class="admin-section-head">
           <h2>Preview</h2>
@@ -1598,7 +1603,8 @@
     window.ROSTER_STATIC_BASE_URL = <?!= JSON.stringify(staticBaseUrl) ?>;
   </script>
 
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- External XLSX parser plus the shared roster/admin clients. -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="<?= staticBaseUrl ?>generator.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
   <script src="<?= staticBaseUrl ?>client.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
   <script src="<?= staticBaseUrl ?>admin.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>

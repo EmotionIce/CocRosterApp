@@ -1,3 +1,4 @@
+# Cache policy overrides for public HTML, scripts, styles, and immutable assets.
 /
   Cache-Control: public, max-age=0, must-revalidate
 

@@ -1,4 +1,6 @@
+/* Shared Cloudflare Pages styles for the public shell, landing experience, and admin overlays. */
 :root{
+  /* Core surface, glass, and motion variables shared across the site. */
   --bg:#0b0f17;
   --surface:#111827;
   --surface2:#0f172a;
@@ -86,7 +88,7 @@ html{
   scroll-behavior: smooth;
 }
 
-/* fixed glow background (no tiling seams on long pages) */
+/* Fixed glow background that stays seamless on long pages. */
 body::before {
   content: "";
   position: fixed;
@@ -100,7 +102,7 @@ body::before {
   background-repeat: no-repeat;
 }
 
-/* subtle grain to reduce color banding */
+/* Subtle grain layer that reduces color banding in the gradients. */
 body::after{
   content:"";
   position: fixed;

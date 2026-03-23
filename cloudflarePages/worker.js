@@ -1,6 +1,9 @@
+// Cloudflare Worker routing and Apps Script fallback helpers.
+
 const FALLBACK_APPS_SCRIPT_EXEC_URL =
   "https://script.google.com/macros/s/AKfycbyIrN6gBS2DkhJwO6NzdtnHPEBQJCCkOtiPOM9EslkQ6AaQjXmFFDGGVn_sENGKxEwuhg/exec";
 
+// Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
   const value = String(valueRaw == null ? "" : valueRaw).trim();
   if (!value) return "";
@@ -8,6 +11,7 @@ const normalizeHttpUrl = (valueRaw) => {
   return value.replace(/[\/\\]+$/, "");
 };
 
+// Resolve Apps Script exec URL.
 const resolveAppsScriptExecUrl = (envRaw) => {
   const env = envRaw && typeof envRaw === "object" ? envRaw : {};
   const configured = normalizeHttpUrl(
@@ -19,6 +23,7 @@ const resolveAppsScriptExecUrl = (envRaw) => {
   return base + "/exec";
 };
 
+// Handle JSON response.
 const jsonResponse = (status, payload) =>
   new Response(JSON.stringify(payload), {
     status,
@@ -28,11 +33,13 @@ const jsonResponse = (status, payload) =>
     },
   });
 
+// Return whether admin API path.
 const isAdminApiPath = (pathnameRaw) => {
   const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
   return pathname === "/api/admin" || pathname === "/api/admin/";
 };
 
+// Return whether admin page path.
 const isAdminPagePath = (pathnameRaw) => {
   const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
   return (
@@ -43,6 +50,7 @@ const isAdminPagePath = (pathnameRaw) => {
   );
 };
 
+// Return whether admin page query.
 const isAdminPageQuery = (urlRaw) => {
   const url = urlRaw && typeof urlRaw === "object" ? urlRaw : null;
   if (!url) return false;
@@ -52,6 +60,7 @@ const isAdminPageQuery = (urlRaw) => {
   return page === "admin";
 };
 
+// Handle admin API.
 const handleAdminApi = async (request, env) => {
   const method = String(request.method || "").toUpperCase();
   if (method === "OPTIONS") {
@@ -117,6 +126,7 @@ const handleAdminApi = async (request, env) => {
   }
 };
 
+// Create an asset request.
 const createAssetRequest = (request, pathnameRaw) => {
   const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
   if (!pathname) return request;
@@ -125,6 +135,7 @@ const createAssetRequest = (request, pathnameRaw) => {
   return new Request(rewrittenUrl.toString(), request);
 };
 
+// Handle serve static asset.
 const serveStaticAsset = (request, env) => {
   if (!env || !env.ASSETS || typeof env.ASSETS.fetch !== "function") {
     return new Response("ASSETS binding is missing.", { status: 500 });

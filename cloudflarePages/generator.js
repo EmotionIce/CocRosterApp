@@ -1,9 +1,16 @@
+// Spreadsheet import parsing and roster generation helpers for the admin UI.
+
 (() => {
+  // Convert a value to a string safely.
   const toStr = (v) => (v == null ? "" : String(v));
+  // Return whether a value is a plain object.
   const isObj = (v) => v != null && typeof v === "object" && !Array.isArray(v);
+  // Normalize whitespace.
   const normalizeWhitespace = (raw) => toStr(raw).replace(/\s+/g, " ").trim();
+  // Normalize column key.
   const normalizeColumnKey = (raw) => toStr(raw).trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 
+  // Build column lookup.
   const buildColumnLookup = (row) => {
     const out = {};
     if (!row || typeof row !== "object") return out;
@@ -16,6 +23,7 @@
     return out;
   };
 
+  // Pick the first matching property from a row object.
   const pick = (row, names) => {
     if (!row || typeof row !== "object") return undefined;
 
@@ -31,6 +39,7 @@
     return undefined;
   };
 
+  // Pick the first present, non-empty property from a row object.
   const pickFirstNonEmpty = (row, names) => {
     let firstPresent;
     for (const name of names) {
@@ -42,15 +51,19 @@
     return firstPresent;
   };
 
+  // Normalize tag.
   const normalizeTag = (tag) => {
     const t = normalizeWhitespace(tag).toUpperCase();
     if (!t) return "";
     return t.startsWith("#") ? t : ("#" + t);
   };
 
+  // Normalize clan key.
   const normalizeClanKey = (clan) => normalizeWhitespace(clan).toUpperCase();
+  // Normalize lookup key.
   const normalizeLookupKey = (text) => normalizeWhitespace(text).toUpperCase().replace(/[^A-Z0-9]/g, "");
 
+  // Parse int strict.
   const parseIntStrict = (v) => {
     if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
     const s = normalizeWhitespace(v);
@@ -67,6 +80,7 @@
     return Number.isFinite(n) ? n : null;
   };
 
+  // Normalize war pref.
   const normalizeWarPref = (v) => {
     const s = normalizeWhitespace(v).toLowerCase();
     if (!s) return "unknown";
@@ -101,6 +115,7 @@
     "missing": true,
   };
 
+  // Sanitize name candidate.
   const sanitizeNameCandidate = (raw) => {
     const text = normalizeWhitespace(raw);
     if (!text) return "";
@@ -108,6 +123,7 @@
     return NAME_PLACEHOLDERS[key] ? "" : text;
   };
 
+  // Sanitize discord candidate.
   const sanitizeDiscordCandidate = (raw) => {
     const text = normalizeWhitespace(raw);
     if (!text) return "";
@@ -115,8 +131,10 @@
     return DISCORD_PLACEHOLDERS[key] ? "" : text;
   };
 
+  // Return whether non empty profile value.
   const isNonEmptyProfileValue = (value) => !!normalizeWhitespace(value);
 
+  // Ensure roster arrays.
   const ensureRosterArrays = (roster) => {
     if (!roster || typeof roster !== "object") return;
     if (!Array.isArray(roster.main)) roster.main = [];
@@ -124,8 +142,10 @@
     if (!Array.isArray(roster.missing)) roster.missing = [];
   };
 
+  // Deep-clone a JSON-safe value.
   const cloneJson = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
 
+  // Parse XLSX rows tolerant.
   const parseXlsxRowsTolerant = (rows) => {
     if (!Array.isArray(rows)) throw new Error("XLSX rows must be an array.");
 
@@ -214,6 +234,7 @@
     };
   };
 
+  // Extract imported clan values.
   const extractImportedClanValues = (accountsRaw) => {
     const accounts = Array.isArray(accountsRaw) ? accountsRaw : [];
     const byKey = {};
@@ -254,6 +275,7 @@
     return entries;
   };
 
+  // Build roster metadata.
   const buildRosterMetadata = (rosterData) => {
     const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
     const byId = {};
@@ -271,6 +293,7 @@
     return { byId, list };
   };
 
+  // Handle suggest clan mappings.
   const suggestClanMappings = (args) => {
     const input = isObj(args) ? args : {};
     const importedClanValues = Array.isArray(input.importedClanValues) ? input.importedClanValues : [];
@@ -321,6 +344,7 @@
     return mapping;
   };
 
+  // Normalize import filters.
   const normalizeImportFilters = (filtersRaw) => {
     const filters = isObj(filtersRaw) ? filtersRaw : {};
     const allowed = Array.isArray(filters.allowedClanKeys)
@@ -334,6 +358,7 @@
     };
   };
 
+  // Normalize import mapping.
   const normalizeImportMapping = (mappingRaw, importedClanValues, rosterData) => {
     const mapping = isObj(mappingRaw) ? mappingRaw : {};
     const imported = Array.isArray(importedClanValues) ? importedClanValues : [];
@@ -349,11 +374,13 @@
     return out;
   };
 
+  // Build preview tag index.
   const buildPreviewTagIndex = (rosterData) => {
     const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
     const byTag = {};
     const duplicates = [];
 
+    // Ingest one item into the current accumulator or index.
     const ingest = (playerRaw, rosterId, rosterTitle, role, rosterRef) => {
       const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
       const tag = normalizeTag(player.tag);
@@ -386,6 +413,7 @@
     return { byTag, duplicates };
   };
 
+  // Build safe matched updates.
   const buildSafeMatchedUpdates = (existingPlayerRaw, importedAccountRaw) => {
     const existingPlayer = existingPlayerRaw && typeof existingPlayerRaw === "object" ? existingPlayerRaw : {};
     const imported = importedAccountRaw && typeof importedAccountRaw === "object" ? importedAccountRaw : {};
@@ -414,6 +442,7 @@
     return updates;
   };
 
+  // Build import comparison.
   const buildImportComparison = (args) => {
     const input = isObj(args) ? args : {};
     const rosterData = input.rosterData;
@@ -605,6 +634,7 @@
     };
   };
 
+  // Apply import comparison.
   const applyImportComparison = (args) => {
     const input = isObj(args) ? args : {};
     const rosterData = input.rosterData;

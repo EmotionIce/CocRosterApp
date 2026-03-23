@@ -1,5 +1,6 @@
 // Asset/media serving and cache helpers.
 
+// Get static asset version.
 function getStaticAssetVersion_() {
 	if (staticAssetVersionCache_ !== null) return staticAssetVersionCache_;
 	let configuredVersion = "";
@@ -17,6 +18,7 @@ function getStaticAssetVersion_() {
 	return version;
 }
 
+// Build static asset URL.
 function buildStaticAssetUrl_(relativePathRaw, versionRaw) {
 	const baseUrl = String(STATIC_ASSET_BASE_URL == null ? "" : STATIC_ASSET_BASE_URL).trim().replace(/[\/\\]+$/, "");
 	const relativePath = String(relativePathRaw == null ? "" : relativePathRaw)
@@ -34,6 +36,7 @@ function buildStaticAssetUrl_(relativePathRaw, versionRaw) {
 	return url;
 }
 
+// Get town hall icon data.
 function getTownHallIconData(levelRaw) {
 	const level = toNonNegativeInt_(levelRaw);
 	if (level < 1 || level > 18) {
@@ -74,6 +77,7 @@ function getTownHallIconData(levelRaw) {
 	return payload;
 }
 
+// Normalize image asset path.
 function normalizeImageAssetPath_(assetPathRaw) {
 	return String(assetPathRaw == null ? "" : assetPathRaw)
 		.trim()
@@ -83,6 +87,7 @@ function normalizeImageAssetPath_(assetPathRaw) {
 		.replace(/^drive\//i, "");
 }
 
+// Handle pick most recently updated file.
 function pickMostRecentlyUpdatedFile_(filesRaw) {
 	const files = Array.isArray(filesRaw) ? filesRaw : [];
 	let newest = null;
@@ -99,6 +104,7 @@ function pickMostRecentlyUpdatedFile_(filesRaw) {
 	return newest;
 }
 
+// Find image asset file.
 function findImageAssetFile_(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	if (!safeAssetPath) return { assetPath: "", file: null };
@@ -106,6 +112,7 @@ function findImageAssetFile_(assetPathRaw) {
 	const baseName = safeAssetPath.split(/[\/\\]/).pop() || safeAssetPath;
 	const pathCandidates = [];
 	const seenCandidates = {};
+	// Push path candidate.
 	const pushPathCandidate = (valueRaw) => {
 		const value = normalizeImageAssetPath_(valueRaw);
 		if (!value || seenCandidates[value]) return;
@@ -135,17 +142,20 @@ function findImageAssetFile_(assetPathRaw) {
 	return { assetPath: safeAssetPath, file: null };
 }
 
+// Return whether supported media asset extension.
 function isSupportedMediaAssetExtension_(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	return /\.(gif|png|jpe?g|we?bp|webm|mp4|ogv)$/i.test(safeAssetPath);
 }
 
+// Return whether supported media mime type.
 function isSupportedMediaMimeType_(mimeTypeRaw) {
 	const mimeType = String(mimeTypeRaw == null ? "" : mimeTypeRaw).trim().toLowerCase();
 	if (!mimeType) return false;
 	return String(mimeType).indexOf("image/") === 0 || String(mimeType).indexOf("video/") === 0;
 }
 
+// Get media asset data.
 function getMediaAssetData(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	if (!safeAssetPath) {
@@ -171,6 +181,7 @@ function getMediaAssetData(assetPathRaw) {
 	return payload;
 }
 
+// Get image asset data.
 function getImageAssetData(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	if (!safeAssetPath) {
@@ -199,6 +210,7 @@ function getImageAssetData(assetPathRaw) {
 	return payload;
 }
 
+// Normalize league family key.
 function normalizeLeagueFamilyKey_(value) {
 	const raw = String(value == null ? "" : value)
 		.trim()
@@ -208,6 +220,7 @@ function normalizeLeagueFamilyKey_(value) {
 	return normalized.replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
 }
 
+// Normalize league match text.
 function normalizeLeagueMatchText_(value) {
 	const raw = String(value == null ? "" : value)
 		.trim()
@@ -221,11 +234,14 @@ function normalizeLeagueMatchText_(value) {
 		.trim();
 }
 
+// Resolve home league asset family.
 function resolveHomeLeagueAssetFamily_(leagueNameRaw) {
 	const text = normalizeLeagueMatchText_(leagueNameRaw);
 	const compact = normalizeLeagueFamilyKey_(leagueNameRaw);
 	if (!text) return "";
+	// Return whether word.
 	const hasWord = (word) => new RegExp("(^|\\s)" + String(word) + "(\\s|$)").test(text);
+	// Return whether compact.
 	const hasCompact = (fragment) => compact.indexOf(String(fragment)) >= 0;
 	if (hasWord("unranked")) return "unranked";
 	if (hasWord("skeleton")) return "skeleton";
@@ -243,6 +259,7 @@ function resolveHomeLeagueAssetFamily_(leagueNameRaw) {
 	return "";
 }
 
+// Get home league asset path.
 function getHomeLeagueAssetPath_(leagueNameRaw) {
 	const family = resolveHomeLeagueAssetFamily_(leagueNameRaw);
 	if (family === "unranked") return "assets/icons/league-unranked.webp";
@@ -261,6 +278,7 @@ function getHomeLeagueAssetPath_(leagueNameRaw) {
 	return "";
 }
 
+// Get league icon data.
 function getLeagueIconData(leagueNameRaw) {
 	const leagueName = String(leagueNameRaw == null ? "" : leagueNameRaw).trim();
 	const family = resolveHomeLeagueAssetFamily_(leagueName);
@@ -287,6 +305,7 @@ function getLeagueIconData(leagueNameRaw) {
 	return payload;
 }
 
+// Handle serve asset.
 function serveAsset_(name) {
 	const safeName = String(name)
 		.replace(/^[\/\\]+/, "")
@@ -305,6 +324,7 @@ function serveAsset_(name) {
 	}
 }
 
+// Handle serve media asset data.
 function serveMediaAssetData_(assetPathRaw) {
 	const safeAssetPath = normalizeImageAssetPath_(assetPathRaw);
 	return ContentService.createTextOutput(
@@ -319,10 +339,12 @@ function serveMediaAssetData_(assetPathRaw) {
 	).setMimeType(ContentService.MimeType.JSON);
 }
 
+// Handle serve image asset data.
 function serveImageAssetData_(assetPathRaw) {
 	return serveMediaAssetData_(assetPathRaw);
 }
 
+// Get asset text.
 function getAssetText_(filename) {
 	const safeFilename = String(filename == null ? "" : filename).trim();
 	if (!safeFilename) return "";
@@ -353,6 +375,7 @@ function getAssetText_(filename) {
 	return "";
 }
 
+// Get Script cache safe.
 function getScriptCacheSafe_() {
 	try {
 		return CacheService.getScriptCache();
@@ -362,6 +385,7 @@ function getScriptCacheSafe_() {
 	}
 }
 
+// Handle read string from cache.
 function readStringFromCache_(cache, key) {
 	if (!cache || !key) return null;
 	try {
@@ -373,6 +397,7 @@ function readStringFromCache_(cache, key) {
 	}
 }
 
+// Handle write string to cache.
 function writeStringToCache_(cache, key, value, ttlSeconds) {
 	if (!cache || !key || value == null) return;
 	const ttl = Math.max(1, Number(ttlSeconds) || 0);
@@ -383,6 +408,7 @@ function writeStringToCache_(cache, key, value, ttlSeconds) {
 	}
 }
 
+// Handle maybe cache text.
 function maybeCacheText_(cache, key, textRaw, ttlSeconds, optionsRaw) {
 	if (!cache || !key || textRaw == null) return false;
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -411,6 +437,7 @@ function maybeCacheText_(cache, key, textRaw, ttlSeconds, optionsRaw) {
 	}
 }
 
+// Remove string from cache.
 function removeStringFromCache_(cache, key) {
 	if (!cache || !key) return;
 	try {
@@ -420,10 +447,12 @@ function removeStringFromCache_(cache, key) {
 	}
 }
 
+// Build asset text cache key.
 function buildAssetTextCacheKey_(filename) {
 	return "assetText:" + ASSET_TEXT_CACHE_VERSION + ":" + encodeURIComponent(String(filename == null ? "" : filename));
 }
 
+// Get asset text cache ttl seconds.
 function getAssetTextCacheTtlSeconds_(filename) {
 	const lower = String(filename == null ? "" : filename)
 		.trim()
@@ -432,6 +461,7 @@ function getAssetTextCacheTtlSeconds_(filename) {
 	return ASSET_TEXT_CACHE_TTL_STATIC_SECONDS;
 }
 
+// Handle infer asset mime type.
 function inferAssetMimeType_(filename, providedMimeType) {
 	const mimeType = String(providedMimeType || "").trim().toLowerCase();
 	if (mimeType && mimeType !== "application/octet-stream") return mimeType;

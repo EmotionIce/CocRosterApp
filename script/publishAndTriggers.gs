@@ -1,5 +1,6 @@
 // Publish flow and auto-refresh trigger orchestration.
 
+// Handle write published roster data.
 function writePublishedRosterData_(rosterDataRaw) {
 	const publishedAt = new Date().toISOString();
 	let validationStepLabel = "prepare publish payload";
@@ -170,6 +171,7 @@ function writePublishedRosterData_(rosterDataRaw) {
 	}
 }
 
+// Handle write auto refreshed active roster data.
 function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterDataRaw) {
 	const sourceSnapshot = sourceSnapshotRaw && typeof sourceSnapshotRaw === "object" ? sourceSnapshotRaw : readActiveRosterSnapshot_();
 	const sourceData = validateRosterData_(sourceSnapshot.rosterData);
@@ -229,6 +231,7 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 	};
 }
 
+// Build auto refresh summary.
 function buildAutoRefreshSummary_(runResult, writeResult) {
 	const run = runResult && typeof runResult === "object" ? runResult : {};
 	const write = writeResult && typeof writeResult === "object" ? writeResult : {};
@@ -241,6 +244,7 @@ function buildAutoRefreshSummary_(runResult, writeResult) {
 	return baseSummary + " wrote " + rostersWritten + " roster(s).";
 }
 
+// Set auto refresh run result.
 function setAutoRefreshRunResult_(statusRaw, summaryRaw, errorRaw, issueCountRaw, issueSummaryRaw, startedAtRaw, finishedAtRaw) {
 	const status = String(statusRaw == null ? "" : statusRaw).trim() || "error";
 	const summary = String(summaryRaw == null ? "" : summaryRaw)
@@ -270,6 +274,7 @@ function setAutoRefreshRunResult_(statusRaw, summaryRaw, errorRaw, issueCountRaw
 	);
 }
 
+// Return whether auto refresh enabled.
 function isAutoRefreshEnabled_() {
 	const raw = String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_ENABLED_PROPERTY) || "")
 		.trim()
@@ -277,6 +282,7 @@ function isAutoRefreshEnabled_() {
 	return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
+// Get trigger unique ID.
 function getTriggerUniqueId_(trigger) {
 	if (!trigger || typeof trigger !== "object" || typeof trigger.getUniqueId !== "function") return "";
 	try {
@@ -286,6 +292,7 @@ function getTriggerUniqueId_(trigger) {
 	}
 }
 
+// Handle list auto refresh triggers.
 function listAutoRefreshTriggers_() {
 	const all = ScriptApp.getProjectTriggers();
 	return all.filter((trigger) => {
@@ -297,6 +304,7 @@ function listAutoRefreshTriggers_() {
 	});
 }
 
+// Remove auto refresh triggers.
 function removeAutoRefreshTriggers_() {
 	const triggers = listAutoRefreshTriggers_();
 	let removed = 0;
@@ -311,6 +319,7 @@ function removeAutoRefreshTriggers_() {
 	return removed;
 }
 
+// Ensure single auto refresh trigger.
 function ensureSingleAutoRefreshTrigger_() {
 	const props = PropertiesService.getScriptProperties();
 	const configuredId = String(props.getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
@@ -346,6 +355,7 @@ function ensureSingleAutoRefreshTrigger_() {
 	return keep;
 }
 
+// Handle reconcile auto refresh trigger state.
 function reconcileAutoRefreshTriggerState_() {
 	const props = PropertiesService.getScriptProperties();
 	const enabled = isAutoRefreshEnabled_();
@@ -362,6 +372,7 @@ function reconcileAutoRefreshTriggerState_() {
 	return { enabled: true, triggerId: triggerId, hasTrigger: !!triggerId };
 }
 
+// Handle read auto refresh settings.
 function readAutoRefreshSettings_() {
 	const props = PropertiesService.getScriptProperties();
 	const enabled = isAutoRefreshEnabled_();
@@ -394,6 +405,7 @@ function readAutoRefreshSettings_() {
 	};
 }
 
+// Handle auto refresh active roster tick.
 function autoRefreshActiveRosterTick() {
 	const startedAt = new Date().toISOString();
 	let runIssueCount = 0;

@@ -1,7 +1,9 @@
 // Refresh-all/pipeline orchestration and related diagnostics.
 
+// Build a stable, validated payload fingerprint for refresh change detection.
 function normalizeActiveRosterForCompare_(rosterDataRaw) {
 	const validated = validateRosterData_(rosterDataRaw);
+	// Only compare fields that represent the active roster payload itself.
 	return JSON.stringify({
 		schemaVersion: validated.schemaVersion,
 		pageTitle: validated.pageTitle,
@@ -12,13 +14,16 @@ function normalizeActiveRosterForCompare_(rosterDataRaw) {
 	});
 }
 
+// Compare normalized payloads so transient fields do not trigger false positives.
 function hasActiveRosterPayloadChanged_(beforeRaw, afterRaw) {
 	return normalizeActiveRosterForCompare_(beforeRaw) !== normalizeActiveRosterForCompare_(afterRaw);
 }
 
+// Stamp `lastUpdatedAt` while preserving the validated roster payload shape.
 function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
 	const timestamp = String(timestampRaw == null ? "" : timestampRaw).trim() || new Date().toISOString();
 	const validated = validateRosterData_(rosterDataRaw);
+	// Rebuild the payload explicitly so validation strips anything unsupported.
 	const out = {
 		schemaVersion: validated.schemaVersion,
 		pageTitle: validated.pageTitle,
@@ -28,11 +33,13 @@ function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
 		lastUpdatedAt: timestamp,
 	};
 	if (validated.publicConfig && typeof validated.publicConfig === "object") {
+		// Preserve optional public config when it is part of the validated shape.
 		out.publicConfig = validated.publicConfig;
 	}
 	return validateRosterData_(out);
 }
 
+// Normalize issue text into a single line and keep it within a safe UI length.
 function shortenIssueMessage_(messageRaw, maxLenRaw) {
 	const text = String(messageRaw == null ? "" : messageRaw)
 		.replace(/\s+/g, " ")
@@ -43,9 +50,11 @@ function shortenIssueMessage_(messageRaw, maxLenRaw) {
 	return text.slice(0, Math.max(0, maxLen - 3)).trim() + "...";
 }
 
+// Build a compact one-line summary from the first issue for status surfaces.
 function buildAutoRefreshIssueSummary_(issuesRaw) {
 	const issues = Array.isArray(issuesRaw) ? issuesRaw : [];
 	if (!issues.length) return "";
+	// The first issue is the highest-signal summary candidate for compact surfaces.
 	const first = issues[0] && typeof issues[0] === "object" ? issues[0] : {};
 	const rosterName = String(first.rosterName == null ? "" : first.rosterName).trim() || "Unknown roster";
 	const step = String(first.step == null ? "" : first.step).trim() || "pipeline";
@@ -53,10 +62,12 @@ function buildAutoRefreshIssueSummary_(issuesRaw) {
 	return rosterName + " | " + step + " | " + message;
 }
 
+// Find a roster by id without throwing when data is partial.
 function findRosterInDataById_(rosterData, rosterIdRaw) {
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	if (!rosterId) return null;
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	// Keep the lookup simple and order-preserving because roster lists are already small.
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 		if (String(roster.id || "").trim() === rosterId) return roster;
@@ -64,6 +75,7 @@ function findRosterInDataById_(rosterData, rosterIdRaw) {
 	return null;
 }
 
+// Deep-clone roster payload so a failed step can roll back safely.
 function cloneRosterDataForRefresh_(rosterDataRaw) {
 	try {
 		return JSON.parse(JSON.stringify(rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {}));
@@ -72,12 +84,15 @@ function cloneRosterDataForRefresh_(rosterDataRaw) {
 	}
 }
 
+// Collect player tags that appear more than once across all roster sections.
 function findDuplicateRosterTags_(rosterDataRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const byTag = {};
+	// These are the sections that can legally contain live roster players.
 	const sections = ["main", "subs", "missing"];
 
+	// Record every normalized tag occurrence so we can later keep only collisions.
 	for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
 		const roster = rosters[rosterIndex] && typeof rosters[rosterIndex] === "object" ? rosters[rosterIndex] : {};
 		const rosterId = String(roster.id == null ? "" : roster.id).trim() || "(missing-id@" + rosterIndex + ")";
@@ -100,6 +115,7 @@ function findDuplicateRosterTags_(rosterDataRaw) {
 
 	const tags = Object.keys(byTag).sort();
 	const duplicates = [];
+	// Filter down to tags that appear in more than one location.
 	for (let i = 0; i < tags.length; i++) {
 		const tag = tags[i];
 		const occurrences = byTag[tag];
@@ -112,12 +128,14 @@ function findDuplicateRosterTags_(rosterDataRaw) {
 	return duplicates;
 }
 
+// Format duplicate-tag diagnostics with bounded tag/location counts.
 function formatDuplicateRosterTagsForMessage_(duplicatesRaw, maxTagsRaw, maxLocationsRaw) {
 	const duplicates = Array.isArray(duplicatesRaw) ? duplicatesRaw : [];
 	if (!duplicates.length) return "";
 	const maxTags = Math.max(1, toNonNegativeInt_(maxTagsRaw) || 3);
 	const maxLocations = Math.max(1, toNonNegativeInt_(maxLocationsRaw) || 4);
 	const tagParts = [];
+	// Bound the diagnostic string so it stays readable in logs and UI surfaces.
 	for (let i = 0; i < duplicates.length && i < maxTags; i++) {
 		const duplicate = duplicates[i] && typeof duplicates[i] === "object" ? duplicates[i] : {};
 		const tag = normalizeTag_(duplicate.tag) || String(duplicate.tag || "");
@@ -137,8 +155,10 @@ function formatDuplicateRosterTagsForMessage_(duplicatesRaw, maxTagsRaw, maxLoca
 	return "duplicate tag detail: " + tagParts.join(" ; ");
 }
 
+// Expand duplicate-tag validation errors with concrete roster/section locations.
 function appendDuplicateRosterTagDetailsToError_(stepLabelRaw, err, rosterDataRaw) {
 	const baseMessage = errorMessage_(err);
+	// Only decorate the specific validation failure this helper knows how to explain.
 	if (!/duplicate player tag in output/i.test(baseMessage)) return baseMessage;
 	const duplicates = findDuplicateRosterTags_(rosterDataRaw);
 	if (!duplicates.length) return baseMessage;
@@ -148,12 +168,14 @@ function appendDuplicateRosterTagDetailsToError_(stepLabelRaw, err, rosterDataRa
 	return detail ? detail + " | " + baseMessage : baseMessage;
 }
 
+// Re-throw with enriched duplicate-tag context when available.
 function rethrowWithDuplicateRosterTagDetails_(stepLabelRaw, err, rosterDataRaw) {
 	const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabelRaw, err, rosterDataRaw);
 	if (detailedMessage === errorMessage_(err)) throw err;
 	throw new Error(detailedMessage);
 }
 
+// First-wave prefetch for all clans: members + mode-specific war entry points.
 function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarClanTagsRaw, cwlClanTagsRaw, optionsRaw) {
 	const connectedClanTags = Array.isArray(connectedClanTagsRaw) ? connectedClanTagsRaw : [];
 	const regularWarClanTags = Array.isArray(regularWarClanTagsRaw) ? regularWarClanTagsRaw : [];
@@ -163,6 +185,7 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 	const regularWarKeyByClanTag = {};
 	const leagueGroupKeyByClanTag = {};
 
+	// Build batched path entries keyed by endpoint type and clan tag.
 	for (let i = 0; i < connectedClanTags.length; i++) {
 		const clanTag = normalizeTag_(connectedClanTags[i]);
 		if (!clanTag) continue;
@@ -201,8 +224,10 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 	const currentRegularWarErrorByClanTag = {};
 	const leaguegroupRawByClanTag = {};
 	const leaguegroupErrorByClanTag = {};
+	// Use one capture timestamp so all member snapshots from this batch line up.
 	const capturedAt = new Date().toISOString();
 
+	// Project member fetches into snapshot/error maps keyed by clan tag.
 	for (let i = 0; i < connectedClanTags.length; i++) {
 		const clanTag = normalizeTag_(connectedClanTags[i]);
 		if (!clanTag) continue;
@@ -224,6 +249,7 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 		}
 	}
 
+	// Regular-war fetches treat 404/private-war-log as handled unavailable states.
 	for (let i = 0; i < regularWarClanTags.length; i++) {
 		const clanTag = normalizeTag_(regularWarClanTags[i]);
 		if (!clanTag) continue;
@@ -246,6 +272,7 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 		currentRegularWarErrorByClanTag[clanTag] = err;
 	}
 
+	// Keep raw league-group payloads for a second CWL-war prefetch wave.
 	for (let i = 0; i < cwlClanTags.length; i++) {
 		const clanTag = normalizeTag_(cwlClanTags[i]);
 		if (!clanTag) continue;
@@ -270,12 +297,14 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 	};
 }
 
+// Build all prefetch maps needed to run every roster pipeline without refetching per roster.
 function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
 	const connectedClanTagSet = {};
 	const regularWarClanTagSet = {};
 	const cwlClanTagSet = {};
 
+	// Deduplicate clan tags and split by tracking mode so only relevant endpoints are fetched.
 	for (let i = 0; i < sourceRosters.length; i++) {
 		const roster = sourceRosters[i] && typeof sourceRosters[i] === "object" ? sourceRosters[i] : {};
 		const rosterId = String(roster.id == null ? "" : roster.id).trim();
@@ -295,17 +324,20 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 		batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
 		batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
 	};
+	// Wave one covers member and war-index endpoints keyed only by clan tag.
 	const connectedClanTags = Object.keys(connectedClanTagSet);
 	const regularWarClanTags = Object.keys(regularWarClanTagSet);
 	const cwlClanTags = Object.keys(cwlClanTagSet);
 	const waveOnePrefetch = buildRefreshAllMixedWaveOnePrefetch_(connectedClanTags, regularWarClanTags, cwlClanTags, prefetchOptions);
 
+	// Second wave: resolve war tags from league groups and prefetch raw CWL wars once.
 	const cwlWarTagSet = {};
 	const leaguegroupTags = Object.keys(waveOnePrefetch.leaguegroupRawByClanTag);
 	for (let i = 0; i < leaguegroupTags.length; i++) {
 		const clanTag = leaguegroupTags[i];
 		if (Object.prototype.hasOwnProperty.call(waveOnePrefetch.leaguegroupErrorByClanTag, clanTag)) continue;
 		const leaguegroup = waveOnePrefetch.leaguegroupRawByClanTag[clanTag];
+		// League groups are only an index; actual lineup data still lives on war endpoints.
 		const warTags = extractLeagueGroupWarTags_(leaguegroup);
 		for (let j = 0; j < warTags.length; j++) {
 			const warTag = normalizeTag_(warTags[j]);
@@ -327,11 +359,13 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	};
 }
 
+// Extract the most useful failure text from heterogeneous step result/error shapes.
 function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 	const stepResult = stepResultRaw && typeof stepResultRaw === "object" ? stepResultRaw : {};
 	const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
 	let message = "";
 
+	// Prefer explicit step-level errors over nested result payload fallbacks.
 	const stepError = Object.prototype.hasOwnProperty.call(stepResult, "error") ? stepResult.error : null;
 	if (stepError && typeof stepError === "object") {
 		message = errorMessage_(stepError);
@@ -341,6 +375,7 @@ function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 
 	const result = stepResult.result && typeof stepResult.result === "object" ? stepResult.result : {};
 	if (!message) {
+		// Stats partial-failure payloads often surface the real cause here.
 		message = String(result.warRefreshError == null ? "" : result.warRefreshError).trim();
 	}
 	if (!message) {
@@ -360,11 +395,13 @@ function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 	return message;
 }
 
+// Run a single-roster refresh pipeline with per-step rollback and issue tracking.
 function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const skipInitialValidation = options.skipInitialValidation === true;
 	let rosterData = null;
 	if (skipInitialValidation) {
+		// Refresh-all reuses already-validated rosterData between per-roster pipeline runs.
 		rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 		if (!rosterData || !Array.isArray(rosterData.rosters)) {
 			throw new Error("Refresh pipeline payload is invalid.");
@@ -379,9 +416,11 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	if (!rosterId) throw new Error("Roster ID is required.");
 	const ownershipSnapshot = options.ownershipSnapshot && typeof options.ownershipSnapshot === "object" ? options.ownershipSnapshot : null;
+	// Handle touch pipeline lock lease.
 	const touchPipelineLockLease = () => {
 		touchActiveRosterLockLease_("refresh pipeline");
 	};
+	// Normalize optional prefetch maps once so downstream calls can rely on objects.
 	const pipelinePrefetchOptions = {
 		prefetchedClanSnapshotsByTag: options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {},
 		prefetchedClanErrorsByTag: options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {},
@@ -398,6 +437,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		metricsRunState: options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null,
 	};
 
+	// Step status payload returned to callers and surfaced in refresh-all diagnostics.
 	const steps = {
 		pool: { ok: false, skipped: false, message: "", result: null },
 		lineup: { ok: false, skipped: false, message: "", result: null },
@@ -405,11 +445,14 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		bench: { ok: false, skipped: false, message: "", result: null },
 	};
 	const issues = [];
+	// Get current roster.
 	const getCurrentRoster = () => findRosterInDataById_(rosterData, rosterId);
+	// Get current tracking mode.
 	const getCurrentTrackingMode = () => {
 		const roster = getCurrentRoster();
 		return roster ? getRosterTrackingMode_(roster) : "cwl";
 	};
+	// Return whether CWL preparation active for current roster.
 	const isCwlPreparationActiveForCurrentRoster = () => {
 		const roster = getCurrentRoster();
 		return !!(roster && getRosterTrackingMode_(roster) === "cwl" && isCwlPreparationActive_(roster));
@@ -418,11 +461,13 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const initialRoster = getCurrentRoster();
 	const rosterName = String((initialRoster && initialRoster.title) || "").trim() || rosterId;
 	const initialTrackingMode = getCurrentTrackingMode();
+	// Step labels are intentionally user-facing because they flow into issue summaries.
 	const poolStepLabel = "sync clan roster pool";
 	const lineupStepLabel = initialTrackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup";
 	const statsStepLabel = initialTrackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats";
 	const benchStepLabel = "compute bench suggestions";
 
+	// Record pipeline issues in a normalized, user-facing format.
 	const addIssue = (stepRaw, messageRaw) => {
 		const step = String(stepRaw == null ? "" : stepRaw).trim() || "pipeline";
 		const message = shortenIssueMessage_(messageRaw, 200);
@@ -435,6 +480,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		});
 	};
 
+	// Mark a dependency-driven skip as an issue so operators see why work did not run.
 	const markSkippedAfterFailedStep = (stepKey, stepLabelRaw, prerequisiteStepLabelRaw) => {
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
 		const prerequisiteStepLabel = String(prerequisiteStepLabelRaw == null ? "" : prerequisiteStepLabelRaw).trim();
@@ -447,6 +493,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		addIssue(stepLabel, skipMessage);
 	};
 
+	// Mark an expected no-op (feature disabled or mode constraint) as successful skip.
 	const markIntentionalSkip = (stepKey, messageRaw) => {
 		const step = steps[stepKey];
 		step.ok = true;
@@ -455,6 +502,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		if (stepKey === "stats") step.partialFailure = false;
 	};
 
+	// Execute one step and restore pre-step data if it throws or reports failure.
 	const runStepWithRollback = (stepKey, stepLabelRaw, stepFn) => {
 		const step = steps[stepKey];
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
@@ -463,6 +511,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			touchPipelineLockLease();
 			const stepResult = stepFn();
 			const stepReportedFailure = !!(stepResult && typeof stepResult === "object" && stepResult.ok === false);
+			// Steps may return `{ ok:false }` without throwing; treat this as a controlled failure.
 			if (stepReportedFailure) {
 				let failureRosterData = null;
 				let failureRosterValidationErr = null;
@@ -482,6 +531,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 				step.skipped = false;
 				step.message = detailedMessage;
 				step.result = stepResult && stepResult.result && typeof stepResult.result === "object" ? stepResult.result : null;
+				// Stats can preserve metrics while war refresh fails; keep that partial-failure signal.
 				if (stepKey === "stats") {
 					const statsResult = step.result && typeof step.result === "object" ? step.result : {};
 					step.partialFailure = !!(statsResult.partialFailure || (statsResult.memberTrackingPreserved && statsResult.warRefreshFailed));
@@ -491,6 +541,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			}
 
 			if (stepResult && stepResult.rosterData) {
+				// Success paths can still return mutated roster data that must be revalidated.
 				rosterData = validateRosterData_(stepResult.rosterData);
 			}
 			touchPipelineLockLease();
@@ -501,6 +552,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			if (stepKey === "stats") step.partialFailure = false;
 			return true;
 		} catch (err) {
+			// Unexpected exceptions always roll back to the pre-step snapshot.
 			const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabel, err, rosterData);
 			rosterData = beforeStep;
 			step.ok = false;
@@ -512,6 +564,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		}
 	};
 
+	// Branch once on roster existence, then execute pipeline in dependency order.
 	if (!initialRoster) {
 		const notFoundMessage = "Roster not found in current refresh payload.";
 		steps.pool.message = notFoundMessage;
@@ -533,6 +586,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 
 		const poolStepOk = !!steps.pool.ok;
 		const trackingModeForPipeline = getCurrentTrackingMode();
+		// CWL Preparation Mode deliberately freezes live lineup imports until the roster is finalized.
 		if (trackingModeForPipeline === "cwl" && isCwlPreparationActiveForCurrentRoster()) {
 			markIntentionalSkip("lineup", "live CWL lineup sync blocked by CWL Preparation Mode");
 		} else if (!hasConnectedClanTag || !poolStepOk) {
@@ -542,6 +596,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		}
 
 		const lineupStepOk = !!steps.lineup.ok;
+		// Regular-war mode can still refresh historical stats when lineup sync fails.
 		const allowStatsWithoutLineup = trackingModeForPipeline === "regularWar";
 		if (!hasConnectedClanTag || !poolStepOk || (!lineupStepOk && !allowStatsWithoutLineup)) {
 			markSkippedAfterFailedStep("stats", statsStepLabel, !poolStepOk || !hasConnectedClanTag ? poolStepLabel : lineupStepLabel);
@@ -557,6 +612,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 
 		const statsStepOk = !!steps.stats.ok;
 		const statsResult = steps.stats.result && typeof steps.stats.result === "object" ? steps.stats.result : {};
+		// If no active CWL exists and nothing changed, bench planning would only churn stale output.
 		const skipBenchForNoActiveCwl = trackingModeForPipeline === "cwl" && statsStepOk && !!statsResult.cwlUnavailable && !!statsResult.statsUnchanged;
 		if (trackingModeForPipeline !== "cwl") {
 			markIntentionalSkip("bench", "bench suggestions are disabled for regular war rosters");
@@ -572,6 +628,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		}
 	}
 
+	// Final validation guarantees the caller always receives schema-safe roster data.
 	let validatedRosterData = null;
 	try {
 		touchPipelineLockLease();
@@ -580,6 +637,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh pipeline payload", err, rosterData));
 	}
 	const finalRoster = findRosterInDataById_(validatedRosterData, rosterId);
+	// Use the final roster state in case a step changed the tracking mode.
 	const finalTrackingMode = finalRoster ? getRosterTrackingMode_(finalRoster) : initialTrackingMode;
 	const partialFailure = !!steps.stats.partialFailure;
 	return {
@@ -596,6 +654,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	};
 }
 
+// Human-readable aggregate summary for logs/toasts after refresh-all completes.
 function buildRefreshAllRunSummary_(processedRostersRaw, rostersWithIssuesRaw, issueCountRaw) {
 	const processed = Math.max(0, toNonNegativeInt_(processedRostersRaw));
 	const withIssues = Math.max(0, toNonNegativeInt_(rostersWithIssuesRaw));
@@ -603,8 +662,10 @@ function buildRefreshAllRunSummary_(processedRostersRaw, rostersWithIssuesRaw, i
 	return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s).";
 }
 
+// Flatten prefetch bundle into the option shape expected by per-roster pipeline calls.
 function buildRefreshAllPipelinePrefetchOptions_(prefetchBundleRaw) {
 	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
+	// Default every branch to an object so downstream code can use plain property checks.
 	return {
 		prefetchedClanSnapshotsByTag:
 			prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {},
@@ -621,10 +682,12 @@ function buildRefreshAllPipelinePrefetchOptions_(prefetchBundleRaw) {
 	};
 }
 
+// Build a shared ownership snapshot once so pool sync can avoid redundant lookups.
 function buildRefreshAllOwnershipSnapshot_(rosterData, prefetchBundleRaw, optionsRaw) {
 	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null;
+	// This snapshot is read-only input for pool sync, not a metrics-writing pass.
 	return buildLiveRosterOwnershipSnapshot_(rosterData, {
 		recordMetrics: false,
 		metricsRunState: metricsRunState,
@@ -633,10 +696,12 @@ function buildRefreshAllOwnershipSnapshot_(rosterData, prefetchBundleRaw, option
 	});
 }
 
+// Select the per-roster status message shown in refresh-all results.
 function buildRefreshAllRosterResultMessage_(pipelineResultRaw, rosterIssuesRaw) {
 	const pipelineResult = pipelineResultRaw && typeof pipelineResultRaw === "object" ? pipelineResultRaw : {};
 	const rosterIssues = Array.isArray(rosterIssuesRaw) ? rosterIssuesRaw : [];
 	if (rosterIssues.length > 0) {
+		// Surface the first concrete issue before any generic success/partial-failure text.
 		return shortenIssueMessage_(rosterIssues[0] && rosterIssues[0].message, 180) || "Refresh pipeline completed with issues.";
 	}
 	if (pipelineResult.partialFailure === true) {
@@ -648,6 +713,7 @@ function buildRefreshAllRosterResultMessage_(pipelineResultRaw, rosterIssuesRaw)
 	return "Refresh pipeline complete.";
 }
 
+// Run refresh pipeline for every roster (expects caller already holds the job lock).
 function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let rosterData = null;
 	try {
@@ -657,12 +723,14 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : {};
+	// Ensure mutable run-state containers exist for cross-roster metrics reuse.
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
 	if (!metricsRunState.profileSnapshotByTag || typeof metricsRunState.profileSnapshotByTag !== "object") metricsRunState.profileSnapshotByTag = {};
 	if (!metricsRunState.profileSnapshotErrorByTag || typeof metricsRunState.profileSnapshotErrorByTag !== "object") metricsRunState.profileSnapshotErrorByTag = {};
 	if (typeof metricsRunState.profileFetchBlocked !== "boolean") metricsRunState.profileFetchBlocked = false;
 	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const rosterIds = [];
+	// Freeze the roster iteration order up front so later mutations do not affect coverage.
 	for (let i = 0; i < sourceRosters.length; i++) {
 		const rosterId = String((sourceRosters[i] && sourceRosters[i].id) || "").trim();
 		if (!rosterId) continue;
@@ -673,6 +741,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const perRoster = [];
 	let processedRosters = 0;
 	let rostersWithIssues = 0;
+	// Prefetch once for all rosters to reduce API calls and keep data temporally aligned.
 	touchActiveRosterLockLease_("refresh all prefetch");
 	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(sourceRosters);
 	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
@@ -680,6 +749,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		metricsRunState: metricsRunState,
 	});
 
+	// Execute the same single-roster pipeline for each id and aggregate diagnostics.
 	for (let i = 0; i < rosterIds.length; i++) {
 		touchActiveRosterLockLease_("refresh all roster " + (i + 1) + "/" + rosterIds.length);
 		const rosterId = rosterIds[i];
@@ -705,12 +775,14 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 				),
 			);
 			if (pipelineRun && pipelineRun.rosterData) {
+				// Carry forward each successful roster mutation into the next pipeline run.
 				rosterData = pipelineRun.rosterData;
 			}
 			pipelineResult = pipelineRun && pipelineRun.result && typeof pipelineRun.result === "object" ? pipelineRun.result : {};
 			partialFailure = pipelineResult.partialFailure === true;
 			trackingMode = String(pipelineResult.trackingMode == null ? trackingMode : pipelineResult.trackingMode).trim() || trackingMode;
 			const pipelineIssues = Array.isArray(pipelineResult.issues) ? pipelineResult.issues : [];
+			// Flatten per-step issues into both per-roster and global issue collections.
 			for (let j = 0; j < pipelineIssues.length; j++) {
 				const issueRaw = pipelineIssues[j] && typeof pipelineIssues[j] === "object" ? pipelineIssues[j] : {};
 				const step = String(issueRaw.step == null ? "" : issueRaw.step).trim() || "pipeline";
@@ -726,6 +798,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 				issues.push(issue);
 			}
 			if (pipelineIssues.length < 1 && pipelineRun && pipelineRun.ok === false) {
+				// Preserve a minimal issue even if the step-level issue list came back empty.
 				const fallbackMessage = "refresh pipeline failed.";
 				const issue = {
 					rosterId: rosterId,
@@ -737,6 +810,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 				issues.push(issue);
 			}
 			if (partialFailure && rosterIssues.length < 1) {
+				// Partial failures still need a visible issue row in aggregate refresh results.
 				const issue = {
 					rosterId: rosterId,
 					rosterName: rosterName,
@@ -747,6 +821,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 				issues.push(issue);
 			}
 		} catch (err) {
+			// Hard failures still collapse to the same roster-level issue shape as soft failures.
 			const detailedMessage = appendDuplicateRosterTagDetailsToError_("refresh roster pipeline", err, rosterData);
 			const issue = {
 				rosterId: rosterId,
@@ -760,6 +835,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		const rosterHasIssues = rosterIssues.length > 0 || partialFailure;
 		if (rosterHasIssues) rostersWithIssues++;
 		const rosterMessage = buildRefreshAllRosterResultMessage_(pipelineResult, rosterIssues);
+		// Store both the summary row and the underlying issue list for the caller.
 		perRoster.push({
 			rosterId: rosterId,
 			rosterName: rosterName,
@@ -772,6 +848,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		});
 	}
 
+	// Validate once after the loop so callers receive a safe final payload snapshot.
 	let validatedRosterData = null;
 	try {
 		validatedRosterData = validateRosterData_(rosterData);
@@ -792,6 +869,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	};
 }
 
+// Public refresh-all entrypoint that wraps the unlocked core with the job lock lifecycle.
 function runRefreshAllRostersCore_(rosterDataOrLoaderRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const lockOwner = String(options.lockOwner == null ? "refresh-all" : options.lockOwner).trim() || "refresh-all";
@@ -803,6 +881,7 @@ function runRefreshAllRostersCore_(rosterDataOrLoaderRaw, optionsRaw) {
 	return withActiveRosterJobLock_(lockOwner, lockWaitMs, function () {
 		touchActiveRosterLockLease_("refresh all start");
 		if (beforeRun) {
+			// Allow the caller to skip this run based on freshness or external conditions.
 			const beforeResult = beforeRun();
 			if (beforeResult && typeof beforeResult === "object" && beforeResult.skip === true) {
 				return {
@@ -812,9 +891,11 @@ function runRefreshAllRostersCore_(rosterDataOrLoaderRaw, optionsRaw) {
 				};
 			}
 		}
+		// Delay loading until the lock is held so callers can fetch the freshest source payload.
 		const sourceRosterData = rosterDataLoader ? rosterDataLoader() : rosterDataOrLoaderRaw;
 		const runResult = runRefreshAllRostersUnlockedCore_(sourceRosterData, options);
 		if (onAfterRun) {
+			// Let the caller persist or publish the final run result while the lock is still held.
 			onAfterRun(runResult);
 		}
 		touchActiveRosterLockLease_("refresh all complete");

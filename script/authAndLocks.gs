@@ -1,5 +1,6 @@
 // Admin auth and active-roster lock helpers.
 
+// Parse active roster job lock state.
 function parseActiveRosterJobLockState_(raw) {
 	const text = String(raw == null ? "" : raw).trim();
 	if (!text) return null;
@@ -19,6 +20,7 @@ function parseActiveRosterJobLockState_(raw) {
 	}
 }
 
+// Try to acquire active roster job lock.
 function tryAcquireActiveRosterJobLock_(ownerRaw, waitMsRaw) {
 	const owner = String(ownerRaw == null ? "unknown" : ownerRaw).trim() || "unknown";
 	const waitMs = Math.max(0, Number(waitMsRaw) || 0);
@@ -64,6 +66,7 @@ function tryAcquireActiveRosterJobLock_(ownerRaw, waitMsRaw) {
 	return null;
 }
 
+// Create an active roster job lock busy error.
 function createActiveRosterJobLockBusyError_(ownerRaw, waitMsRaw) {
 	const owner = String(ownerRaw == null ? "unknown" : ownerRaw).trim() || "unknown";
 	const waitMs = Math.max(0, Number(waitMsRaw) || 0);
@@ -74,6 +77,7 @@ function createActiveRosterJobLockBusyError_(ownerRaw, waitMsRaw) {
 	return err;
 }
 
+// Renew active roster job lock lease for token.
 function renewActiveRosterJobLockLeaseForToken_(props, tokenRaw, ownerRaw) {
 	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
 	if (!token) return false;
@@ -102,6 +106,7 @@ function renewActiveRosterJobLockLeaseForToken_(props, tokenRaw, ownerRaw) {
 	}
 }
 
+// Release active roster job lock.
 function releaseActiveRosterJobLock_(tokenRaw) {
 	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
 	if (!token) return false;
@@ -121,6 +126,7 @@ function releaseActiveRosterJobLock_(tokenRaw) {
 	}
 }
 
+// Handle with active roster job lock.
 function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 	if (typeof callback !== "function") {
 		throw new Error("Active roster job callback is required.");
@@ -151,6 +157,7 @@ function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 	}
 }
 
+// Return whether active roster job lock busy error.
 function isActiveRosterJobLockBusyError_(errRaw) {
 	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
 	if (err && String(err.code || "").trim() === "activeRosterJobLockBusy") return true;
@@ -158,6 +165,7 @@ function isActiveRosterJobLockBusyError_(errRaw) {
 	return message.indexOf("another active roster refresh/publish flow is running") >= 0;
 }
 
+// Handle assert admin password.
 function assertAdminPassword_(password) {
 	const props = PropertiesService.getScriptProperties();
 	const configured = props.getProperty("ADMIN_PW");
@@ -170,6 +178,7 @@ function assertAdminPassword_(password) {
 	}
 }
 
+// Handle check publish cooldown.
 function checkPublishCooldown_() {
 	const props = PropertiesService.getScriptProperties();
 	const nowMs = Date.now();
@@ -181,10 +190,12 @@ function checkPublishCooldown_() {
 	}
 }
 
+// Record the latest publish timestamp for cooldown enforcement.
 function markPublish_() {
 	PropertiesService.getScriptProperties().setProperty("LAST_PUBLISH_MS", String(Date.now()));
 }
 
+// Push active roster lock context.
 function pushActiveRosterLockContext_(ctxRaw) {
 	const ctx = ctxRaw && typeof ctxRaw === "object" ? ctxRaw : null;
 	if (!ctx || typeof ctx.touch !== "function") return;
@@ -192,6 +203,7 @@ function pushActiveRosterLockContext_(ctxRaw) {
 	activeRosterLockContextStack_.push(ctx);
 }
 
+// Pop active roster lock context.
 function popActiveRosterLockContext_(tokenRaw) {
 	const token = String(tokenRaw == null ? "" : tokenRaw).trim();
 	if (!token) return;
@@ -206,6 +218,7 @@ function popActiveRosterLockContext_(tokenRaw) {
 	}
 }
 
+// Handle touch active roster lock lease.
 function touchActiveRosterLockLease_(reasonRaw) {
 	if (!Array.isArray(activeRosterLockContextStack_) || !activeRosterLockContextStack_.length) return false;
 	const ctx = activeRosterLockContextStack_[activeRosterLockContextStack_.length - 1];
@@ -225,6 +238,7 @@ function touchActiveRosterLockLease_(reasonRaw) {
 	return false;
 }
 
+// Return whether valid admin password.
 function hasValidAdminPassword_(password) {
 	try {
 		assertAdminPassword_(password);

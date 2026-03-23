@@ -1,16 +1,19 @@
 // Roster schema sanitization and validation boundary.
 
+// Sanitize notes.
 function sanitizeNotes_(raw) {
 	const arr = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
 	return arr.map((n) => String(n == null ? "" : n).trim()).filter((n) => n);
 }
 
+// Sanitize public config URL.
 function sanitizePublicConfigUrl_(valueRaw) {
 	const value = String(valueRaw == null ? "" : valueRaw).trim();
 	if (!value) return "";
 	return /^https?:\/\//i.test(value) ? value : "";
 }
 
+// Copy sanitized public config URLs.
 function copySanitizedPublicConfigUrls_(target, source, keys) {
 	if (!target || typeof target !== "object" || !source || typeof source !== "object" || !Array.isArray(keys)) return;
 	for (let i = 0; i < keys.length; i++) {
@@ -21,6 +24,7 @@ function copySanitizedPublicConfigUrls_(target, source, keys) {
 	}
 }
 
+// Sanitize public config.
 function sanitizePublicConfig_(raw) {
 	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
 	if (!source) return null;
@@ -39,6 +43,7 @@ function sanitizePublicConfig_(raw) {
 	return Object.keys(out).length ? out : null;
 }
 
+// Handle count roster payload.
 function countRosterPayload_(rosterData) {
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	let playerCount = 0;
@@ -58,6 +63,7 @@ function countRosterPayload_(rosterData) {
 	return { playerCount, noteCount };
 }
 
+// Validate roster data.
 function validateRosterData_(data) {
 	if (!data || typeof data !== "object") throw new Error("Invalid roster data: expected an object.");
 
@@ -95,6 +101,7 @@ function validateRosterData_(data) {
 		const subs = Array.isArray(r.subs) ? r.subs : [];
 		const missing = Array.isArray(r.missing) ? r.missing : [];
 
+		// Sanitize player.
 		const sanitizePlayer = (p, role) => {
 			const obj = p && typeof p === "object" ? p : {};
 			const rawTag = typeof obj.tag === "string" ? obj.tag : "";
@@ -180,6 +187,7 @@ function validateRosterData_(data) {
 
 	const consumedRosterIndexes = {};
 	const orderedRosters = [];
+	// Push roster index.
 	const pushRosterIndex = (index) => {
 		if (!isFinite(index) || consumedRosterIndexes[index]) return;
 		consumedRosterIndexes[index] = true;

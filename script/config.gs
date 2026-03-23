@@ -1,5 +1,6 @@
 // Global constants and harmless caches extracted from the legacy monolith.
 
+// Asset publishing, locking, and refresh orchestration constants.
 const ASSET_TEXT_CACHE_VERSION = "v2";
 const ASSET_TEXT_CACHE_TTL_ROSTER_SECONDS = 30;
 const ASSET_TEXT_CACHE_TTL_STATIC_SECONDS = 600;
@@ -40,6 +41,7 @@ const CACHE_SAFE_TEXT_MAX_CHARS = 90 * 1024;
 let staticAssetVersionCache_ = null;
 let firebaseConfigCache_ = null;
 
+// External service, roster-tracking, and metrics retention constants.
 const COC_PROXY_BASE_URL = "https://cocproxy.royaleapi.dev/v1";
 const PLAYER_PROFILE_CACHE_TTL_SECONDS = 300;
 const TOWN_HALL_ICON_CACHE_TTL_SECONDS = 3600;
@@ -74,6 +76,7 @@ const PLAYER_METRICS_PROFILE_ENRICH_MIN_UNRANKED_RATIO = 0.7;
 const PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH = 0.9;
 let activeRosterLockContextStack_ = [];
 
+// Bench planner weights and solver limits.
 const CWL_BENCH_PLANNER_CONFIG = {
 	algorithm: "season_milp_v1",
 	defaultSeasonDays: 7,

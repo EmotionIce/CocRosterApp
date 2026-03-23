@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- Public Cloudflare Pages shell for the roster, landing, and leaderboard views. -->
 <html>
 <head>
   <meta charset="utf-8" />
@@ -11,6 +12,7 @@
 </head>
 <body style="margin:0;">
 <div class="container public-shell">
+  <!-- Shared public header and navigation across all public views. -->
   <header class="public-header glass-surface glass-surface--strong">
     <div class="public-brand">
       <div class="public-brand__eyebrow">200+ Members &bull; Discord-Based</div>
@@ -30,6 +32,7 @@
     <div id="globalLastUpdatedValue" class="global-last-updated__value">-</div>
   </div>
 
+  <!-- Loading and freshness state shown while public data hydrates. -->
   <div id="shellLoadingNotice" class="shell-loading-notice glass-surface glass-surface--soft" aria-live="polite" aria-hidden="false">
     <div class="shell-loading-notice__pulse" aria-hidden="true"></div>
     <div class="shell-loading-notice__content">
@@ -38,6 +41,7 @@
     </div>
   </div>
 
+  <!-- Marketing and clan-family landing experience. -->
   <section id="publicViewLanding" class="public-view public-view--landing">
     <div class="landing-shell">
       <section class="landing-chapter landing-hero" data-landing-reveal>
@@ -189,6 +193,7 @@
     </div>
   </section>
 
+  <!-- Live roster cards and detailed section breakdowns. -->
   <section id="publicViewRosters" class="public-view public-view--rosters hidden">
     <div id="rosterSearchCard" class="card search-card">
       <div class="search-top">
@@ -202,6 +207,7 @@
     <div id="rosters"></div>
   </section>
 
+  <!-- Public leaderboard with alternate sort modes and month filters. -->
   <section id="publicViewLeaderboard" class="public-view public-view--leaderboard hidden">
     <div id="leaderboard"></div>
   </section>

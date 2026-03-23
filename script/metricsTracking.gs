@@ -1,10 +1,12 @@
 // Player metrics capture, normalization, and tracking helpers.
 
+// Sanitize metrics day key.
 function sanitizeMetricsDayKey_(value) {
 	const text = String(value == null ? "" : value).trim();
 	return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
 }
 
+// Sanitize donation month key.
 function sanitizeDonationMonthKey_(value) {
 	const text = String(value == null ? "" : value).trim();
 	const match = /^(\d{4})-(\d{2})$/.exec(text);
@@ -14,6 +16,7 @@ function sanitizeDonationMonthKey_(value) {
 	return match[1] + "-" + match[2];
 }
 
+// Get donation month sort value.
 function getDonationMonthSortValue_(value) {
 	const key = sanitizeDonationMonthKey_(value);
 	if (!key) return -1;
@@ -24,6 +27,7 @@ function getDonationMonthSortValue_(value) {
 	return year * 12 + (month - 1);
 }
 
+// Sanitize metrics icon URLs.
 function sanitizeMetricsIconUrls_(iconUrlsRaw) {
 	const iconUrls = iconUrlsRaw && typeof iconUrlsRaw === "object" ? iconUrlsRaw : {};
 	const out = {};
@@ -37,6 +41,7 @@ function sanitizeMetricsIconUrls_(iconUrlsRaw) {
 	return Object.keys(out).length ? out : null;
 }
 
+// Sanitize metrics league snapshot.
 function sanitizeMetricsLeagueSnapshot_(leagueRaw) {
 	const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
 	if (!league) return null;
@@ -53,6 +58,7 @@ function sanitizeMetricsLeagueSnapshot_(leagueRaw) {
 	return out;
 }
 
+// Sanitize metrics player house snapshot.
 function sanitizeMetricsPlayerHouseSnapshot_(playerHouseRaw) {
 	const playerHouse = playerHouseRaw && typeof playerHouseRaw === "object" ? playerHouseRaw : null;
 	if (!playerHouse) return null;
@@ -74,6 +80,7 @@ function sanitizeMetricsPlayerHouseSnapshot_(playerHouseRaw) {
 	return { elements: outElements };
 }
 
+// Sanitize metrics snapshot payload.
 function sanitizeMetricsSnapshotPayload_(snapshotRaw, fallbackTagRaw) {
 	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
 	const tag = normalizeTag_(snapshot.tag || fallbackTagRaw);
@@ -123,6 +130,7 @@ function sanitizeMetricsSnapshotPayload_(snapshotRaw, fallbackTagRaw) {
 	return out;
 }
 
+// Map API members for metrics snapshot.
 function mapApiMembersForMetricsSnapshot_(membersRaw) {
 	const out = [];
 	const seen = {};
@@ -166,12 +174,14 @@ function mapApiMembersForMetricsSnapshot_(membersRaw) {
 	return out;
 }
 
+// Build player metrics profile snapshot cache key.
 function buildPlayerMetricsProfileSnapshotCacheKey_(tagRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag) return "";
 	return "playerMetricsProfileSnapshot:" + PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_VERSION + ":" + encodeURIComponent(tag);
 }
 
+// Handle read cached player metrics profile snapshot.
 function readCachedPlayerMetricsProfileSnapshot_(tagRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag) return null;
@@ -188,6 +198,7 @@ function readCachedPlayerMetricsProfileSnapshot_(tagRaw) {
 	}
 }
 
+// Handle write cached player metrics profile snapshot.
 function writeCachedPlayerMetricsProfileSnapshot_(tagRaw, snapshotRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag) return;
@@ -199,6 +210,7 @@ function writeCachedPlayerMetricsProfileSnapshot_(tagRaw, snapshotRaw) {
 	writeStringToCache_(cache, cacheKey, JSON.stringify(snapshot), PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_TTL_SECONDS);
 }
 
+// Build metrics snapshot from player profile.
 function buildMetricsSnapshotFromPlayerProfile_(profileRaw, fallbackTagRaw) {
 	const profile = profileRaw && typeof profileRaw === "object" ? profileRaw : {};
 	const tag = normalizeTag_(profile.tag || fallbackTagRaw);
@@ -230,6 +242,7 @@ function buildMetricsSnapshotFromPlayerProfile_(profileRaw, fallbackTagRaw) {
 	return sanitizeMetricsSnapshotPayload_(snapshot, tag);
 }
 
+// Merge metrics snapshot prefer authoritative.
 function mergeMetricsSnapshotPreferAuthoritative_(fallbackRaw, authoritativeRaw) {
 	const fallback = sanitizeMetricsSnapshotPayload_(fallbackRaw, "");
 	const authoritative = sanitizeMetricsSnapshotPayload_(authoritativeRaw, fallback && fallback.tag);
@@ -245,6 +258,7 @@ function mergeMetricsSnapshotPreferAuthoritative_(fallbackRaw, authoritativeRaw)
 	return merged;
 }
 
+// Return whether metrics snapshot likely incomplete.
 function isMetricsSnapshotLikelyIncomplete_(snapshotRaw) {
 	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, "");
 	if (!snapshot) return true;
@@ -259,6 +273,7 @@ function isMetricsSnapshotLikelyIncomplete_(snapshotRaw) {
 	return false;
 }
 
+// Return whether enrich metrics members with profiles.
 function shouldEnrichMetricsMembersWithProfiles_(membersRaw) {
 	const members = Array.isArray(membersRaw) ? membersRaw : [];
 	const total = members.length;
@@ -296,6 +311,7 @@ function shouldEnrichMetricsMembersWithProfiles_(membersRaw) {
 	return false;
 }
 
+// Fetch authoritative player metrics snapshot.
 function fetchAuthoritativePlayerMetricsSnapshot_(tagRaw, runStateRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag) return null;
@@ -331,6 +347,7 @@ function fetchAuthoritativePlayerMetricsSnapshot_(tagRaw, runStateRaw) {
 	}
 }
 
+// Handle enrich metrics members with profiles.
 function enrichMetricsMembersWithProfiles_(membersRaw, optionsRaw) {
 	const members = Array.isArray(membersRaw) ? membersRaw : [];
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -381,6 +398,7 @@ function enrichMetricsMembersWithProfiles_(membersRaw, optionsRaw) {
 	};
 }
 
+// Sanitize metrics trophy history point.
 function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
 	const point = pointRaw && typeof pointRaw === "object" ? pointRaw : {};
 	const dayKey = sanitizeMetricsDayKey_(point.dayKey);
@@ -403,6 +421,7 @@ function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
 	return out;
 }
 
+// Sanitize metrics donation month ledger.
 function sanitizeMetricsDonationMonthLedger_(ledgerRaw, monthKeyRaw) {
 	const ledger = ledgerRaw && typeof ledgerRaw === "object" ? ledgerRaw : {};
 	const monthKey = sanitizeDonationMonthKey_(monthKeyRaw || ledger.monthKey);
@@ -429,6 +448,7 @@ function sanitizeMetricsDonationMonthLedger_(ledgerRaw, monthKeyRaw) {
 	return out;
 }
 
+// Create an empty player metrics store.
 function createEmptyPlayerMetricsStore_() {
 	return {
 		schemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
@@ -437,6 +457,7 @@ function createEmptyPlayerMetricsStore_() {
 	};
 }
 
+// Create an empty player metrics entry.
 function createEmptyPlayerMetricsEntry_(tagRaw, nameRaw) {
 	const tag = normalizeTag_(tagRaw);
 	return {
@@ -450,6 +471,7 @@ function createEmptyPlayerMetricsEntry_(tagRaw, nameRaw) {
 	};
 }
 
+// Handle are metrics snapshots equivalent.
 function areMetricsSnapshotsEquivalent_(leftRaw, rightRaw) {
 	const left = sanitizeMetricsSnapshotPayload_(leftRaw, "");
 	const right = sanitizeMetricsSnapshotPayload_(rightRaw, "");
@@ -461,6 +483,7 @@ function areMetricsSnapshotsEquivalent_(leftRaw, rightRaw) {
 	return JSON.stringify(l) === JSON.stringify(r);
 }
 
+// Handle are metrics trophy points equivalent.
 function areMetricsTrophyPointsEquivalent_(leftRaw, rightRaw) {
 	const left = sanitizeMetricsTrophyHistoryPoint_(leftRaw);
 	const right = sanitizeMetricsTrophyHistoryPoint_(rightRaw);
@@ -468,6 +491,7 @@ function areMetricsTrophyPointsEquivalent_(leftRaw, rightRaw) {
 	return left.dayKey === right.dayKey && left.trophies === right.trophies && normalizeTag_(left.clanTag) === normalizeTag_(right.clanTag) && JSON.stringify(left.league || null) === JSON.stringify(right.league || null);
 }
 
+// Prune trophy history daily.
 function pruneTrophyHistoryDaily_(historyRaw, nowDateRaw) {
 	const history = Array.isArray(historyRaw) ? historyRaw : [];
 	const nowDate = nowDateRaw instanceof Date ? nowDateRaw : new Date();
@@ -503,6 +527,7 @@ function pruneTrophyHistoryDaily_(historyRaw, nowDateRaw) {
 	return pruned;
 }
 
+// Prune donation months.
 function pruneDonationMonths_(donationMonthsRaw) {
 	const donationMonths = donationMonthsRaw && typeof donationMonthsRaw === "object" ? donationMonthsRaw : {};
 	const keys = Object.keys(donationMonths)
@@ -521,9 +546,11 @@ function pruneDonationMonths_(donationMonthsRaw) {
 	return out;
 }
 
+// Get player metrics entry evidence ms.
 function getPlayerMetricsEntryEvidenceMs_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	let best = 0;
+	// Handle keep best.
 	const keepBest = (valueRaw) => {
 		const ms = parseIsoToMs_(valueRaw);
 		if (ms > best) best = ms;
@@ -562,6 +589,7 @@ function getPlayerMetricsEntryEvidenceMs_(entryRaw) {
 	return best;
 }
 
+// Sanitize player metrics entry.
 function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const identity = entry.identity && typeof entry.identity === "object" ? entry.identity : {};
@@ -613,6 +641,7 @@ function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 	return out;
 }
 
+// Sanitize player metrics store.
 function sanitizePlayerMetricsStore_(storeRaw, nowIsoRaw) {
 	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};
 	const nowMs = parseIsoToMs_(nowIsoRaw) || Date.now();
@@ -637,12 +666,14 @@ function sanitizePlayerMetricsStore_(storeRaw, nowIsoRaw) {
 	};
 }
 
+// Sanitize entry tag.
 function sanitizeEntryTag_(entryRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
 	const identity = entry.identity && typeof entry.identity === "object" ? entry.identity : {};
 	return normalizeTag_(identity.tag || (entry.latestSnapshot && entry.latestSnapshot.tag));
 }
 
+// Ensure player metrics store.
 function ensurePlayerMetricsStore_(rosterData) {
 	if (!rosterData || typeof rosterData !== "object") return createEmptyPlayerMetricsStore_();
 	const sanitized = sanitizePlayerMetricsStore_(rosterData.playerMetrics, new Date().toISOString());
@@ -650,6 +681,7 @@ function ensurePlayerMetricsStore_(rosterData) {
 	return sanitized;
 }
 
+// Handle count player metrics entries.
 function countPlayerMetricsEntries_(storeRaw) {
 	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};
 	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
@@ -661,6 +693,7 @@ function countPlayerMetricsEntries_(storeRaw) {
 	return count;
 }
 
+// Handle list rosters needing metrics coverage repair.
 function listRostersNeedingMetricsCoverageRepair_(rosterDataRaw, minCoverageRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -708,6 +741,7 @@ function listRostersNeedingMetricsCoverageRepair_(rosterDataRaw, minCoverageRaw)
 	return out;
 }
 
+// Handle list connected clan tags for metrics.
 function listConnectedClanTagsForMetrics_(rosterDataRaw, rosterIdFilterRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -728,6 +762,7 @@ function listConnectedClanTagsForMetrics_(rosterDataRaw, rosterIdFilterRaw) {
 	return out;
 }
 
+// Capture connected clan metrics.
 function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -801,6 +836,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	};
 }
 
+// Capture roster pool profile metrics.
 function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
@@ -873,6 +909,7 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 	};
 }
 
+// Capture member tracking for roster.
 function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
@@ -916,6 +953,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	};
 }
 
+// Build metrics capture context.
 function buildMetricsCaptureContext_(capturedAtRaw) {
 	const capturedMs = parseIsoToMs_(capturedAtRaw);
 	const capturedAt = capturedMs > 0 ? new Date(capturedMs).toISOString() : new Date().toISOString();
@@ -928,6 +966,7 @@ function buildMetricsCaptureContext_(capturedAtRaw) {
 	};
 }
 
+// Handle upsert daily trophy history point.
 function upsertDailyTrophyHistoryPoint_(entry, pointRaw, captureDateRaw) {
 	const entryObj = entry && typeof entry === "object" ? entry : {};
 	const point = sanitizeMetricsTrophyHistoryPoint_(pointRaw);
@@ -956,6 +995,7 @@ function upsertDailyTrophyHistoryPoint_(entry, pointRaw, captureDateRaw) {
 	return changed;
 }
 
+// Update donation ledger value.
 function updateDonationLedgerValue_(ledger, rawValue, rawFieldName, totalFieldName, resetFieldName) {
 	const state = ledger && typeof ledger === "object" ? ledger : {};
 	const currentRaw = toNonNegativeInt_(rawValue);
@@ -987,6 +1027,7 @@ function updateDonationLedgerValue_(ledger, rawValue, rawFieldName, totalFieldNa
 	};
 }
 
+// Update monthly donation ledger for snapshot.
 function updateMonthlyDonationLedgerForSnapshot_(entry, snapshotRaw, captureCtx) {
 	const entryObj = entry && typeof entry === "object" ? entry : {};
 	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, "");
@@ -1024,6 +1065,7 @@ function updateMonthlyDonationLedgerForSnapshot_(entry, snapshotRaw, captureCtx)
 	return before !== after;
 }
 
+// Update player metrics entry from snapshot.
 function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw) {
 	const entryObj = entry && typeof entry === "object" ? entry : {};
 	const captureCtx = captureCtxRaw && typeof captureCtxRaw === "object" ? captureCtxRaw : buildMetricsCaptureContext_("");
@@ -1083,6 +1125,7 @@ function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw
 	return latestChanged || trophyChanged || donationChanged || shouldUpdateLastSeen;
 }
 
+// Record clan member metrics snapshot.
 function recordClanMemberMetricsSnapshot_(rosterData, clanTagRaw, membersRaw, optionsRaw) {
 	const rosterDataSafe = rosterData && typeof rosterData === "object" ? rosterData : null;
 	if (!rosterDataSafe) {

@@ -1,5 +1,6 @@
 // Firebase transport, storage, and active snapshot helpers.
 
+// Get required Script property.
 function getRequiredScriptProperty_(keyRaw) {
 	const key = String(keyRaw == null ? "" : keyRaw).trim();
 	if (!key) throw new Error("Missing Script Property key.");
@@ -8,12 +9,14 @@ function getRequiredScriptProperty_(keyRaw) {
 	return value;
 }
 
+// Normalize Firebase db URL.
 function normalizeFirebaseDbUrl_(urlRaw) {
 	const raw = String(urlRaw == null ? "" : urlRaw).trim();
 	if (!raw) return "";
 	return raw.replace(/\/+$/, "");
 }
 
+// Normalize Firebase path.
 function normalizeFirebasePath_(pathRaw) {
 	return String(pathRaw == null ? "" : pathRaw)
 		.trim()
@@ -22,6 +25,7 @@ function normalizeFirebasePath_(pathRaw) {
 		.replace(/\.\./g, "");
 }
 
+// Build Firebase JSON URL.
 function buildFirebaseJsonUrl_(dbUrlRaw, pathRaw) {
 	const dbUrl = normalizeFirebaseDbUrl_(dbUrlRaw);
 	if (!dbUrl) throw new Error("Missing Firebase Realtime Database URL.");
@@ -43,10 +47,12 @@ function buildFirebaseJsonUrl_(dbUrlRaw, pathRaw) {
 	return dbUrl + "/" + encodedSegments.join("/") + ".json";
 }
 
+// Build Firebase root JSON URL.
 function buildFirebaseRootJsonUrl_(dbUrlRaw) {
 	return buildFirebaseJsonUrl_(dbUrlRaw, "");
 }
 
+// Get Firebase config.
 function getFirebaseConfig_() {
 	if (firebaseConfigCache_) return firebaseConfigCache_;
 	const config = {
@@ -63,22 +69,27 @@ function getFirebaseConfig_() {
 	return config;
 }
 
+// Handle utf8 string to bytes.
 function utf8StringToBytes_(valueRaw) {
 	return Utilities.newBlob(String(valueRaw == null ? "" : valueRaw)).getBytes();
 }
 
+// Handle utf8 bytes to string.
 function utf8BytesToString_(bytesRaw) {
 	return Utilities.newBlob(bytesRaw || []).getDataAsString("UTF-8");
 }
 
+// Handle base64 URL encode bytes.
 function base64UrlEncodeBytes_(bytesRaw) {
 	return Utilities.base64EncodeWebSafe(bytesRaw || []).replace(/=+$/g, "");
 }
 
+// Handle base64 URL encode utf8.
 function base64UrlEncodeUtf8_(valueRaw) {
 	return base64UrlEncodeBytes_(utf8StringToBytes_(valueRaw));
 }
 
+// Handle base64 URL decode to utf8.
 function base64UrlDecodeToUtf8_(valueRaw) {
 	let value = String(valueRaw == null ? "" : valueRaw).trim();
 	if (!value) return "";
@@ -89,6 +100,7 @@ function base64UrlDecodeToUtf8_(valueRaw) {
 	return utf8BytesToString_(decoded);
 }
 
+// Handle needs Firebase key encoding.
 function needsFirebaseKeyEncoding_(keyRaw) {
 	const key = String(keyRaw == null ? "" : keyRaw);
 	if (!key) return true;
@@ -98,12 +110,14 @@ function needsFirebaseKeyEncoding_(keyRaw) {
 	return false;
 }
 
+// Encode Firebase object key.
 function encodeFirebaseObjectKey_(keyRaw) {
 	const key = String(keyRaw == null ? "" : keyRaw);
 	if (!needsFirebaseKeyEncoding_(key)) return key;
 	return FIREBASE_KEY_ENCODING_PREFIX + base64UrlEncodeUtf8_(key);
 }
 
+// Decode Firebase object key.
 function decodeFirebaseObjectKey_(keyRaw) {
 	const key = String(keyRaw == null ? "" : keyRaw);
 	if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) !== 0) return key;
@@ -116,6 +130,7 @@ function decodeFirebaseObjectKey_(keyRaw) {
 	}
 }
 
+// Encode Firebase object keys recursive.
 function encodeFirebaseObjectKeysRecursive_(valueRaw) {
 	if (Array.isArray(valueRaw)) {
 		const outArray = [];
@@ -136,6 +151,7 @@ function encodeFirebaseObjectKeysRecursive_(valueRaw) {
 	return out;
 }
 
+// Decode Firebase object keys recursive.
 function decodeFirebaseObjectKeysRecursive_(valueRaw) {
 	if (Array.isArray(valueRaw)) {
 		const outArray = [];
@@ -156,11 +172,13 @@ function decodeFirebaseObjectKeysRecursive_(valueRaw) {
 	return out;
 }
 
+// Clear Firebase access token cache.
 function clearFirebaseAccessTokenCache_() {
 	const cache = getScriptCacheSafe_();
 	removeStringFromCache_(cache, FIREBASE_ACCESS_TOKEN_CACHE_KEY);
 }
 
+// Handle request Firebase access token.
 function requestFirebaseAccessToken_() {
 	const config = getFirebaseConfig_();
 	const nowSeconds = Math.floor(Date.now() / 1000);
@@ -203,6 +221,7 @@ function requestFirebaseAccessToken_() {
 	return { accessToken: accessToken, expiresIn: expiresIn };
 }
 
+// Get Firebase access token.
 function getFirebaseAccessToken_(forceRefreshRaw) {
 	const forceRefresh = !!forceRefreshRaw;
 	const cache = getScriptCacheSafe_();
@@ -216,12 +235,14 @@ function getFirebaseAccessToken_(forceRefreshRaw) {
 	return tokenPayload.accessToken;
 }
 
+// Handle Firebase request JSON.
 function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw) {
 	const path = normalizeFirebasePath_(pathRaw);
 	const method = String(methodRaw == null ? "GET" : methodRaw).trim().toUpperCase();
 	if (!method) throw new Error("Firebase request method is required.");
 	const url = buildFirebaseJsonUrl_(getFirebaseConfig_().dbUrl, path);
 
+	// Handle do request.
 	const doRequest = (forceTokenRefresh) => {
 		const accessToken = getFirebaseAccessToken_(forceTokenRefresh);
 		const options = {
@@ -260,10 +281,12 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw) {
 	}
 }
 
+// Handle Firebase root request JSON.
 function firebaseRootRequestJson_(methodRaw, payloadRaw) {
 	return firebaseRequestJson_("", methodRaw, payloadRaw);
 }
 
+// Parse roster data text.
 function parseRosterDataText_(text, sourceLabel) {
 	const label = String(sourceLabel == null ? ACTIVE_ROSTER_FILENAME : sourceLabel).trim() || ACTIVE_ROSTER_FILENAME;
 	const raw = String(text == null ? "" : text);
@@ -280,6 +303,7 @@ function parseRosterDataText_(text, sourceLabel) {
 	}
 }
 
+// Decode and validate active roster payload.
 function decodeAndValidateActiveRosterPayload_(encodedPayload, sourceLabelRaw) {
 	if (!encodedPayload || typeof encodedPayload !== "object" || Array.isArray(encodedPayload)) {
 		throw new Error("Missing or invalid active roster payload at " + String(sourceLabelRaw || "unknown") + ".");
@@ -294,6 +318,7 @@ function decodeAndValidateActiveRosterPayload_(encodedPayload, sourceLabelRaw) {
 	};
 }
 
+// Handle read legacy root active roster snapshot or null.
 function readLegacyRootActiveRosterSnapshotOrNull_() {
 	const encodedRoot = firebaseRootRequestJson_("GET");
 	if (!encodedRoot || typeof encodedRoot !== "object" || Array.isArray(encodedRoot)) return null;
@@ -304,6 +329,7 @@ function readLegacyRootActiveRosterSnapshotOrNull_() {
 	}
 }
 
+// Handle read active roster snapshot from Firebase.
 function readActiveRosterSnapshotFromFirebase_() {
 	const encodedPayload = firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "GET");
 	if (encodedPayload != null) {
@@ -316,6 +342,7 @@ function readActiveRosterSnapshotFromFirebase_() {
 	throw new Error("Missing active roster payload at /active and no valid legacy root payload fallback was found.");
 }
 
+// Handle read active roster snapshot.
 function readActiveRosterSnapshot_() {
 	return readActiveRosterSnapshotFromFirebase_();
 }
@@ -395,6 +422,7 @@ function updateActiveRosterDataCaches_(text) {
 	});
 }
 
+// Handle write active roster data to Firebase.
 function writeActiveRosterDataToFirebase_(rosterDataRaw) {
 	const validated = validateRosterData_(rosterDataRaw);
 	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
@@ -404,18 +432,21 @@ function writeActiveRosterDataToFirebase_(rosterDataRaw) {
 	return { rosterData: validated, text: payloadText };
 }
 
+// Get server date string.
 function getServerDateString_(dateRaw) {
 	const date = dateRaw instanceof Date ? dateRaw : new Date();
 	const timezone = Session.getScriptTimeZone ? Session.getScriptTimeZone() : "Etc/UTC";
 	return Utilities.formatDate(date, timezone, "yyyy-MM-dd");
 }
 
+// Get server month key.
 function getServerMonthKey_(dateRaw) {
 	const date = dateRaw instanceof Date ? dateRaw : new Date();
 	const timezone = Session.getScriptTimeZone ? Session.getScriptTimeZone() : "Etc/UTC";
 	return Utilities.formatDate(date, timezone, "yyyy-MM");
 }
 
+// Parse iso to ms.
 function parseIsoToMs_(isoRaw) {
 	const text = String(isoRaw == null ? "" : isoRaw).trim();
 	if (!text) return 0;
@@ -423,6 +454,7 @@ function parseIsoToMs_(isoRaw) {
 	return isFinite(ms) ? ms : 0;
 }
 
+// Build safe publish archive key.
 function buildSafePublishArchiveKey_(timestampRaw) {
 	const date = timestampRaw ? new Date(timestampRaw) : new Date();
 	const safeDate = isFinite(date.getTime()) ? date : new Date();
@@ -430,6 +462,7 @@ function buildSafePublishArchiveKey_(timestampRaw) {
 	return prefix + "_" + Utilities.getUuid().slice(0, 8);
 }
 
+// Build Firebase child path.
 function buildFirebaseChildPath_(parentPathRaw, keyRaw) {
 	const parentPath = normalizeFirebasePath_(parentPathRaw);
 	const key = String(keyRaw == null ? "" : keyRaw).trim();
@@ -437,16 +470,19 @@ function buildFirebaseChildPath_(parentPathRaw, keyRaw) {
 	return parentPath ? parentPath + "/" + key : key;
 }
 
+// Handle read Firebase map object.
 function readFirebaseMapObject_(pathRaw) {
 	const payload = firebaseRequestJson_(pathRaw, "GET");
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
 	return payload;
 }
 
+// Handle list Firebase child keys.
 function listFirebaseChildKeys_(pathRaw) {
 	return Object.keys(readFirebaseMapObject_(pathRaw));
 }
 
+// Handle write archived roster payload.
 function writeArchivedRosterPayload_(pathRaw, rosterDataRaw) {
 	const validated = validateRosterData_(rosterDataRaw);
 	const encoded = encodeFirebaseObjectKeysRecursive_(validated);
@@ -454,6 +490,7 @@ function writeArchivedRosterPayload_(pathRaw, rosterDataRaw) {
 	return validated;
 }
 
+// Create a publish archive backup from snapshot.
 function createPublishArchiveBackupFromSnapshot_(sourceSnapshotRaw, timestampRaw) {
 	const sourceSnapshot = sourceSnapshotRaw && typeof sourceSnapshotRaw === "object" ? sourceSnapshotRaw : null;
 	if (!sourceSnapshot || !sourceSnapshot.rosterData) {
@@ -465,6 +502,7 @@ function createPublishArchiveBackupFromSnapshot_(sourceSnapshotRaw, timestampRaw
 	return { created: true, key: key };
 }
 
+// Clean up publish archive backups.
 function cleanupPublishArchiveBackups_() {
 	const keys = listFirebaseChildKeys_(FIREBASE_ARCHIVE_PUBLISH_PATH)
 		.filter((key) => key)
@@ -478,6 +516,7 @@ function cleanupPublishArchiveBackups_() {
 	return deletedCount;
 }
 
+// Create an auto refresh daily archive if needed.
 function createAutoRefreshDailyArchiveIfNeeded_(dateStringRaw, rosterDataRaw) {
 	const archiveDate = String(dateStringRaw == null ? "" : dateStringRaw).trim() || getServerDateString_(new Date());
 	if (!/^\d{4}-\d{2}-\d{2}$/.test(archiveDate)) {
@@ -492,6 +531,7 @@ function createAutoRefreshDailyArchiveIfNeeded_(dateStringRaw, rosterDataRaw) {
 	return { created: true, existed: false, archiveDate: archiveDate, key: archiveDate };
 }
 
+// Clean up old auto refresh daily archives.
 function cleanupOldAutoRefreshDailyArchives_() {
 	const keys = listFirebaseChildKeys_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH)
 		.filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))
@@ -505,6 +545,7 @@ function cleanupOldAutoRefreshDailyArchives_() {
 	return deletedCount;
 }
 
+// Find latest auto refresh archive date.
 function findLatestAutoRefreshArchiveDate_() {
 	const keys = listFirebaseChildKeys_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH)
 		.filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))
@@ -512,12 +553,14 @@ function findLatestAutoRefreshArchiveDate_() {
 	return keys.length ? keys[keys.length - 1] : "";
 }
 
+// Mark active data write success.
 function markActiveDataWriteSuccess_(timestampRaw) {
 	const timestamp = String(timestampRaw == null ? "" : timestampRaw).trim() || new Date().toISOString();
 	const props = PropertiesService.getScriptProperties();
 	props.setProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY, timestamp);
 }
 
+// Get last successful active write at.
 function getLastSuccessfulActiveWriteAt_() {
 	const props = PropertiesService.getScriptProperties();
 	const text = String(props.getProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY) || "").trim();
@@ -533,6 +576,7 @@ function getLastSuccessfulActiveWriteAt_() {
 	}
 }
 
+// Return whether recent successful active write.
 function isRecentSuccessfulActiveWrite_() {
 	const lastWriteAt = getLastSuccessfulActiveWriteAt_();
 	const lastWriteMs = parseIsoToMs_(lastWriteAt);
@@ -540,6 +584,7 @@ function isRecentSuccessfulActiveWrite_() {
 	return Date.now() - lastWriteMs < AUTO_REFRESH_INTERVAL_MS;
 }
 
+// Handle replace active roster data.
 function replaceActiveRosterData_(validatedRosterData, options) {
 	const opts = options && typeof options === "object" ? options : {};
 	const validated = validateRosterData_(validatedRosterData);

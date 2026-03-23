@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- Lightweight redirect shell that preserves query/hash when entering the public app. -->
 <html>
 <head>
   <meta charset="utf-8" />
@@ -11,6 +12,7 @@
   <p style="margin:0 0 6px;">Redirecting to the public roster page.</p>
   <p style="margin:0;"><a style="color:#93c5fd;" href="/">Continue</a></p>
   <script>
+    // Preserve the incoming query string and hash when redirecting to the root shell.
     (function () {
       if (typeof window === "undefined" || !window.location) return;
       var search = typeof window.location.search === "string" ? window.location.search : "";

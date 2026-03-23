@@ -1,1 +1,2 @@
+# Redirect the legacy app shell path to the root public shell.
 /app.html / 301

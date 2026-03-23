@@ -13,11 +13,13 @@
     var DEFAULT_FIREBASE_DB_URL = "https://turtlecoc-37f22-default-rtdb.firebaseio.com";
     var DEFAULT_APPS_SCRIPT_BASE_URL = "https://script.google.com/macros/s/AKfycbyIrN6gBS2DkhJwO6NzdtnHPEBQJCCkOtiPOM9EslkQ6AaQjXmFFDGGVn_sENGKxEwuhg/exec";
 
+    // Handle as trimmed text.
     function asTrimmedText(valueRaw) {
         if (valueRaw == null) return "";
         return String(valueRaw).trim();
     }
 
+    // Normalize http base URL.
     function normalizeHttpBaseUrl(valueRaw) {
         var value = asTrimmedText(valueRaw);
         if (!value) return "";
