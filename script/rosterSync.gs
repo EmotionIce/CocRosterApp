@@ -78,11 +78,8 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		.toLowerCase();
 	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : { seenClanTags: {} };
-	const metricsProfileRunState = shouldRecordMetrics
-		? metricsRunState.profileRunState && typeof metricsRunState.profileRunState === "object"
-			? metricsRunState.profileRunState
-			: (metricsRunState.profileRunState = {})
-		: null;
+	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
+	const metricsProfileRunState = shouldRecordMetrics ? ensureMetricsProfileRunState_(metricsRunState) : null;
 	let metricsCommittedRosterData = shouldRecordMetrics
 		? { playerMetrics: sanitizePlayerMetricsStore_(rosterData && rosterData.playerMetrics, snapshotStartedAtIso) }
 		: null;

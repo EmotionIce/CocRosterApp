@@ -311,14 +311,161 @@ function shouldEnrichMetricsMembersWithProfiles_(membersRaw) {
 	return false;
 }
 
+// Ensure canonical player-profile run-state object.
+function ensureMetricsProfileRunState_(runStateRaw) {
+	const runState = runStateRaw && typeof runStateRaw === "object" ? runStateRaw : {};
+	const nested = runState.profileRunState && typeof runState.profileRunState === "object" ? runState.profileRunState : null;
+	const topSnapshotByTag = runState.profileSnapshotByTag && typeof runState.profileSnapshotByTag === "object" ? runState.profileSnapshotByTag : null;
+	const nestedSnapshotByTag = nested && nested.profileSnapshotByTag && typeof nested.profileSnapshotByTag === "object" ? nested.profileSnapshotByTag : null;
+	const topErrorByTag = runState.profileSnapshotErrorByTag && typeof runState.profileSnapshotErrorByTag === "object" ? runState.profileSnapshotErrorByTag : null;
+	const nestedErrorByTag = nested && nested.profileSnapshotErrorByTag && typeof nested.profileSnapshotErrorByTag === "object" ? nested.profileSnapshotErrorByTag : null;
+	let profileSnapshotByTag = topSnapshotByTag || nestedSnapshotByTag || {};
+	let profileSnapshotErrorByTag = topErrorByTag || nestedErrorByTag || {};
+	if (topSnapshotByTag && nestedSnapshotByTag && topSnapshotByTag !== nestedSnapshotByTag) {
+		const nestedKeys = Object.keys(nestedSnapshotByTag);
+		for (let i = 0; i < nestedKeys.length; i++) {
+			const key = nestedKeys[i];
+			if (!Object.prototype.hasOwnProperty.call(topSnapshotByTag, key)) {
+				topSnapshotByTag[key] = nestedSnapshotByTag[key];
+			}
+		}
+		profileSnapshotByTag = topSnapshotByTag;
+	}
+	if (topErrorByTag && nestedErrorByTag && topErrorByTag !== nestedErrorByTag) {
+		const nestedKeys = Object.keys(nestedErrorByTag);
+		for (let i = 0; i < nestedKeys.length; i++) {
+			const key = nestedKeys[i];
+			if (!Object.prototype.hasOwnProperty.call(topErrorByTag, key)) {
+				topErrorByTag[key] = nestedErrorByTag[key];
+			}
+		}
+		profileSnapshotErrorByTag = topErrorByTag;
+	}
+	runState.profileSnapshotByTag = profileSnapshotByTag;
+	runState.profileSnapshotErrorByTag = profileSnapshotErrorByTag;
+	const topBlocked = typeof runState.profileFetchBlocked === "boolean" ? runState.profileFetchBlocked : false;
+	const nestedBlocked = nested && typeof nested.profileFetchBlocked === "boolean" ? nested.profileFetchBlocked : false;
+	runState.profileFetchBlocked = topBlocked || nestedBlocked;
+	if (nested) {
+		nested.profileSnapshotByTag = runState.profileSnapshotByTag;
+		nested.profileSnapshotErrorByTag = runState.profileSnapshotErrorByTag;
+		nested.profileFetchBlocked = runState.profileFetchBlocked;
+	}
+	return runState;
+}
+
+// Prefetch authoritative player metrics snapshots by tag.
+function prefetchAuthoritativePlayerMetricsSnapshotsByTag_(playerTagsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const runState = ensureMetricsProfileRunState_(options.runState && typeof options.runState === "object" ? options.runState : {});
+	const inputTags = Array.isArray(playerTagsRaw) ? playerTagsRaw : [];
+	const uniqueTags = [];
+	const seenTags = {};
+	for (let i = 0; i < inputTags.length; i++) {
+		const tag = normalizeTag_(inputTags[i]);
+		if (!tag || !isValidPlayerTag_(tag) || seenTags[tag]) continue;
+		seenTags[tag] = true;
+		uniqueTags.push(tag);
+	}
+
+	let runStateHits = 0;
+	let runStateErrors = 0;
+	let cacheHits = 0;
+	let blockedMisses = 0;
+	const misses = [];
+	for (let i = 0; i < uniqueTags.length; i++) {
+		const tag = uniqueTags[i];
+		if (runState.profileSnapshotByTag[tag]) {
+			runStateHits++;
+			continue;
+		}
+		if (runState.profileSnapshotErrorByTag[tag]) {
+			runStateErrors++;
+			continue;
+		}
+		const cached = readCachedPlayerMetricsProfileSnapshot_(tag);
+		if (cached) {
+			runState.profileSnapshotByTag[tag] = cached;
+			cacheHits++;
+			continue;
+		}
+		if (runState.profileFetchBlocked) {
+			blockedMisses++;
+			continue;
+		}
+		misses.push(tag);
+	}
+
+	let liveRequested = 0;
+	let liveSucceeded = 0;
+	let liveFailed = 0;
+	let liveRateLimited = 0;
+	if (misses.length > 0 && !runState.profileFetchBlocked) {
+		const batchSize = Math.max(1, toNonNegativeInt_(options.batchSize) || AUTO_REFRESH_PREFETCH_BATCH_SIZE);
+		const batchDelayMs = Math.max(0, toNonNegativeInt_(options.batchDelayMs) || AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS);
+		const entries = [];
+		for (let i = 0; i < misses.length; i++) {
+			const tag = misses[i];
+			entries.push({
+				key: tag,
+				path: "/players/" + encodeTagForPath_(tag),
+			});
+		}
+		liveRequested = entries.length;
+		const fetched = cocFetchAllByPathEntries_(entries, {
+			batchSize: batchSize,
+			batchDelayMs: batchDelayMs,
+		});
+		for (let i = 0; i < misses.length; i++) {
+			const tag = misses[i];
+			if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, tag)) {
+				const snapshot = buildMetricsSnapshotFromPlayerProfile_(fetched.dataByKey[tag], tag);
+				if (snapshot) {
+					writeCachedPlayerMetricsProfileSnapshot_(tag, snapshot);
+					runState.profileSnapshotByTag[tag] = snapshot;
+					liveSucceeded++;
+					continue;
+				}
+				runState.profileSnapshotErrorByTag[tag] = true;
+				liveFailed++;
+				continue;
+			}
+			if (Object.prototype.hasOwnProperty.call(fetched.errorByKey, tag)) {
+				const err = fetched.errorByKey[tag];
+				runState.profileSnapshotErrorByTag[tag] = true;
+				if (err && Number(err.statusCode) === 429) {
+					runState.profileFetchBlocked = true;
+					liveRateLimited++;
+				}
+				liveFailed++;
+				continue;
+			}
+			runState.profileSnapshotErrorByTag[tag] = true;
+			liveFailed++;
+		}
+	}
+
+	return {
+		requestedTagCount: inputTags.length,
+		uniqueTagCount: uniqueTags.length,
+		runStateHits: runStateHits,
+		runStateErrors: runStateErrors,
+		cacheHits: cacheHits,
+		blockedMisses: blockedMisses,
+		liveRequested: liveRequested,
+		liveSucceeded: liveSucceeded,
+		liveFailed: liveFailed,
+		liveRateLimited: liveRateLimited,
+		profileFetchBlocked: runState.profileFetchBlocked === true,
+	};
+}
+
 // Fetch authoritative player metrics snapshot.
 function fetchAuthoritativePlayerMetricsSnapshot_(tagRaw, runStateRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag) return null;
-	const runState = runStateRaw && typeof runStateRaw === "object" ? runStateRaw : null;
+	const runState = runStateRaw && typeof runStateRaw === "object" ? ensureMetricsProfileRunState_(runStateRaw) : null;
 	if (runState) {
-		if (!runState.profileSnapshotByTag || typeof runState.profileSnapshotByTag !== "object") runState.profileSnapshotByTag = {};
-		if (!runState.profileSnapshotErrorByTag || typeof runState.profileSnapshotErrorByTag !== "object") runState.profileSnapshotErrorByTag = {};
 		if (runState.profileSnapshotByTag[tag]) return runState.profileSnapshotByTag[tag];
 		if (runState.profileSnapshotErrorByTag[tag]) return null;
 		if (runState.profileFetchBlocked) return null;
@@ -361,7 +508,7 @@ function enrichMetricsMembersWithProfiles_(membersRaw, optionsRaw) {
 
 	const shouldEnrichAll = mode === "always" ? true : shouldEnrichMetricsMembersWithProfiles_(members);
 
-	const runState = options.runState && typeof options.runState === "object" ? options.runState : {};
+	const runState = ensureMetricsProfileRunState_(options.runState && typeof options.runState === "object" ? options.runState : {});
 	const out = [];
 	let attempted = 0;
 	let enriched = 0;
@@ -781,11 +928,9 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	const clanTags = listConnectedClanTagsForMetrics_(rosterData, rosterIdFilter);
 	const runState = options.runState && typeof options.runState === "object"
 		? options.runState
-		: { seenClanTags: {}, profileSnapshotByTag: {}, profileSnapshotErrorByTag: {}, profileFetchBlocked: false };
+		: { seenClanTags: {} };
 	if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
-	if (!runState.profileSnapshotByTag || typeof runState.profileSnapshotByTag !== "object") runState.profileSnapshotByTag = {};
-	if (!runState.profileSnapshotErrorByTag || typeof runState.profileSnapshotErrorByTag !== "object") runState.profileSnapshotErrorByTag = {};
-	if (typeof runState.profileFetchBlocked !== "boolean") runState.profileFetchBlocked = false;
+	ensureMetricsProfileRunState_(runState);
 	const errors = [];
 	let capturedClans = 0;
 	let recorded = 0;
@@ -853,7 +998,8 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 
 	const connectedClanTag = normalizeTag_(roster.connectedClanTag);
 	const players = collectRosterPoolPlayers_(roster);
-	const profileRunState = options.profileRunState && typeof options.profileRunState === "object" ? options.profileRunState : {};
+	const profileRunStateSource = options.profileRunState && typeof options.profileRunState === "object" ? options.profileRunState : options.runState;
+	const profileRunState = ensureMetricsProfileRunState_(profileRunStateSource && typeof profileRunStateSource === "object" ? profileRunStateSource : {});
 	const snapshotsByClanTag = {};
 	const seenTags = {};
 	const errors = [];
@@ -934,7 +1080,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	// When strict profile mode is requested, also refresh directly from player profiles
 	// so metrics still update even if clan-member snapshots are incomplete or unavailable.
 	const fallback = captureRosterPoolProfileMetrics_(rosterData, rosterId, {
-		profileRunState: options.runState && options.runState.profileRunState,
+		runState: options.runState,
 	});
 
 	return {

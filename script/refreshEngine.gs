@@ -359,6 +359,42 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	};
 }
 
+// Collect refresh-all player tags to warm authoritative profile snapshots once per run.
+function collectRefreshAllPlayerProfileCandidateTags_(sourceRostersRaw, prefetchBundleRaw) {
+	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
+	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
+	const clanMembersSnapshotByTag =
+		prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {};
+	const tagSet = {};
+
+	// Include all roster pool tags (main/subs/missing) across every roster.
+	for (let i = 0; i < sourceRosters.length; i++) {
+		const roster = sourceRosters[i] && typeof sourceRosters[i] === "object" ? sourceRosters[i] : {};
+		const players = collectRosterPoolPlayers_(roster);
+		for (let j = 0; j < players.length; j++) {
+			const tag = normalizeTag_(players[j] && players[j].tag);
+			if (!tag || !isValidPlayerTag_(tag)) continue;
+			tagSet[tag] = true;
+		}
+	}
+
+	// Add tags from wave-one connected-clan member snapshots.
+	const clanTags = Object.keys(clanMembersSnapshotByTag);
+	for (let i = 0; i < clanTags.length; i++) {
+		const clanTag = clanTags[i];
+		const snapshot = clanMembersSnapshotByTag[clanTag] && typeof clanMembersSnapshotByTag[clanTag] === "object" ? clanMembersSnapshotByTag[clanTag] : {};
+		const metricsMembers = Array.isArray(snapshot.metricsMembers) ? snapshot.metricsMembers : snapshot.members;
+		const members = Array.isArray(metricsMembers) ? metricsMembers : [];
+		for (let j = 0; j < members.length; j++) {
+			const tag = normalizeTag_(members[j] && members[j].tag);
+			if (!tag || !isValidPlayerTag_(tag)) continue;
+			tagSet[tag] = true;
+		}
+	}
+
+	return Object.keys(tagSet).sort();
+}
+
 // Extract the most useful failure text from heterogeneous step result/error shapes.
 function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 	const stepResult = stepResultRaw && typeof stepResultRaw === "object" ? stepResultRaw : {};
@@ -725,9 +761,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : {};
 	// Ensure mutable run-state containers exist for cross-roster metrics reuse.
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
-	if (!metricsRunState.profileSnapshotByTag || typeof metricsRunState.profileSnapshotByTag !== "object") metricsRunState.profileSnapshotByTag = {};
-	if (!metricsRunState.profileSnapshotErrorByTag || typeof metricsRunState.profileSnapshotErrorByTag !== "object") metricsRunState.profileSnapshotErrorByTag = {};
-	if (typeof metricsRunState.profileFetchBlocked !== "boolean") metricsRunState.profileFetchBlocked = false;
+	const metricsProfileRunState = ensureMetricsProfileRunState_(metricsRunState);
 	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const rosterIds = [];
 	// Freeze the roster iteration order up front so later mutations do not affect coverage.
@@ -744,6 +778,12 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	// Prefetch once for all rosters to reduce API calls and keep data temporally aligned.
 	touchActiveRosterLockLease_("refresh all prefetch");
 	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(sourceRosters);
+	const refreshAllProfileCandidateTags = collectRefreshAllPlayerProfileCandidateTags_(sourceRosters, refreshAllPrefetch);
+	prefetchAuthoritativePlayerMetricsSnapshotsByTag_(refreshAllProfileCandidateTags, {
+		runState: metricsProfileRunState,
+		batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
+		batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
+	});
 	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
 	const ownershipSnapshot = buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
 		metricsRunState: metricsRunState,
