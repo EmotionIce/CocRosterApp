@@ -401,8 +401,8 @@ function prefetchAuthoritativePlayerMetricsSnapshotsByTag_(playerTagsRaw, option
 	let liveFailed = 0;
 	let liveRateLimited = 0;
 	if (misses.length > 0 && !runState.profileFetchBlocked) {
-		const batchSize = Math.max(1, toNonNegativeInt_(options.batchSize) || AUTO_REFRESH_PREFETCH_BATCH_SIZE);
-		const batchDelayMs = Math.max(0, toNonNegativeInt_(options.batchDelayMs) || AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS);
+		const batchSize = Math.max(1, toNonNegativeInt_(options.batchSize) || PLAYER_PROFILE_PREFETCH_BATCH_SIZE);
+		const batchDelayMs = Math.max(0, toNonNegativeInt_(options.batchDelayMs) || PLAYER_PROFILE_PREFETCH_BATCH_DELAY_MS);
 		const entries = [];
 		for (let i = 0; i < misses.length; i++) {
 			const tag = misses[i];

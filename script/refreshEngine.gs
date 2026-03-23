@@ -752,6 +752,12 @@ function buildRefreshAllRosterResultMessage_(pipelineResultRaw, rosterIssuesRaw)
 // Run refresh pipeline for every roster (expects caller already holds the job lock).
 function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let rosterData = null;
+	const totalStartMs = Date.now();
+	let prefetchDurationMs = 0;
+	let profileWarmupDurationMs = 0;
+	let ownershipSnapshotDurationMs = 0;
+	let cumulativeRosterPipelineDurationMs = 0;
+	let profileWarmupCandidateCount = 0;
 	try {
 		rosterData = validateRosterData_(rosterDataRaw);
 	} catch (err) {
@@ -777,21 +783,29 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let rostersWithIssues = 0;
 	// Prefetch once for all rosters to reduce API calls and keep data temporally aligned.
 	touchActiveRosterLockLease_("refresh all prefetch");
+	const prefetchStartMs = Date.now();
 	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(sourceRosters);
+	prefetchDurationMs = Math.max(0, Date.now() - prefetchStartMs);
+	const profileWarmupStartMs = Date.now();
 	const refreshAllProfileCandidateTags = collectRefreshAllPlayerProfileCandidateTags_(sourceRosters, refreshAllPrefetch);
+	profileWarmupCandidateCount = refreshAllProfileCandidateTags.length;
 	prefetchAuthoritativePlayerMetricsSnapshotsByTag_(refreshAllProfileCandidateTags, {
 		runState: metricsProfileRunState,
-		batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
-		batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
+		batchSize: PLAYER_PROFILE_PREFETCH_BATCH_SIZE,
+		batchDelayMs: PLAYER_PROFILE_PREFETCH_BATCH_DELAY_MS,
 	});
+	profileWarmupDurationMs = Math.max(0, Date.now() - profileWarmupStartMs);
 	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
+	const ownershipSnapshotStartMs = Date.now();
 	const ownershipSnapshot = buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
 		metricsRunState: metricsRunState,
 	});
+	ownershipSnapshotDurationMs = Math.max(0, Date.now() - ownershipSnapshotStartMs);
 
 	// Execute the same single-roster pipeline for each id and aggregate diagnostics.
 	for (let i = 0; i < rosterIds.length; i++) {
 		touchActiveRosterLockLease_("refresh all roster " + (i + 1) + "/" + rosterIds.length);
+		const rosterPipelineStartMs = Date.now();
 		const rosterId = rosterIds[i];
 		processedRosters++;
 		const currentRoster = findRosterInDataById_(rosterData, rosterId);
@@ -872,6 +886,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 			rosterIssues.push(issue);
 			issues.push(issue);
 		}
+		cumulativeRosterPipelineDurationMs += Math.max(0, Date.now() - rosterPipelineStartMs);
 		const rosterHasIssues = rosterIssues.length > 0 || partialFailure;
 		if (rosterHasIssues) rostersWithIssues++;
 		const rosterMessage = buildRefreshAllRosterResultMessage_(pipelineResult, rosterIssues);
@@ -895,6 +910,17 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	} catch (err) {
 		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh payload", err, rosterData));
 	}
+	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
+	Logger.log(
+		"refreshAllRosters timing totalMs=%s prefetchMs=%s profileWarmupMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s profileCandidates=%s",
+		totalDurationMs,
+		prefetchDurationMs,
+		profileWarmupDurationMs,
+		ownershipSnapshotDurationMs,
+		cumulativeRosterPipelineDurationMs,
+		processedRosters,
+		profileWarmupCandidateCount,
+	);
 
 	return {
 		ok: issues.length < 1,
