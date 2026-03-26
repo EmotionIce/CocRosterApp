@@ -164,7 +164,7 @@ function writePublishedRosterData_(rosterDataRaw) {
 			meta.publishArchiveKey,
 			publishArchiveCleanupDeleted,
 		);
-		markActiveDataWriteSuccess_(publishedAt);
+		markActiveDataWriteSuccess_(publishedAt, ACTIVE_DATA_WRITE_SOURCE_PUBLISH);
 		return meta;
 	} catch (err) {
 		rethrowWithDuplicateRosterTagDetails_(validationStepLabel, err, duplicateDiagnosticsRosterData);
@@ -215,7 +215,7 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 		lastAutoRefreshArchiveDate: archiveDate,
 		lastAutoRefreshArchiveCleanupDeleted: archiveCleanupDeleted,
 	});
-	markActiveDataWriteSuccess_(writtenAt);
+	markActiveDataWriteSuccess_(writtenAt, ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH);
 
 	return {
 		changed: true,
@@ -429,11 +429,12 @@ function autoRefreshActiveRosterTick() {
 				lockOwner: "auto-refresh",
 				lockWaitMs: 0,
 				beforeRun: function () {
-					if (!isRecentSuccessfulActiveWrite_()) return null;
+					if (!isRecentSuccessfulActiveWrite_({ ignoreAutoRefreshWrites: true })) return null;
 					return {
 						skip: true,
 						reason: "cooldown",
 						lastWriteAt: getLastSuccessfulActiveWriteAt_(),
+						lastWriteSource: getLastSuccessfulActiveWriteSource_(),
 					};
 				},
 				onAfterRun: function (resultRaw) {
@@ -450,7 +451,9 @@ function autoRefreshActiveRosterTick() {
 			const reason = String(runResult.reason == null ? "" : runResult.reason).trim().toLowerCase();
 			if (reason === "cooldown") {
 				const lastWriteAt = String(runResult.lastWriteAt || "").trim();
-				let summary = "Auto-refresh skipped: active data was written recently (" + (lastWriteAt || "unknown") + ").";
+				const lastWriteSource = String(runResult.lastWriteSource || "").trim();
+				const sourceSuffix = lastWriteSource ? " by " + lastWriteSource : "";
+				let summary = "Auto-refresh skipped: active data was written recently" + sourceSuffix + " (" + (lastWriteAt || "unknown") + ").";
 				try {
 					const cleanupDeleted = cleanupOldAutoRefreshDailyArchives_();
 					if (cleanupDeleted > 0) {

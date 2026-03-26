@@ -554,10 +554,23 @@ function findLatestAutoRefreshArchiveDate_() {
 }
 
 // Mark active data write success.
-function markActiveDataWriteSuccess_(timestampRaw) {
+function markActiveDataWriteSuccess_(timestampRaw, sourceRaw) {
 	const timestamp = String(timestampRaw == null ? "" : timestampRaw).trim() || new Date().toISOString();
+	const sourceText = String(sourceRaw == null ? "" : sourceRaw)
+		.trim()
+		.toLowerCase();
+	const source =
+		sourceText === ACTIVE_DATA_WRITE_SOURCE_PUBLISH || sourceText === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH
+			? sourceText
+			: ACTIVE_DATA_WRITE_SOURCE_UNKNOWN;
 	const props = PropertiesService.getScriptProperties();
-	props.setProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY, timestamp);
+	props.setProperties(
+		{
+			[ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY]: timestamp,
+			[ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_SOURCE_PROPERTY]: source,
+		},
+		false,
+	);
 }
 
 // Get last successful active write at.
@@ -569,18 +582,40 @@ function getLastSuccessfulActiveWriteAt_() {
 		const activeData = readActiveRosterData_();
 		const fallback = String((activeData && activeData.lastUpdatedAt) || "").trim();
 		if (!fallback) return "";
-		props.setProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY, fallback);
+		props.setProperties(
+			{
+				[ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY]: fallback,
+				[ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_SOURCE_PROPERTY]: ACTIVE_DATA_WRITE_SOURCE_UNKNOWN,
+			},
+			false,
+		);
 		return fallback;
 	} catch (err) {
 		return "";
 	}
 }
 
+// Get last successful active write source.
+function getLastSuccessfulActiveWriteSource_() {
+	const props = PropertiesService.getScriptProperties();
+	const source = String(props.getProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_SOURCE_PROPERTY) || "")
+		.trim()
+		.toLowerCase();
+	if (source === ACTIVE_DATA_WRITE_SOURCE_PUBLISH || source === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH) return source;
+	return ACTIVE_DATA_WRITE_SOURCE_UNKNOWN;
+}
+
 // Return whether recent successful active write.
-function isRecentSuccessfulActiveWrite_() {
+function isRecentSuccessfulActiveWrite_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const ignoreAutoRefreshWrites = options.ignoreAutoRefreshWrites === true;
 	const lastWriteAt = getLastSuccessfulActiveWriteAt_();
 	const lastWriteMs = parseIsoToMs_(lastWriteAt);
 	if (!lastWriteMs) return false;
+	if (ignoreAutoRefreshWrites) {
+		const source = getLastSuccessfulActiveWriteSource_();
+		if (source === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH) return false;
+	}
 	return Date.now() - lastWriteMs < AUTO_REFRESH_INTERVAL_MS;
 }
 

@@ -68,6 +68,26 @@
         leaderboard: "leaderboard",
         landing: "landing",
     };
+    const PUBLIC_VIEW_SYNC_COPY = {
+        rosters: {
+            loadingTitle: "Preparing roster board",
+            loadingText: "Building live roster cards and sections.",
+            refreshTitle: "Refreshing roster board",
+            refreshText: "Showing the current snapshot while live member data syncs.",
+        },
+        leaderboard: {
+            loadingTitle: "Preparing leaderboard",
+            loadingText: "Assembling live ranking controls and cards.",
+            refreshTitle: "Refreshing leaderboard",
+            refreshText: "Current rankings stay visible while the latest stats sync in.",
+        },
+        landing: {
+            loadingTitle: "Preparing clan overview",
+            loadingText: "Loading the latest family snapshot and media.",
+            refreshTitle: "Refreshing clan overview",
+            refreshText: "Home content remains visible while fresh clan data syncs.",
+        },
+    };
     const PUBLIC_PAGE_QUERY_VALUES = {
         auto: "auto",
         rosters: "rosters",
@@ -986,33 +1006,122 @@
         return "";
     };
 
-    // Handle show shell loading notice.
-    const showShellLoadingNotice = (viewRaw) => {
-        const notice = $("#shellLoadingNotice");
-        if (!notice) return;
-        const titleEl = $("#shellLoadingNoticeTitle");
-        const textEl = $("#shellLoadingNoticeText");
+    // Resolve public view sync copy.
+    const resolvePublicViewSyncCopy = (viewRaw, modeRaw) => {
         const view = sanitizePublicViewValue(viewRaw);
-        if (titleEl) titleEl.textContent = "Loading live roster data";
-        if (textEl) {
-            if (view === PUBLIC_VIEW_VALUES.rosters) {
-                textEl.textContent = "Roster cards are visible now. Fresh player data is still syncing.";
-            } else if (view === PUBLIC_VIEW_VALUES.leaderboard) {
-                textEl.textContent = "Leaderboard shell is ready. Latest stats are still syncing.";
-            } else {
-                textEl.textContent = "Home is ready. Fresh clan data is still syncing in the background.";
+        const mode = toStr(modeRaw).trim().toLowerCase() === "refresh" ? "refresh" : "loading";
+        const defaults = PUBLIC_VIEW_SYNC_COPY[PUBLIC_VIEW_VALUES.landing] || {};
+        const copy = PUBLIC_VIEW_SYNC_COPY[view] || defaults;
+        if (mode === "refresh") {
+            return {
+                title: toStr(copy.refreshTitle).trim() || "Refreshing live data",
+                text: toStr(copy.refreshText).trim() || "Showing the current snapshot while fresh data syncs.",
+            };
+        }
+        return {
+            title: toStr(copy.loadingTitle).trim() || "Loading live data",
+            text: toStr(copy.loadingText).trim() || "Building the latest roster view.",
+        };
+    };
+
+    // Resolve public view container.
+    const resolvePublicViewContainer = (viewRaw) => {
+        const view = sanitizePublicViewValue(viewRaw);
+        if (view === PUBLIC_VIEW_VALUES.rosters) return $("#publicViewRosters");
+        if (view === PUBLIC_VIEW_VALUES.leaderboard) return $("#publicViewLeaderboard");
+        return $("#publicViewLanding");
+    };
+
+    // Hide all public-view sync chips.
+    const hideAllPublicViewSyncChips = () => {
+        const selectors = ["#publicViewLanding", "#publicViewRosters", "#publicViewLeaderboard"];
+        for (let i = 0; i < selectors.length; i++) {
+            const container = $(selectors[i]);
+            if (!container || typeof container.querySelectorAll !== "function") continue;
+            const chips = container.querySelectorAll(".public-view-sync-chip");
+            if (!chips || !chips.length) continue;
+            for (let j = 0; j < chips.length; j++) {
+                const chip = chips[j];
+                if (!chip || !chip.classList) continue;
+                chip.classList.add("hidden");
+                chip.setAttribute("aria-hidden", "true");
             }
         }
-        notice.classList.remove("hidden");
-        notice.setAttribute("aria-hidden", "false");
+    };
+
+    // Ensure public-view sync chip.
+    const ensurePublicViewSyncChip = (viewRaw) => {
+        const container = resolvePublicViewContainer(viewRaw);
+        if (!container || typeof container.querySelector !== "function") return null;
+
+        let chip = container.querySelector(".public-view-sync-chip");
+        if (!chip) {
+            chip = el("div", "public-view-sync-chip hidden");
+            chip.setAttribute("aria-hidden", "true");
+            chip.setAttribute("role", "status");
+            chip.setAttribute("aria-live", "polite");
+
+            const pulse = el("span", "public-view-sync-chip__pulse");
+            pulse.setAttribute("aria-hidden", "true");
+
+            const content = el("div", "public-view-sync-chip__content");
+            const titleEl = el("div", "public-view-sync-chip__title");
+            titleEl.setAttribute("data-public-view-sync-title", "1");
+            const textEl = el("div", "public-view-sync-chip__text");
+            textEl.setAttribute("data-public-view-sync-text", "1");
+
+            content.appendChild(titleEl);
+            content.appendChild(textEl);
+            chip.appendChild(pulse);
+            chip.appendChild(content);
+            container.appendChild(chip);
+        }
+
+        const titleEl = chip.querySelector("[data-public-view-sync-title='1']");
+        const textEl = chip.querySelector("[data-public-view-sync-text='1']");
+        if (!titleEl || !textEl) return null;
+        return { chip, titleEl, textEl };
+    };
+
+    // Show public-view sync chip.
+    const showPublicViewSyncChip = (viewRaw, modeRaw) => {
+        const view = sanitizePublicViewValue(viewRaw);
+        hideAllPublicViewSyncChips();
+
+        const refs = ensurePublicViewSyncChip(view);
+        if (!refs) return;
+        const copy = resolvePublicViewSyncCopy(view, modeRaw);
+        refs.titleEl.textContent = copy.title;
+        refs.textEl.textContent = copy.text;
+        refs.chip.classList.remove("hidden");
+        refs.chip.setAttribute("aria-hidden", "false");
+    };
+
+    // Handle show shell loading notice.
+    const showShellLoadingNotice = (viewRaw) => {
+        const view = sanitizePublicViewValue(viewRaw);
+        const mode = lastRenderedData ? "refresh" : "loading";
+        const copy = resolvePublicViewSyncCopy(view, mode);
+        const notice = $("#shellLoadingNotice");
+        const titleEl = $("#shellLoadingNoticeTitle");
+        const textEl = $("#shellLoadingNoticeText");
+        if (titleEl) titleEl.textContent = copy.title;
+        if (textEl) textEl.textContent = copy.text;
+        if (notice) {
+            notice.classList.remove("hidden");
+            notice.setAttribute("aria-hidden", "false");
+        }
+        showPublicViewSyncChip(view, mode);
     };
 
     // Handle hide shell loading notice.
     const hideShellLoadingNotice = () => {
         const notice = $("#shellLoadingNotice");
-        if (!notice) return;
-        notice.classList.add("hidden");
-        notice.setAttribute("aria-hidden", "true");
+        if (notice) {
+            notice.classList.add("hidden");
+            notice.setAttribute("aria-hidden", "true");
+        }
+        hideAllPublicViewSyncChips();
     };
 
     // Handle show error.
@@ -5453,14 +5562,76 @@
         if (loading) loading.remove();
     };
 
+    // Create a view loading skeleton line.
+    const createViewLoadingSkeletonLine = (modifierRaw) => {
+        const modifier = toStr(modifierRaw).trim();
+        const className = modifier
+            ? "view-loading-skeleton__line view-loading-skeleton__line--" + modifier
+            : "view-loading-skeleton__line";
+        return el("span", className);
+    };
+
+    // Render landing loading state.
+    const renderLandingLoadingState = () => {
+        renderLandingView({}, { allowMediaLoading: landingMediaCanStart });
+
+        const familyMeta = $("#landingFamilyMeta");
+        if (familyMeta) familyMeta.textContent = "Syncing the latest family snapshot. Live lineup stats will appear shortly.";
+
+        const target = $("#landingClanFamilyGrid");
+        if (!target) return;
+        clearNode(target);
+
+        const loadingGrid = el("div", "landing-family-loading-grid");
+        for (let i = 0; i < 4; i++) {
+            const card = el("article", "landing-family-card landing-family-card--loading view-loading-skeleton");
+            card.appendChild(createViewLoadingSkeletonLine("title"));
+            card.appendChild(createViewLoadingSkeletonLine("value"));
+            card.appendChild(createViewLoadingSkeletonLine("label"));
+            card.appendChild(createViewLoadingSkeletonLine("chip"));
+            loadingGrid.appendChild(card);
+        }
+        target.appendChild(loadingGrid);
+    };
+
     // Render rosters loading state.
     const renderRostersLoadingState = () => {
         const target = $("#rosters");
         if (!target) return;
         target.textContent = "";
-        const card = el("div", "card");
-        card.appendChild(el("div", "empty", "Loading roster data..."));
-        target.appendChild(card);
+        for (let i = 0; i < 3; i++) {
+            const card = el("article", "card roster-loading-card view-loading-skeleton");
+            const head = el("div", "roster-loading-card__head");
+            const headMain = el("div", "roster-loading-card__head-main");
+            headMain.appendChild(createViewLoadingSkeletonLine("title"));
+            headMain.appendChild(createViewLoadingSkeletonLine("subtitle"));
+
+            const headMeta = el("div", "roster-loading-card__head-meta");
+            headMeta.appendChild(createViewLoadingSkeletonLine("pill"));
+            headMeta.appendChild(createViewLoadingSkeletonLine("pill"));
+            if (i === 0) headMeta.appendChild(createViewLoadingSkeletonLine("pill"));
+
+            head.appendChild(headMain);
+            head.appendChild(headMeta);
+            card.appendChild(head);
+
+            for (let sectionIndex = 0; sectionIndex < 2; sectionIndex++) {
+                const section = el("div", "roster-loading-card__section");
+                section.appendChild(createViewLoadingSkeletonLine("section"));
+                for (let rowIndex = 0; rowIndex < 3; rowIndex++) {
+                    const row = el("div", "roster-loading-card__row");
+                    row.appendChild(createViewLoadingSkeletonLine("avatar"));
+                    const rowBody = el("div", "roster-loading-card__row-body");
+                    rowBody.appendChild(createViewLoadingSkeletonLine("name"));
+                    rowBody.appendChild(createViewLoadingSkeletonLine("meta"));
+                    row.appendChild(rowBody);
+                    section.appendChild(row);
+                }
+                card.appendChild(section);
+            }
+
+            target.appendChild(card);
+        }
 
         const searchInput = $("#rosterSearchInput");
         updateSearchInfo({
@@ -5477,9 +5648,30 @@
         const target = $("#leaderboard");
         if (!target) return;
         target.textContent = "";
-        const card = el("div", "card");
-        card.appendChild(el("div", "empty", "Loading leaderboard data..."));
-        target.appendChild(card);
+
+        const controlsCard = el("div", "card leaderboard-loading-controls view-loading-skeleton");
+        for (let rowIndex = 0; rowIndex < 2; rowIndex++) {
+            const row = el("div", "leaderboard-loading-controls__row");
+            row.appendChild(createViewLoadingSkeletonLine("label"));
+            const chips = el("div", "leaderboard-loading-controls__chips");
+            for (let chipIndex = 0; chipIndex < 4; chipIndex++) {
+                chips.appendChild(createViewLoadingSkeletonLine("chip"));
+            }
+            row.appendChild(chips);
+            controlsCard.appendChild(row);
+        }
+        target.appendChild(controlsCard);
+
+        const list = el("div", "leaderboard-list leaderboard-loading-list");
+        for (let i = 0; i < 9; i++) {
+            const card = el("article", "player leaderboard-player leaderboard-loading-player view-loading-skeleton");
+            card.appendChild(createViewLoadingSkeletonLine("name"));
+            card.appendChild(createViewLoadingSkeletonLine("meta"));
+            card.appendChild(createViewLoadingSkeletonLine("metric"));
+            card.appendChild(createViewLoadingSkeletonLine("submetric"));
+            list.appendChild(card);
+        }
+        target.appendChild(list);
     };
 
     // Render data pending view state.
@@ -5495,7 +5687,7 @@
         } else if (activeView === PUBLIC_VIEW_VALUES.rosters) {
             renderRostersLoadingState();
         } else {
-            renderLandingView({}, { allowMediaLoading: landingMediaCanStart });
+            renderLandingLoadingState();
         }
         removeGlobalLoadingCard();
     };

@@ -159,6 +159,100 @@
     authCard.classList.toggle("is-unlocked", !!unlocked);
   };
 
+  const STARTUP_LOADER_MIN_VISIBLE_MS = 700;
+  let startupLoaderShownAtMs = 0;
+
+  // Wait for the requested milliseconds.
+  const waitForMs_ = (msRaw) => {
+    const ms = Math.max(0, Number(msRaw) || 0);
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  };
+
+  // Update startup loader text copy.
+  const setStartupLoaderCopy_ = (stageRaw, messageRaw) => {
+    const stageEl = $("#startupLoaderStage");
+    const messageEl = $("#startupLoaderMessage");
+    const stage = toStr(stageRaw).trim() || "Preparing workspace";
+    const message = toStr(messageRaw).trim() || "Loading admin controls...";
+    if (stageEl) stageEl.textContent = stage;
+    if (messageEl) messageEl.textContent = message;
+  };
+
+  // Show startup loader and block shell interactions.
+  const showStartupLoader_ = (stageRaw, messageRaw) => {
+    const overlay = $("#startupLoader");
+    setStartupLoaderCopy_(stageRaw, messageRaw);
+    if (!overlay) return;
+    startupLoaderShownAtMs = Date.now();
+    overlay.classList.remove("hidden");
+    overlay.setAttribute("aria-hidden", "false");
+    overlay.setAttribute("aria-busy", "true");
+    // Force transition start before showing.
+    overlay.offsetWidth;
+    overlay.classList.add("is-visible");
+    document.body.classList.add("admin-startup-blocked");
+    const shell = $(".admin-shell-container");
+    if (shell) shell.setAttribute("inert", "");
+  };
+
+  // Refresh startup loader text while already visible.
+  const refreshStartupLoader_ = (stageRaw, messageRaw) => {
+    const overlay = $("#startupLoader");
+    if (!overlay || overlay.classList.contains("hidden")) {
+      showStartupLoader_(stageRaw, messageRaw);
+      return;
+    }
+    setStartupLoaderCopy_(stageRaw, messageRaw);
+  };
+
+  // Hide startup loader and restore shell interactions.
+  const hideStartupLoader_ = async (optionsRaw) => {
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const skipMinimumDelay = !!options.skipMinimumDelay;
+    const overlay = $("#startupLoader");
+    const unlockShell = () => {
+      document.body.classList.remove("admin-startup-blocked");
+      const shell = $(".admin-shell-container");
+      if (shell) shell.removeAttribute("inert");
+    };
+
+    if (!skipMinimumDelay && startupLoaderShownAtMs > 0) {
+      const elapsed = Date.now() - startupLoaderShownAtMs;
+      const remaining = STARTUP_LOADER_MIN_VISIBLE_MS - elapsed;
+      if (remaining > 0) {
+        await waitForMs_(remaining);
+      }
+    }
+
+    if (!overlay || overlay.classList.contains("hidden")) {
+      startupLoaderShownAtMs = 0;
+      unlockShell();
+      return;
+    }
+
+    overlay.classList.remove("is-visible");
+    overlay.setAttribute("aria-busy", "false");
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        overlay.removeEventListener("transitionend", onTransitionEnd);
+        overlay.classList.add("hidden");
+        overlay.setAttribute("aria-hidden", "true");
+        startupLoaderShownAtMs = 0;
+        unlockShell();
+        resolve();
+      };
+      const onTransitionEnd = (evt) => {
+        if (evt && evt.target !== overlay) return;
+        finish();
+      };
+      overlay.addEventListener("transitionend", onTransitionEnd);
+      setTimeout(finish, 320);
+    });
+  };
+
   // Sync overlay body state.
   const syncOverlayBodyState = () => {
     const hasOpenOverlay = !!document.querySelector(".admin-overlay.is-open");
@@ -3993,6 +4087,14 @@
         return;
       }
 
+      let unlockSucceeded = false;
+      if (loginBtn) {
+        loginBtn.disabled = true;
+        loginBtn.textContent = "Unlocking...";
+      }
+      if (pwInput) pwInput.disabled = true;
+      showStartupLoader_("Step 1 of 3", "Verifying credentials...");
+
       try {
         setLoginStatus("Verifying...");
         await runServerMethod("verifyAdminPassword", [state.password]);
@@ -4005,13 +4107,16 @@
           loginBtn.textContent = "Unlocked";
         }
         if (pwInput) pwInput.disabled = true;
-        setLoginStatus("Unlocked. Loading active config...");
         refreshAdminWorkflowUi();
+        setLoginStatus("Unlocked. Syncing auto-refresh settings...");
+        refreshStartupLoader_("Step 2 of 3", "Syncing auto-refresh schedule...");
         try {
           await loadAutoRefreshSettings();
         } catch (settingsErr) {
           alert("Unlocked, but failed to load auto-refresh settings: " + toErrorMessage(settingsErr));
         }
+        setLoginStatus("Unlocked. Loading active config...");
+        refreshStartupLoader_("Step 3 of 3", "Loading active roster preview...");
         try {
           await loadActiveConfigIntoPreview({
             silentError: true,
@@ -4022,6 +4127,7 @@
           setLoginStatus("Unlocked (auto-load failed).");
           setStatus("Auto-load failed. Use Load active config.");
         }
+        unlockSucceeded = true;
       } catch (err) {
         show("#adminPanel", false);
         setAuthCardUnlocked(false);
@@ -4029,13 +4135,17 @@
         state.password = "";
         state.autoRefreshSettings = null;
         state.autoRefreshBusy = false;
-        if (loginBtn) {
-          loginBtn.disabled = false;
-          loginBtn.textContent = "Unlock";
-        }
-        if (pwInput) pwInput.disabled = false;
         renderAutoRefreshUi();
         alert("Unlock failed: " + toErrorMessage(err));
+      } finally {
+        await hideStartupLoader_({ skipMinimumDelay: !unlockSucceeded });
+        if (!unlockSucceeded) {
+          if (loginBtn) {
+            loginBtn.disabled = false;
+            loginBtn.textContent = "Unlock";
+          }
+          if (pwInput) pwInput.disabled = false;
+        }
       }
     };
 
