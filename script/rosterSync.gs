@@ -1748,6 +1748,14 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	const liveSnapshot = isCurrentWarPrivate ? null : buildRegularWarLiveSnapshot_(currentWar, ctx.clanTag, trackedHistoryTagSet, nowIso);
 	const currentLiveWarKey = liveSnapshot && liveSnapshot.warMeta ? String(liveSnapshot.warMeta.warKey || "").trim() : "";
 	const previousActiveWarKey = String((lifecycle && lifecycle.activeWarKey) || (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey) || "").trim();
+	if (isCurrentWarPrivate) {
+		Logger.log(
+			"refreshRegularWarStatsCore private-war-log rosterId=%s clanTag=%s previousActiveWarKey=%s",
+			ctx.rosterId,
+			ctx.clanTag,
+			previousActiveWarKey || "",
+		);
+	}
 
 	let finalization = { attempted: false, finalized: false, source: "", incomplete: false, reason: "" };
 	const shouldFinalizePrevious = !isCurrentWarPrivate && shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentLiveWarKey || currentWarMeta.warKey, currentWarState);
@@ -1785,6 +1793,24 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 
 	const nextLifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
 	const keepPendingPreviousWar = !isCurrentWarPrivate && !liveSnapshot && !!previousActiveWarKey && !!shouldFinalizePrevious && !!(finalization && finalization.attempted) && !(finalization && finalization.finalized);
+	const repairAttemptedWarCount = toNonNegativeInt_(repairResult && repairResult.attemptedWarCount);
+	const repairedWarCount = toNonNegativeInt_(repairResult && repairResult.repairedWarCount);
+	if ((finalization && finalization.attempted) || repairAttemptedWarCount > 0 || repairedWarCount > 0 || keepPendingPreviousWar) {
+		Logger.log(
+			"refreshRegularWarStatsCore repair-path rosterId=%s clanTag=%s currentWarState=%s finalizationAttempted=%s finalized=%s finalizationSource=%s finalizationReason=%s finalizationIncomplete=%s repairAttemptedWarCount=%s repairedWarCount=%s keepPendingPreviousWar=%s",
+			ctx.rosterId,
+			ctx.clanTag,
+			currentWarState,
+			!!(finalization && finalization.attempted),
+			!!(finalization && finalization.finalized),
+			String((finalization && finalization.source) || ""),
+			String((finalization && finalization.reason) || ""),
+			!!(finalization && finalization.incomplete),
+			repairAttemptedWarCount,
+			repairedWarCount,
+			keepPendingPreviousWar,
+		);
+	}
 	if (isCurrentWarPrivate) {
 		nextLifecycle.activeWarKey = previousActiveWarKey || nextLifecycle.activeWarKey;
 		nextLifecycle.activeWarState = nextLifecycle.activeWarState || "notinwar";
@@ -1904,8 +1930,8 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			finalizationSource: String((finalization && finalization.source) || ""),
 			finalizationReason: String((finalization && finalization.reason) || ""),
 			finalizationIncomplete: !!(finalization && finalization.incomplete),
-			repairAttemptedWarCount: toNonNegativeInt_(repairResult && repairResult.attemptedWarCount),
-			repairedWarCount: toNonNegativeInt_(repairResult && repairResult.repairedWarCount),
+			repairAttemptedWarCount: repairAttemptedWarCount,
+			repairedWarCount: repairedWarCount,
 			teamSize: toNonNegativeInt_(currentWarMeta.teamSize),
 			attacksPerMember: toNonNegativeInt_(currentWarMeta.attacksPerMember),
 			currentWarUnavailableReason: String(currentWarMeta.unavailableReason || ""),
@@ -1918,6 +1944,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 
 // Refresh tracking stats core.
 function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
+	const statsStartMs = Date.now();
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
@@ -1925,6 +1952,9 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	const ctx = findRosterById_(rosterData, rosterId);
 	let capture = null;
 	let postCaptureRosterData = null;
+	let captureDurationMs = 0;
+	let warRefreshDurationMs = 0;
+	const captureStartMs = Date.now();
 	try {
 		capture = captureMemberTrackingForRoster_(ctx.rosterData, ctx.rosterId, {
 			continueOnError: true,
@@ -1944,6 +1974,22 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	} catch (err) {
 		Logger.log("refreshTrackingStatsCore metrics capture failed for roster '%s': %s", ctx.rosterId, errorMessage_(err));
 	}
+	captureDurationMs = Math.max(0, Date.now() - captureStartMs);
+	const captureTiming = capture && capture.captureTimingMs && typeof capture.captureTimingMs === "object" ? capture.captureTimingMs : null;
+	if (captureTiming) {
+		Logger.log(
+			"refreshTrackingStatsCore capture-breakdown rosterId=%s primaryMs=%s fallbackMs=%s finalizeMs=%s totalMs=%s primaryRecorded=%s fallbackRecorded=%s fallbackSkippedPlayerTags=%s fallbackSkippedByClanTag=%s",
+			ctx.rosterId,
+			toNonNegativeInt_(captureTiming.primary),
+			toNonNegativeInt_(captureTiming.fallback),
+			toNonNegativeInt_(captureTiming.finalize),
+			toNonNegativeInt_(captureTiming.total),
+			toNonNegativeInt_(capture && capture.primaryRecorded),
+			toNonNegativeInt_(capture && capture.fallbackRecorded),
+			toNonNegativeInt_(capture && capture.fallbackSkippedPlayerTags),
+			toNonNegativeInt_(capture && capture.fallbackSkippedByClanTag),
+		);
+	}
 	if (capture) {
 		try {
 			// Keep a clean post-capture snapshot so later war-refresh failures can preserve metrics safely.
@@ -1954,12 +2000,27 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
 	let refresh = null;
+	const warRefreshStartMs = Date.now();
 	try {
 		refresh = trackingMode === "regularWar" ? refreshRegularWarStatsCore_(ctx.rosterData, ctx.rosterId, options) : refreshCwlStatsCore_(ctx.rosterData, ctx.rosterId, options);
+		warRefreshDurationMs = Math.max(0, Date.now() - warRefreshStartMs);
 	} catch (err) {
+		warRefreshDurationMs = Math.max(0, Date.now() - warRefreshStartMs);
 		// Keep member metrics updates even when optional war endpoints are blocked by private war logs.
 		if (capture && isPrivateWarLogError_(err)) {
-			Logger.log("refreshTrackingStatsCore war refresh skipped for roster '%s' because war log is private: %s", ctx.rosterId, errorMessage_(err));
+			const captureErrorCount = capture && Array.isArray(capture.errors) ? capture.errors.length : 0;
+			const totalDurationMs = Math.max(0, Date.now() - statsStartMs);
+			Logger.log(
+				"refreshTrackingStatsCore private-war-log fallback rosterId=%s mode=%s captureMs=%s warRefreshMs=%s totalMs=%s captureRecorded=%s captureErrors=%s error=%s",
+				ctx.rosterId,
+				trackingMode,
+				captureDurationMs,
+				warRefreshDurationMs,
+				totalDurationMs,
+				toNonNegativeInt_(capture.recorded),
+				captureErrorCount,
+				errorMessage_(err),
+			);
 			return {
 				ok: true,
 				rosterData: postCaptureRosterData || validateRosterData_(ctx.rosterData),
@@ -1975,6 +2036,19 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 		if (capture && postCaptureRosterData) {
 			const warRefreshError = errorMessage_(err);
 			const refreshLabel = trackingMode === "regularWar" ? "regular war refresh" : "CWL refresh";
+			const captureErrorCount = capture && Array.isArray(capture.errors) ? capture.errors.length : 0;
+			const totalDurationMs = Math.max(0, Date.now() - statsStartMs);
+			Logger.log(
+				"refreshTrackingStatsCore partial-failure fallback rosterId=%s mode=%s captureMs=%s warRefreshMs=%s totalMs=%s captureRecorded=%s captureErrors=%s error=%s",
+				ctx.rosterId,
+				trackingMode,
+				captureDurationMs,
+				warRefreshDurationMs,
+				totalDurationMs,
+				toNonNegativeInt_(capture.recorded),
+				captureErrorCount,
+				warRefreshError,
+			);
 			return {
 				ok: false,
 				rosterData: postCaptureRosterData,
@@ -1999,5 +2073,33 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	if (capture && refresh && refresh.result && typeof refresh.result === "object") {
 		refresh.result.memberTracking = capture;
 	}
+	const refreshResult = refresh && refresh.result && typeof refresh.result === "object" ? refresh.result : {};
+	const captureErrorCount = capture && Array.isArray(capture.errors) ? capture.errors.length : 0;
+	const totalDurationMs = Math.max(0, Date.now() - statsStartMs);
+	if (refreshResult.cwlUnavailable === true || refreshResult.warDataSkipped === true) {
+		Logger.log(
+			"refreshTrackingStatsCore unavailable-path rosterId=%s mode=%s reason=%s statsUnchanged=%s",
+			ctx.rosterId,
+			trackingMode,
+			String(refreshResult.unavailableReason || refreshResult.currentWarUnavailableReason || ""),
+			refreshResult.statsUnchanged === true,
+		);
+	}
+	Logger.log(
+		"refreshTrackingStatsCore timing rosterId=%s mode=%s captureMs=%s warRefreshMs=%s totalMs=%s captureRecorded=%s captureErrors=%s partialFailure=%s warDataSkipped=%s cwlUnavailable=%s statsUnchanged=%s repairAttemptedWarCount=%s repairedWarCount=%s",
+		ctx.rosterId,
+		trackingMode,
+		captureDurationMs,
+		warRefreshDurationMs,
+		totalDurationMs,
+		toNonNegativeInt_(capture && capture.recorded),
+		captureErrorCount,
+		refreshResult.partialFailure === true,
+		refreshResult.warDataSkipped === true,
+		refreshResult.cwlUnavailable === true,
+		refreshResult.statsUnchanged === true,
+		toNonNegativeInt_(refreshResult.repairAttemptedWarCount),
+		toNonNegativeInt_(refreshResult.repairedWarCount),
+	);
 	return refresh;
 }

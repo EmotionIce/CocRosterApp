@@ -828,6 +828,21 @@ function ensurePlayerMetricsStore_(rosterData) {
 	return sanitized;
 }
 
+// Ensure player metrics store shape without a full sanitize/prune pass.
+function ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterDataRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	if (!rosterData) return createEmptyPlayerMetricsStore_();
+	const storeRaw = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : createEmptyPlayerMetricsStore_();
+	const byTag = storeRaw.byTag && typeof storeRaw.byTag === "object" ? storeRaw.byTag : {};
+	const out = {
+		schemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
+		updatedAt: String(storeRaw.updatedAt == null ? "" : storeRaw.updatedAt).trim(),
+		byTag: byTag,
+	};
+	rosterData.playerMetrics = out;
+	return out;
+}
+
 // Handle count player metrics entries.
 function countPlayerMetricsEntries_(storeRaw) {
 	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};
@@ -915,6 +930,8 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const rosterIdFilter = String(options.rosterId == null ? "" : options.rosterId).trim();
 	const continueOnError = options.continueOnError !== false;
+	const deferStoreSanitize = options.deferStoreSanitize === true;
+	const assumeStoreAlreadySanitized = options.assumeStoreAlreadySanitized === true;
 	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
 		.trim()
 		.toLowerCase();
@@ -922,7 +939,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
 	if (!rosterData) {
-		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0 };
+		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0, capturedTags: [] };
 	}
 
 	const clanTags = listConnectedClanTagsForMetrics_(rosterData, rosterIdFilter);
@@ -937,6 +954,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	let updated = 0;
 	let profileEnriched = 0;
 	let profileAttempted = 0;
+	const capturedTagSet = {};
 
 	for (let i = 0; i < clanTags.length; i++) {
 		const clanTag = clanTags[i];
@@ -956,10 +974,19 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 				capturedAt: snapshot && snapshot.capturedAt,
 				runState: runState,
 				source: "captureConnectedClanMetrics",
+				deferStoreSanitize: deferStoreSanitize,
+				assumeStoreAlreadySanitized: assumeStoreAlreadySanitized,
+				collectTags: true,
 			});
 			capturedClans++;
 			recorded += toNonNegativeInt_(result && result.recorded);
 			updated += toNonNegativeInt_(result && result.updated);
+			const tags = result && Array.isArray(result.tags) ? result.tags : [];
+			for (let j = 0; j < tags.length; j++) {
+				const tag = normalizeTag_(tags[j]);
+				if (!tag) continue;
+				capturedTagSet[tag] = true;
+			}
 		} catch (err) {
 			const message = errorMessage_(err);
 			errors.push({ clanTag: clanTag, message: message });
@@ -967,7 +994,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 		}
 	}
 
-	ensurePlayerMetricsStore_(rosterData);
+	if (!deferStoreSanitize) ensurePlayerMetricsStore_(rosterData);
 	return {
 		attemptedClans: clanTags.length,
 		capturedClans: capturedClans,
@@ -978,7 +1005,55 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 		profileEnriched: profileEnriched,
 		profileAttempted: profileAttempted,
 		metricsProfileMode: metricsProfileMode,
+		capturedTags: Object.keys(capturedTagSet),
+		deferredSanitize: deferStoreSanitize,
 	};
+}
+
+// Normalize list/object inputs into a normalized tag set.
+function toNormalizedTagSet_(valuesRaw) {
+	const out = {};
+	if (Array.isArray(valuesRaw)) {
+		for (let i = 0; i < valuesRaw.length; i++) {
+			const tag = normalizeTag_(valuesRaw[i]);
+			if (!tag) continue;
+			out[tag] = true;
+		}
+		return out;
+	}
+	const values = valuesRaw && typeof valuesRaw === "object" ? valuesRaw : null;
+	if (!values) return out;
+	const keys = Object.keys(values);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		const normalizedKey = normalizeTag_(key);
+		if (normalizedKey && values[key]) out[normalizedKey] = true;
+		const value = values[key];
+		if (typeof value === "string") {
+			const valueTag = normalizeTag_(value);
+			if (valueTag) out[valueTag] = true;
+		}
+	}
+	return out;
+}
+
+// Find roster by id for metrics capture without validating the full payload.
+function findRosterByIdForMetricsCapture_(rosterDataRaw, rosterIdRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterData || !rosterId) return null;
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : null;
+		if (!roster) continue;
+		if (String(roster.id || "").trim() !== rosterId) continue;
+		return {
+			rosterData: rosterData,
+			roster: roster,
+			rosterId: rosterId,
+		};
+	}
+	return null;
 }
 
 // Capture roster pool profile metrics.
@@ -986,14 +1061,46 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const deferStoreSanitize = options.deferStoreSanitize === true;
+	const assumeStoreAlreadySanitized = options.assumeStoreAlreadySanitized === true;
+	const skipPlayerTagSet = toNormalizedTagSet_(options.skipPlayerTags);
+	const skipClanTagSet = toNormalizedTagSet_(options.skipClanTags);
 	if (!rosterData || !rosterId) {
-		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0, profileAttempted: 0, profileEnriched: 0, metricsProfileMode: "always", usedProfileFallback: true };
+		return {
+			attemptedClans: 0,
+			capturedClans: 0,
+			recorded: 0,
+			updated: 0,
+			errors: [],
+			entryCount: 0,
+			profileAttempted: 0,
+			profileEnriched: 0,
+			metricsProfileMode: "always",
+			usedProfileFallback: true,
+			capturedTags: [],
+			skippedPlayerTags: 0,
+			skippedByClanTag: 0,
+		};
 	}
 
-	const ctx = findRosterById_(rosterData, rosterId);
+	const ctx = findRosterByIdForMetricsCapture_(rosterData, rosterId);
 	const roster = ctx && ctx.roster ? ctx.roster : null;
 	if (!roster) {
-		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0, profileAttempted: 0, profileEnriched: 0, metricsProfileMode: "always", usedProfileFallback: true };
+		return {
+			attemptedClans: 0,
+			capturedClans: 0,
+			recorded: 0,
+			updated: 0,
+			errors: [],
+			entryCount: 0,
+			profileAttempted: 0,
+			profileEnriched: 0,
+			metricsProfileMode: "always",
+			usedProfileFallback: true,
+			capturedTags: [],
+			skippedPlayerTags: 0,
+			skippedByClanTag: 0,
+		};
 	}
 
 	const connectedClanTag = normalizeTag_(roster.connectedClanTag);
@@ -1005,11 +1112,17 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 	const errors = [];
 	let profileAttempted = 0;
 	let profileEnriched = 0;
+	let skippedPlayerTags = 0;
+	let skippedByClanTag = 0;
 
 	for (let i = 0; i < players.length; i++) {
 		const tag = normalizeTag_(players[i] && players[i].tag);
 		if (!tag || seenTags[tag] || !isValidPlayerTag_(tag)) continue;
 		seenTags[tag] = true;
+		if (skipPlayerTagSet[tag]) {
+			skippedPlayerTags++;
+			continue;
+		}
 		profileAttempted++;
 
 		const snapshot = fetchAuthoritativePlayerMetricsSnapshot_(tag, profileRunState);
@@ -1020,6 +1133,10 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 
 		profileEnriched++;
 		const clanTag = normalizeTag_(snapshot.clanTag) || connectedClanTag || "#0";
+		if (skipClanTagSet[clanTag]) {
+			skippedByClanTag++;
+			continue;
+		}
 		const normalizedSnapshot = sanitizeMetricsSnapshotPayload_(Object.assign({}, snapshot, { clanTag: clanTag }), tag);
 		if (!normalizedSnapshot) continue;
 		if (!snapshotsByClanTag[clanTag]) snapshotsByClanTag[clanTag] = [];
@@ -1028,6 +1145,7 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 
 	let recorded = 0;
 	let updated = 0;
+	const capturedTagSet = {};
 	const clanTags = Object.keys(snapshotsByClanTag);
 	for (let i = 0; i < clanTags.length; i++) {
 		const clanTag = clanTags[i];
@@ -1035,12 +1153,21 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 		if (!Array.isArray(snapshots) || !snapshots.length) continue;
 		const result = recordClanMemberMetricsSnapshot_(ctx.rosterData, clanTag, snapshots, {
 			source: "captureRosterPoolProfileMetrics",
+			deferStoreSanitize: deferStoreSanitize,
+			assumeStoreAlreadySanitized: assumeStoreAlreadySanitized,
+			collectTags: true,
 		});
 		recorded += toNonNegativeInt_(result && result.recorded);
 		updated += toNonNegativeInt_(result && result.updated);
+		const tags = result && Array.isArray(result.tags) ? result.tags : [];
+		for (let j = 0; j < tags.length; j++) {
+			const tag = normalizeTag_(tags[j]);
+			if (!tag) continue;
+			capturedTagSet[tag] = true;
+		}
 	}
 
-	ensurePlayerMetricsStore_(ctx.rosterData);
+	if (!deferStoreSanitize) ensurePlayerMetricsStore_(ctx.rosterData);
 	return {
 		attemptedClans: clanTags.length,
 		capturedClans: clanTags.length,
@@ -1052,6 +1179,10 @@ function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw
 		profileEnriched: profileEnriched,
 		metricsProfileMode: "always",
 		usedProfileFallback: true,
+		capturedTags: Object.keys(capturedTagSet),
+		skippedPlayerTags: skippedPlayerTags,
+		skippedByClanTag: skippedByClanTag,
+		deferredSanitize: deferStoreSanitize,
 	};
 }
 
@@ -1063,39 +1194,129 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	if (!rosterData || !rosterId) {
 		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0 };
 	}
+	const captureStartMs = Date.now();
 	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
 		.trim()
 		.toLowerCase();
 	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
+	const runState = options.runState && typeof options.runState === "object" ? options.runState : {};
+	if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
+	ensureMetricsProfileRunState_(runState);
+	const existingStore = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : null;
+	const looksPreparedStore =
+		!!existingStore &&
+		Number(existingStore.schemaVersion) === PLAYER_METRICS_SCHEMA_VERSION &&
+		existingStore.byTag &&
+		typeof existingStore.byTag === "object";
+	if (runState.metricsStorePrepared === true || looksPreparedStore) {
+		ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterData);
+	} else {
+		ensurePlayerMetricsStore_(rosterData);
+	}
+	runState.metricsStorePrepared = true;
+
+	let connectedClanTag = "";
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		if (String(roster.id || "").trim() !== rosterId) continue;
+		connectedClanTag = normalizeTag_(roster.connectedClanTag);
+		break;
+	}
+
+	const primaryStartMs = Date.now();
 	const primary = captureConnectedClanMetrics_(rosterData, {
 		rosterId: rosterId,
 		continueOnError: options.continueOnError !== false,
 		metricsProfileMode: metricsProfileMode,
-		runState: options.runState,
+		runState: runState,
 		prefetchedClanSnapshotsByTag: options.prefetchedClanSnapshotsByTag,
 		prefetchedClanErrorsByTag: options.prefetchedClanErrorsByTag,
+		deferStoreSanitize: true,
+		assumeStoreAlreadySanitized: true,
 	});
-	if (metricsProfileMode !== "always") return primary;
+	const primaryDurationMs = Math.max(0, Date.now() - primaryStartMs);
+	const primaryCapturedTags = primary && Array.isArray(primary.capturedTags) ? primary.capturedTags : [];
+	const finalErrors = [].concat(primary && Array.isArray(primary.errors) ? primary.errors : []);
 
-	// When strict profile mode is requested, also refresh directly from player profiles
-	// so metrics still update even if clan-member snapshots are incomplete or unavailable.
-	const fallback = captureRosterPoolProfileMetrics_(rosterData, rosterId, {
-		runState: options.runState,
-	});
+	let fallback = null;
+	let fallbackDurationMs = 0;
+	if (metricsProfileMode === "always") {
+		const skipFallbackClanTags = [];
+		if (connectedClanTag) {
+			const primaryCapturedConnectedClan = toNonNegativeInt_(primary && primary.capturedClans) > 0;
+			const connectedClanAlreadySeen = runState.seenClanTags[connectedClanTag] === true;
+			if (primaryCapturedConnectedClan || connectedClanAlreadySeen) skipFallbackClanTags.push(connectedClanTag);
+		}
+		const fallbackStartMs = Date.now();
+		// Strict profile mode keeps pool coverage, but skips tags already written by the primary clan snapshot.
+		fallback = captureRosterPoolProfileMetrics_(rosterData, rosterId, {
+			runState: runState,
+			deferStoreSanitize: true,
+			assumeStoreAlreadySanitized: true,
+			skipPlayerTags: primaryCapturedTags,
+			skipClanTags: skipFallbackClanTags,
+		});
+		fallbackDurationMs = Math.max(0, Date.now() - fallbackStartMs);
+		finalErrors.push.apply(finalErrors, fallback && Array.isArray(fallback.errors) ? fallback.errors : []);
+	}
+
+	const finalizeStartMs = Date.now();
+	ensurePlayerMetricsStore_(rosterData);
+	runState.metricsStorePrepared = true;
+	const finalizeDurationMs = Math.max(0, Date.now() - finalizeStartMs);
+	const totalDurationMs = Math.max(0, Date.now() - captureStartMs);
+
+	if (metricsProfileMode !== "always") {
+		return {
+			attemptedClans: toNonNegativeInt_(primary && primary.attemptedClans),
+			capturedClans: toNonNegativeInt_(primary && primary.capturedClans),
+			recorded: toNonNegativeInt_(primary && primary.recorded),
+			updated: toNonNegativeInt_(primary && primary.updated),
+			errors: finalErrors,
+			entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
+			profileAttempted: toNonNegativeInt_(primary && primary.profileAttempted),
+			profileEnriched: toNonNegativeInt_(primary && primary.profileEnriched),
+			metricsProfileMode: metricsProfileMode,
+			usedProfileFallback: false,
+			primaryRecorded: toNonNegativeInt_(primary && primary.recorded),
+			fallbackRecorded: 0,
+			fallbackSkippedPlayerTags: 0,
+			fallbackSkippedByClanTag: 0,
+			captureTimingMs: {
+				primary: primaryDurationMs,
+				fallback: 0,
+				finalize: finalizeDurationMs,
+				total: totalDurationMs,
+			},
+		};
+	}
+
+	const fallbackRecorded = toNonNegativeInt_(fallback && fallback.recorded);
+	const fallbackSkippedPlayerTags = toNonNegativeInt_(fallback && fallback.skippedPlayerTags);
+	const fallbackSkippedByClanTag = toNonNegativeInt_(fallback && fallback.skippedByClanTag);
 
 	return {
 		attemptedClans: toNonNegativeInt_(primary && primary.attemptedClans) + toNonNegativeInt_(fallback && fallback.attemptedClans),
 		capturedClans: toNonNegativeInt_(primary && primary.capturedClans) + toNonNegativeInt_(fallback && fallback.capturedClans),
-		recorded: toNonNegativeInt_(primary && primary.recorded) + toNonNegativeInt_(fallback && fallback.recorded),
+		recorded: toNonNegativeInt_(primary && primary.recorded) + fallbackRecorded,
 		updated: toNonNegativeInt_(primary && primary.updated) + toNonNegativeInt_(fallback && fallback.updated),
-		errors: []
-			.concat(primary && Array.isArray(primary.errors) ? primary.errors : [])
-			.concat(fallback && Array.isArray(fallback.errors) ? fallback.errors : []),
+		errors: finalErrors,
 		entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
 		profileAttempted: toNonNegativeInt_(primary && primary.profileAttempted) + toNonNegativeInt_(fallback && fallback.profileAttempted),
 		profileEnriched: toNonNegativeInt_(primary && primary.profileEnriched) + toNonNegativeInt_(fallback && fallback.profileEnriched),
 		metricsProfileMode: "always",
 		usedProfileFallback: true,
+		primaryRecorded: toNonNegativeInt_(primary && primary.recorded),
+		fallbackRecorded: fallbackRecorded,
+		fallbackSkippedPlayerTags: fallbackSkippedPlayerTags,
+		fallbackSkippedByClanTag: fallbackSkippedByClanTag,
+		captureTimingMs: {
+			primary: primaryDurationMs,
+			fallback: fallbackDurationMs,
+			finalize: finalizeDurationMs,
+			total: totalDurationMs,
+		},
 	};
 }
 
@@ -1284,24 +1505,30 @@ function recordClanMemberMetricsSnapshot_(rosterData, clanTagRaw, membersRaw, op
 	}
 
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const deferStoreSanitize = options.deferStoreSanitize === true;
+	const assumeStoreAlreadySanitized = options.assumeStoreAlreadySanitized === true;
+	const collectTags = options.collectTags === true;
 	const runState = options.runState && typeof options.runState === "object" ? options.runState : null;
 	if (runState) {
 		if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
 		if (runState.seenClanTags[clanTag]) {
-			return { recorded: 0, updated: 0, deduped: true, changed: false };
+			const dedupedResult = { recorded: 0, updated: 0, deduped: true, changed: false };
+			if (collectTags) dedupedResult.tags = [];
+			return dedupedResult;
 		}
 		runState.seenClanTags[clanTag] = true;
 	}
 
 	const captureCtx = buildMetricsCaptureContext_(options.capturedAt);
 	captureCtx.clanTag = clanTag;
-	const store = ensurePlayerMetricsStore_(rosterDataSafe);
+	const store = deferStoreSanitize ? ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterDataSafe) : ensurePlayerMetricsStore_(rosterDataSafe);
 	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
 	store.byTag = byTag;
 
 	const members = Array.isArray(membersRaw) ? membersRaw : [];
 	let recorded = 0;
 	let updated = 0;
+	const touchedTags = collectTags ? {} : null;
 	for (let i = 0; i < members.length; i++) {
 		const baseSnapshot = sanitizeMetricsSnapshotPayload_(members[i], "");
 		if (!baseSnapshot) continue;
@@ -1313,23 +1540,37 @@ function recordClanMemberMetricsSnapshot_(rosterData, clanTagRaw, membersRaw, op
 		baseSnapshot.clanTag = clanTag;
 		baseSnapshot.capturedAt = captureCtx.capturedAt;
 
-		const currentEntry = sanitizePlayerMetricsEntry_(tag, byTag[tag], captureCtx.capturedDate.getTime(), captureCtx.capturedDate) || createEmptyPlayerMetricsEntry_(tag, baseSnapshot.name || "");
+		let currentEntry = null;
+		if (assumeStoreAlreadySanitized) {
+			const existingEntry = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : null;
+			currentEntry = existingEntry || createEmptyPlayerMetricsEntry_(tag, baseSnapshot.name || "");
+		} else {
+			currentEntry = sanitizePlayerMetricsEntry_(tag, byTag[tag], captureCtx.capturedDate.getTime(), captureCtx.capturedDate) || createEmptyPlayerMetricsEntry_(tag, baseSnapshot.name || "");
+		}
 		const changed = updatePlayerMetricsEntryFromSnapshot_(currentEntry, baseSnapshot, captureCtx);
 		byTag[tag] = currentEntry;
 		recorded++;
 		if (changed) updated++;
+		if (touchedTags) touchedTags[tag] = true;
 	}
 
-	const sanitizedStore = sanitizePlayerMetricsStore_(store, captureCtx.capturedAt);
-	if (updated > 0 || !sanitizedStore.updatedAt) {
-		sanitizedStore.updatedAt = captureCtx.capturedAt;
+	if (deferStoreSanitize) {
+		if (updated > 0 || !store.updatedAt) store.updatedAt = captureCtx.capturedAt;
+		rosterDataSafe.playerMetrics = store;
+	} else {
+		const sanitizedStore = sanitizePlayerMetricsStore_(store, captureCtx.capturedAt);
+		if (updated > 0 || !sanitizedStore.updatedAt) {
+			sanitizedStore.updatedAt = captureCtx.capturedAt;
+		}
+		rosterDataSafe.playerMetrics = sanitizedStore;
 	}
-	rosterDataSafe.playerMetrics = sanitizedStore;
 
-	return {
+	const out = {
 		recorded: recorded,
 		updated: updated,
 		deduped: false,
 		changed: updated > 0,
 	};
+	if (touchedTags) out.tags = Object.keys(touchedTags);
+	return out;
 }

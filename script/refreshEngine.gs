@@ -433,6 +433,7 @@ function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 
 // Run a single-roster refresh pipeline with per-step rollback and issue tracking.
 function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	const rosterPipelineStartMs = Date.now();
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const skipInitialValidation = options.skipInitialValidation === true;
 	let rosterData = null;
@@ -480,6 +481,12 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		stats: { ok: false, skipped: false, partialFailure: false, message: "", result: null },
 		bench: { ok: false, skipped: false, message: "", result: null },
 	};
+	const stepDurationMs = {
+		pool: 0,
+		lineup: 0,
+		stats: 0,
+		bench: 0,
+	};
 	const issues = [];
 	// Get current roster.
 	const getCurrentRoster = () => findRosterInDataById_(rosterData, rosterId);
@@ -525,6 +532,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		step.ok = false;
 		step.skipped = true;
 		step.message = skipMessage;
+		stepDurationMs[stepKey] = 0;
 		if (stepKey === "stats") step.partialFailure = false;
 		addIssue(stepLabel, skipMessage);
 	};
@@ -535,6 +543,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		step.ok = true;
 		step.skipped = true;
 		step.message = String(messageRaw == null ? "" : messageRaw).trim();
+		stepDurationMs[stepKey] = 0;
 		if (stepKey === "stats") step.partialFailure = false;
 	};
 
@@ -543,6 +552,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		const step = steps[stepKey];
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
 		const beforeStep = cloneRosterDataForRefresh_(rosterData);
+		const stepStartMs = Date.now();
 		try {
 			touchPipelineLockLease();
 			const stepResult = stepFn();
@@ -572,6 +582,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 					const statsResult = step.result && typeof step.result === "object" ? step.result : {};
 					step.partialFailure = !!(statsResult.partialFailure || (statsResult.memberTrackingPreserved && statsResult.warRefreshFailed));
 				}
+				stepDurationMs[stepKey] = Math.max(0, Date.now() - stepStartMs);
 				addIssue(stepLabel, detailedMessage);
 				return false;
 			}
@@ -586,6 +597,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			step.result = stepResult && stepResult.result && typeof stepResult.result === "object" ? stepResult.result : null;
 			step.message = String(step.result && step.result.message != null ? step.result.message : "").trim();
 			if (stepKey === "stats") step.partialFailure = false;
+			stepDurationMs[stepKey] = Math.max(0, Date.now() - stepStartMs);
 			return true;
 		} catch (err) {
 			// Unexpected exceptions always roll back to the pre-step snapshot.
@@ -595,6 +607,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			step.skipped = false;
 			step.message = detailedMessage;
 			if (stepKey === "stats") step.partialFailure = false;
+			stepDurationMs[stepKey] = Math.max(0, Date.now() - stepStartMs);
 			addIssue(stepLabel, detailedMessage);
 			return false;
 		}
@@ -676,8 +689,22 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	// Use the final roster state in case a step changed the tracking mode.
 	const finalTrackingMode = finalRoster ? getRosterTrackingMode_(finalRoster) : initialTrackingMode;
 	const partialFailure = !!steps.stats.partialFailure;
+	const hasIssues = issues.length > 0;
+	const totalPipelineDurationMs = Math.max(0, Date.now() - rosterPipelineStartMs);
+	Logger.log(
+		"refreshRosterPipeline timing rosterId=%s trackingMode=%s poolMs=%s lineupMs=%s statsMs=%s benchMs=%s totalMs=%s statsPartialFailure=%s hasIssues=%s",
+		rosterId,
+		finalTrackingMode,
+		stepDurationMs.pool,
+		stepDurationMs.lineup,
+		stepDurationMs.stats,
+		stepDurationMs.bench,
+		totalPipelineDurationMs,
+		partialFailure,
+		hasIssues,
+	);
 	return {
-		ok: issues.length < 1,
+		ok: !hasIssues,
 		rosterData: validatedRosterData,
 		result: {
 			rosterId: rosterId,
@@ -758,6 +785,17 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let ownershipSnapshotDurationMs = 0;
 	let cumulativeRosterPipelineDurationMs = 0;
 	let profileWarmupCandidateCount = 0;
+	let profileWarmupRequestedTagCount = 0;
+	let profileWarmupUniqueTagCount = 0;
+	let profileWarmupRunStateHits = 0;
+	let profileWarmupRunStateErrors = 0;
+	let profileWarmupCacheHits = 0;
+	let profileWarmupBlockedMisses = 0;
+	let profileWarmupLiveRequested = 0;
+	let profileWarmupLiveSucceeded = 0;
+	let profileWarmupLiveFailed = 0;
+	let profileWarmupLiveRateLimited = 0;
+	let profileWarmupProfileFetchBlocked = false;
 	try {
 		rosterData = validateRosterData_(rosterDataRaw);
 	} catch (err) {
@@ -789,12 +827,46 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const profileWarmupStartMs = Date.now();
 	const refreshAllProfileCandidateTags = collectRefreshAllPlayerProfileCandidateTags_(sourceRosters, refreshAllPrefetch);
 	profileWarmupCandidateCount = refreshAllProfileCandidateTags.length;
-	prefetchAuthoritativePlayerMetricsSnapshotsByTag_(refreshAllProfileCandidateTags, {
+	const profileWarmupSummaryRaw = prefetchAuthoritativePlayerMetricsSnapshotsByTag_(refreshAllProfileCandidateTags, {
 		runState: metricsProfileRunState,
 		batchSize: PLAYER_PROFILE_PREFETCH_BATCH_SIZE,
 		batchDelayMs: PLAYER_PROFILE_PREFETCH_BATCH_DELAY_MS,
 	});
+	const profileWarmupSummary = profileWarmupSummaryRaw && typeof profileWarmupSummaryRaw === "object" ? profileWarmupSummaryRaw : {};
+	profileWarmupRequestedTagCount = toNonNegativeInt_(profileWarmupSummary.requestedTagCount);
+	profileWarmupUniqueTagCount = toNonNegativeInt_(profileWarmupSummary.uniqueTagCount);
+	profileWarmupRunStateHits = toNonNegativeInt_(profileWarmupSummary.runStateHits);
+	profileWarmupRunStateErrors = toNonNegativeInt_(profileWarmupSummary.runStateErrors);
+	profileWarmupCacheHits = toNonNegativeInt_(profileWarmupSummary.cacheHits);
+	profileWarmupBlockedMisses = toNonNegativeInt_(profileWarmupSummary.blockedMisses);
+	profileWarmupLiveRequested = toNonNegativeInt_(profileWarmupSummary.liveRequested);
+	profileWarmupLiveSucceeded = toNonNegativeInt_(profileWarmupSummary.liveSucceeded);
+	profileWarmupLiveFailed = toNonNegativeInt_(profileWarmupSummary.liveFailed);
+	profileWarmupLiveRateLimited = toNonNegativeInt_(profileWarmupSummary.liveRateLimited);
+	profileWarmupProfileFetchBlocked = profileWarmupSummary.profileFetchBlocked === true;
 	profileWarmupDurationMs = Math.max(0, Date.now() - profileWarmupStartMs);
+	Logger.log(
+		"refreshAllRosters profileWarmup requestedTagCount=%s uniqueTagCount=%s runStateHits=%s runStateErrors=%s cacheHits=%s blockedMisses=%s liveRequested=%s liveSucceeded=%s liveFailed=%s liveRateLimited=%s profileFetchBlocked=%s",
+		profileWarmupRequestedTagCount,
+		profileWarmupUniqueTagCount,
+		profileWarmupRunStateHits,
+		profileWarmupRunStateErrors,
+		profileWarmupCacheHits,
+		profileWarmupBlockedMisses,
+		profileWarmupLiveRequested,
+		profileWarmupLiveSucceeded,
+		profileWarmupLiveFailed,
+		profileWarmupLiveRateLimited,
+		profileWarmupProfileFetchBlocked,
+	);
+	if (profileWarmupLiveRateLimited > 0 || profileWarmupBlockedMisses > 0 || profileWarmupProfileFetchBlocked) {
+		Logger.log(
+			"refreshAllRosters profileWarmup throttled blockedMisses=%s liveRateLimited=%s profileFetchBlocked=%s",
+			profileWarmupBlockedMisses,
+			profileWarmupLiveRateLimited,
+			profileWarmupProfileFetchBlocked,
+		);
+	}
 	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
 	const ownershipSnapshotStartMs = Date.now();
 	const ownershipSnapshot = buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
@@ -912,7 +984,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(
-		"refreshAllRosters timing totalMs=%s prefetchMs=%s profileWarmupMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s profileCandidates=%s",
+		"refreshAllRosters timing totalMs=%s prefetchMs=%s profileWarmupMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s profileCandidates=%s profileLiveRequested=%s profileLiveSucceeded=%s profileLiveFailed=%s profileLiveRateLimited=%s profileBlockedMisses=%s profileFetchBlocked=%s",
 		totalDurationMs,
 		prefetchDurationMs,
 		profileWarmupDurationMs,
@@ -920,6 +992,12 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		cumulativeRosterPipelineDurationMs,
 		processedRosters,
 		profileWarmupCandidateCount,
+		profileWarmupLiveRequested,
+		profileWarmupLiveSucceeded,
+		profileWarmupLiveFailed,
+		profileWarmupLiveRateLimited,
+		profileWarmupBlockedMisses,
+		profileWarmupProfileFetchBlocked,
 	);
 
 	return {
