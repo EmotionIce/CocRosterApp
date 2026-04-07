@@ -45,6 +45,23 @@ function collectRosterPoolPlayers_(roster) {
 	return out;
 }
 
+// Handle collect roster usable players (main + subs only).
+function collectRosterUsablePlayers_(roster) {
+	const main = Array.isArray(roster && roster.main) ? roster.main : [];
+	const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
+	const out = [];
+	const seen = {};
+	const usable = main.concat(subs);
+	for (let i = 0; i < usable.length; i++) {
+		const player = usable[i] && typeof usable[i] === "object" ? usable[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		out.push(player);
+	}
+	return out;
+}
+
 // Build roster pool tag set.
 function buildRosterPoolTagSet_(roster) {
 	const out = {};

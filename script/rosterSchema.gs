@@ -141,12 +141,19 @@ function validateRosterData_(data) {
 			if (!playerTag) continue;
 			rosterPoolTagSet[playerTag] = true;
 		}
+		const rosterUsableTagSet = {};
+		const rosterUsable = outMain.concat(outSubs);
+		for (let j = 0; j < rosterUsable.length; j++) {
+			const playerTag = normalizeTag_(rosterUsable[j] && rosterUsable[j].tag);
+			if (!playerTag) continue;
+			rosterUsableTagSet[playerTag] = true;
+		}
 		let sanitizedWarPerformance = sanitizeRosterWarPerformance_(r.warPerformance);
 		const retentionTagSet = buildHistoryRetentionTagSet_(rosterPoolTagSet, sanitizedWarPerformance, r.regularWar, new Date().toISOString());
 		const sanitizedCwlStats = sanitizeRosterCwlStats_(r.cwlStats, retentionTagSet);
 		const sanitizedRegularWar = sanitizeRosterRegularWar_(r.regularWar, retentionTagSet);
 		sanitizedWarPerformance = backfillWarPerformanceFromLegacyRegularAggregate_(sanitizedWarPerformance, sanitizedRegularWar);
-		const sanitizedBenchSuggestions = sanitizeRosterBenchSuggestions_(r.benchSuggestions, rosterPoolTagSet);
+		const sanitizedBenchSuggestions = sanitizeRosterBenchSuggestions_(r.benchSuggestions, rosterUsableTagSet);
 		const sanitizedCwlPreparation = sanitizeRosterCwlPreparation_(r.cwlPreparation, rosterPoolTagSet, trackingMode, {
 			defaultRosterSize: normalizePreparationRosterSize_(outMain.length, CWL_PREPARATION_MIN_ROSTER_SIZE),
 			enforceLockedInLimit: true,

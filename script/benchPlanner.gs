@@ -349,7 +349,7 @@ function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
 	const season = seasonContext && typeof seasonContext === "object" ? seasonContext : {};
 	const rosterStatsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object" ? rosterSafe.cwlStats.byTag : {};
 	const currentMainRaw = Array.isArray(rosterSafe.main) ? rosterSafe.main : [];
-	const poolPlayersRaw = collectRosterPoolPlayers_(rosterSafe);
+	const poolPlayersRaw = collectRosterUsablePlayers_(rosterSafe);
 	let requestedMainSize = Number(rosterSafe && rosterSafe.badges && rosterSafe.badges.main);
 	if (!isFinite(requestedMainSize)) requestedMainSize = currentMainRaw.length;
 	requestedMainSize = Math.max(0, Math.floor(requestedMainSize));
