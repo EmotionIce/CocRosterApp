@@ -2,93 +2,127 @@
 
 Production roster operations platform for Clash of Clans clan families.
 
+This repository combines:
+- A public roster + leaderboard website.
+- A password-protected admin console for refresh/import/publish workflows.
+- A backend refresh pipeline that syncs data from Clash endpoints.
+- Reliable storage and archival snapshots in Firebase Realtime Database.
+
 ## Live Deployment
 
 - Public site: [https://turtle.qzz.io](https://turtle.qzz.io)
 - Admin console: [https://turtle.qzz.io/console](https://turtle.qzz.io/console)
 - Source: [https://github.com/EmotionIce/CocRosterApp](https://github.com/EmotionIce/CocRosterApp)
 
-## What This Project Does
+## Recruiter Snapshot
 
-This app manages full clan-family roster operations from one workflow:
+This project demonstrates end-to-end product engineering in a real production setup:
+- Full-stack architecture across browser, edge worker, backend APIs, and database.
+- Data modeling + schema validation for non-trivial nested payloads.
+- Operational reliability (locking, cooldowns, rollback behavior, archive retention).
+- Mobile-first admin UX for non-technical content updates.
+- Integration with external APIs (Clash data via proxy) under retry/rate-limit constraints.
 
-- Multi-roster management (add/remove/reorder rosters, per-roster clan tag + mode).
-- Two tracking modes per roster: `cwl` and `regularWar`.
-- Refresh pipeline against Clash endpoints (members, current war, war log, CWL league group).
-- CWL preparation and bench planning (including lock-in and lock-out controls).
-- Public roster + leaderboard site with loading/fallback behavior.
-- Password-protected admin workflows for refresh, import, and publish.
-- Auto-refresh scheduling and Firebase archival snapshots.
+## Core Capabilities
+
+### Public website
+- Landing page with modular content blocks driven by `publicConfig.profile`.
+- Roster view with search and sectioned player lists.
+- Leaderboard view with multiple sort modes and month toggles.
+- Runtime fallback hydration (Firebase active snapshot first, asset route fallback second).
+
+### Admin console (`/console`)
+- Tabs: `Rosters`, `Import`, `Preview`, `Website`.
+- Active snapshot loads automatically after unlock.
+- Roster operations:
+  - per-roster clan connection tests,
+  - refresh-all pipeline,
+  - lineup/stat sync,
+  - bench/CWL tools,
+  - publish with cooldown and locking.
+- XLSX import compare/apply workflow.
+- Website editor:
+  - compact quick edits for commonly changed fields,
+  - section-based editor (`General`, `Brand`, `Navigation`, `Hero`, `Journey`, `Family`, `War`, `CWL`, `Network`, `Proof`, `Final CTA`, `Media`, `Advanced JSON`),
+  - repeater controls for ordered arrays,
+  - advanced JSON escape hatch for exact override control.
+
+### Backend pipeline
+- Multi-step refresh pipeline with per-step rollback and issue aggregation.
+- Supports both tracking modes: `cwl` and `regularWar`.
+- CWL preparation and bench suggestion planner (`season_milp_v1`).
+- Player metrics tracking and historical retention logic.
+- Publish-time safeguards to prevent accidental metrics loss.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     A["Admin UI (/console)"] -->|"POST /api/admin"| B["Cloudflare Worker"]
-    B -->|"RPC bridge"| C["Google Apps Script (doPost)"]
-    C -->|"Refresh pipeline"| D["CoC proxy API"]
-    C -->|"Validated snapshot write"| E["Firebase Realtime DB"]
-    F["Public UI (turtle.qzz.io)"] -->|"Hydrate active snapshot"| E
+    B -->|"RPC bridge"| C["Google Apps Script doPost"]
+    C -->|"Refresh + publish logic"| D["CoC proxy API"]
+    C -->|"Validated active/archive writes"| E["Firebase Realtime DB"]
+    F["Public UI (turtle.qzz.io)"] -->|"Read active snapshot"| E
     F -->|"Fallback asset fetch"| C
-    G["Cloudflare Pages static assets"] --> F
+    G["Cloudflare static assets"] --> F
 ```
 
-## Why The Implementation
+## Tech Stack
 
-- Strict roster schema validation and sanitization before writes (`script/rosterSchema.gs`).
-- Duplicate tag/roster checks and deterministic `rosterOrder` normalization.
-- Lock-based refresh/publish orchestration to prevent concurrent data corruption.
-- Archived publish/auto-refresh snapshots in Firebase for recovery.
-- Runtime fallbacks on the public client (Firebase first, then asset route).
-- No build complexity: deployable source is plain HTML/CSS/JS + Apps Script.
+| Area | Implementation |
+| --- | --- |
+| Frontend | Vanilla HTML/CSS/JS (`cloudflarePages/index.html`, `client.js`, `admin.js`) |
+| Admin import | XLSX parsing in browser (`cloudflarePages/generator.js`) |
+| Edge/API bridge | Cloudflare Worker (`cloudflarePages/worker.js`) |
+| Backend | Google Apps Script (`script/*.gs`) |
+| Data store | Firebase Realtime Database (`active`, `archive/*`, `meta`) |
+| External API | Clash data via `https://cocproxy.royaleapi.dev/v1` |
 
-## Repository Map
+## Repository Structure
+
+### Frontend + edge (`cloudflarePages/`)
+- `index.html`: public shell (landing, rosters, leaderboard).
+- `client.js`: public hydration, rendering, leaderboard/search/profile logic.
+- `console.html` / `admin.html`: admin shells.
+- `admin.js`: admin state machine and workflow orchestration.
+- `generator.js`: XLSX import parsing, compare, and apply helpers.
+- `public-config.js`: runtime config bootstrap and optional static overrides.
+- `worker.js` / `_worker.js`: admin API proxy + admin route rewriting.
+- `styles.css`: shared styles for public and admin surfaces.
 
 ### Backend (`script/`)
+- `entrypoints.gs`: `doGet`/`doPost` handling and response helpers.
+- `adminApi.gs`: RPC dispatch (`getRosterData`, `refreshAllRosters`, `publishRosterData`, etc.).
+- `refreshEngine.gs`: refresh-all pipeline orchestration.
+- `rosterSync.gs`: roster pool/lineup/stat sync.
+- `warDomain.gs`: war/CWL aggregation + lifecycle/history sanitization.
+- `benchPlanner.gs`: CWL bench planner and suggestion generation.
+- `metricsTracking.gs`: player metrics enrichment and retention.
+- `rosterSchema.gs`: schema validation + sanitization boundary.
+- `firebaseStore.gs`: Firebase transport, active reads/writes, archive helpers.
+- `authAndLocks.gs`: admin auth, publish cooldown, lock lifecycle.
 
-- `entrypoints.gs`: Apps Script `doGet`/`doPost`, public redirect, admin API envelope.
-- `adminApi.gs`: RPC dispatcher (`getRosterData`, `refreshAllRosters`, `publishRosterData`, etc.).
-- `refreshEngine.gs`: orchestrates full refresh-all pipeline and issue summaries.
-- `rosterSync.gs`: roster pool/lineup sync and tracking refresh logic.
-- `warDomain.gs`: CWL + regular war aggregation and sanitization.
-- `benchPlanner.gs`: CWL planner (`season_milp_v1`) and suggestion generation.
-- `metricsTracking.gs`: retention and player history/metrics enrichment.
-- `firebaseStore.gs`: Firebase transport, active snapshot writes, archive maintenance.
-- `authAndLocks.gs`: admin auth + active roster job lock lifecycle.
-- `rosterSchema.gs`: canonical data contract boundary.
+## Data Contract
 
-### Frontend + Edge (`cloudflarePages/`)
-
-- `index.html`: public shell (landing, rosters, leaderboard).
-- `client.js`: public rendering, hydration, profile interactions.
-- `console.html`: Cloudflare-hosted admin shell.
-- `admin.js`: admin state machine and mutation workflows.
-- `generator.js`: XLSX import parsing + compare/apply logic.
-- `public-config.js`: runtime public/admin URL config.
-- `worker.js` / `_worker.js`: admin proxy + route rewriting.
-- `styles.css`: shared visual layer.
-
-## Data Contract (Current)
-
-`roster-data.json` is the published source of truth:
+Published payload (`roster-data.json`) is schema-validated before write:
 
 ```json
 {
   "schemaVersion": 1,
   "pageTitle": "Join the TURTLE Clan Family",
-  "lastUpdatedAt": "ISO-8601",
+  "lastUpdatedAt": "2026-04-08T00:00:00.000Z",
   "publicConfig": {
-    "profile": {
-      "brand": { "eyebrow": "Your clan family" },
-      "hero": { "title": "Your landing headline" },
-      "importMappingSeeds": [
-        { "clan": "YOUR CLAN NAME", "rosterId": "main-a" }
-      ]
-    },
     "landing": {
       "bannerMediaUrl": "https://...",
       "squareMediaUrl": "https://...",
       "discordInviteUrl": "https://..."
+    },
+    "profile": {
+      "hero": { "title": "Your headline" },
+      "family": { "metaTemplate": "{clanCount} clans, {playerCount} tracked players." },
+      "importMappingSeeds": [
+        { "clan": "YOUR CLAN NAME", "rosterId": "main-a" }
+      ]
     }
   },
   "rosterOrder": ["main-a", "master-2-b"],
@@ -107,78 +141,102 @@ flowchart LR
         "lockStateByTag": {}
       }
     }
-  ]
+  ],
+  "playerMetrics": {}
 }
 ```
 
-## Admin Workflow
+Notes:
+- `publicConfig.profile` is sanitized recursively with safe-key guards.
+- `publicConfig.landing.profile` is also accepted for compatibility.
+- Empty/noisy overrides are pruned.
 
-1. Unlock admin UI (server-side password validation).
-2. Load active config into preview.
-3. Optionally import XLSX and compare/apply.
-4. Refresh all rosters (pipeline runs by roster).
-5. Review statuses and preparation outcomes.
-6. Publish validated snapshot to Firebase active path + archive.
+## Modular Family Customization (Current Implementation)
 
-## Deployment Notes
+The project now supports config-driven family branding without backend changes.
 
-1. Deploy `script/` as a Google Apps Script web app.
-2. Configure Script Properties at minimum:
-   - `ADMIN_PW`
-   - `COC_API_TOKEN`
-   - `FIREBASE_DB_URL`
-   - `FIREBASE_CLIENT_EMAIL`
-   - `FIREBASE_PRIVATE_KEY`
-   - `FIREBASE_TOKEN_URI`
-3. Deploy `cloudflarePages/` with Worker routing.
-4. Ensure public runtime values are set (`ROSTER_FIREBASE_DB_URL`, `ROSTER_BASE_URL`).
-5. Verify admin bridge path (`/api/admin`) and public hydration from Firebase.
+### Recommended workflow
+1. Open `/console` and unlock.
+2. Go to `Website`.
+3. Use Quick Edits for common updates:
+   - page title,
+   - Discord URL,
+   - banner/square media URLs,
+   - hero title,
+   - primary CTA label.
+4. Use section editors for structured copy updates.
+5. Use `Advanced JSON` only when you need exact low-level control.
+6. Publish from the command bar.
 
-## Modular Rebranding (Implemented Base)
+### Import mapping seeds
+`importMappingSeeds` can be provided in profile JSON for XLSX clan-name auto-mapping:
+- Array form: `{ "clan": "Clan Name", "rosterId": "main-a" }`
+- Object form: `{ "CLAN_NAME": "main-a" }`
 
-The repo now supports config-driven clan-family branding/copy without changing core pipeline code:
+## Reliability and Safety Design
 
-1. `publicConfig` now accepts a `profile` object (validated + sanitized in `script/rosterSchema.gs`).
-   - Landing/nav copy overrides live under `publicConfig.profile`.
-   - Import mapping hints can live under `publicConfig.profile.importMappingSeeds`.
-2. Landing/nav copy is rendered dynamically in `cloudflarePages/client.js` with safe defaults.
-3. Existing snapshots remain compatible.
-   - If `publicConfig.profile` is missing, current TURTLE-style defaults render automatically.
-4. Public URL/media overrides support both payload and static runtime override.
-   - Payload: `publicConfig.landing.*Url`
-   - Runtime: `window.ROSTER_PUBLIC_CONFIG_OVERRIDES` in `cloudflarePages/public-config.js` (runtime wins)
-5. Admin now includes website-profile controls.
-   - URL fields: Discord invite, banner media, square media.
-   - JSON profile editor for advanced copy customization.
-6. XLSX import clan mapping can now be seeded from data (no code edits required).
-   - `publicConfig.profile.importMappingSeeds` accepts:
-     - Array form: `{ clan, rosterId }`
-     - Object form: `{ "CLAN_KEY": "rosterId" }`
+- Strict schema validation before publish (`validateRosterData_`).
+- Duplicate roster/tag protection with diagnostics.
+- Active job lock around refresh/publish to prevent concurrent mutation.
+- Publish cooldown enforcement.
+- Per-step refresh rollback on failure.
+- Auto-refresh trigger management and run status tracking.
+- Archive retention in Firebase:
+  - publish backups (`archive/publish`, keep latest 10),
+  - daily auto-refresh backups (`archive/autorefreshDaily`, keep latest 2).
+- Public hydration fallback when primary source is unavailable.
 
-## Quick Rebranding Workflow
+## Deployment
 
-1. Open admin (`/console`) and unlock.
-2. Load active config.
-3. Update URL fields and/or paste profile JSON in **Website profile JSON**.
-4. Optional: add `importMappingSeeds` so XLSX clan labels auto-map to your roster IDs.
-5. Verify in Preview.
-6. Publish.
+### 1) Deploy Apps Script backend
 
-## Next Modular Step (Planned)
+Deploy `script/` as a web app and set Script Properties.
+Recommended web app settings: execute as owner account, access allowed for the users who need to call it (the worker forwards requests to this endpoint).
 
-This base now supports safe, data-driven rebranding and import seeding.
-Next step is to package this into a reusable "clan family starter profile" flow:
+Required Script Properties:
+- `ADMIN_PW`
+- `COC_API_TOKEN`
+- `FIREBASE_DB_URL`
+- `FIREBASE_CLIENT_EMAIL`
+- `FIREBASE_PRIVATE_KEY`
+- `FIREBASE_TOKEN_URI`
 
-1. Add one-click profile template insertion/export in admin.
-2. Add roster template packs (starter roster IDs/titles per family).
-3. Add guided migration helpers to rename roster IDs without breaking historical data.
+### 2) Deploy Cloudflare worker + static assets
 
-## Development Notes
+Use `cloudflarePages/` with `worker.js` as entrypoint.
 
-- No build step: committed files are deployable artifacts.
-- Keep `script/` and `cloudflarePages/` behavior aligned when changing shared flows.
-- `cloudflarePages/assets/` contains static media/icons used by both public and admin UI.
+`wrangler.example.toml` is included as a baseline.
+
+Recommended worker variable:
+- `ROSTER_APPS_SCRIPT_URL=https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`
+
+### 3) Verify runtime config
+
+In `cloudflarePages/public-config.js`, confirm:
+- `ROSTER_FIREBASE_DB_URL`
+- `ROSTER_BASE_URL` (Apps Script URL, if needed for fallback)
+
+### 4) Smoke test
+
+1. Open `/console`, unlock, confirm active snapshot auto-loads.
+2. Run refresh-all.
+3. Validate roster/website changes in UI.
+4. Publish and re-check public site (`/`).
+
+## Operational Notes
+
+- This repo is deployable as-is (no frontend build step).
+- Cache-busting query params are used on script tags in HTML shells.
+- `worker.js` and `_worker.js` are intentionally mirrored.
+- `console.html` and `admin.html` are intentionally mirrored for admin route compatibility.
+
+## Roadmap
+
+Planned modularization enhancements:
+- Profile template packs (import/export).
+- Starter roster packs for new clan families.
+- Guided tools for safe roster ID migration with historical continuity.
 
 ## License
 
-See `LICENSE`.
+See [LICENSE](LICENSE).
