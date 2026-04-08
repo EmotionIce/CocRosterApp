@@ -15,7 +15,7 @@
   <!-- Shared public header and navigation across all public views. -->
   <header class="public-header glass-surface glass-surface--strong">
     <div class="public-brand">
-      <div class="public-brand__eyebrow">200+ Members &bull; Discord-Based</div>
+      <div id="publicBrandEyebrow" class="public-brand__eyebrow">200+ Members &bull; Discord-Based</div>
       <h1 id="pageTitleHeading">Join the TURTLE Clan Family</h1>
     </div>
     <nav class="public-nav" aria-label="Public navigation">
@@ -47,12 +47,12 @@
       <section class="landing-chapter landing-hero" data-landing-reveal>
         <figure id="landingBannerSlot" class="landing-media-slot landing-media-slot--banner is-placeholder">
           <div id="landingBannerMediaHost" class="landing-media-slot__media hidden" aria-hidden="true"></div>
-          <figcaption class="landing-media-slot__placeholder">TURTLE banner preview</figcaption>
+          <figcaption id="landingBannerPlaceholderText" class="landing-media-slot__placeholder">TURTLE banner preview</figcaption>
         </figure>
         <div class="landing-hero__content">
-          <p class="landing-eyebrow">Recruiting active players</p>
-          <h2>TURTLE: active, organized, improving.</h2>
-          <p>
+          <p id="landingHeroEyebrow" class="landing-eyebrow">Recruiting active players</p>
+          <h2 id="landingHeroTitle">TURTLE: active, organized, improving.</h2>
+          <p id="landingHeroBody">
             A place for every Town Hall, from steady progress to high-level wars and the Project Se7ven path.
           </p>
           <div class="landing-hero__actions">
@@ -66,30 +66,30 @@
       <section class="landing-chapter landing-square-story" data-landing-square-story data-landing-reveal>
         <div class="landing-square-story__inner">
           <div class="landing-square-story__copy">
-            <p class="landing-eyebrow">How joining works</p>
-            <h3>You bring the player tag. We handle the setup and path forward.</h3>
+            <p id="landingJourneyEyebrow" class="landing-eyebrow">How joining works</p>
+            <h3 id="landingJourneyTitle">You bring the player tag. We handle the setup and path forward.</h3>
             <div class="landing-square-steps">
               <article class="landing-square-step is-active" data-landing-square-step="0">
-                <p class="landing-square-step__label">Step 1</p>
-                <h4>Open a ticket</h4>
-                <p>Share your player tag and basic playstyle.</p>
+                <p id="landingJourneyStep1Label" class="landing-square-step__label">Step 1</p>
+                <h4 id="landingJourneyStep1Title">Open a ticket</h4>
+                <p id="landingJourneyStep1Body">Share your player tag and basic playstyle.</p>
               </article>
               <article class="landing-square-step" data-landing-square-step="1">
-                <p class="landing-square-step__label">Step 2</p>
-                <h4>Get linked and placed</h4>
-                <p>Your account gets linked to Discord and you set your self-roles.</p>
+                <p id="landingJourneyStep2Label" class="landing-square-step__label">Step 2</p>
+                <h4 id="landingJourneyStep2Title">Get linked and placed</h4>
+                <p id="landingJourneyStep2Body">Your account gets linked to Discord and you set your self-roles.</p>
               </article>
               <article class="landing-square-step" data-landing-square-step="2">
-                <p class="landing-square-step__label">Step 3</p>
-                <h4>War, learn, move up</h4>
-                <p>Join the clan, opt into war through the pinned message and move up, in the TURTLE-family, as your Town Hall and performance improve.</p>
+                <p id="landingJourneyStep3Label" class="landing-square-step__label">Step 3</p>
+                <h4 id="landingJourneyStep3Title">War, learn, move up</h4>
+                <p id="landingJourneyStep3Body">Join the clan, opt into war through the pinned message and move up, in the TURTLE-family, as your Town Hall and performance improve.</p>
               </article>
             </div>
           </div>
           <div class="landing-square-story__visual" data-landing-square-sticky>
             <figure id="landingSquareSlot" class="landing-media-slot landing-media-slot--square is-placeholder">
               <div id="landingSquareMediaHost" class="landing-media-slot__media hidden" aria-hidden="true"></div>
-              <figcaption class="landing-media-slot__placeholder">TURTLE icon preview</figcaption>
+              <figcaption id="landingSquarePlaceholderText" class="landing-media-slot__placeholder">TURTLE icon preview</figcaption>
             </figure>
           </div>
         </div>
@@ -97,8 +97,8 @@
 
       <section class="landing-chapter landing-family" data-landing-reveal>
         <div class="landing-family__intro">
-          <p class="landing-eyebrow">Clan family lineup</p>
-          <h3>From early growth to Legends-level play, the family gives every Town Hall a real home and room to keep climbing.</h3>
+          <p id="landingFamilyEyebrow" class="landing-eyebrow">Clan family lineup</p>
+          <h3 id="landingFamilyTitle">From early growth to Legends-level play, the family gives every Town Hall a real home and room to keep climbing.</h3>
           <p id="landingFamilyMeta" class="landing-family__meta">Live overview of the current family.</p>
         </div>
         <div id="landingClanFamilyGrid" class="landing-family-grid"></div>
@@ -106,82 +106,82 @@
 
       <section class="landing-chapter landing-feature landing-feature--war" data-landing-reveal>
         <div class="landing-feature__content">
-          <p class="landing-eyebrow">Main clan focus</p>
-          <h3>TURTLE Main is built for strong TH17 and TH18 players who want serious wars and the relaxed community vibe.</h3>
-          <p>Reliable hits matter missed attacks and long-term performance are tracked. Planning help is there when you want it, and players who ask for coaching can get it.</p>
+          <p id="landingWarEyebrow" class="landing-eyebrow">Main clan focus</p>
+          <h3 id="landingWarTitle">TURTLE Main is built for strong TH17 and TH18 players who want serious wars and the relaxed community vibe.</h3>
+          <p id="landingWarBody">Reliable hits matter missed attacks and long-term performance are tracked. Planning help is there when you want it, and players who ask for coaching can get it.</p>
         </div>
         <aside class="landing-feature__rail" aria-label="Main clan highlights">
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">War style</span>
-            <strong class="landing-feature-chip__value">Relaxed, but reliable</strong>
+            <span id="landingWarChip1Label" class="landing-feature-chip__label">War style</span>
+            <strong id="landingWarChip1Value" class="landing-feature-chip__value">Relaxed, but reliable</strong>
           </div>
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">Core TH range</span>
-            <strong class="landing-feature-chip__value">TH17-18</strong>
+            <span id="landingWarChip2Label" class="landing-feature-chip__label">Core TH range</span>
+            <strong id="landingWarChip2Value" class="landing-feature-chip__value">TH17-18</strong>
           </div>
         </aside>
       </section>
 
       <section class="landing-chapter landing-feature landing-feature--cwl" data-landing-reveal>
         <div class="landing-feature__content">
-          <p class="landing-eyebrow">CWL structure</p>
-          <h3>Every active member gets a CWL spot, and regular wars keep running even during league week.</h3>
-          <p>Rosters are set before CWL starts, based on Town Hall strength and the best overall lineup fit. Subs are rotated so everyone still earns full rewards, and the family keeps side wars and back-to-back wars running year-round.</p>
+          <p id="landingCwlEyebrow" class="landing-eyebrow">CWL structure</p>
+          <h3 id="landingCwlTitle">Every active member gets a CWL spot, and regular wars keep running even during league week.</h3>
+          <p id="landingCwlBody">Rosters are set before CWL starts, based on Town Hall strength and the best overall lineup fit. Subs are rotated so everyone still earns full rewards, and the family keeps side wars and back-to-back wars running year-round.</p>
         </div>
         <aside class="landing-feature__rail" aria-label="CWL highlights">
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">Access</span>
-            <strong class="landing-feature-chip__value">All active members</strong>
+            <span id="landingCwlChip1Label" class="landing-feature-chip__label">Access</span>
+            <strong id="landingCwlChip1Value" class="landing-feature-chip__value">All active members</strong>
           </div>
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">During CWL</span>
-            <strong class="landing-feature-chip__value">Side wars running</strong>
+            <span id="landingCwlChip2Label" class="landing-feature-chip__label">During CWL</span>
+            <strong id="landingCwlChip2Value" class="landing-feature-chip__value">Side wars running</strong>
           </div>
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">Coordination</span>
-            <strong class="landing-feature-chip__value">Always optimized</strong>
+            <span id="landingCwlChip3Label" class="landing-feature-chip__label">Coordination</span>
+            <strong id="landingCwlChip3Value" class="landing-feature-chip__value">Always optimized</strong>
           </div>
         </aside>
       </section>
 
       <section class="landing-chapter landing-feature landing-feature--network" data-landing-reveal>
         <div class="landing-feature__content">
-          <p class="landing-eyebrow">ProjectSE7VEN</p>
-          <h3>For the strongest players, TURTLE also opens a path into Project 7&#39;s fully competitive environment.</h3>
-          <p>Confident Legends League players can move into P7 for a sharper competitive setting, high-level push play, and prize-backed push events worth multiple hundreds $$! It is the elite lane, but still part of the wider TURTLE ecosystem.</p>
+          <p id="landingNetworkEyebrow" class="landing-eyebrow">ProjectSE7VEN</p>
+          <h3 id="landingNetworkTitle">For the strongest players, TURTLE also opens a path into Project 7&#39;s fully competitive environment.</h3>
+          <p id="landingNetworkBody">Confident Legends League players can move into P7 for a sharper competitive setting, high-level push play, and prize-backed push events worth multiple hundreds $$! It is the elite lane, but still part of the wider TURTLE ecosystem.</p>
         </div>
         <aside class="landing-feature__rail" aria-label="Network highlights">
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">Entry bar</span>
-            <strong class="landing-feature-chip__value">Legends + confident hits</strong>
+            <span id="landingNetworkChip1Label" class="landing-feature-chip__label">Entry bar</span>
+            <strong id="landingNetworkChip1Value" class="landing-feature-chip__value">Legends + confident hits</strong>
           </div>
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">Events</span>
-            <strong class="landing-feature-chip__value">$$$ push events</strong>
+            <span id="landingNetworkChip2Label" class="landing-feature-chip__label">Events</span>
+            <strong id="landingNetworkChip2Value" class="landing-feature-chip__value">$$$ push events</strong>
           </div>
           <div class="landing-feature-chip">
-            <span class="landing-feature-chip__label">Connection</span>
-            <strong class="landing-feature-chip__value">Shared leadership</strong>
+            <span id="landingNetworkChip3Label" class="landing-feature-chip__label">Connection</span>
+            <strong id="landingNetworkChip3Value" class="landing-feature-chip__value">Shared leadership</strong>
           </div>
         </aside>
       </section>
 
       <section class="landing-chapter landing-proof" data-landing-reveal>
         <div class="landing-proof__inner">
-          <p class="landing-eyebrow">Why it works</p>
-          <h3>Discord is required. Pressure isn&#39;t.</h3>
-          <p>The expectations are simple: stay active, see your notifications, use your hits, and be willing to improve. EU and US staff coverage keeps replies fast, while the family stays organized without becoming overly strict.</p>
+          <p id="landingProofEyebrow" class="landing-eyebrow">Why it works</p>
+          <h3 id="landingProofTitle">Discord is required. Pressure isn&#39;t.</h3>
+          <p id="landingProofBody">The expectations are simple: stay active, see your notifications, use your hits, and be willing to improve. EU and US staff coverage keeps replies fast, while the family stays organized without becoming overly strict.</p>
         </div>
       </section>
 
       <section class="landing-chapter landing-final-cta" data-landing-reveal>
         <div class="landing-final-cta__content">
-          <p class="landing-eyebrow">Ready to join</p>
-          <h3>Join the Discord and Open a Ticket.</h3>
+          <p id="landingFinalEyebrow" class="landing-eyebrow">Ready to join</p>
+          <h3 id="landingFinalTitle">Join the Discord and Open a Ticket.</h3>
           <ol class="landing-join-steps">
-            <li>Join the server and open a Ticket.</li>
-            <li>Share your player tag and playstyle</li>
-            <li>Get placed in the right clan and opt into war when ready</li>
+            <li id="landingFinalStep1">Join the server and open a Ticket.</li>
+            <li id="landingFinalStep2">Share your player tag and playstyle</li>
+            <li id="landingFinalStep3">Get placed in the right clan and opt into war when ready</li>
           </ol>
           <div class="landing-hero__actions">
             <a id="landingBottomDiscordCta" class="landing-cta landing-cta--primary" href="#" target="_blank"
@@ -220,8 +220,8 @@
 </div>
 
 
-  <script src="./public-config.js?v=20260321c"></script>
-  <script defer src="./client.js?v=20260321c"></script>
+  <script src="./public-config.js?v=20260408a"></script>
+  <script defer src="./client.js?v=20260408a"></script>
 </body>
 </html>
 

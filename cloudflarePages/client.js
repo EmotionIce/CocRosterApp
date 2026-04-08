@@ -99,6 +99,94 @@
         squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_ofyufv&profile=cld-looping",
         discordInviteUrl: "https://discord.gg/turtlecoc",
     };
+    const PUBLIC_PROFILE_DEFAULTS = {
+        brand: {
+            eyebrow: "200+ Members \u2022 Discord-Based",
+        },
+        nav: {
+            homeLabel: "Home",
+            rostersLabel: "Rosters",
+            leaderboardLabel: "Leaderboard",
+            discordLabel: "Discord",
+            adminLabel: "Admin Panel",
+        },
+        hero: {
+            eyebrow: "Recruiting active players",
+            title: "TURTLE: active, organized, improving.",
+            body: "A place for every Town Hall, from steady progress to high-level wars and the Project Se7ven path.",
+            primaryCtaLabel: "Join Discord now!",
+            secondaryCtaLabel: "See Current Rosters",
+        },
+        journey: {
+            eyebrow: "How joining works",
+            title: "You bring the player tag. We handle the setup and path forward.",
+            steps: [
+                { label: "Step 1", title: "Open a ticket", body: "Share your player tag and basic playstyle." },
+                { label: "Step 2", title: "Get linked and placed", body: "Your account gets linked to Discord and you set your self-roles." },
+                { label: "Step 3", title: "War, learn, move up", body: "Join the clan, opt into war through the pinned message and move up, in the TURTLE-family, as your Town Hall and performance improve." },
+            ],
+        },
+        family: {
+            eyebrow: "Clan family lineup",
+            title: "From early growth to Legends-level play, the family gives every Town Hall a real home and room to keep climbing.",
+            metaTemplate: "{clanCount} clans, {playerCount} tracked players across the family.",
+            loadingMetaText: "Syncing the latest family snapshot. Live lineup stats will appear shortly.",
+            playersLabel: "Players in roster",
+            cwlLabel: "CWL",
+            regularWarLabel: "Regular war",
+        },
+        war: {
+            eyebrow: "Main clan focus",
+            title: "TURTLE Main is built for strong TH17 and TH18 players who want serious wars and the relaxed community vibe.",
+            body: "Reliable hits matter missed attacks and long-term performance are tracked. Planning help is there when you want it, and players who ask for coaching can get it.",
+            highlights: [
+                { label: "War style", value: "Relaxed, but reliable" },
+                { label: "Core TH range", value: "TH17-18" },
+            ],
+        },
+        cwl: {
+            eyebrow: "CWL structure",
+            title: "Every active member gets a CWL spot, and regular wars keep running even during league week.",
+            body: "Rosters are set before CWL starts, based on Town Hall strength and the best overall lineup fit. Subs are rotated so everyone still earns full rewards, and the family keeps side wars and back-to-back wars running year-round.",
+            highlights: [
+                { label: "Access", value: "All active members" },
+                { label: "During CWL", value: "Side wars running" },
+                { label: "Coordination", value: "Always optimized" },
+            ],
+        },
+        network: {
+            eyebrow: "ProjectSE7VEN",
+            title: "For the strongest players, TURTLE also opens a path into Project 7's fully competitive environment.",
+            body: "Confident Legends League players can move into P7 for a sharper competitive setting, high-level push play, and prize-backed push events worth multiple hundreds $$! It is the elite lane, but still part of the wider TURTLE ecosystem.",
+            highlights: [
+                { label: "Entry bar", value: "Legends + confident hits" },
+                { label: "Events", value: "$$$ push events" },
+                { label: "Connection", value: "Shared leadership" },
+            ],
+        },
+        proof: {
+            eyebrow: "Why it works",
+            title: "Discord is required. Pressure isn't.",
+            body: "The expectations are simple: stay active, see your notifications, use your hits, and be willing to improve. EU and US staff coverage keeps replies fast, while the family stays organized without becoming overly strict.",
+        },
+        finalCta: {
+            eyebrow: "Ready to join",
+            title: "Join the Discord and Open a Ticket.",
+            steps: [
+                "Join the server and open a Ticket.",
+                "Share your player tag and playstyle",
+                "Get placed in the right clan and opt into war when ready",
+            ],
+            primaryCtaLabel: "Join TURTLE on Discord",
+            secondaryCtaLabel: "View Leaderboard",
+        },
+        media: {
+            bannerLabel: "TURTLE banner animation",
+            squareLabel: "TURTLE icon animation",
+            bannerPlaceholderLabel: "TURTLE banner preview",
+            squarePlaceholderLabel: "TURTLE icon preview",
+        },
+    };
     const LANDING_MEDIA_REMOTE_LOAD_TIMEOUT_MS = 9000;
     const LANDING_MEDIA_LOCAL_LOAD_TIMEOUT_MS = 7000;
     const LANDING_MEDIA_FALLBACK_CANDIDATES = {
@@ -250,12 +338,88 @@
         return { kind: "none", value: "" };
     };
 
+    // Return whether plain object.
+    const isPlainObject_ = (valueRaw) => !!(valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw));
+
+    // Read runtime public config overrides from global scope.
+    const readRuntimePublicConfigOverrides_ = () => {
+        if (typeof window === "undefined" || !window) return {};
+        const overrides = window.ROSTER_PUBLIC_CONFIG_OVERRIDES;
+        return isPlainObject_(overrides) ? overrides : {};
+    };
+
+    // Sanitize profile values by template shape.
+    const sanitizePublicProfileByTemplate_ = (templateRaw, candidateRaw) => {
+        if (typeof templateRaw === "string") {
+            const text = toStr(candidateRaw).trim();
+            return text || templateRaw;
+        }
+
+        if (Array.isArray(templateRaw)) {
+            if (!templateRaw.length) return [];
+            const templateItem = templateRaw[0];
+            const sourceArray = Array.isArray(candidateRaw) ? candidateRaw : [];
+
+            if (typeof templateItem === "string") {
+                const outStrings = [];
+                for (let i = 0; i < templateRaw.length; i++) {
+                    const fallbackText = toStr(templateRaw[i]).trim();
+                    const candidateText = toStr(sourceArray[i]).trim();
+                    outStrings.push(candidateText || fallbackText);
+                }
+                return outStrings;
+            }
+
+            const outObjects = [];
+            for (let i = 0; i < templateRaw.length; i++) {
+                const fallbackItem = isPlainObject_(templateRaw[i]) ? templateRaw[i] : templateItem;
+                const sourceItem = isPlainObject_(sourceArray[i]) ? sourceArray[i] : {};
+                outObjects.push(sanitizePublicProfileByTemplate_(fallbackItem, sourceItem));
+            }
+            return outObjects;
+        }
+
+        if (!isPlainObject_(templateRaw)) return templateRaw;
+        const sourceObject = isPlainObject_(candidateRaw) ? candidateRaw : {};
+        const out = {};
+        const keys = Object.keys(templateRaw);
+        for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            out[key] = sanitizePublicProfileByTemplate_(templateRaw[key], sourceObject[key]);
+        }
+        return out;
+    };
+
+    // Build resolved public profile from defaults, payload data, then runtime overrides.
+    // Runtime overrides win so static rebranding can be applied without republishing data.
+    const buildResolvedPublicProfile_ = (runtimeConfigRaw, payloadConfigRaw, landingConfigRaw, runtimeLandingRaw) => {
+        const runtimeConfig = isPlainObject_(runtimeConfigRaw) ? runtimeConfigRaw : {};
+        const payloadConfig = isPlainObject_(payloadConfigRaw) ? payloadConfigRaw : {};
+        const landingConfig = isPlainObject_(landingConfigRaw) ? landingConfigRaw : {};
+        const runtimeLanding = isPlainObject_(runtimeLandingRaw) ? runtimeLandingRaw : {};
+
+        let merged = sanitizePublicProfileByTemplate_(PUBLIC_PROFILE_DEFAULTS, {});
+        merged = sanitizePublicProfileByTemplate_(merged, payloadConfig.profile);
+        merged = sanitizePublicProfileByTemplate_(merged, landingConfig.profile);
+        merged = sanitizePublicProfileByTemplate_(merged, runtimeConfig.profile);
+        merged = sanitizePublicProfileByTemplate_(merged, runtimeLanding.profile);
+        return merged;
+    };
+
     // Get public config from data.
     const getPublicConfigFromData = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const configRoot = data.publicConfig && typeof data.publicConfig === "object" ? data.publicConfig : {};
         const landingConfig = configRoot.landing && typeof configRoot.landing === "object" ? configRoot.landing : {};
+        const runtimeOverrides = readRuntimePublicConfigOverrides_();
+        const runtimeLanding = runtimeOverrides.landing && typeof runtimeOverrides.landing === "object" ? runtimeOverrides.landing : {};
         const bannerMediaUrl = pickFirstHttpUrl(
+            runtimeLanding.bannerMediaUrl,
+            runtimeLanding.bannerUrl,
+            runtimeLanding.bannerGifUrl,
+            runtimeOverrides.bannerMediaUrl,
+            runtimeOverrides.bannerUrl,
+            runtimeOverrides.bannerGifUrl,
             landingConfig.bannerMediaUrl,
             landingConfig.bannerUrl,
             landingConfig.bannerGifUrl,
@@ -265,6 +429,12 @@
             PUBLIC_LANDING_DEFAULTS.bannerMediaUrl
         );
         const squareMediaUrl = pickFirstHttpUrl(
+            runtimeLanding.squareMediaUrl,
+            runtimeLanding.squareUrl,
+            runtimeLanding.squareGifUrl,
+            runtimeOverrides.squareMediaUrl,
+            runtimeOverrides.squareUrl,
+            runtimeOverrides.squareGifUrl,
             landingConfig.squareMediaUrl,
             landingConfig.squareUrl,
             landingConfig.squareGifUrl,
@@ -274,14 +444,18 @@
             PUBLIC_LANDING_DEFAULTS.squareMediaUrl
         );
         const discordInviteUrl = normalizeHttpUrl(
+            runtimeLanding.discordInviteUrl ||
+            runtimeOverrides.discordInviteUrl ||
             landingConfig.discordInviteUrl ||
             configRoot.discordInviteUrl ||
             PUBLIC_LANDING_DEFAULTS.discordInviteUrl
         );
+        const profile = buildResolvedPublicProfile_(runtimeOverrides, configRoot, landingConfig, runtimeLanding);
         return {
             bannerMediaUrl,
             squareMediaUrl,
             discordInviteUrl,
+            profile,
         };
     };
 
@@ -307,6 +481,118 @@
         setDiscordLinkTarget($("#openDiscordLink"), url);
         setDiscordLinkTarget($("#landingHeroDiscordCta"), url);
         setDiscordLinkTarget($("#landingBottomDiscordCta"), url);
+    };
+
+    // Set element text content when the target exists.
+    const setElementTextIfPresent_ = (idRaw, textRaw) => {
+        const id = toStr(idRaw).trim();
+        if (!id) return;
+        const node = $("#" + id);
+        if (!node) return;
+        const text = toStr(textRaw);
+        if (node.textContent !== text) node.textContent = text;
+    };
+
+    // Apply resolved public profile copy to static DOM content.
+    const applyLandingProfileCopy_ = (profileRaw) => {
+        const profile = isPlainObject_(profileRaw) ? profileRaw : PUBLIC_PROFILE_DEFAULTS;
+        const brand = isPlainObject_(profile.brand) ? profile.brand : {};
+        const nav = isPlainObject_(profile.nav) ? profile.nav : {};
+        const hero = isPlainObject_(profile.hero) ? profile.hero : {};
+        const journey = isPlainObject_(profile.journey) ? profile.journey : {};
+        const journeySteps = Array.isArray(journey.steps) ? journey.steps : [];
+        const family = isPlainObject_(profile.family) ? profile.family : {};
+        const war = isPlainObject_(profile.war) ? profile.war : {};
+        const warHighlights = Array.isArray(war.highlights) ? war.highlights : [];
+        const cwl = isPlainObject_(profile.cwl) ? profile.cwl : {};
+        const cwlHighlights = Array.isArray(cwl.highlights) ? cwl.highlights : [];
+        const network = isPlainObject_(profile.network) ? profile.network : {};
+        const networkHighlights = Array.isArray(network.highlights) ? network.highlights : [];
+        const proof = isPlainObject_(profile.proof) ? profile.proof : {};
+        const finalCta = isPlainObject_(profile.finalCta) ? profile.finalCta : {};
+        const finalSteps = Array.isArray(finalCta.steps) ? finalCta.steps : [];
+        const media = isPlainObject_(profile.media) ? profile.media : {};
+
+        setElementTextIfPresent_("publicBrandEyebrow", brand.eyebrow);
+        setElementTextIfPresent_("openLandingViewBtn", nav.homeLabel);
+        setElementTextIfPresent_("openRostersViewBtn", nav.rostersLabel);
+        setElementTextIfPresent_("openLeaderboardViewBtn", nav.leaderboardLabel);
+        setElementTextIfPresent_("openDiscordLink", nav.discordLabel);
+        setElementTextIfPresent_("openAdminLink", nav.adminLabel);
+
+        setElementTextIfPresent_("landingHeroEyebrow", hero.eyebrow);
+        setElementTextIfPresent_("landingHeroTitle", hero.title);
+        setElementTextIfPresent_("landingHeroBody", hero.body);
+        setElementTextIfPresent_("landingHeroDiscordCta", hero.primaryCtaLabel);
+        setElementTextIfPresent_("landingHeroRostersCta", hero.secondaryCtaLabel);
+
+        setElementTextIfPresent_("landingJourneyEyebrow", journey.eyebrow);
+        setElementTextIfPresent_("landingJourneyTitle", journey.title);
+        setElementTextIfPresent_("landingJourneyStep1Label", journeySteps[0] && journeySteps[0].label);
+        setElementTextIfPresent_("landingJourneyStep1Title", journeySteps[0] && journeySteps[0].title);
+        setElementTextIfPresent_("landingJourneyStep1Body", journeySteps[0] && journeySteps[0].body);
+        setElementTextIfPresent_("landingJourneyStep2Label", journeySteps[1] && journeySteps[1].label);
+        setElementTextIfPresent_("landingJourneyStep2Title", journeySteps[1] && journeySteps[1].title);
+        setElementTextIfPresent_("landingJourneyStep2Body", journeySteps[1] && journeySteps[1].body);
+        setElementTextIfPresent_("landingJourneyStep3Label", journeySteps[2] && journeySteps[2].label);
+        setElementTextIfPresent_("landingJourneyStep3Title", journeySteps[2] && journeySteps[2].title);
+        setElementTextIfPresent_("landingJourneyStep3Body", journeySteps[2] && journeySteps[2].body);
+
+        setElementTextIfPresent_("landingFamilyEyebrow", family.eyebrow);
+        setElementTextIfPresent_("landingFamilyTitle", family.title);
+
+        setElementTextIfPresent_("landingWarEyebrow", war.eyebrow);
+        setElementTextIfPresent_("landingWarTitle", war.title);
+        setElementTextIfPresent_("landingWarBody", war.body);
+        setElementTextIfPresent_("landingWarChip1Label", warHighlights[0] && warHighlights[0].label);
+        setElementTextIfPresent_("landingWarChip1Value", warHighlights[0] && warHighlights[0].value);
+        setElementTextIfPresent_("landingWarChip2Label", warHighlights[1] && warHighlights[1].label);
+        setElementTextIfPresent_("landingWarChip2Value", warHighlights[1] && warHighlights[1].value);
+
+        setElementTextIfPresent_("landingCwlEyebrow", cwl.eyebrow);
+        setElementTextIfPresent_("landingCwlTitle", cwl.title);
+        setElementTextIfPresent_("landingCwlBody", cwl.body);
+        setElementTextIfPresent_("landingCwlChip1Label", cwlHighlights[0] && cwlHighlights[0].label);
+        setElementTextIfPresent_("landingCwlChip1Value", cwlHighlights[0] && cwlHighlights[0].value);
+        setElementTextIfPresent_("landingCwlChip2Label", cwlHighlights[1] && cwlHighlights[1].label);
+        setElementTextIfPresent_("landingCwlChip2Value", cwlHighlights[1] && cwlHighlights[1].value);
+        setElementTextIfPresent_("landingCwlChip3Label", cwlHighlights[2] && cwlHighlights[2].label);
+        setElementTextIfPresent_("landingCwlChip3Value", cwlHighlights[2] && cwlHighlights[2].value);
+
+        setElementTextIfPresent_("landingNetworkEyebrow", network.eyebrow);
+        setElementTextIfPresent_("landingNetworkTitle", network.title);
+        setElementTextIfPresent_("landingNetworkBody", network.body);
+        setElementTextIfPresent_("landingNetworkChip1Label", networkHighlights[0] && networkHighlights[0].label);
+        setElementTextIfPresent_("landingNetworkChip1Value", networkHighlights[0] && networkHighlights[0].value);
+        setElementTextIfPresent_("landingNetworkChip2Label", networkHighlights[1] && networkHighlights[1].label);
+        setElementTextIfPresent_("landingNetworkChip2Value", networkHighlights[1] && networkHighlights[1].value);
+        setElementTextIfPresent_("landingNetworkChip3Label", networkHighlights[2] && networkHighlights[2].label);
+        setElementTextIfPresent_("landingNetworkChip3Value", networkHighlights[2] && networkHighlights[2].value);
+
+        setElementTextIfPresent_("landingProofEyebrow", proof.eyebrow);
+        setElementTextIfPresent_("landingProofTitle", proof.title);
+        setElementTextIfPresent_("landingProofBody", proof.body);
+
+        setElementTextIfPresent_("landingFinalEyebrow", finalCta.eyebrow);
+        setElementTextIfPresent_("landingFinalTitle", finalCta.title);
+        setElementTextIfPresent_("landingFinalStep1", finalSteps[0]);
+        setElementTextIfPresent_("landingFinalStep2", finalSteps[1]);
+        setElementTextIfPresent_("landingFinalStep3", finalSteps[2]);
+        setElementTextIfPresent_("landingBottomDiscordCta", finalCta.primaryCtaLabel);
+        setElementTextIfPresent_("landingBottomLeaderboardCta", finalCta.secondaryCtaLabel);
+
+        setElementTextIfPresent_("landingBannerPlaceholderText", media.bannerPlaceholderLabel);
+        setElementTextIfPresent_("landingSquarePlaceholderText", media.squarePlaceholderLabel);
+    };
+
+    // Format family meta text by replacing known placeholders.
+    const formatFamilyMetaText_ = (templateRaw, valuesRaw) => {
+        const template = toStr(templateRaw).trim();
+        const values = valuesRaw && typeof valuesRaw === "object" ? valuesRaw : {};
+        if (!template) return "";
+        return template
+            .replace(/\{clanCount\}/g, toStr(values.clanCount))
+            .replace(/\{playerCount\}/g, toStr(values.playerCount));
     };
 
     // Create a DOM element with optional class and text content.
@@ -5277,13 +5563,15 @@
     };
 
     // Render landing clan family.
-    const renderLandingClanFamily = (dataRaw) => {
+    const renderLandingClanFamily = (dataRaw, profileRaw) => {
         const target = $("#landingClanFamilyGrid");
         const familyMeta = $("#landingFamilyMeta");
         if (!target) return;
         clearNode(target);
 
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const profile = isPlainObject_(profileRaw) ? profileRaw : PUBLIC_PROFILE_DEFAULTS;
+        const family = isPlainObject_(profile.family) ? profile.family : {};
         const rosters = getOrderedRostersFromData(data);
         if (!rosters.length) {
             const empty = el("div", "landing-family-empty", "Clan roster data will appear here once synced.");
@@ -5303,8 +5591,10 @@
             const members = countUniqueTagsAcrossActiveRosterRoles(roster);
             totalMembers += members;
             const memberValue = el("div", "landing-family-card__value", formatNumber(members));
-            const memberLabel = el("div", "landing-family-card__label", "Players in roster");
-            const trackingMode = getRosterTrackingMode(roster) === "regularWar" ? "Regular war" : "CWL";
+            const memberLabel = el("div", "landing-family-card__label", toStr(family.playersLabel).trim() || "Players in roster");
+            const trackingMode = getRosterTrackingMode(roster) === "regularWar"
+                ? (toStr(family.regularWarLabel).trim() || "Regular war")
+                : (toStr(family.cwlLabel).trim() || "CWL");
             const meta = el("div", "landing-family-card__meta", trackingMode);
 
             card.appendChild(title);
@@ -5315,7 +5605,11 @@
         }
 
         if (familyMeta) {
-            familyMeta.textContent = String(formatNumber(rosters.length)) + " clans, " + String(formatNumber(totalMembers)) + " tracked players across the family.";
+            const rendered = formatFamilyMetaText_(toStr(family.metaTemplate).trim(), {
+                clanCount: String(formatNumber(rosters.length)),
+                playerCount: String(formatNumber(totalMembers)),
+            });
+            familyMeta.textContent = rendered || (String(formatNumber(rosters.length)) + " clans, " + String(formatNumber(totalMembers)) + " tracked players across the family.");
         }
     };
 
@@ -5497,11 +5791,13 @@
     };
 
     // Apply landing media from data.
-    const applyLandingMediaFromData = (dataRaw, optionsRaw) => {
+    const applyLandingMediaFromData = (dataRaw, optionsRaw, configOverrideRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const allowMediaLoading = !!options.allowMediaLoading;
-        const config = getPublicConfigFromData(data);
+        const config = isPlainObject_(configOverrideRaw) ? configOverrideRaw : getPublicConfigFromData(data);
+        const profile = config && isPlainObject_(config.profile) ? config.profile : PUBLIC_PROFILE_DEFAULTS;
+        const mediaProfile = profile && isPlainObject_(profile.media) ? profile.media : {};
         applyDiscordLinks(config.discordInviteUrl);
         if (!allowMediaLoading) {
             setLandingMediaSlotsToPlaceholder();
@@ -5511,14 +5807,14 @@
             slotId: "landingBannerSlot",
             mediaHostId: "landingBannerMediaHost",
             mediaUrl: config.bannerMediaUrl,
-            mediaLabel: "TURTLE banner animation",
+            mediaLabel: toStr(mediaProfile.bannerLabel).trim() || "Clan banner animation",
             fallbackCandidates: LANDING_MEDIA_FALLBACK_CANDIDATES.banner,
         });
         setLandingMediaSlotSource({
             slotId: "landingSquareSlot",
             mediaHostId: "landingSquareMediaHost",
             mediaUrl: config.squareMediaUrl,
-            mediaLabel: "TURTLE icon animation",
+            mediaLabel: toStr(mediaProfile.squareLabel).trim() || "Clan icon animation",
             fallbackCandidates: LANDING_MEDIA_FALLBACK_CANDIDATES.square,
         });
     };
@@ -5548,8 +5844,10 @@
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const allowMediaLoading = options.allowMediaLoading === true || (options.allowMediaLoading == null && landingMediaCanStart);
-        applyLandingMediaFromData(data, { allowMediaLoading: allowMediaLoading });
-        renderLandingClanFamily(data);
+        const publicConfig = getPublicConfigFromData(data);
+        applyLandingProfileCopy_(publicConfig.profile);
+        applyLandingMediaFromData(data, { allowMediaLoading: allowMediaLoading }, publicConfig);
+        renderLandingClanFamily(data, publicConfig.profile);
         refreshLandingRevealTargets();
         if (getEffectivePublicView() === PUBLIC_VIEW_VALUES.landing) {
             ensureLandingEffectsActive();
@@ -5573,10 +5871,15 @@
 
     // Render landing loading state.
     const renderLandingLoadingState = () => {
+        const loadingConfig = getPublicConfigFromData({});
         renderLandingView({}, { allowMediaLoading: landingMediaCanStart });
 
         const familyMeta = $("#landingFamilyMeta");
-        if (familyMeta) familyMeta.textContent = "Syncing the latest family snapshot. Live lineup stats will appear shortly.";
+        const loadingFamily = loadingConfig && loadingConfig.profile && loadingConfig.profile.family
+            ? loadingConfig.profile.family
+            : null;
+        const loadingText = toStr(loadingFamily && loadingFamily.loadingMetaText).trim();
+        if (familyMeta) familyMeta.textContent = loadingText || "Syncing the latest family snapshot. Live lineup stats will appear shortly.";
 
         const target = $("#landingClanFamilyGrid");
         if (!target) return;
@@ -5909,6 +6212,7 @@
             if (pageTitleHeading) pageTitleHeading.textContent = pageTitleText;
         }
         const publicConfig = getPublicConfigFromData(lastRenderedData);
+        applyLandingProfileCopy_(publicConfig.profile);
         applyDiscordLinks(publicConfig.discordInviteUrl);
 
         const activeView = getEffectivePublicView();
@@ -6430,7 +6734,9 @@
     markBootTiming("shell-boot-start");
     applyLoadTimePublicViewSelection();
     updateAdminLink();
-    applyDiscordLinks(PUBLIC_LANDING_DEFAULTS.discordInviteUrl);
+    const initialPublicConfig = getPublicConfigFromData({});
+    applyLandingProfileCopy_(initialPublicConfig.profile);
+    applyDiscordLinks(initialPublicConfig.discordInviteUrl);
     bindPublicViewUi();
     bindSearchUi();
     bindProfileUi();

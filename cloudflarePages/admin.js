@@ -5,6 +5,7 @@
   const $ = (sel) => document.querySelector(sel);
   // Convert a value to a string safely.
   const toStr = (v) => (v == null ? "" : String(v));
+  const PREVIEW_NOT_READY_MESSAGE = "Preview is not loaded yet. Refresh the page and unlock again.";
 
   const state = {
     password: "",
@@ -46,6 +47,226 @@
     if (!el) return;
     el.textContent = msg || "";
     el.style.color = isError ? "#fca5a5" : "#6b7280";
+  };
+
+  // Set the website-profile status message.
+  const setPublicProfileStatus = (msg, isError) => {
+    const el = $("#publicProfileStatus");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.color = isError ? "#fca5a5" : "#6b7280";
+  };
+
+  // Return whether a preview payload is loaded.
+  const hasLoadedPreviewData_ = () => !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters));
+
+  // Set website-profile controls enabled.
+  const setPublicProfileControlsEnabled_ = (enabledRaw) => {
+    const enabled = !!enabledRaw;
+    const ids = [
+      "publicDiscordInviteUrl",
+      "publicBannerMediaUrl",
+      "publicSquareMediaUrl",
+      "publicProfileJson",
+      "applyPublicProfileBtn",
+      "clearPublicProfileBtn",
+    ];
+    for (let i = 0; i < ids.length; i++) {
+      const el = $("#" + ids[i]);
+      if (!el) continue;
+      el.disabled = !enabled;
+    }
+  };
+
+  // Normalize public config URL.
+  const normalizePublicConfigUrl_ = (valueRaw) => {
+    const value = toStr(valueRaw).trim();
+    if (!value) return "";
+    return /^https?:\/\//i.test(value) ? value : "";
+  };
+
+  // Return whether plain object.
+  const isPlainObject_ = (valueRaw) => !!(valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw));
+
+  // Get mutable public config root from loaded preview data.
+  const getLoadedPublicConfigRoot_ = () => {
+    if (!hasLoadedPreviewData_()) return null;
+    if (!isPlainObject_(state.lastRosterData.publicConfig)) {
+      state.lastRosterData.publicConfig = {};
+    }
+    return state.lastRosterData.publicConfig;
+  };
+
+  // Get mutable landing public config from loaded preview data.
+  const getLoadedLandingPublicConfig_ = () => {
+    const root = getLoadedPublicConfigRoot_();
+    if (!root) return null;
+    if (!isPlainObject_(root.landing)) {
+      root.landing = {};
+    }
+    return root.landing;
+  };
+
+  // Remove empty public config branches.
+  const cleanupLoadedPublicConfig_ = () => {
+    if (!hasLoadedPreviewData_()) return;
+    const root = state.lastRosterData.publicConfig;
+    if (!isPlainObject_(root)) {
+      delete state.lastRosterData.publicConfig;
+      return;
+    }
+
+    if (!isPlainObject_(root.profile) || !Object.keys(root.profile).length) {
+      delete root.profile;
+    }
+    if (!isPlainObject_(root.landing) || !Object.keys(root.landing).length) {
+      delete root.landing;
+    }
+    if (!Object.keys(root).length) {
+      delete state.lastRosterData.publicConfig;
+    }
+  };
+
+  // Apply a public config mutation to preview state.
+  const applyPublicConfigMutation_ = (statusMessageRaw) => {
+    renderPreviewFromState();
+    const publishBtn = $("#publishBtn");
+    if (publishBtn) publishBtn.disabled = false;
+    markReportStale("Preview changed after website profile update. Re-run compare with preview.");
+    setStatus(toStr(statusMessageRaw).trim() || "Website profile updated.");
+  };
+
+  // Sync website-profile editor fields from loaded preview state.
+  const syncPublicConfigEditorFromState_ = (optionsRaw) => {
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const preserveStatus = options.preserveStatus === true;
+    const hasPreview = hasLoadedPreviewData_();
+    setPublicProfileControlsEnabled_(hasPreview);
+
+    const discordInput = $("#publicDiscordInviteUrl");
+    const bannerInput = $("#publicBannerMediaUrl");
+    const squareInput = $("#publicSquareMediaUrl");
+    const profileJsonInput = $("#publicProfileJson");
+
+    if (!hasPreview) {
+      if (discordInput) discordInput.value = "";
+      if (bannerInput) bannerInput.value = "";
+      if (squareInput) squareInput.value = "";
+      if (profileJsonInput) profileJsonInput.value = "";
+      if (!preserveStatus) setPublicProfileStatus("");
+      return;
+    }
+
+    const root = isPlainObject_(state.lastRosterData.publicConfig) ? state.lastRosterData.publicConfig : {};
+    const landing = isPlainObject_(root.landing) ? root.landing : {};
+    const discordValue = toStr(landing.discordInviteUrl || root.discordInviteUrl).trim();
+    const bannerValue = toStr(landing.bannerMediaUrl || landing.bannerUrl || landing.bannerGifUrl || root.bannerMediaUrl || root.bannerUrl || root.bannerGifUrl).trim();
+    const squareValue = toStr(landing.squareMediaUrl || landing.squareUrl || landing.squareGifUrl || root.squareMediaUrl || root.squareUrl || root.squareGifUrl).trim();
+    const profileValue = isPlainObject_(root.profile) ? root.profile : (isPlainObject_(landing.profile) ? landing.profile : null);
+
+    if (discordInput) discordInput.value = discordValue;
+    if (bannerInput) bannerInput.value = bannerValue;
+    if (squareInput) squareInput.value = squareValue;
+    if (profileJsonInput) profileJsonInput.value = profileValue ? jsonPretty(profileValue) : "";
+    if (!preserveStatus) setPublicProfileStatus("");
+  };
+
+  // Commit one public URL field from editor to preview payload.
+  const commitPublicUrlFieldFromEditor_ = (fieldKeyRaw, inputRaw, labelRaw) => {
+    const fieldKey = toStr(fieldKeyRaw).trim();
+    const label = toStr(labelRaw).trim() || fieldKey;
+    if (!fieldKey) return;
+    if (!hasLoadedPreviewData_()) return;
+
+    const input = inputRaw && typeof inputRaw === "object" ? inputRaw : null;
+    const rawValue = toStr(input && input.value).trim();
+    const normalized = normalizePublicConfigUrl_(rawValue);
+    if (rawValue && !normalized) {
+      throw new Error(label + " must start with http:// or https://");
+    }
+
+    const root = getLoadedPublicConfigRoot_();
+    const landing = getLoadedLandingPublicConfig_();
+    if (!root || !landing) return;
+
+    const beforeValue = toStr(landing[fieldKey] || root[fieldKey]).trim();
+    if (normalized) {
+      landing[fieldKey] = normalized;
+      if (Object.prototype.hasOwnProperty.call(root, fieldKey)) delete root[fieldKey];
+    } else {
+      if (Object.prototype.hasOwnProperty.call(landing, fieldKey)) delete landing[fieldKey];
+      if (Object.prototype.hasOwnProperty.call(root, fieldKey)) delete root[fieldKey];
+    }
+    cleanupLoadedPublicConfig_();
+
+    if (beforeValue === normalized) {
+      syncPublicConfigEditorFromState_({ preserveStatus: true });
+      return;
+    }
+    applyPublicConfigMutation_(label + " updated.");
+    setPublicProfileStatus(label + " updated.", false);
+    syncPublicConfigEditorFromState_();
+  };
+
+  // Apply website-profile JSON from editor into preview payload.
+  const applyPublicProfileJsonFromEditor_ = () => {
+    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+
+    const profileJsonInput = $("#publicProfileJson");
+    const rawText = toStr(profileJsonInput && profileJsonInput.value).trim();
+
+    const root = getLoadedPublicConfigRoot_();
+    if (!root) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    if (!rawText) {
+      const hadProfile = (isPlainObject_(root.profile) && Object.keys(root.profile).length > 0) ||
+        (isPlainObject_(root.landing) && isPlainObject_(root.landing.profile) && Object.keys(root.landing.profile).length > 0);
+      if (Object.prototype.hasOwnProperty.call(root, "profile")) delete root.profile;
+      if (isPlainObject_(root.landing) && Object.prototype.hasOwnProperty.call(root.landing, "profile")) delete root.landing.profile;
+      cleanupLoadedPublicConfig_();
+      if (hadProfile) {
+        applyPublicConfigMutation_("Website profile JSON cleared.");
+      } else {
+        renderPreviewFromState();
+      }
+      setPublicProfileStatus("Website profile cleared. Default copy is active.", false);
+      syncPublicConfigEditorFromState_();
+      return;
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (err) {
+      throw new Error("Website profile JSON is invalid: " + toErrorMessage(err));
+    }
+    if (!isPlainObject_(parsed)) {
+      throw new Error("Website profile JSON must be a JSON object.");
+    }
+
+    root.profile = parsed;
+    cleanupLoadedPublicConfig_();
+    applyPublicConfigMutation_("Website profile JSON updated.");
+    setPublicProfileStatus("Website profile JSON applied.", false);
+    syncPublicConfigEditorFromState_({ preserveStatus: true });
+  };
+
+  // Clear website-profile JSON from preview payload.
+  const clearPublicProfileFromEditor_ = () => {
+    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    const root = getLoadedPublicConfigRoot_();
+    if (!root) return;
+    const hadProfile = (isPlainObject_(root.profile) && Object.keys(root.profile).length > 0) ||
+      (isPlainObject_(root.landing) && isPlainObject_(root.landing.profile) && Object.keys(root.landing.profile).length > 0);
+    if (Object.prototype.hasOwnProperty.call(root, "profile")) delete root.profile;
+    if (isPlainObject_(root.landing) && Object.prototype.hasOwnProperty.call(root.landing, "profile")) delete root.landing.profile;
+    cleanupLoadedPublicConfig_();
+    if (hadProfile) {
+      applyPublicConfigMutation_("Website profile JSON cleared.");
+    } else {
+      renderPreviewFromState();
+    }
+    setPublicProfileStatus("Website profile cleared. Default copy is active.", false);
+    syncPublicConfigEditorFromState_({ preserveStatus: true });
   };
 
   // Set the roster status message.
@@ -115,9 +336,40 @@
     return $("#clanMappingList") || $("#clanMappingTable tbody") || $("#clanMappingTable");
   };
 
-  const ADMIN_TAB_KEYS = ["rosters", "import", "preview"];
+  const ADMIN_TAB_KEYS = ["rosters", "import", "preview", "website"];
+  // Normalize admin tab key.
+  const normalizeAdminTabKey_ = (tabKeyRaw) => toStr(tabKeyRaw).trim().toLowerCase();
   // Get admin tab buttons.
   const getAdminTabButtons = () => Array.from(document.querySelectorAll('[data-admin-tab]'));
+
+  // Return available tab keys from DOM, preferring known key order.
+  const getAvailableAdminTabKeys_ = () => {
+    const buttons = getAdminTabButtons();
+    const keySet = {};
+    const buttonKeys = [];
+    for (let i = 0; i < buttons.length; i++) {
+      const key = normalizeAdminTabKey_(buttons[i] && buttons[i].dataset && buttons[i].dataset.adminTab);
+      if (!key || keySet[key]) continue;
+      keySet[key] = true;
+      buttonKeys.push(key);
+    }
+
+    const ordered = [];
+    const orderedSet = {};
+    for (let i = 0; i < ADMIN_TAB_KEYS.length; i++) {
+      const key = normalizeAdminTabKey_(ADMIN_TAB_KEYS[i]);
+      if (!key || !keySet[key] || orderedSet[key]) continue;
+      orderedSet[key] = true;
+      ordered.push(key);
+    }
+    for (let i = 0; i < buttonKeys.length; i++) {
+      const key = buttonKeys[i];
+      if (!key || orderedSet[key]) continue;
+      orderedSet[key] = true;
+      ordered.push(key);
+    }
+    return ordered.length ? ordered : ADMIN_TAB_KEYS.slice();
+  };
 
   // Get admin tab panel by key.
   const getAdminTabPanelByKey = (tabKeyRaw) => {
@@ -129,13 +381,15 @@
   // Set active admin tab.
   const setActiveAdminTab = (tabKeyRaw, optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-    const tabKey = toStr(tabKeyRaw).trim().toLowerCase();
-    const nextTab = ADMIN_TAB_KEYS.includes(tabKey) ? tabKey : "rosters";
+    const tabKey = normalizeAdminTabKey_(tabKeyRaw);
+    const availableTabs = getAvailableAdminTabKeys_();
+    const fallbackTab = availableTabs.length ? availableTabs[0] : "rosters";
+    const nextTab = availableTabs.includes(tabKey) ? tabKey : fallbackTab;
     state.activeAdminTab = nextTab;
 
     const buttons = getAdminTabButtons();
     for (const btn of buttons) {
-      const key = toStr(btn && btn.dataset && btn.dataset.adminTab).trim().toLowerCase();
+      const key = normalizeAdminTabKey_(btn && btn.dataset && btn.dataset.adminTab);
       const active = key === nextTab;
       btn.classList.toggle("is-active", active);
       btn.setAttribute("aria-selected", active ? "true" : "false");
@@ -143,7 +397,14 @@
       if (active && options.focusButton !== false) btn.focus();
     }
 
-    for (const key of ADMIN_TAB_KEYS) {
+    const panelKeys = ADMIN_TAB_KEYS.slice();
+    for (let i = 0; i < availableTabs.length; i++) {
+      const key = normalizeAdminTabKey_(availableTabs[i]);
+      if (!key || panelKeys.includes(key)) continue;
+      panelKeys.push(key);
+    }
+
+    for (const key of panelKeys) {
       const panel = getAdminTabPanelByKey(key);
       if (!panel) continue;
       const active = key === nextTab;
@@ -847,7 +1108,7 @@
 
     if (!hasLoadedPreview) {
       setAddPreviewRosterPanelOpen(false);
-      if (hint) hint.textContent = "Load active config first.";
+      if (hint) hint.textContent = "Preview loads automatically after unlock.";
       return;
     }
 
@@ -875,7 +1136,7 @@
       addBtn.disabled = true;
       if (toggleBtn) toggleBtn.disabled = true;
       setAddPlayerPanelOpen(false);
-      if (hint) hint.textContent = "Load active config first.";
+      if (hint) hint.textContent = "Preview loads automatically after unlock.";
       return;
     }
 
@@ -3171,7 +3432,7 @@
       throw new Error("Wait for refresh all to finish before running compare.");
     }
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-      throw new Error("Load active config first.");
+      throw new Error(PREVIEW_NOT_READY_MESSAGE);
     }
     if (!state.importSession || !Array.isArray(state.importSession.accounts)) {
       throw new Error("Import an XLSX file first.");
@@ -3231,7 +3492,7 @@
       throw new Error("Wait for refresh all to finish before applying import updates.");
     }
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-      throw new Error("Load active config first.");
+      throw new Error(PREVIEW_NOT_READY_MESSAGE);
     }
     if (!state.importSession || !state.importSession.comparison || !state.importSession.comparison.summary) {
       throw new Error("Run compare first.");
@@ -3478,6 +3739,7 @@
       enforceLockedInLimit: false,
     });
     clearSuggestionMarks_();
+    syncPublicConfigEditorFromState_({ preserveStatus: true });
     renderPreviewFromState();
     markReportStale();
     const publishBtn = $("#publishBtn");
@@ -3496,7 +3758,7 @@
     if (!rosters.length) {
       const empty = document.createElement("div");
       empty.className = "roster-card-empty";
-      empty.textContent = "Load active config first.";
+      empty.textContent = "Preview loads automatically after unlock.";
       mount.appendChild(empty);
       return;
     }
@@ -3903,7 +4165,7 @@
       throw new Error("Refresh all is already running.");
     }
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-      throw new Error("Load active config first.");
+      throw new Error(PREVIEW_NOT_READY_MESSAGE);
     }
     if (!state.password) {
       throw new Error("Unlock admin first.");
@@ -4015,6 +4277,7 @@
       reindexAllRosters();
       setAddPreviewRosterStatus("", false);
       setAddPlayerStatus("", false);
+      syncPublicConfigEditorFromState_({ preserveStatus: true });
 
       if (state.importSession) {
         alignImportMappingWithPreview();
@@ -4055,6 +4318,7 @@
     setAuthCardUnlocked(false);
     renderPreviewFromState();
     renderImportUi();
+    syncPublicConfigEditorFromState_();
 
     const toggleAddPlayerPanelBtn = $("#toggleAddPlayerPanelBtn");
     const toggleAddPreviewRosterPanelBtn = $("#toggleAddPreviewRosterPanelBtn");
@@ -4125,7 +4389,7 @@
           setLoginStatus("Unlocked.");
         } catch (loadErr) {
           setLoginStatus("Unlocked (auto-load failed).");
-          setStatus("Auto-load failed. Use Load active config.");
+          setStatus("Auto-load failed. Refresh and unlock again.");
         }
         unlockSucceeded = true;
       } catch (err) {
@@ -4211,6 +4475,71 @@
       pageTitleInput.addEventListener("blur", commitPageTitle);
     }
 
+    const publicDiscordInviteInput = $("#publicDiscordInviteUrl");
+    const publicBannerMediaUrlInput = $("#publicBannerMediaUrl");
+    const publicSquareMediaUrlInput = $("#publicSquareMediaUrl");
+    const publicProfileJsonInput = $("#publicProfileJson");
+    const applyPublicProfileBtn = $("#applyPublicProfileBtn");
+    const clearPublicProfileBtn = $("#clearPublicProfileBtn");
+
+    // Bind one URL input to public-config persistence.
+    const bindPublicUrlInput_ = (inputEl, fieldKey, label) => {
+      if (!inputEl) return;
+      // Handle commit URL from editor input.
+      const commit = () => {
+        try {
+          commitPublicUrlFieldFromEditor_(fieldKey, inputEl, label);
+        } catch (err) {
+          syncPublicConfigEditorFromState_({ preserveStatus: true });
+          setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+          alert("Public setting update failed: " + toErrorMessage(err));
+        }
+      };
+      inputEl.addEventListener("change", commit);
+      inputEl.addEventListener("blur", commit);
+    };
+
+    bindPublicUrlInput_(publicDiscordInviteInput, "discordInviteUrl", "Discord invite URL");
+    bindPublicUrlInput_(publicBannerMediaUrlInput, "bannerMediaUrl", "Banner media URL");
+    bindPublicUrlInput_(publicSquareMediaUrlInput, "squareMediaUrl", "Square media URL");
+
+    if (publicProfileJsonInput) {
+      publicProfileJsonInput.addEventListener("keydown", (e) => {
+        if (!e || !(e.ctrlKey || e.metaKey) || toStr(e.key).toLowerCase() !== "enter") return;
+        e.preventDefault();
+        if (applyPublicProfileBtn && applyPublicProfileBtn.disabled) return;
+        try {
+          applyPublicProfileJsonFromEditor_();
+        } catch (err) {
+          setPublicProfileStatus("Apply failed: " + toErrorMessage(err), true);
+          alert("Website profile apply failed: " + toErrorMessage(err));
+        }
+      });
+    }
+
+    if (applyPublicProfileBtn) {
+      applyPublicProfileBtn.onclick = () => {
+        try {
+          applyPublicProfileJsonFromEditor_();
+        } catch (err) {
+          setPublicProfileStatus("Apply failed: " + toErrorMessage(err), true);
+          alert("Website profile apply failed: " + toErrorMessage(err));
+        }
+      };
+    }
+
+    if (clearPublicProfileBtn) {
+      clearPublicProfileBtn.onclick = () => {
+        try {
+          clearPublicProfileFromEditor_();
+        } catch (err) {
+          setPublicProfileStatus("Clear failed: " + toErrorMessage(err), true);
+          alert("Website profile clear failed: " + toErrorMessage(err));
+        }
+      };
+    }
+    syncPublicConfigEditorFromState_();
+
     const excludeWarOutInput = $("#excludeWarOut");
     const requireDiscordInput = $("#requireDiscord");
     // Handle import filter change.
@@ -4285,17 +4614,6 @@
       }
     };
 
-    $("#loadActiveBtn").onclick = async () => {
-      try {
-        await loadActiveConfigIntoPreview({
-          silentError: false,
-          statusOnSuccess: "Active config loaded.",
-        });
-      } catch (_err) {
-        // Alert is shown inside loadActiveConfigIntoPreview when silentError is false.
-      }
-    };
-
     const xlsxInput = $("#xlsxInput");
     if (xlsxInput) {
       xlsxInput.onchange = async (e) => {
@@ -4358,7 +4676,7 @@
 
     $("#publishBtn").onclick = async () => {
       try {
-        if (!state.lastRosterData) throw new Error("Load active config first.");
+        if (!state.lastRosterData) throw new Error(PREVIEW_NOT_READY_MESSAGE);
         const now = Date.now();
         if (now < state.publishCooldownUntil) throw new Error("Publish cooldown: please wait a few seconds.");
 

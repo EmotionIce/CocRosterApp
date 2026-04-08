@@ -13,6 +13,61 @@ function sanitizePublicConfigUrl_(valueRaw) {
 	return /^https?:\/\//i.test(value) ? value : "";
 }
 
+// Return whether plain object.
+function isPlainObject_(valueRaw) {
+	return !!(valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw));
+}
+
+// Return whether safe profile object key.
+function isSafePublicProfileKey_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw).trim();
+	if (!key) return false;
+	// Block prototype-mutating keys before copying dynamic objects.
+	const normalized = key.toLowerCase();
+	if (normalized === "__proto__" || normalized === "prototype" || normalized === "constructor") return false;
+	return /^[A-Za-z0-9 _.#&'()-]{1,80}$/.test(key);
+}
+
+// Sanitize public profile node.
+function sanitizePublicProfileNode_(valueRaw, depthRaw) {
+	const depth = Math.max(0, toNonNegativeInt_(depthRaw));
+	if (depth > 5) return null;
+
+	if (valueRaw == null) return null;
+
+	if (typeof valueRaw === "string") {
+		const text = String(valueRaw).trim();
+		return text ? text : null;
+	}
+
+	if (Array.isArray(valueRaw)) {
+		const outArray = [];
+		const maxItems = Math.min(30, valueRaw.length);
+		for (let i = 0; i < maxItems; i++) {
+			const next = sanitizePublicProfileNode_(valueRaw[i], depth + 1);
+			if (next == null) continue;
+			outArray.push(next);
+		}
+		return outArray.length ? outArray : null;
+	}
+
+	if (!isPlainObject_(valueRaw)) return null;
+
+	const out = {};
+	const keys = Object.keys(valueRaw);
+	let copied = 0;
+	for (let i = 0; i < keys.length; i++) {
+		if (copied >= 80) break;
+		const key = String(keys[i] == null ? "" : keys[i]).trim();
+		if (!isSafePublicProfileKey_(key)) continue;
+		const next = sanitizePublicProfileNode_(valueRaw[key], depth + 1);
+		if (next == null) continue;
+		out[key] = next;
+		copied++;
+	}
+	return Object.keys(out).length ? out : null;
+}
+
 // Copy sanitized public config URLs.
 function copySanitizedPublicConfigUrls_(target, source, keys) {
 	if (!target || typeof target !== "object" || !source || typeof source !== "object" || !Array.isArray(keys)) return;
@@ -33,11 +88,17 @@ function sanitizePublicConfig_(raw) {
 	const out = {};
 	copySanitizedPublicConfigUrls_(out, source, mediaKeys);
 
+	const profile = sanitizePublicProfileNode_(source.profile, 0);
+	if (profile) out.profile = profile;
+
 	const landingSource = source.landing && typeof source.landing === "object" && !Array.isArray(source.landing) ? source.landing : null;
 	if (landingSource) {
 		const landingOut = {};
 		copySanitizedPublicConfigUrls_(landingOut, landingSource, mediaKeys);
+		const landingProfile = sanitizePublicProfileNode_(landingSource.profile, 0);
+		if (landingProfile) landingOut.profile = landingProfile;
 		if (Object.keys(landingOut).length) out.landing = landingOut;
+		if (!out.profile && landingProfile) out.profile = landingProfile;
 	}
 
 	return Object.keys(out).length ? out : null;

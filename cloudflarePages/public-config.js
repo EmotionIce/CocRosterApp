@@ -6,6 +6,15 @@
  * - ROSTER_BASE_URL: Apps Script web app URL used as backend source.
  * - ROSTER_ADMIN_URL (optional): absolute or root-relative admin page URL.
  * - ROSTER_ADMIN_API_BASE (optional): admin API proxy base (default /api/admin).
+ * - ROSTER_PUBLIC_CONFIG_OVERRIDES (optional): static public/branding overrides.
+ *
+ * `ROSTER_PUBLIC_CONFIG_OVERRIDES` supports these optional keys:
+ * - bannerMediaUrl
+ * - squareMediaUrl
+ * - discordInviteUrl
+ * - landing (object): same keys as above, plus profile
+ * - profile (object): landing/nav copy plus optional importMappingSeeds hints
+ * Runtime overrides take precedence over published payload values.
  * At minimum set ROSTER_FIREBASE_DB_URL for direct Firebase hydration.
  */
 (function initRosterPublicConfig(globalScope) {
@@ -43,6 +52,12 @@
     var configuredRosterBaseUrl = normalizeHttpBaseUrl(globalScope.ROSTER_BASE_URL);
     var defaultRosterBaseUrl = normalizeHttpBaseUrl(DEFAULT_APPS_SCRIPT_BASE_URL);
     globalScope.ROSTER_BASE_URL = configuredRosterBaseUrl || defaultRosterBaseUrl;
+
+    var configuredPublicOverrides = globalScope.ROSTER_PUBLIC_CONFIG_OVERRIDES;
+    if (!configuredPublicOverrides || typeof configuredPublicOverrides !== "object" || Array.isArray(configuredPublicOverrides)) {
+        configuredPublicOverrides = {};
+    }
+    globalScope.ROSTER_PUBLIC_CONFIG_OVERRIDES = configuredPublicOverrides;
 
     if (typeof globalScope.__ROSTER_DATA__ === "undefined") {
         globalScope.__ROSTER_DATA__ = null;

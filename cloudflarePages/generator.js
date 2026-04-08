@@ -293,6 +293,56 @@
     return { byId, list };
   };
 
+  // Build import mapping seed lookup from public config profile extensions.
+  // Supports both array and object forms:
+  // - profile.importMappingSeeds: [{ clan: "Clan Name", rosterId: "roster-id" }]
+  // - profile.importMappingSeeds: { "CLAN_NAME": "roster-id" }
+  const buildImportMappingSeedLookup = (rosterDataRaw, rosterMetaRaw) => {
+    const rosterData = isObj(rosterDataRaw) ? rosterDataRaw : {};
+    const rosterMeta = isObj(rosterMetaRaw) ? rosterMetaRaw : buildRosterMetadata(rosterData);
+    const publicConfig = isObj(rosterData.publicConfig) ? rosterData.publicConfig : {};
+    const landingConfig = isObj(publicConfig.landing) ? publicConfig.landing : {};
+    const rootProfile = isObj(publicConfig.profile) ? publicConfig.profile : {};
+    const landingProfile = isObj(landingConfig.profile) ? landingConfig.profile : {};
+
+    const byClanKey = {};
+    const byLookupKey = {};
+
+    // Add one seed pair if the target roster exists.
+    const addSeed = (clanRaw, rosterIdRaw) => {
+      const clan = normalizeWhitespace(clanRaw);
+      const rosterId = normalizeWhitespace(rosterIdRaw);
+      if (!clan || !rosterId || !rosterMeta.byId[rosterId]) return;
+      const clanKey = normalizeClanKey(clan);
+      const lookupKey = normalizeLookupKey(clan);
+      if (clanKey) byClanKey[clanKey] = rosterId;
+      if (lookupKey) byLookupKey[lookupKey] = rosterId;
+    };
+
+    // Read either array or object form of seeds.
+    const consumeSeeds = (seedsRaw) => {
+      if (Array.isArray(seedsRaw)) {
+        for (const entryRaw of seedsRaw) {
+          const entry = isObj(entryRaw) ? entryRaw : {};
+          addSeed(
+            entry.clan || entry.label || entry.key || entry.name,
+            entry.rosterId || entry.targetRosterId || entry.id
+          );
+        }
+        return;
+      }
+      if (!isObj(seedsRaw)) return;
+      const keys = Object.keys(seedsRaw);
+      for (const key of keys) {
+        addSeed(key, seedsRaw[key]);
+      }
+    };
+
+    consumeSeeds(rootProfile.importMappingSeeds);
+    consumeSeeds(landingProfile.importMappingSeeds);
+    return { byClanKey, byLookupKey };
+  };
+
   // Handle suggest clan mappings.
   const suggestClanMappings = (args) => {
     const input = isObj(args) ? args : {};
@@ -315,6 +365,11 @@
       "TURTLE CWL": "turtle-cwl-crystal-2-30v30",
       PROJECTSE7VEN: "p7-comp-clan",
     };
+    const seededByLookup = {};
+    for (const key of Object.keys(seeded)) {
+      seededByLookup[normalizeLookupKey(key)] = seeded[key];
+    }
+    const customSeedLookup = buildImportMappingSeedLookup(input.rosterData, rosterMeta);
 
     const mapping = {};
 
@@ -322,14 +377,20 @@
       const clanEntry = clanEntryRaw && typeof clanEntryRaw === "object" ? clanEntryRaw : {};
       const clanKey = normalizeClanKey(clanEntry.key || clanEntry.label);
       if (!clanKey) continue;
+      const lookupKey = normalizeLookupKey(clanEntry.label || clanKey);
 
-      const seededRosterId = seeded[clanKey];
+      const customRosterId = customSeedLookup.byClanKey[clanKey] || customSeedLookup.byLookupKey[lookupKey];
+      if (customRosterId && rosterMeta.byId[customRosterId]) {
+        mapping[clanKey] = customRosterId;
+        continue;
+      }
+
+      const seededRosterId = seeded[clanKey] || seededByLookup[lookupKey];
       if (seededRosterId && rosterMeta.byId[seededRosterId]) {
         mapping[clanKey] = seededRosterId;
         continue;
       }
 
-      const lookupKey = normalizeLookupKey(clanEntry.label || clanKey);
       const matches = rosterCandidates.filter((candidate) => {
         if (candidate.keys[clanKey]) return true;
         if (lookupKey && candidate.keys[lookupKey]) return true;

@@ -91,45 +91,6 @@
       box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.16);
     }
 
-    #loadActiveBtn {
-      gap: 10px;
-      background: linear-gradient(135deg, rgba(245, 214, 125, 0.22), rgba(56, 189, 248, 0.18));
-      border-color: rgba(245, 214, 125, 0.45);
-      color: #f8fafc;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 10px 24px rgba(15, 23, 42, 0.36);
-      position: relative;
-      transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
-      white-space: nowrap;
-    }
-
-    #loadActiveBtn::before {
-      content: "";
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: #f5d67d;
-      box-shadow: 0 0 0 4px rgba(245, 214, 125, 0.18);
-      flex: 0 0 auto;
-    }
-
-    #loadActiveBtn:hover:not(:disabled) {
-      background: linear-gradient(135deg, rgba(245, 214, 125, 0.28), rgba(56, 189, 248, 0.24));
-      border-color: rgba(252, 235, 178, 0.74);
-      transform: translateY(-1px);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13), 0 14px 28px rgba(15, 23, 42, 0.4);
-    }
-
-    #loadActiveBtn:focus-visible {
-      outline: none;
-      border-color: rgba(252, 235, 178, 0.9);
-      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 12px 26px rgba(15, 23, 42, 0.34);
-    }
-
-    #loadActiveBtn:disabled {
-      box-shadow: none;
-      transform: none;
-    }
-
     .btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
@@ -809,6 +770,44 @@
       max-width: none;
     }
 
+    .admin-public-config-surface {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid #1f2937;
+      padding-top: 10px;
+      min-width: 0;
+    }
+
+    .admin-public-config-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .admin-public-config-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .admin-public-config-actions .btn {
+      min-height: 34px;
+      padding: 7px 11px;
+      border-radius: 10px;
+      font-size: 12px;
+      line-height: 1.1;
+    }
+
+    #publicProfileJson {
+      min-height: 220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
     .admin-global-status {
       min-height: 16px;
       color: #cbd5e1;
@@ -1431,6 +1430,10 @@
         grid-template-columns: 1fr;
       }
 
+      .admin-public-config-grid {
+        grid-template-columns: 1fr;
+      }
+
       .roster-admin-card__config {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
@@ -1524,7 +1527,6 @@
       <section class="card admin-command-bar">
         <div class="admin-command-grid">
           <div class="admin-command-actions admin-command-actions--compact">
-            <button id="loadActiveBtn" class="btn secondary admin-command-btn" type="button">Load active config</button>
             <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>Refresh all</button>
             <button id="publishBtn" class="btn admin-command-btn" type="button" disabled>Publish</button>
           </div>
@@ -1537,11 +1539,6 @@
 
       <section class="card admin-secondary-controls">
         <div class="admin-secondary-grid">
-          <label class="admin-field" for="pageTitle">
-            <span class="admin-field-label">Page title</span>
-            <input id="pageTitle" class="admin-input" value="Roster Overview" />
-          </label>
-
           <div class="auto-refresh-panel">
             <label class="auto-refresh-toggle-row" for="autoRefreshToggle">
               <input id="autoRefreshToggle" type="checkbox" disabled />
@@ -1553,7 +1550,7 @@
         </div>
 
         <div class="small muted">
-          Load active config into preview, run roster or import operations, then publish.
+          Active roster preview loads automatically after unlock.
         </div>
       </section>
 
@@ -1569,6 +1566,10 @@
         <button id="adminTabBtnPreview" class="admin-tab" type="button" role="tab" aria-selected="false"
           aria-controls="adminTabPreview" data-admin-tab="preview" tabindex="-1">
           Preview
+        </button>
+        <button id="adminTabBtnWebsite" class="admin-tab" type="button" role="tab" aria-selected="false"
+          aria-controls="adminTabWebsite" data-admin-tab="website" tabindex="-1">
+          Website
         </button>
       </nav>
 
@@ -1678,6 +1679,54 @@
         <div id="rosters"></div>
         <div id="load-error" class="card hidden"></div>
       </section>
+
+      <section id="adminTabWebsite" class="admin-tab-panel card hidden" role="tabpanel"
+        aria-labelledby="adminTabBtnWebsite">
+        <div class="admin-section-head">
+          <h2>Website</h2>
+          <p class="small muted">Edit public page copy, media links, and family profile mapping settings.</p>
+        </div>
+
+        <div class="admin-secondary-grid">
+          <label class="admin-field" for="pageTitle">
+            <span class="admin-field-label">Page title</span>
+            <input id="pageTitle" class="admin-input" value="Roster Overview" />
+          </label>
+        </div>
+
+        <div class="admin-public-config-surface">
+          <div class="admin-public-config-grid">
+            <label class="admin-field" for="publicDiscordInviteUrl">
+              <span class="admin-field-label">Discord invite URL</span>
+              <input id="publicDiscordInviteUrl" class="admin-input" placeholder="https://discord.gg/your-invite" />
+            </label>
+
+            <label class="admin-field" for="publicBannerMediaUrl">
+              <span class="admin-field-label">Banner media URL</span>
+              <input id="publicBannerMediaUrl" class="admin-input" placeholder="https://..." />
+            </label>
+
+            <label class="admin-field" for="publicSquareMediaUrl">
+              <span class="admin-field-label">Square media URL</span>
+              <input id="publicSquareMediaUrl" class="admin-input" placeholder="https://..." />
+            </label>
+          </div>
+
+          <label class="admin-field" for="publicProfileJson">
+            <span class="admin-field-label">Website profile JSON (optional)</span>
+            <textarea id="publicProfileJson" class="admin-textarea" spellcheck="false" placeholder="{\n  &quot;brand&quot;: { &quot;eyebrow&quot;: &quot;Your clan family&quot; },\n  &quot;hero&quot;: { &quot;title&quot;: &quot;Your headline&quot; },\n  &quot;importMappingSeeds&quot;: [\n    { &quot;clan&quot;: &quot;YOUR CLAN NAME&quot;, &quot;rosterId&quot;: &quot;your-roster-id&quot; }\n  ]\n}"></textarea>
+            <span class="small muted">Set only the fields you want to override. Empty means defaults.</span>
+          </label>
+
+          <div class="admin-public-config-actions">
+            <button id="applyPublicProfileBtn" class="btn secondary admin-command-btn" type="button" disabled>Apply profile JSON</button>
+            <button id="clearPublicProfileBtn" class="btn secondary admin-command-btn" type="button" disabled>Clear profile</button>
+            <span id="publicProfileStatus" class="small muted"></span>
+          </div>
+        </div>
+
+        <div class="small muted">Changes apply to preview immediately. Publish to push live.</div>
+      </section>
     </div>
   </div>
 
@@ -1691,7 +1740,7 @@
         <button type="button" class="btn secondary admin-overlay-close" data-overlay-close="addPreviewRosterPanel">Close</button>
       </div>
       <div class="admin-overlay-body">
-        <span id="addPreviewRosterHint" class="small muted">Load active config first.</span>
+        <span id="addPreviewRosterHint" class="small muted">Preview loads automatically after unlock.</span>
 
         <label class="admin-field" for="addPreviewRosterId">
           <span class="admin-field-label">Roster ID</span>
@@ -1733,7 +1782,7 @@
         <button type="button" class="btn secondary admin-overlay-close" data-overlay-close="addPlayerPanel">Close</button>
       </div>
       <div class="admin-overlay-body">
-        <span id="addPlayerHint" class="small muted">Load active config first.</span>
+        <span id="addPlayerHint" class="small muted">Preview loads automatically after unlock.</span>
 
         <label class="admin-field" for="addPlayerRoster">
           <span class="admin-field-label">Roster</span>
@@ -1789,7 +1838,7 @@
     </div>
   </div>
 
-    <script src="./public-config.js?v=20260326a"></script>
+    <script src="./public-config.js?v=20260408a"></script>
   <script>
     window.ROSTER_CLIENT_DISABLE_AUTOLOAD = true;
     window.ROSTER_ADMIN_MODE = true;
@@ -1801,9 +1850,9 @@
 
 <!-- Runtime config, XLSX parsing, and the shared roster/admin clients. -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="./generator.js?v=20260326a"></script>
-  <script src="./client.js?v=20260326a"></script>
-  <script src="./admin.js?v=20260326a"></script>
+  <script src="./generator.js?v=20260408a"></script>
+  <script src="./client.js?v=20260408a"></script>
+  <script src="./admin.js?v=20260408a"></script>
 </body>
 
 </html>

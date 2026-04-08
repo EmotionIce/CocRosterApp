@@ -78,6 +78,13 @@ flowchart LR
   "pageTitle": "Join the TURTLE Clan Family",
   "lastUpdatedAt": "ISO-8601",
   "publicConfig": {
+    "profile": {
+      "brand": { "eyebrow": "Your clan family" },
+      "hero": { "title": "Your landing headline" },
+      "importMappingSeeds": [
+        { "clan": "YOUR CLAN NAME", "rosterId": "main-a" }
+      ]
+    },
     "landing": {
       "bannerMediaUrl": "https://...",
       "squareMediaUrl": "https://...",
@@ -127,27 +134,44 @@ flowchart LR
 4. Ensure public runtime values are set (`ROSTER_FIREBASE_DB_URL`, `ROSTER_BASE_URL`).
 5. Verify admin bridge path (`/api/admin`) and public hydration from Firebase.
 
-## Modularization Roadmap (Next Step)
+## Modular Rebranding (Implemented Base)
 
-Current code already supports multiple rosters, but branding/content is still mostly TURTLE-specific in `cloudflarePages/index.html` and parts of `cloudflarePages/client.js`.
+The repo now supports config-driven clan-family branding/copy without changing core pipeline code:
 
-Next iteration will make this repo reusable for other clan families:
+1. `publicConfig` now accepts a `profile` object (validated + sanitized in `script/rosterSchema.gs`).
+   - Landing/nav copy overrides live under `publicConfig.profile`.
+   - Import mapping hints can live under `publicConfig.profile.importMappingSeeds`.
+2. Landing/nav copy is rendered dynamically in `cloudflarePages/client.js` with safe defaults.
+3. Existing snapshots remain compatible.
+   - If `publicConfig.profile` is missing, current TURTLE-style defaults render automatically.
+4. Public URL/media overrides support both payload and static runtime override.
+   - Payload: `publicConfig.landing.*Url`
+   - Runtime: `window.ROSTER_PUBLIC_CONFIG_OVERRIDES` in `cloudflarePages/public-config.js` (runtime wins)
+5. Admin now includes website-profile controls.
+   - URL fields: Discord invite, banner media, square media.
+   - JSON profile editor for advanced copy customization.
+6. XLSX import clan mapping can now be seeded from data (no code edits required).
+   - `publicConfig.profile.importMappingSeeds` accepts:
+     - Array form: `{ clan, rosterId }`
+     - Object form: `{ "CLAN_KEY": "rosterId" }`
 
-1. Expand `publicConfig` schema beyond URL-only values.
-   - Add validated text fields for hero copy, section text, and CTA labels.
-   - Keep backward compatibility with existing `publicConfig.landing.*Url`.
-2. Move hardcoded landing copy into config-driven rendering.
-   - Use existing `rosters` + `rosterOrder` as the dynamic base.
-   - Keep static defaults only as fallback values.
-3. Introduce a family profile template.
-   - Add a documented starter config that a new clan can duplicate and edit.
-   - Keep domain and media URLs isolated from logic.
-4. Isolate "brand layer" from "operations layer".
-   - Operations: refresh/publish/schema/metrics/bench planner remain generic.
-   - Brand layer: text/media/theme values become per-family config.
-5. Add migration + docs.
-   - Document old-to-new config mapping.
-   - Ensure existing TURTLE payloads continue to render without breaking.
+## Quick Rebranding Workflow
+
+1. Open admin (`/console`) and unlock.
+2. Load active config.
+3. Update URL fields and/or paste profile JSON in **Website profile JSON**.
+4. Optional: add `importMappingSeeds` so XLSX clan labels auto-map to your roster IDs.
+5. Verify in Preview.
+6. Publish.
+
+## Next Modular Step (Planned)
+
+This base now supports safe, data-driven rebranding and import seeding.
+Next step is to package this into a reusable "clan family starter profile" flow:
+
+1. Add one-click profile template insertion/export in admin.
+2. Add roster template packs (starter roster IDs/titles per family).
+3. Add guided migration helpers to rename roster IDs without breaking historical data.
 
 ## Development Notes
 
