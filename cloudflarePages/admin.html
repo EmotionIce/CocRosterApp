@@ -671,9 +671,10 @@
 
     .admin-command-bar {
       padding: 12px;
-      position: static;
-      top: auto;
-      z-index: auto;
+      position: sticky;
+      top: 8px;
+      top: calc(8px + env(safe-area-inset-top, 0px));
+      z-index: 40;
       border-color: rgba(245, 214, 125, 0.24);
       background: linear-gradient(160deg, rgba(18, 28, 46, 0.9), rgba(10, 17, 30, 0.86));
       backdrop-filter: blur(6px);
@@ -684,11 +685,18 @@
       gap: 8px;
     }
 
-    .admin-command-top {
-      display: grid;
-      grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
-      gap: 10px;
-      align-items: start;
+    .admin-command-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .admin-command-public-link {
+      margin-left: auto;
+      flex: 0 0 auto;
     }
 
     .admin-field {
@@ -770,19 +778,376 @@
       max-width: none;
     }
 
-    .admin-public-config-surface {
+    .website-editor-shell {
       display: grid;
-      gap: 10px;
-      border-top: 1px solid #1f2937;
-      padding-top: 10px;
+      gap: 12px;
       min-width: 0;
     }
 
-    .admin-public-config-grid {
+    .website-quick-edits {
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      background: rgba(9, 15, 28, 0.58);
+      padding: 10px;
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px;
       min-width: 0;
+    }
+
+    .website-quick-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr;
+      min-width: 0;
+    }
+
+    .website-quick-status {
+      min-height: 16px;
+      color: #94a3b8;
+      word-break: break-word;
+    }
+
+    .website-editor-workspace {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .website-section-list {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-section-card {
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.66);
+      color: #e2e8f0;
+      padding: 10px;
+      text-align: left;
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      cursor: pointer;
+      transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
+    }
+
+    .website-section-card:hover:not(:disabled) {
+      border-color: rgba(245, 214, 125, 0.45);
+      background: rgba(30, 41, 59, 0.76);
+      transform: translateY(-1px);
+    }
+
+    .website-section-card:focus-visible {
+      outline: none;
+      border-color: rgba(252, 235, 178, 0.85);
+      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.2);
+    }
+
+    .website-section-card.is-active {
+      border-color: rgba(245, 214, 125, 0.66);
+      background: linear-gradient(165deg, rgba(245, 214, 125, 0.15), rgba(30, 41, 59, 0.6));
+    }
+
+    .website-section-card:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .website-section-card__top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-section-card__title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #f8fafc;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-section-card__desc {
+      margin: 0;
+      font-size: 12px;
+      color: #94a3b8;
+      line-height: 1.4;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-section-card__meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .website-override-pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #cbd5e1;
+      background: rgba(15, 23, 42, 0.85);
+      white-space: nowrap;
+    }
+
+    .website-override-pill.is-custom {
+      border-color: rgba(245, 214, 125, 0.52);
+      color: #fde68a;
+      background: rgba(245, 214, 125, 0.12);
+    }
+
+    .website-section-editor {
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      background: rgba(9, 15, 28, 0.64);
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+      min-height: 132px;
+    }
+
+    .website-section-empty {
+      border: 1px dashed #334155;
+      border-radius: 10px;
+      padding: 14px;
+      font-size: 12px;
+      color: #94a3b8;
+      background: rgba(15, 23, 42, 0.45);
+    }
+
+    .website-editor-header {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .website-editor-header__top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .website-editor-header h3 {
+      margin: 0;
+      font-size: 15px;
+      color: #f8fafc;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-editor-header p {
+      margin: 0;
+      font-size: 12px;
+      color: #94a3b8;
+      line-height: 1.45;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-field-list {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-field {
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      padding: 9px;
+      background: rgba(15, 23, 42, 0.44);
+      display: grid;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .website-field-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .website-field-title {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .website-field-title strong {
+      font-size: 12px;
+      color: #f8fafc;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-field-title span {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.35;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-field-state {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #cbd5e1;
+      background: rgba(15, 23, 42, 0.82);
+      white-space: nowrap;
+    }
+
+    .website-field-state.is-override {
+      border-color: rgba(34, 197, 94, 0.45);
+      color: #86efac;
+      background: rgba(22, 163, 74, 0.14);
+    }
+
+    .website-field-message {
+      min-height: 14px;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+
+    .website-field-message.is-error {
+      color: #fca5a5;
+    }
+
+    .website-token-hints {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .website-token-chip {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 11px;
+      color: #cbd5e1;
+      background: rgba(15, 23, 42, 0.85);
+      white-space: nowrap;
+    }
+
+    .website-repeater {
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      padding: 9px;
+      background: rgba(15, 23, 42, 0.44);
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-repeater-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .website-repeater-head h4 {
+      margin: 0;
+      font-size: 12px;
+      color: #f8fafc;
+    }
+
+    .website-repeater-list {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-repeater-item {
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 8px;
+      background: rgba(15, 23, 42, 0.66);
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-repeater-item__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .website-repeater-item__title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #e2e8f0;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .website-repeater-item__actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .website-repeater-item__fields {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-repeater-empty {
+      border: 1px dashed #334155;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+      color: #94a3b8;
+      background: rgba(15, 23, 42, 0.45);
+    }
+
+    .website-advanced-json {
+      display: grid;
+      gap: 9px;
+      min-width: 0;
+    }
+
+    #publicProfileJson {
+      min-height: 240px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.4;
     }
 
     .admin-public-config-actions {
@@ -801,13 +1166,6 @@
       line-height: 1.1;
     }
 
-    #publicProfileJson {
-      min-height: 220px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-
     .admin-global-status {
       min-height: 16px;
       color: #cbd5e1;
@@ -816,7 +1174,7 @@
 
     .admin-tabs {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
       min-width: 0;
     }
@@ -1421,16 +1779,19 @@
       }
     }
 
+    @media (min-width: 980px) {
+      .website-quick-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .website-editor-workspace {
+        grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
+        align-items: start;
+      }
+    }
+
     @media (max-width: 1100px) {
-      .admin-command-top {
-        grid-template-columns: 1fr;
-      }
-
       .admin-secondary-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .admin-public-config-grid {
         grid-template-columns: 1fr;
       }
 
@@ -1455,6 +1816,14 @@
 
       .admin-tabs {
         grid-template-columns: 1fr;
+      }
+
+      .website-quick-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .website-editor-workspace.is-editing-section .website-section-list {
+        display: none;
       }
 
       .roster-admin-card__header {
@@ -1501,9 +1870,6 @@
   <div class="container admin-shell-container">
     <header class="admin-page-head">
       <h1>Roster Admin</h1>
-      <a id="backToPublicBtn" class="btn secondary admin-page-head-link" href="/" aria-label="Back to public roster">
-        Public Page
-      </a>
     </header>
 
 <!-- Authentication gate shown before the admin UI unlocks. -->
@@ -1526,9 +1892,14 @@
     <div id="adminPanel" class="admin-shell hidden">
       <section class="card admin-command-bar">
         <div class="admin-command-grid">
-          <div class="admin-command-actions admin-command-actions--compact">
-            <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>Refresh all</button>
-            <button id="publishBtn" class="btn admin-command-btn" type="button" disabled>Publish</button>
+          <div class="admin-command-row">
+            <div class="admin-command-actions admin-command-actions--compact">
+              <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>Refresh all</button>
+              <button id="publishBtn" class="btn admin-command-btn" type="button" disabled>Publish</button>
+            </div>
+            <a id="backToPublicBtn" class="btn secondary admin-page-head-link admin-command-public-link" href="/" aria-label="Back to public roster">
+              Public Page
+            </a>
           </div>
 
           <div class="admin-command-footer">
@@ -1684,48 +2055,65 @@
         aria-labelledby="adminTabBtnWebsite">
         <div class="admin-section-head">
           <h2>Website</h2>
-          <p class="small muted">Edit public page copy, media links, and family profile mapping settings.</p>
+          <p class="small muted">Section-based editor for landing copy and media.</p>
         </div>
 
-        <div class="admin-secondary-grid">
-          <label class="admin-field" for="pageTitle">
-            <span class="admin-field-label">Page title</span>
-            <input id="pageTitle" class="admin-input" value="Roster Overview" />
-          </label>
-        </div>
+        <div class="website-editor-shell">
+          <div class="website-quick-edits">
+            <div class="admin-section-head">
+              <h3>Quick Edits</h3>
+              <p class="small muted">Frequently updated fields for fast edits.</p>
+            </div>
 
-        <div class="admin-public-config-surface">
-          <div class="admin-public-config-grid">
-            <label class="admin-field" for="publicDiscordInviteUrl">
-              <span class="admin-field-label">Discord invite URL</span>
-              <input id="publicDiscordInviteUrl" class="admin-input" placeholder="https://discord.gg/your-invite" />
-            </label>
+            <div class="website-quick-grid">
+              <label class="admin-field" for="pageTitle">
+                <span class="admin-field-label">Page title</span>
+                <input id="pageTitle" class="admin-input" data-website-control="1" placeholder="Roster Overview" />
+              </label>
 
-            <label class="admin-field" for="publicBannerMediaUrl">
-              <span class="admin-field-label">Banner media URL</span>
-              <input id="publicBannerMediaUrl" class="admin-input" placeholder="https://..." />
-            </label>
+              <label class="admin-field" for="publicDiscordInviteUrl">
+                <span class="admin-field-label">Discord invite URL</span>
+                <input id="publicDiscordInviteUrl" class="admin-input" data-website-control="1"
+                  placeholder="https://discord.gg/your-invite" />
+              </label>
 
-            <label class="admin-field" for="publicSquareMediaUrl">
-              <span class="admin-field-label">Square media URL</span>
-              <input id="publicSquareMediaUrl" class="admin-input" placeholder="https://..." />
-            </label>
+              <label class="admin-field" for="publicBannerMediaUrl">
+                <span class="admin-field-label">Banner media URL</span>
+                <input id="publicBannerMediaUrl" class="admin-input" data-website-control="1" placeholder="https://..." />
+              </label>
+
+              <label class="admin-field" for="publicSquareMediaUrl">
+                <span class="admin-field-label">Square media URL</span>
+                <input id="publicSquareMediaUrl" class="admin-input" data-website-control="1" placeholder="https://..." />
+              </label>
+
+              <label class="admin-field" for="publicHeroTitleQuick">
+                <span class="admin-field-label">Hero title</span>
+                <input id="publicHeroTitleQuick" class="admin-input" data-website-control="1"
+                  placeholder="Main landing headline" />
+              </label>
+
+              <label class="admin-field" for="publicHeroPrimaryCtaQuick">
+                <span class="admin-field-label">Primary CTA label</span>
+                <input id="publicHeroPrimaryCtaQuick" class="admin-input" data-website-control="1"
+                  placeholder="Join on Discord" />
+              </label>
+            </div>
+
+            <div id="websiteQuickStatus" class="website-quick-status small muted"></div>
           </div>
 
-          <label class="admin-field" for="publicProfileJson">
-            <span class="admin-field-label">Website profile JSON (optional)</span>
-            <textarea id="publicProfileJson" class="admin-textarea" spellcheck="false" placeholder="{\n  &quot;brand&quot;: { &quot;eyebrow&quot;: &quot;Your clan family&quot; },\n  &quot;hero&quot;: { &quot;title&quot;: &quot;Your headline&quot; },\n  &quot;importMappingSeeds&quot;: [\n    { &quot;clan&quot;: &quot;YOUR CLAN NAME&quot;, &quot;rosterId&quot;: &quot;your-roster-id&quot; }\n  ]\n}"></textarea>
-            <span class="small muted">Set only the fields you want to override. Empty means defaults.</span>
-          </label>
+          <div id="websiteEditorWorkspace" class="website-editor-workspace">
+            <div id="websiteSectionList" class="website-section-list" aria-label="Website sections"></div>
+            <div id="websiteSectionEditor" class="website-section-editor" aria-live="polite"></div>
+          </div>
 
-          <div class="admin-public-config-actions">
-            <button id="applyPublicProfileBtn" class="btn secondary admin-command-btn" type="button" disabled>Apply profile JSON</button>
-            <button id="clearPublicProfileBtn" class="btn secondary admin-command-btn" type="button" disabled>Clear profile</button>
+          <div>
             <span id="publicProfileStatus" class="small muted"></span>
           </div>
         </div>
 
-        <div class="small muted">Changes apply to preview immediately. Publish to push live.</div>
+        <div class="small muted">Publish from the command bar to push website changes live.</div>
       </section>
     </div>
   </div>
@@ -1838,7 +2226,7 @@
     </div>
   </div>
 
-    <script src="./public-config.js?v=20260408a"></script>
+    <script src="./public-config.js?v=20260408c"></script>
   <script>
     window.ROSTER_CLIENT_DISABLE_AUTOLOAD = true;
     window.ROSTER_ADMIN_MODE = true;
@@ -1850,9 +2238,9 @@
 
 <!-- Runtime config, XLSX parsing, and the shared roster/admin clients. -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="./generator.js?v=20260408a"></script>
-  <script src="./client.js?v=20260408a"></script>
-  <script src="./admin.js?v=20260408a"></script>
+  <script src="./generator.js?v=20260408c"></script>
+  <script src="./client.js?v=20260408c"></script>
+  <script src="./admin.js?v=20260408c"></script>
 </body>
 
 </html>

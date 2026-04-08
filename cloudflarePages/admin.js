@@ -5,7 +5,7 @@
   const $ = (sel) => document.querySelector(sel);
   // Convert a value to a string safely.
   const toStr = (v) => (v == null ? "" : String(v));
-  const PREVIEW_NOT_READY_MESSAGE = "Preview is not loaded yet. Refresh the page and unlock again.";
+  const PREVIEW_NOT_READY_MESSAGE = "Admin data is not loaded yet. Refresh the page and unlock again.";
 
   const state = {
     password: "",
@@ -25,6 +25,8 @@
     importLoadWarning: null,
     activeAdminTab: "rosters",
     modalFocusReturnByPanel: {},
+    websiteEditorActiveSectionId: "",
+    websiteEditorUiBound: false,
   };
 
   // Set the global status message.
@@ -57,23 +59,353 @@
     el.style.color = isError ? "#fca5a5" : "#6b7280";
   };
 
+  // Set quick-edit status copy.
+  const setWebsiteQuickStatus_ = (msg, isError) => {
+    const el = $("#websiteQuickStatus");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.color = isError ? "#fca5a5" : "#94a3b8";
+  };
+
   // Return whether a preview payload is loaded.
   const hasLoadedPreviewData_ = () => !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters));
+
+  const WEBSITE_PAGE_TITLE_DEFAULT = "Roster Overview";
+  const PUBLIC_LANDING_EDITOR_DEFAULTS = {
+    bannerMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=banner_xwhksj&profile=cld-looping",
+    squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_ofyufv&profile=cld-looping",
+    discordInviteUrl: "https://discord.gg/turtlecoc",
+  };
+  const PUBLIC_PROFILE_EDITOR_DEFAULTS = {
+    brand: {
+      eyebrow: "200+ Members \u2022 Discord-Based",
+    },
+    nav: {
+      homeLabel: "Home",
+      rostersLabel: "Rosters",
+      leaderboardLabel: "Leaderboard",
+      discordLabel: "Discord",
+      adminLabel: "Admin Panel",
+    },
+    hero: {
+      eyebrow: "Recruiting active players",
+      title: "TURTLE: active, organized, improving.",
+      body: "A place for every Town Hall, from steady progress to high-level wars and the Project Se7ven path.",
+      primaryCtaLabel: "Join Discord now!",
+      secondaryCtaLabel: "See Current Rosters",
+    },
+    journey: {
+      eyebrow: "How joining works",
+      title: "You bring the player tag. We handle the setup and path forward.",
+      steps: [
+        { label: "Step 1", title: "Open a ticket", body: "Share your player tag and basic playstyle." },
+        { label: "Step 2", title: "Get linked and placed", body: "Your account gets linked to Discord and you set your self-roles." },
+        { label: "Step 3", title: "War, learn, move up", body: "Join the clan, opt into war through the pinned message and move up, in the TURTLE-family, as your Town Hall and performance improve." },
+      ],
+    },
+    family: {
+      eyebrow: "Clan family lineup",
+      title: "From early growth to Legends-level play, the family gives every Town Hall a real home and room to keep climbing.",
+      metaTemplate: "{clanCount} clans, {playerCount} tracked players across the family.",
+      loadingMetaText: "Syncing the latest family snapshot. Live lineup stats will appear shortly.",
+      playersLabel: "Players in roster",
+      cwlLabel: "CWL",
+      regularWarLabel: "Regular war",
+    },
+    war: {
+      eyebrow: "Main clan focus",
+      title: "TURTLE Main is built for strong TH17 and TH18 players who want serious wars and the relaxed community vibe.",
+      body: "Reliable hits matter missed attacks and long-term performance are tracked. Planning help is there when you want it, and players who ask for coaching can get it.",
+      highlights: [
+        { label: "War style", value: "Relaxed, but reliable" },
+        { label: "Core TH range", value: "TH17-18" },
+      ],
+    },
+    cwl: {
+      eyebrow: "CWL structure",
+      title: "Every active member gets a CWL spot, and regular wars keep running even during league week.",
+      body: "Rosters are set before CWL starts, based on Town Hall strength and the best overall lineup fit. Subs are rotated so everyone still earns full rewards, and the family keeps side wars and back-to-back wars running year-round.",
+      highlights: [
+        { label: "Access", value: "All active members" },
+        { label: "During CWL", value: "Side wars running" },
+        { label: "Coordination", value: "Always optimized" },
+      ],
+    },
+    network: {
+      eyebrow: "ProjectSE7VEN",
+      title: "For the strongest players, TURTLE also opens a path into Project 7's fully competitive environment.",
+      body: "Confident Legends League players can move into P7 for a sharper competitive setting, high-level push play, and prize-backed push events worth multiple hundreds $$! It is the elite lane, but still part of the wider TURTLE ecosystem.",
+      highlights: [
+        { label: "Entry bar", value: "Legends + confident hits" },
+        { label: "Events", value: "$$$ push events" },
+        { label: "Connection", value: "Shared leadership" },
+      ],
+    },
+    proof: {
+      eyebrow: "Why it works",
+      title: "Discord is required. Pressure isn't.",
+      body: "The expectations are simple: stay active, see your notifications, use your hits, and be willing to improve. EU and US staff coverage keeps replies fast, while the family stays organized without becoming overly strict.",
+    },
+    finalCta: {
+      eyebrow: "Ready to join",
+      title: "Join the Discord and Open a Ticket.",
+      steps: [
+        "Join the server and open a Ticket.",
+        "Share your player tag and playstyle",
+        "Get placed in the right clan and opt into war when ready",
+      ],
+      primaryCtaLabel: "Join TURTLE on Discord",
+      secondaryCtaLabel: "View Leaderboard",
+    },
+    media: {
+      bannerLabel: "TURTLE banner animation",
+      squareLabel: "TURTLE icon animation",
+      bannerPlaceholderLabel: "TURTLE banner preview",
+      squarePlaceholderLabel: "TURTLE icon preview",
+    },
+  };
+  const LANDING_URL_ALIASES_BY_KEY_ = {
+    discordInviteUrl: ["discordInviteUrl"],
+    bannerMediaUrl: ["bannerMediaUrl", "bannerUrl", "bannerGifUrl"],
+    squareMediaUrl: ["squareMediaUrl", "squareUrl", "squareGifUrl"],
+  };
+  const WEBSITE_EDITOR_SECTIONS = [
+    {
+      id: "general",
+      label: "General",
+      description: "Page-level settings and landing URLs used by the public shell.",
+      fields: [
+        { key: "general.pageTitle", source: "page", type: "text", path: "pageTitle", label: "Page title", description: "Browser title and roster heading." },
+        { key: "general.discordInviteUrl", source: "landing", type: "url", path: "discordInviteUrl", label: "Discord invite URL", description: "Main invite link used for all Discord CTAs." },
+        { key: "general.bannerMediaUrl", source: "landing", type: "url", path: "bannerMediaUrl", label: "Banner media URL", description: "Landing hero banner media source." },
+        { key: "general.squareMediaUrl", source: "landing", type: "url", path: "squareMediaUrl", label: "Square media URL", description: "Landing square media source." },
+      ],
+    },
+    {
+      id: "brand",
+      label: "Brand",
+      description: "Top-of-page brand copy.",
+      fields: [
+        { key: "brand.eyebrow", source: "profile", type: "text", path: "brand.eyebrow", label: "Brand eyebrow", description: "Short descriptor shown near the logo." },
+      ],
+    },
+    {
+      id: "navigation",
+      label: "Navigation",
+      description: "Labels for navigation and admin entry points.",
+      fields: [
+        { key: "nav.homeLabel", source: "profile", type: "text", path: "nav.homeLabel", label: "Home label" },
+        { key: "nav.rostersLabel", source: "profile", type: "text", path: "nav.rostersLabel", label: "Rosters label" },
+        { key: "nav.leaderboardLabel", source: "profile", type: "text", path: "nav.leaderboardLabel", label: "Leaderboard label" },
+        { key: "nav.discordLabel", source: "profile", type: "text", path: "nav.discordLabel", label: "Discord label" },
+        { key: "nav.adminLabel", source: "profile", type: "text", path: "nav.adminLabel", label: "Admin label" },
+      ],
+    },
+    {
+      id: "hero",
+      label: "Hero",
+      description: "Main landing hero copy and call-to-action labels.",
+      fields: [
+        { key: "hero.eyebrow", source: "profile", type: "text", path: "hero.eyebrow", label: "Hero eyebrow" },
+        { key: "hero.title", source: "profile", type: "textarea", path: "hero.title", label: "Hero title" },
+        { key: "hero.body", source: "profile", type: "textarea", path: "hero.body", label: "Hero body" },
+        { key: "hero.primaryCtaLabel", source: "profile", type: "text", path: "hero.primaryCtaLabel", label: "Primary CTA label" },
+        { key: "hero.secondaryCtaLabel", source: "profile", type: "text", path: "hero.secondaryCtaLabel", label: "Secondary CTA label" },
+      ],
+    },
+    {
+      id: "journey",
+      label: "Journey",
+      description: "Joining flow and step cards.",
+      fields: [
+        { key: "journey.eyebrow", source: "profile", type: "text", path: "journey.eyebrow", label: "Journey eyebrow" },
+        { key: "journey.title", source: "profile", type: "textarea", path: "journey.title", label: "Journey title" },
+        {
+          key: "journey.steps",
+          source: "profile",
+          type: "repeater",
+          path: "journey.steps",
+          label: "Journey steps",
+          description: "Cards shown in order on the landing timeline.",
+          itemType: "object",
+          itemLabel: "Step",
+          defaultItem: { label: "Step", title: "", body: "" },
+          itemFields: [
+            { key: "label", type: "text", label: "Label" },
+            { key: "title", type: "text", label: "Title" },
+            { key: "body", type: "textarea", label: "Body" },
+          ],
+        },
+      ],
+    },
+    {
+      id: "family",
+      label: "Family",
+      description: "Clan family intro and roster meta labels.",
+      fields: [
+        { key: "family.eyebrow", source: "profile", type: "text", path: "family.eyebrow", label: "Family eyebrow" },
+        { key: "family.title", source: "profile", type: "textarea", path: "family.title", label: "Family title" },
+        {
+          key: "family.metaTemplate",
+          source: "profile",
+          type: "tokenText",
+          path: "family.metaTemplate",
+          label: "Family meta template",
+          description: "Supports dynamic values from roster data.",
+          tokens: ["{clanCount}", "{playerCount}"],
+          requiredTokens: ["{clanCount}", "{playerCount}"],
+        },
+        { key: "family.loadingMetaText", source: "profile", type: "textarea", path: "family.loadingMetaText", label: "Loading meta text" },
+        { key: "family.playersLabel", source: "profile", type: "text", path: "family.playersLabel", label: "Players label" },
+        { key: "family.cwlLabel", source: "profile", type: "text", path: "family.cwlLabel", label: "CWL label" },
+        { key: "family.regularWarLabel", source: "profile", type: "text", path: "family.regularWarLabel", label: "Regular war label" },
+      ],
+    },
+    {
+      id: "war",
+      label: "War",
+      description: "Main war section copy and highlights.",
+      fields: [
+        { key: "war.eyebrow", source: "profile", type: "text", path: "war.eyebrow", label: "War eyebrow" },
+        { key: "war.title", source: "profile", type: "textarea", path: "war.title", label: "War title" },
+        { key: "war.body", source: "profile", type: "textarea", path: "war.body", label: "War body" },
+        {
+          key: "war.highlights",
+          source: "profile",
+          type: "repeater",
+          path: "war.highlights",
+          label: "War highlights",
+          itemType: "object",
+          itemLabel: "Highlight",
+          defaultItem: { label: "", value: "" },
+          itemFields: [
+            { key: "label", type: "text", label: "Label" },
+            { key: "value", type: "text", label: "Value" },
+          ],
+        },
+      ],
+    },
+    {
+      id: "cwl",
+      label: "CWL",
+      description: "CWL section copy and highlight chips.",
+      fields: [
+        { key: "cwl.eyebrow", source: "profile", type: "text", path: "cwl.eyebrow", label: "CWL eyebrow" },
+        { key: "cwl.title", source: "profile", type: "textarea", path: "cwl.title", label: "CWL title" },
+        { key: "cwl.body", source: "profile", type: "textarea", path: "cwl.body", label: "CWL body" },
+        {
+          key: "cwl.highlights",
+          source: "profile",
+          type: "repeater",
+          path: "cwl.highlights",
+          label: "CWL highlights",
+          itemType: "object",
+          itemLabel: "Highlight",
+          defaultItem: { label: "", value: "" },
+          itemFields: [
+            { key: "label", type: "text", label: "Label" },
+            { key: "value", type: "text", label: "Value" },
+          ],
+        },
+      ],
+    },
+    {
+      id: "network",
+      label: "Network",
+      description: "Project-network copy and highlights.",
+      fields: [
+        { key: "network.eyebrow", source: "profile", type: "text", path: "network.eyebrow", label: "Network eyebrow" },
+        { key: "network.title", source: "profile", type: "textarea", path: "network.title", label: "Network title" },
+        { key: "network.body", source: "profile", type: "textarea", path: "network.body", label: "Network body" },
+        {
+          key: "network.highlights",
+          source: "profile",
+          type: "repeater",
+          path: "network.highlights",
+          label: "Network highlights",
+          itemType: "object",
+          itemLabel: "Highlight",
+          defaultItem: { label: "", value: "" },
+          itemFields: [
+            { key: "label", type: "text", label: "Label" },
+            { key: "value", type: "text", label: "Value" },
+          ],
+        },
+      ],
+    },
+    {
+      id: "proof",
+      label: "Proof",
+      description: "Trust, expectations, and social proof section.",
+      fields: [
+        { key: "proof.eyebrow", source: "profile", type: "text", path: "proof.eyebrow", label: "Proof eyebrow" },
+        { key: "proof.title", source: "profile", type: "textarea", path: "proof.title", label: "Proof title" },
+        { key: "proof.body", source: "profile", type: "textarea", path: "proof.body", label: "Proof body" },
+      ],
+    },
+    {
+      id: "finalCta",
+      label: "Final CTA",
+      description: "Bottom call-to-action and onboarding checklist copy.",
+      fields: [
+        { key: "finalCta.eyebrow", source: "profile", type: "text", path: "finalCta.eyebrow", label: "Final CTA eyebrow" },
+        { key: "finalCta.title", source: "profile", type: "textarea", path: "finalCta.title", label: "Final CTA title" },
+        {
+          key: "finalCta.steps",
+          source: "profile",
+          type: "repeater",
+          path: "finalCta.steps",
+          label: "Final CTA steps",
+          itemType: "string",
+          itemLabel: "Step",
+          defaultItem: "",
+        },
+        { key: "finalCta.primaryCtaLabel", source: "profile", type: "text", path: "finalCta.primaryCtaLabel", label: "Primary CTA label" },
+        { key: "finalCta.secondaryCtaLabel", source: "profile", type: "text", path: "finalCta.secondaryCtaLabel", label: "Secondary CTA label" },
+      ],
+    },
+    {
+      id: "media",
+      label: "Media",
+      description: "Landing media labels and placeholder copy.",
+      fields: [
+        { key: "media.bannerLabel", source: "profile", type: "text", path: "media.bannerLabel", label: "Banner media label" },
+        { key: "media.squareLabel", source: "profile", type: "text", path: "media.squareLabel", label: "Square media label" },
+        { key: "media.bannerPlaceholderLabel", source: "profile", type: "text", path: "media.bannerPlaceholderLabel", label: "Banner placeholder label" },
+        { key: "media.squarePlaceholderLabel", source: "profile", type: "text", path: "media.squarePlaceholderLabel", label: "Square placeholder label" },
+      ],
+    },
+    {
+      id: "advanced",
+      label: "Advanced JSON",
+      description: "Raw JSON override editor, validation, and import/export helpers.",
+      advanced: true,
+      fields: [],
+    },
+  ];
+  const WEBSITE_QUICK_FIELDS = [
+    { id: "pageTitle", source: "page", type: "text", path: "pageTitle", label: "Page title" },
+    { id: "publicDiscordInviteUrl", source: "landing", type: "url", path: "discordInviteUrl", label: "Discord invite URL" },
+    { id: "publicBannerMediaUrl", source: "landing", type: "url", path: "bannerMediaUrl", label: "Banner media URL" },
+    { id: "publicSquareMediaUrl", source: "landing", type: "url", path: "squareMediaUrl", label: "Square media URL" },
+    { id: "publicHeroTitleQuick", source: "profile", type: "textarea", path: "hero.title", label: "Hero title" },
+    { id: "publicHeroPrimaryCtaQuick", source: "profile", type: "text", path: "hero.primaryCtaLabel", label: "Primary CTA label" },
+  ];
+  const WEBSITE_EDITOR_SECTION_BY_ID = {};
+  for (let i = 0; i < WEBSITE_EDITOR_SECTIONS.length; i++) {
+    const section = WEBSITE_EDITOR_SECTIONS[i];
+    const sectionId = toStr(section && section.id).trim();
+    if (!sectionId || WEBSITE_EDITOR_SECTION_BY_ID[sectionId]) continue;
+    WEBSITE_EDITOR_SECTION_BY_ID[sectionId] = section;
+  }
 
   // Set website-profile controls enabled.
   const setPublicProfileControlsEnabled_ = (enabledRaw) => {
     const enabled = !!enabledRaw;
-    const ids = [
-      "publicDiscordInviteUrl",
-      "publicBannerMediaUrl",
-      "publicSquareMediaUrl",
-      "publicProfileJson",
-      "applyPublicProfileBtn",
-      "clearPublicProfileBtn",
-    ];
-    for (let i = 0; i < ids.length; i++) {
-      const el = $("#" + ids[i]);
-      if (!el) continue;
+    const controls = Array.from(document.querySelectorAll("[data-website-control='1']"));
+    for (let i = 0; i < controls.length; i++) {
+      const el = controls[i];
+      if (!el || !("disabled" in el)) continue;
       el.disabled = !enabled;
     }
   };
@@ -87,6 +419,114 @@
 
   // Return whether plain object.
   const isPlainObject_ = (valueRaw) => !!(valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw));
+
+  // Convert a dot path to individual segments.
+  const toPathSegments_ = (pathRaw) =>
+    toStr(pathRaw)
+      .split(".")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+  // Read a nested value by dot path.
+  const readValueByPath_ = (rootRaw, pathRaw) => {
+    const root = rootRaw;
+    const parts = toPathSegments_(pathRaw);
+    if (!parts.length) return undefined;
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const key = parts[i];
+      if (!node || typeof node !== "object" || !Object.prototype.hasOwnProperty.call(node, key)) return undefined;
+      node = node[key];
+    }
+    return node;
+  };
+
+  // Return whether a nested value is explicitly set.
+  const hasValueByPath_ = (rootRaw, pathRaw) => readValueByPath_(rootRaw, pathRaw) !== undefined;
+
+  // Write a nested value by dot path (creates objects as needed).
+  const writeValueByPath_ = (rootRaw, pathRaw, value) => {
+    const root = rootRaw;
+    const parts = toPathSegments_(pathRaw);
+    if (!isPlainObject_(root) || !parts.length) return;
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const key = parts[i];
+      if (!isPlainObject_(node[key])) node[key] = {};
+      node = node[key];
+    }
+    node[parts[parts.length - 1]] = value;
+  };
+
+  // Delete a nested value by path and prune empty parent objects.
+  const deleteValueByPath_ = (rootRaw, pathRaw) => {
+    const root = rootRaw;
+    const parts = toPathSegments_(pathRaw);
+    if (!isPlainObject_(root) || !parts.length) return false;
+
+    const visit = (node, index) => {
+      if (!isPlainObject_(node)) return false;
+      const key = parts[index];
+      if (!Object.prototype.hasOwnProperty.call(node, key)) return false;
+      if (index === parts.length - 1) {
+        delete node[key];
+        return true;
+      }
+      const child = node[key];
+      const removed = visit(child, index + 1);
+      if (removed && isPlainObject_(child) && !Object.keys(child).length) delete node[key];
+      return removed;
+    };
+    return visit(root, 0);
+  };
+
+  // Return whether two JSON-safe values are deeply equal.
+  const isJsonEqual_ = (leftRaw, rightRaw) => {
+    if (leftRaw === rightRaw) return true;
+    if (typeof leftRaw !== typeof rightRaw) return false;
+
+    if (Array.isArray(leftRaw) || Array.isArray(rightRaw)) {
+      if (!Array.isArray(leftRaw) || !Array.isArray(rightRaw)) return false;
+      if (leftRaw.length !== rightRaw.length) return false;
+      for (let i = 0; i < leftRaw.length; i++) {
+        if (!isJsonEqual_(leftRaw[i], rightRaw[i])) return false;
+      }
+      return true;
+    }
+
+    if (isPlainObject_(leftRaw) || isPlainObject_(rightRaw)) {
+      if (!isPlainObject_(leftRaw) || !isPlainObject_(rightRaw)) return false;
+      const leftKeys = Object.keys(leftRaw);
+      const rightKeys = Object.keys(rightRaw);
+      if (leftKeys.length !== rightKeys.length) return false;
+      for (let i = 0; i < leftKeys.length; i++) {
+        const key = leftKeys[i];
+        if (!Object.prototype.hasOwnProperty.call(rightRaw, key)) return false;
+        if (!isJsonEqual_(leftRaw[key], rightRaw[key])) return false;
+      }
+      return true;
+    }
+
+    return false;
+  };
+
+  // Deep-merge plain objects. Arrays/scalars are replaced.
+  const mergePlainObjectDeep_ = (targetRaw, sourceRaw) => {
+    const target = isPlainObject_(targetRaw) ? targetRaw : {};
+    const source = isPlainObject_(sourceRaw) ? sourceRaw : {};
+    const keys = Object.keys(source);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const value = source[key];
+      if (isPlainObject_(value)) {
+        if (!isPlainObject_(target[key])) target[key] = {};
+        mergePlainObjectDeep_(target[key], value);
+      } else {
+        target[key] = value == null ? value : cloneJson(value);
+      }
+    }
+    return target;
+  };
 
   // Get mutable public config root from loaded preview data.
   const getLoadedPublicConfigRoot_ = () => {
@@ -107,6 +547,145 @@
     return root.landing;
   };
 
+  // Resolve landing URL aliases for a single field.
+  const getLandingUrlAliases_ = (fieldKeyRaw) => {
+    const key = toStr(fieldKeyRaw).trim();
+    const aliases = LANDING_URL_ALIASES_BY_KEY_[key];
+    return Array.isArray(aliases) && aliases.length ? aliases.slice() : [key];
+  };
+
+  // Read landing URL value from landing branch first, then root aliases.
+  const resolveLandingUrlValue_ = (rootRaw, fieldKeyRaw) => {
+    const key = toStr(fieldKeyRaw).trim();
+    if (!key) return "";
+    const root = isPlainObject_(rootRaw) ? rootRaw : {};
+    const landing = isPlainObject_(root.landing) ? root.landing : {};
+    const aliases = getLandingUrlAliases_(key);
+    for (let i = 0; i < aliases.length; i++) {
+      const value = toStr(landing[aliases[i]]).trim();
+      if (value) return value;
+    }
+    for (let i = 0; i < aliases.length; i++) {
+      const value = toStr(root[aliases[i]]).trim();
+      if (value) return value;
+    }
+    return "";
+  };
+
+  // Return whether an explicit landing URL override is present.
+  const hasLandingUrlOverride_ = (rootRaw, fieldKeyRaw) => {
+    const key = toStr(fieldKeyRaw).trim();
+    if (!key) return false;
+    const root = isPlainObject_(rootRaw) ? rootRaw : {};
+    const landing = isPlainObject_(root.landing) ? root.landing : {};
+    const aliases = getLandingUrlAliases_(key);
+    for (let i = 0; i < aliases.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(landing, aliases[i])) return true;
+    }
+    for (let i = 0; i < aliases.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(root, aliases[i])) return true;
+    }
+    return false;
+  };
+
+  // Clear all aliases for one landing URL field.
+  const clearLandingUrlAliases_ = (rootRaw, fieldKeyRaw) => {
+    const root = isPlainObject_(rootRaw) ? rootRaw : null;
+    if (!root) return;
+    const landing = isPlainObject_(root.landing) ? root.landing : null;
+    const aliases = getLandingUrlAliases_(fieldKeyRaw);
+    for (let i = 0; i < aliases.length; i++) {
+      const alias = aliases[i];
+      if (landing && Object.prototype.hasOwnProperty.call(landing, alias)) delete landing[alias];
+      if (Object.prototype.hasOwnProperty.call(root, alias)) delete root[alias];
+    }
+  };
+
+  // Set one landing URL override while dropping legacy aliases.
+  const setLandingUrlOverride_ = (rootRaw, fieldKeyRaw, valueRaw) => {
+    const root = isPlainObject_(rootRaw) ? rootRaw : null;
+    if (!root) return;
+    const key = toStr(fieldKeyRaw).trim();
+    if (!key) return;
+    const value = toStr(valueRaw).trim();
+    const landing = getLoadedLandingPublicConfig_();
+    if (!landing) return;
+    clearLandingUrlAliases_(root, key);
+    if (value) landing[key] = value;
+  };
+
+  // Merge current profile overrides from `profile` and legacy `landing.profile`.
+  const getMergedProfileOverride_ = (rootRaw) => {
+    const root = isPlainObject_(rootRaw) ? rootRaw : {};
+    const out = {};
+    const landing = isPlainObject_(root.landing) ? root.landing : null;
+    if (landing && isPlainObject_(landing.profile)) {
+      mergePlainObjectDeep_(out, landing.profile);
+    }
+    if (isPlainObject_(root.profile)) {
+      mergePlainObjectDeep_(out, root.profile);
+    }
+    return out;
+  };
+
+  // Move legacy `landing.profile` into `profile`.
+  const normalizeProfilePlacement_ = (rootRaw) => {
+    const root = isPlainObject_(rootRaw) ? rootRaw : null;
+    if (!root) return;
+    const landing = isPlainObject_(root.landing) ? root.landing : null;
+    if (!landing || !isPlainObject_(landing.profile)) return;
+    const merged = isPlainObject_(root.profile) ? root.profile : {};
+    mergePlainObjectDeep_(merged, landing.profile);
+    root.profile = merged;
+    delete landing.profile;
+  };
+
+  // Get default value for one schema field.
+  const getWebsiteFieldDefaultValue_ = (fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    if (field.source === "page") return WEBSITE_PAGE_TITLE_DEFAULT;
+    if (field.source === "landing") return toStr(PUBLIC_LANDING_EDITOR_DEFAULTS[field.path]).trim();
+    const value = readValueByPath_(PUBLIC_PROFILE_EDITOR_DEFAULTS, field.path);
+    return value == null ? (field.type === "repeater" ? [] : "") : cloneJson(value);
+  };
+
+  // Get effective field value (override if set, otherwise defaults).
+  const getWebsiteFieldEffectiveValue_ = (fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    if (field.source === "page") {
+      const pageTitle = toStr(state.lastRosterData && state.lastRosterData.pageTitle).trim();
+      return pageTitle || WEBSITE_PAGE_TITLE_DEFAULT;
+    }
+    const root = isPlainObject_(state.lastRosterData && state.lastRosterData.publicConfig)
+      ? state.lastRosterData.publicConfig
+      : {};
+    if (field.source === "landing") {
+      const value = resolveLandingUrlValue_(root, field.path);
+      return value || getWebsiteFieldDefaultValue_(field);
+    }
+    const mergedOverride = getMergedProfileOverride_(root);
+    if (hasValueByPath_(mergedOverride, field.path)) {
+      const overrideValue = readValueByPath_(mergedOverride, field.path);
+      return overrideValue == null ? "" : cloneJson(overrideValue);
+    }
+    return getWebsiteFieldDefaultValue_(field);
+  };
+
+  // Return whether a field currently has an explicit override.
+  const hasWebsiteFieldOverride_ = (fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    if (field.source === "page") {
+      const current = toStr(state.lastRosterData && state.lastRosterData.pageTitle).trim() || WEBSITE_PAGE_TITLE_DEFAULT;
+      return current !== WEBSITE_PAGE_TITLE_DEFAULT;
+    }
+    const root = isPlainObject_(state.lastRosterData && state.lastRosterData.publicConfig)
+      ? state.lastRosterData.publicConfig
+      : {};
+    if (field.source === "landing") return hasLandingUrlOverride_(root, field.path);
+    const mergedOverride = getMergedProfileOverride_(root);
+    return hasValueByPath_(mergedOverride, field.path);
+  };
+
   // Remove empty public config branches.
   const cleanupLoadedPublicConfig_ = () => {
     if (!hasLoadedPreviewData_()) return;
@@ -118,6 +697,9 @@
 
     if (!isPlainObject_(root.profile) || !Object.keys(root.profile).length) {
       delete root.profile;
+    }
+    if (isPlainObject_(root.landing) && (!isPlainObject_(root.landing.profile) || !Object.keys(root.landing.profile).length)) {
+      delete root.landing.profile;
     }
     if (!isPlainObject_(root.landing) || !Object.keys(root.landing).length) {
       delete root.landing;
@@ -141,34 +723,52 @@
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     const preserveStatus = options.preserveStatus === true;
     const hasPreview = hasLoadedPreviewData_();
-    setPublicProfileControlsEnabled_(hasPreview);
-
+    const pageTitleInput = $("#pageTitle");
     const discordInput = $("#publicDiscordInviteUrl");
     const bannerInput = $("#publicBannerMediaUrl");
     const squareInput = $("#publicSquareMediaUrl");
+    const heroTitleQuick = $("#publicHeroTitleQuick");
+    const heroPrimaryQuick = $("#publicHeroPrimaryCtaQuick");
     const profileJsonInput = $("#publicProfileJson");
 
     if (!hasPreview) {
+      if (pageTitleInput) pageTitleInput.value = "";
       if (discordInput) discordInput.value = "";
       if (bannerInput) bannerInput.value = "";
       if (squareInput) squareInput.value = "";
+      if (heroTitleQuick) heroTitleQuick.value = "";
+      if (heroPrimaryQuick) heroPrimaryQuick.value = "";
       if (profileJsonInput) profileJsonInput.value = "";
+      setWebsiteQuickStatus_("Unlock to edit website content.", false);
       if (!preserveStatus) setPublicProfileStatus("");
+      renderWebsiteEditorShell_();
       return;
     }
 
     const root = isPlainObject_(state.lastRosterData.publicConfig) ? state.lastRosterData.publicConfig : {};
-    const landing = isPlainObject_(root.landing) ? root.landing : {};
-    const discordValue = toStr(landing.discordInviteUrl || root.discordInviteUrl).trim();
-    const bannerValue = toStr(landing.bannerMediaUrl || landing.bannerUrl || landing.bannerGifUrl || root.bannerMediaUrl || root.bannerUrl || root.bannerGifUrl).trim();
-    const squareValue = toStr(landing.squareMediaUrl || landing.squareUrl || landing.squareGifUrl || root.squareMediaUrl || root.squareUrl || root.squareGifUrl).trim();
-    const profileValue = isPlainObject_(root.profile) ? root.profile : (isPlainObject_(landing.profile) ? landing.profile : null);
+    const mergedProfile = getMergedProfileOverride_(root);
+    const pageTitleValue = toStr(state.lastRosterData.pageTitle).trim() || WEBSITE_PAGE_TITLE_DEFAULT;
+    const discordValue = resolveLandingUrlValue_(root, "discordInviteUrl") || PUBLIC_LANDING_EDITOR_DEFAULTS.discordInviteUrl;
+    const bannerValue = resolveLandingUrlValue_(root, "bannerMediaUrl") || PUBLIC_LANDING_EDITOR_DEFAULTS.bannerMediaUrl;
+    const squareValue = resolveLandingUrlValue_(root, "squareMediaUrl") || PUBLIC_LANDING_EDITOR_DEFAULTS.squareMediaUrl;
+    const heroTitleValue = hasValueByPath_(mergedProfile, "hero.title")
+      ? toStr(readValueByPath_(mergedProfile, "hero.title"))
+      : toStr(readValueByPath_(PUBLIC_PROFILE_EDITOR_DEFAULTS, "hero.title"));
+    const heroPrimaryValue = hasValueByPath_(mergedProfile, "hero.primaryCtaLabel")
+      ? toStr(readValueByPath_(mergedProfile, "hero.primaryCtaLabel"))
+      : toStr(readValueByPath_(PUBLIC_PROFILE_EDITOR_DEFAULTS, "hero.primaryCtaLabel"));
 
+    if (pageTitleInput) pageTitleInput.value = pageTitleValue;
     if (discordInput) discordInput.value = discordValue;
     if (bannerInput) bannerInput.value = bannerValue;
     if (squareInput) squareInput.value = squareValue;
-    if (profileJsonInput) profileJsonInput.value = profileValue ? jsonPretty(profileValue) : "";
+    if (heroTitleQuick) heroTitleQuick.value = heroTitleValue;
+    if (heroPrimaryQuick) heroPrimaryQuick.value = heroPrimaryValue;
+    if (profileJsonInput) profileJsonInput.value = Object.keys(mergedProfile).length ? jsonPretty(mergedProfile) : "";
+
+    setWebsiteQuickStatus_("Quick edits save on blur. Publish when ready.", false);
     if (!preserveStatus) setPublicProfileStatus("");
+    renderWebsiteEditorShell_();
   };
 
   // Commit one public URL field from editor to preview payload.
@@ -176,7 +776,7 @@
     const fieldKey = toStr(fieldKeyRaw).trim();
     const label = toStr(labelRaw).trim() || fieldKey;
     if (!fieldKey) return;
-    if (!hasLoadedPreviewData_()) return;
+    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
 
     const input = inputRaw && typeof inputRaw === "object" ? inputRaw : null;
     const rawValue = toStr(input && input.value).trim();
@@ -185,27 +785,26 @@
       throw new Error(label + " must start with http:// or https://");
     }
 
+    const fallbackValue = toStr(PUBLIC_LANDING_EDITOR_DEFAULTS[fieldKey]).trim();
+    const beforeSnapshot = snapshotWebsitePayload_();
     const root = getLoadedPublicConfigRoot_();
-    const landing = getLoadedLandingPublicConfig_();
-    if (!root || !landing) return;
-
-    const beforeValue = toStr(landing[fieldKey] || root[fieldKey]).trim();
-    if (normalized) {
-      landing[fieldKey] = normalized;
-      if (Object.prototype.hasOwnProperty.call(root, fieldKey)) delete root[fieldKey];
+    if (!root) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    if (!normalized || normalized === fallbackValue) {
+      clearLandingUrlAliases_(root, fieldKey);
     } else {
-      if (Object.prototype.hasOwnProperty.call(landing, fieldKey)) delete landing[fieldKey];
-      if (Object.prototype.hasOwnProperty.call(root, fieldKey)) delete root[fieldKey];
+      setLandingUrlOverride_(root, fieldKey, normalized);
     }
     cleanupLoadedPublicConfig_();
 
-    if (beforeValue === normalized) {
+    const afterSnapshot = snapshotWebsitePayload_();
+    if (beforeSnapshot === afterSnapshot) {
       syncPublicConfigEditorFromState_({ preserveStatus: true });
-      return;
+      return false;
     }
     applyPublicConfigMutation_(label + " updated.");
     setPublicProfileStatus(label + " updated.", false);
-    syncPublicConfigEditorFromState_();
+    syncPublicConfigEditorFromState_({ preserveStatus: true });
+    return true;
   };
 
   // Apply website-profile JSON from editor into preview payload.
@@ -244,6 +843,9 @@
     }
 
     root.profile = parsed;
+    if (isPlainObject_(root.landing) && Object.prototype.hasOwnProperty.call(root.landing, "profile")) {
+      delete root.landing.profile;
+    }
     cleanupLoadedPublicConfig_();
     applyPublicConfigMutation_("Website profile JSON updated.");
     setPublicProfileStatus("Website profile JSON applied.", false);
@@ -267,6 +869,890 @@
     }
     setPublicProfileStatus("Website profile cleared. Default copy is active.", false);
     syncPublicConfigEditorFromState_({ preserveStatus: true });
+  };
+
+  // Build a compact mutation snapshot for website data.
+  const snapshotWebsitePayload_ = () => {
+    if (!state.lastRosterData || typeof state.lastRosterData !== "object") return "";
+    const pageTitle = toStr(state.lastRosterData.pageTitle).trim();
+    const publicConfig = isPlainObject_(state.lastRosterData.publicConfig) ? state.lastRosterData.publicConfig : null;
+    return jsonPretty({
+      pageTitle,
+      publicConfig,
+    });
+  };
+
+  // Apply one website mutation and update preview only when it changed something.
+  const mutateWebsitePayload_ = (mutatorRaw, statusMessageRaw) => {
+    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    const mutator = typeof mutatorRaw === "function" ? mutatorRaw : () => {};
+    const before = snapshotWebsitePayload_();
+    mutator();
+    cleanupLoadedPublicConfig_();
+    const after = snapshotWebsitePayload_();
+    const changed = before !== after;
+    if (changed) {
+      const statusMessage = toStr(statusMessageRaw).trim() || "Website content updated.";
+      applyPublicConfigMutation_(statusMessage);
+      setPublicProfileStatus(statusMessage, false);
+    }
+    syncPublicConfigEditorFromState_({ preserveStatus: true });
+    return changed;
+  };
+
+  // Validate token-aware text against schema token rules.
+  const normalizeTokenAwareFieldValue_ = (fieldRaw, valueRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    const value = toStr(valueRaw).trim();
+    if (!value) return "";
+    const tokens = Array.isArray(field.tokens) ? field.tokens.map((t) => toStr(t).trim()).filter(Boolean) : [];
+    if (!tokens.length) return value;
+
+    const tokenMatches = value.match(/\{[A-Za-z0-9_]+\}/g) || [];
+    const unknown = [];
+    const seen = {};
+    for (let i = 0; i < tokenMatches.length; i++) {
+      const token = tokenMatches[i];
+      if (tokens.indexOf(token) >= 0) continue;
+      if (seen[token]) continue;
+      seen[token] = true;
+      unknown.push(token);
+    }
+    if (unknown.length) {
+      throw new Error((toStr(field.label).trim() || "Field") + " uses unsupported token(s): " + unknown.join(", "));
+    }
+
+    const required = Array.isArray(field.requiredTokens)
+      ? field.requiredTokens.map((t) => toStr(t).trim()).filter(Boolean)
+      : [];
+    const missing = [];
+    for (let i = 0; i < required.length; i++) {
+      if (tokenMatches.indexOf(required[i]) >= 0) continue;
+      missing.push(required[i]);
+    }
+    if (missing.length) {
+      throw new Error((toStr(field.label).trim() || "Field") + " must include token(s): " + missing.join(", "));
+    }
+    return value;
+  };
+
+  // Normalize a scalar field value by field type.
+  const normalizeWebsiteScalarValue_ = (fieldRaw, valueRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    if (field.type === "url") {
+      const raw = toStr(valueRaw).trim();
+      const normalized = normalizePublicConfigUrl_(raw);
+      if (raw && !normalized) {
+        throw new Error((toStr(field.label).trim() || "URL field") + " must start with http:// or https://");
+      }
+      return normalized;
+    }
+    if (field.type === "tokenText") {
+      return normalizeTokenAwareFieldValue_(field, valueRaw);
+    }
+    return toStr(valueRaw).trim();
+  };
+
+  // Normalize repeater array values.
+  const normalizeRepeaterValue_ = (fieldRaw, arrayRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    const source = Array.isArray(arrayRaw) ? arrayRaw : [];
+    if (field.itemType === "string") {
+      const outText = [];
+      for (let i = 0; i < source.length; i++) {
+        const text = toStr(source[i]).trim();
+        if (!text) continue;
+        outText.push(text);
+      }
+      return outText;
+    }
+
+    const itemFields = Array.isArray(field.itemFields) ? field.itemFields : [];
+    const outObjects = [];
+    for (let i = 0; i < source.length; i++) {
+      const row = isPlainObject_(source[i]) ? source[i] : {};
+      const outRow = {};
+      for (let j = 0; j < itemFields.length; j++) {
+        const itemField = itemFields[j];
+        const key = toStr(itemField && itemField.key).trim();
+        if (!key) continue;
+        const value = normalizeWebsiteScalarValue_(itemField, row[key]);
+        if (!value) continue;
+        outRow[key] = value;
+      }
+      if (Object.keys(outRow).length) outObjects.push(outRow);
+    }
+    return outObjects;
+  };
+
+  // Commit one schema scalar field to preview payload.
+  const commitWebsiteScalarField_ = (fieldRaw, rawValue) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field) return false;
+    const label = toStr(field.label).trim() || "Website field";
+    const normalized = normalizeWebsiteScalarValue_(field, rawValue);
+
+    if (field.source === "page") {
+      const nextTitle = normalized || WEBSITE_PAGE_TITLE_DEFAULT;
+      return mutateWebsitePayload_(() => {
+        state.lastRosterData.pageTitle = nextTitle;
+      }, label + " updated.");
+    }
+
+    if (field.source === "landing") {
+      const fallback = toStr(PUBLIC_LANDING_EDITOR_DEFAULTS[field.path]).trim();
+      return mutateWebsitePayload_(() => {
+        const root = getLoadedPublicConfigRoot_();
+        if (!root) return;
+        if (!normalized || normalized === fallback) {
+          clearLandingUrlAliases_(root, field.path);
+          return;
+        }
+        setLandingUrlOverride_(root, field.path, normalized);
+      }, label + " updated.");
+    }
+
+    return mutateWebsitePayload_(() => {
+      const root = getLoadedPublicConfigRoot_();
+      if (!root) return;
+      normalizeProfilePlacement_(root);
+      const fallback = getWebsiteFieldDefaultValue_(field);
+      if (!normalized || isJsonEqual_(normalized, fallback)) {
+        if (isPlainObject_(root.profile)) deleteValueByPath_(root.profile, field.path);
+        return;
+      }
+      if (!isPlainObject_(root.profile)) root.profile = {};
+      writeValueByPath_(root.profile, field.path, normalized);
+    }, label + " updated.");
+  };
+
+  // Commit one schema repeater field.
+  const commitWebsiteRepeaterField_ = (fieldRaw, arrayRaw, statusMessageRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field || field.type !== "repeater") return false;
+    const normalized = normalizeRepeaterValue_(field, arrayRaw);
+    const fallback = normalizeRepeaterValue_(field, getWebsiteFieldDefaultValue_(field));
+    const statusMessage = toStr(statusMessageRaw).trim() || (toStr(field.label).trim() || "Repeater field") + " updated.";
+    return mutateWebsitePayload_(() => {
+      const root = getLoadedPublicConfigRoot_();
+      if (!root) return;
+      normalizeProfilePlacement_(root);
+      if (!normalized.length || isJsonEqual_(normalized, fallback)) {
+        if (isPlainObject_(root.profile)) deleteValueByPath_(root.profile, field.path);
+        return;
+      }
+      if (!isPlainObject_(root.profile)) root.profile = {};
+      writeValueByPath_(root.profile, field.path, normalized);
+    }, statusMessage);
+  };
+
+  // Reset one section back to defaults by removing overrides.
+  const resetWebsiteSectionToDefaults_ = (sectionRaw) => {
+    const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
+    if (!section) return false;
+    const fields = Array.isArray(section.fields) ? section.fields : [];
+    return mutateWebsitePayload_(() => {
+      const root = getLoadedPublicConfigRoot_();
+      if (!root) return;
+      normalizeProfilePlacement_(root);
+      for (let i = 0; i < fields.length; i++) {
+        const field = fields[i];
+        if (!field || typeof field !== "object") continue;
+        if (field.source === "page") {
+          state.lastRosterData.pageTitle = WEBSITE_PAGE_TITLE_DEFAULT;
+          continue;
+        }
+        if (field.source === "landing") {
+          clearLandingUrlAliases_(root, field.path);
+          continue;
+        }
+        if (isPlainObject_(root.profile)) deleteValueByPath_(root.profile, field.path);
+      }
+      if (section.advanced === true) {
+        if (Object.prototype.hasOwnProperty.call(root, "profile")) delete root.profile;
+        if (isPlainObject_(root.landing) && Object.prototype.hasOwnProperty.call(root.landing, "profile")) {
+          delete root.landing.profile;
+        }
+      }
+    }, (toStr(section.label).trim() || "Section") + " reset to defaults.");
+  };
+
+  // Resolve one section by id.
+  const getWebsiteEditorSectionById_ = (sectionIdRaw) => {
+    const sectionId = toStr(sectionIdRaw).trim();
+    return WEBSITE_EDITOR_SECTION_BY_ID[sectionId] || null;
+  };
+
+  // Keep workspace class synced with mobile section-editing mode.
+  const syncWebsiteWorkspaceModeClass_ = () => {
+    const workspace = $("#websiteEditorWorkspace");
+    if (!workspace) return;
+    workspace.classList.toggle("is-editing-section", !!toStr(state.websiteEditorActiveSectionId).trim());
+  };
+
+  // Open one section in the Website editor.
+  const openWebsiteEditorSection_ = (sectionIdRaw) => {
+    const section = getWebsiteEditorSectionById_(sectionIdRaw);
+    state.websiteEditorActiveSectionId = section ? section.id : "";
+    syncWebsiteWorkspaceModeClass_();
+    renderWebsiteSectionOverview_();
+    renderWebsiteSectionEditor_();
+  };
+
+  // Return from section editor to section overview.
+  const closeWebsiteEditorSection_ = () => {
+    state.websiteEditorActiveSectionId = "";
+    syncWebsiteWorkspaceModeClass_();
+    renderWebsiteSectionOverview_();
+    renderWebsiteSectionEditor_();
+  };
+
+  // Count explicit overrides inside one section.
+  const countSectionOverrides_ = (sectionRaw) => {
+    const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
+    if (!section) return 0;
+    if (section.advanced === true) {
+      const root = isPlainObject_(state.lastRosterData && state.lastRosterData.publicConfig)
+        ? state.lastRosterData.publicConfig
+        : {};
+      const merged = getMergedProfileOverride_(root);
+      return Object.keys(merged).length;
+    }
+    const fields = Array.isArray(section.fields) ? section.fields : [];
+    let count = 0;
+    for (let i = 0; i < fields.length; i++) {
+      if (hasWebsiteFieldOverride_(fields[i])) count += 1;
+    }
+    return count;
+  };
+
+  // Build one compact action button.
+  const createCompactActionButton_ = (labelRaw) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn secondary admin-command-btn";
+    btn.textContent = toStr(labelRaw).trim();
+    btn.setAttribute("data-website-control", "1");
+    return btn;
+  };
+
+  // Render one scalar field editor row.
+  const renderWebsiteScalarField_ = (mount, fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field || !mount) return;
+
+    const row = document.createElement("div");
+    row.className = "website-field";
+
+    const head = document.createElement("div");
+    head.className = "website-field-head";
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "website-field-title";
+    const title = document.createElement("strong");
+    title.textContent = toStr(field.label).trim() || "Field";
+    titleWrap.appendChild(title);
+    const descText = toStr(field.description).trim();
+    if (descText) {
+      const desc = document.createElement("span");
+      desc.textContent = descText;
+      titleWrap.appendChild(desc);
+    }
+    head.appendChild(titleWrap);
+
+    const stateBadge = document.createElement("span");
+    const hasOverride = hasWebsiteFieldOverride_(field);
+    stateBadge.className = "website-field-state" + (hasOverride ? " is-override" : "");
+    stateBadge.textContent = hasOverride ? "Override" : "Default";
+    head.appendChild(stateBadge);
+    row.appendChild(head);
+
+    const input = field.type === "textarea" || field.type === "tokenText"
+      ? document.createElement("textarea")
+      : document.createElement("input");
+    if (input.tagName === "INPUT") {
+      input.type = field.type === "url" ? "url" : "text";
+      input.className = "admin-input";
+    } else {
+      input.className = "admin-textarea";
+      input.rows = field.type === "textarea" ? 3 : 2;
+    }
+    input.value = toStr(getWebsiteFieldEffectiveValue_(field));
+    input.placeholder = toStr(field.placeholder).trim();
+    input.setAttribute("data-website-control", "1");
+    row.appendChild(input);
+
+    if (field.type === "tokenText") {
+      const tokenRow = document.createElement("div");
+      tokenRow.className = "website-token-hints";
+      const tokens = Array.isArray(field.tokens) ? field.tokens : [];
+      for (let i = 0; i < tokens.length; i++) {
+        const chip = document.createElement("span");
+        chip.className = "website-token-chip";
+        chip.textContent = toStr(tokens[i]).trim();
+        tokenRow.appendChild(chip);
+      }
+      row.appendChild(tokenRow);
+    }
+
+    const message = document.createElement("div");
+    message.className = "website-field-message";
+    row.appendChild(message);
+
+    const commit = () => {
+      try {
+        if (typeof input.setCustomValidity === "function") input.setCustomValidity("");
+        commitWebsiteScalarField_(field, input.value);
+      } catch (err) {
+        const detail = toErrorMessage(err);
+        message.textContent = detail;
+        message.classList.add("is-error");
+        setPublicProfileStatus("Update failed: " + detail, true);
+        if (typeof input.setCustomValidity === "function") {
+          input.setCustomValidity(detail);
+          if (typeof input.reportValidity === "function") input.reportValidity();
+          input.setCustomValidity("");
+        }
+      }
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("blur", commit);
+    mount.appendChild(row);
+  };
+
+  // Read effective repeater items as a mutable array copy.
+  const readEffectiveRepeaterItems_ = (fieldRaw) => {
+    const value = getWebsiteFieldEffectiveValue_(fieldRaw);
+    return Array.isArray(value) ? cloneJson(value) : [];
+  };
+
+  // Render one repeater field with item cards and list controls.
+  const renderWebsiteRepeaterField_ = (mount, fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field || !mount) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "website-repeater";
+
+    const head = document.createElement("div");
+    head.className = "website-repeater-head";
+    const title = document.createElement("h4");
+    title.textContent = toStr(field.label).trim() || "Repeater";
+    head.appendChild(title);
+
+    const addBtn = createCompactActionButton_("Add");
+    addBtn.onclick = () => {
+      const next = readEffectiveRepeaterItems_(field);
+      const nextItem = field.defaultItem != null ? cloneJson(field.defaultItem) : (field.itemType === "string" ? "" : {});
+      next.push(nextItem);
+      try {
+        commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " updated.");
+      } catch (err) {
+        setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+      }
+    };
+    head.appendChild(addBtn);
+    wrap.appendChild(head);
+
+    const descText = toStr(field.description).trim();
+    if (descText) {
+      const desc = document.createElement("div");
+      desc.className = "small muted";
+      desc.textContent = descText;
+      wrap.appendChild(desc);
+    }
+
+    const list = document.createElement("div");
+    list.className = "website-repeater-list";
+    const items = readEffectiveRepeaterItems_(field);
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "website-repeater-empty";
+      empty.textContent = "No items yet. Add the first entry.";
+      list.appendChild(empty);
+      wrap.appendChild(list);
+      mount.appendChild(wrap);
+      return;
+    }
+
+    for (let index = 0; index < items.length; index++) {
+      const card = document.createElement("div");
+      card.className = "website-repeater-item";
+
+      const itemHead = document.createElement("div");
+      itemHead.className = "website-repeater-item__head";
+      const itemTitle = document.createElement("div");
+      itemTitle.className = "website-repeater-item__title";
+      itemTitle.textContent = (toStr(field.itemLabel).trim() || "Item") + " " + (index + 1);
+      itemHead.appendChild(itemTitle);
+
+      const actions = document.createElement("div");
+      actions.className = "website-repeater-item__actions";
+
+      const moveUpBtn = createCompactActionButton_("\u2191");
+      moveUpBtn.title = "Move up";
+      moveUpBtn.disabled = index <= 0;
+      moveUpBtn.onclick = () => {
+        const next = readEffectiveRepeaterItems_(field);
+        if (index <= 0 || index >= next.length) return;
+        const tmp = next[index - 1];
+        next[index - 1] = next[index];
+        next[index] = tmp;
+        try {
+          commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " reordered.");
+        } catch (err) {
+          setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+        }
+      };
+      actions.appendChild(moveUpBtn);
+
+      const moveDownBtn = createCompactActionButton_("\u2193");
+      moveDownBtn.title = "Move down";
+      moveDownBtn.disabled = index >= items.length - 1;
+      moveDownBtn.onclick = () => {
+        const next = readEffectiveRepeaterItems_(field);
+        if (index < 0 || index >= next.length - 1) return;
+        const tmp = next[index + 1];
+        next[index + 1] = next[index];
+        next[index] = tmp;
+        try {
+          commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " reordered.");
+        } catch (err) {
+          setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+        }
+      };
+      actions.appendChild(moveDownBtn);
+
+      const duplicateBtn = createCompactActionButton_("Duplicate");
+      duplicateBtn.onclick = () => {
+        const next = readEffectiveRepeaterItems_(field);
+        if (index < 0 || index >= next.length) return;
+        next.splice(index + 1, 0, cloneJson(next[index]));
+        try {
+          commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " duplicated.");
+        } catch (err) {
+          setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+        }
+      };
+      actions.appendChild(duplicateBtn);
+
+      const deleteBtn = createCompactActionButton_("Delete");
+      deleteBtn.onclick = () => {
+        const next = readEffectiveRepeaterItems_(field);
+        if (index < 0 || index >= next.length) return;
+        next.splice(index, 1);
+        try {
+          commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " updated.");
+        } catch (err) {
+          setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+        }
+      };
+      actions.appendChild(deleteBtn);
+      itemHead.appendChild(actions);
+      card.appendChild(itemHead);
+
+      const fieldGrid = document.createElement("div");
+      fieldGrid.className = "website-repeater-item__fields";
+      if (field.itemType === "string") {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "admin-input";
+        input.value = toStr(items[index]);
+        input.setAttribute("data-website-control", "1");
+        const commit = () => {
+          const next = readEffectiveRepeaterItems_(field);
+          if (index < 0 || index >= next.length) return;
+          next[index] = toStr(input.value).trim();
+          try {
+            commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " updated.");
+          } catch (err) {
+            setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+          }
+        };
+        input.addEventListener("change", commit);
+        input.addEventListener("blur", commit);
+        fieldGrid.appendChild(input);
+      } else {
+        const row = isPlainObject_(items[index]) ? items[index] : {};
+        const itemFields = Array.isArray(field.itemFields) ? field.itemFields : [];
+        for (let i = 0; i < itemFields.length; i++) {
+          const itemField = itemFields[i];
+          const key = toStr(itemField && itemField.key).trim();
+          if (!key) continue;
+          const label = document.createElement("label");
+          label.className = "admin-field";
+          const labelText = document.createElement("span");
+          labelText.className = "admin-field-label";
+          labelText.textContent = toStr(itemField.label).trim() || key;
+          label.appendChild(labelText);
+
+          const input = itemField.type === "textarea" ? document.createElement("textarea") : document.createElement("input");
+          if (input.tagName === "TEXTAREA") {
+            input.className = "admin-textarea";
+            input.rows = 2;
+          } else {
+            input.className = "admin-input";
+            input.type = "text";
+          }
+          input.value = toStr(row[key]);
+          input.setAttribute("data-website-control", "1");
+          label.appendChild(input);
+          const commit = () => {
+            const next = readEffectiveRepeaterItems_(field);
+            if (index < 0 || index >= next.length) return;
+            const nextRow = isPlainObject_(next[index]) ? next[index] : {};
+            nextRow[key] = toStr(input.value).trim();
+            next[index] = nextRow;
+            try {
+              commitWebsiteRepeaterField_(field, next, (toStr(field.label).trim() || "Field") + " updated.");
+            } catch (err) {
+              setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
+            }
+          };
+          input.addEventListener("change", commit);
+          input.addEventListener("blur", commit);
+          fieldGrid.appendChild(label);
+        }
+      }
+
+      card.appendChild(fieldGrid);
+      list.appendChild(card);
+    }
+
+    wrap.appendChild(list);
+    mount.appendChild(wrap);
+  };
+
+  // Read merged profile override currently in memory.
+  const readCurrentProfileOverrideForEditor_ = () => {
+    const root = isPlainObject_(state.lastRosterData && state.lastRosterData.publicConfig)
+      ? state.lastRosterData.publicConfig
+      : {};
+    return getMergedProfileOverride_(root);
+  };
+
+  // Download JSON text to a local file.
+  const downloadJsonFile_ = (filenameRaw, contentRaw) => {
+    const filename = toStr(filenameRaw).trim() || "profile-overrides.json";
+    const content = toStr(contentRaw);
+    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  };
+
+  // Read text from a browser file object.
+  const readFileAsText_ = (fileRaw) =>
+    new Promise((resolve, reject) => {
+      const file = fileRaw;
+      if (!file) {
+        resolve("");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => resolve(toStr(reader.result));
+      reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+      reader.readAsText(file);
+    });
+
+  // Render the advanced JSON escape hatch.
+  const renderWebsiteAdvancedSection_ = (mount) => {
+    if (!mount) return;
+    const wrap = document.createElement("div");
+    wrap.className = "website-advanced-json";
+
+    const field = document.createElement("label");
+    field.className = "admin-field";
+    field.setAttribute("for", "publicProfileJson");
+    const fieldLabel = document.createElement("span");
+    fieldLabel.className = "admin-field-label";
+    fieldLabel.textContent = "Profile override JSON";
+    field.appendChild(fieldLabel);
+
+    const textarea = document.createElement("textarea");
+    textarea.id = "publicProfileJson";
+    textarea.className = "admin-textarea";
+    textarea.spellcheck = false;
+    textarea.setAttribute("data-website-control", "1");
+    const payload = readCurrentProfileOverrideForEditor_();
+    textarea.value = Object.keys(payload).length ? jsonPretty(payload) : "";
+    field.appendChild(textarea);
+
+    const helper = document.createElement("span");
+    helper.className = "small muted";
+    helper.textContent = "Raw JSON is an advanced fallback. Use section editors when possible.";
+    field.appendChild(helper);
+    wrap.appendChild(field);
+
+    const importFileInput = document.createElement("input");
+    importFileInput.id = "importPublicProfileFile";
+    importFileInput.type = "file";
+    importFileInput.accept = ".json,application/json,text/plain";
+    importFileInput.className = "hidden";
+    importFileInput.setAttribute("data-website-control", "1");
+    wrap.appendChild(importFileInput);
+
+    const actions = document.createElement("div");
+    actions.className = "admin-public-config-actions";
+
+    const validateBtn = createCompactActionButton_("Validate");
+    validateBtn.onclick = () => {
+      const raw = toStr(textarea.value).trim();
+      if (!raw) {
+        setPublicProfileStatus("Profile JSON is empty. Defaults remain active.", false);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!isPlainObject_(parsed)) throw new Error("Profile JSON must be a JSON object.");
+        setPublicProfileStatus("Profile JSON is valid.", false);
+      } catch (err) {
+        setPublicProfileStatus("Validate failed: " + toErrorMessage(err), true);
+      }
+    };
+    actions.appendChild(validateBtn);
+
+    const formatBtn = createCompactActionButton_("Format");
+    formatBtn.onclick = () => {
+      const raw = toStr(textarea.value).trim();
+      if (!raw) return;
+      try {
+        const parsed = JSON.parse(raw);
+        if (!isPlainObject_(parsed)) throw new Error("Profile JSON must be a JSON object.");
+        textarea.value = jsonPretty(parsed);
+        setPublicProfileStatus("Profile JSON formatted.", false);
+      } catch (err) {
+        setPublicProfileStatus("Format failed: " + toErrorMessage(err), true);
+      }
+    };
+    actions.appendChild(formatBtn);
+
+    const importBtn = createCompactActionButton_("Import");
+    importBtn.onclick = () => {
+      importFileInput.value = "";
+      importFileInput.click();
+    };
+    actions.appendChild(importBtn);
+
+    const exportBtn = createCompactActionButton_("Export");
+    exportBtn.onclick = () => {
+      const raw = toStr(textarea.value).trim();
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (!isPlainObject_(parsed)) throw new Error("Profile JSON must be a JSON object.");
+          downloadJsonFile_("profile-overrides.json", jsonPretty(parsed));
+          setPublicProfileStatus("Profile JSON exported.", false);
+          return;
+        } catch {
+          // Fallback to merged in-memory payload below.
+        }
+      }
+      const merged = readCurrentProfileOverrideForEditor_();
+      downloadJsonFile_("profile-overrides.json", jsonPretty(merged));
+      setPublicProfileStatus("Current profile overrides exported.", false);
+    };
+    actions.appendChild(exportBtn);
+
+    const applyBtn = createCompactActionButton_("Apply JSON");
+    applyBtn.id = "applyPublicProfileBtn";
+    applyBtn.onclick = () => {
+      try {
+        applyPublicProfileJsonFromEditor_();
+      } catch (err) {
+        setPublicProfileStatus("Apply failed: " + toErrorMessage(err), true);
+      }
+    };
+    actions.appendChild(applyBtn);
+
+    const clearBtn = createCompactActionButton_("Reset Profile");
+    clearBtn.id = "clearPublicProfileBtn";
+    clearBtn.onclick = () => {
+      try {
+        clearPublicProfileFromEditor_();
+      } catch (err) {
+        setPublicProfileStatus("Clear failed: " + toErrorMessage(err), true);
+      }
+    };
+    actions.appendChild(clearBtn);
+    wrap.appendChild(actions);
+
+    importFileInput.addEventListener("change", async () => {
+      const file = importFileInput.files && importFileInput.files[0];
+      if (!file) return;
+      try {
+        const text = await readFileAsText_(file);
+        const parsed = JSON.parse(text);
+        if (!isPlainObject_(parsed)) throw new Error("Imported JSON must be a JSON object.");
+        textarea.value = jsonPretty(parsed);
+        setPublicProfileStatus("Profile JSON imported. Apply to save.", false);
+      } catch (err) {
+        setPublicProfileStatus("Import failed: " + toErrorMessage(err), true);
+      }
+    });
+
+    mount.appendChild(wrap);
+  };
+
+  // Render section overview card list.
+  const renderWebsiteSectionOverview_ = () => {
+    const mount = $("#websiteSectionList");
+    if (!mount) return;
+    mount.textContent = "";
+    if (!hasLoadedPreviewData_()) {
+      const empty = document.createElement("div");
+      empty.className = "website-section-empty";
+      empty.textContent = "Website data is not loaded yet. Unlock to edit website content.";
+      mount.appendChild(empty);
+      return;
+    }
+
+    for (let i = 0; i < WEBSITE_EDITOR_SECTIONS.length; i++) {
+      const section = WEBSITE_EDITOR_SECTIONS[i];
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "website-section-card" + (state.websiteEditorActiveSectionId === section.id ? " is-active" : "");
+      card.setAttribute("data-website-control", "1");
+      card.setAttribute("data-website-section-open", section.id);
+      card.onclick = () => openWebsiteEditorSection_(section.id);
+
+      const top = document.createElement("div");
+      top.className = "website-section-card__top";
+      const title = document.createElement("div");
+      title.className = "website-section-card__title";
+      title.textContent = section.label;
+      top.appendChild(title);
+
+      const count = countSectionOverrides_(section);
+      const pill = document.createElement("span");
+      pill.className = "website-override-pill" + (count > 0 ? " is-custom" : "");
+      pill.textContent = count > 0 ? (count + " override" + (count === 1 ? "" : "s")) : "Default";
+      top.appendChild(pill);
+      card.appendChild(top);
+
+      const desc = document.createElement("p");
+      desc.className = "website-section-card__desc";
+      desc.textContent = toStr(section.description).trim();
+      card.appendChild(desc);
+
+      const meta = document.createElement("div");
+      meta.className = "website-section-card__meta";
+      const fieldCount = section.advanced === true ? 0 : (Array.isArray(section.fields) ? section.fields.length : 0);
+      const fieldHint = document.createElement("span");
+      fieldHint.className = "small muted";
+      fieldHint.textContent = section.advanced === true
+        ? "Advanced tools"
+        : (fieldCount + " field" + (fieldCount === 1 ? "" : "s"));
+      meta.appendChild(fieldHint);
+      card.appendChild(meta);
+      mount.appendChild(card);
+    }
+  };
+
+  // Render active section detail editor.
+  const renderWebsiteSectionEditor_ = () => {
+    const mount = $("#websiteSectionEditor");
+    if (!mount) return;
+    mount.textContent = "";
+    if (!hasLoadedPreviewData_()) {
+      const empty = document.createElement("div");
+      empty.className = "website-section-empty";
+      empty.textContent = "Website data is not loaded yet. Unlock to edit website content.";
+      mount.appendChild(empty);
+      return;
+    }
+
+    const active = getWebsiteEditorSectionById_(state.websiteEditorActiveSectionId);
+    if (!active) {
+      const empty = document.createElement("div");
+      empty.className = "website-section-empty";
+      empty.textContent = "Select a section to edit website content.";
+      mount.appendChild(empty);
+      return;
+    }
+
+    const header = document.createElement("div");
+    header.className = "website-editor-header";
+    const top = document.createElement("div");
+    top.className = "website-editor-header__top";
+    const title = document.createElement("h3");
+    title.textContent = active.label;
+    top.appendChild(title);
+    const backBtn = createCompactActionButton_("Back to sections");
+    backBtn.onclick = () => closeWebsiteEditorSection_();
+    top.appendChild(backBtn);
+    header.appendChild(top);
+    if (toStr(active.description).trim()) {
+      const desc = document.createElement("p");
+      desc.textContent = toStr(active.description).trim();
+      header.appendChild(desc);
+    }
+    mount.appendChild(header);
+
+    const fieldsWrap = document.createElement("div");
+    fieldsWrap.className = "website-field-list";
+    if (active.advanced === true) {
+      renderWebsiteAdvancedSection_(fieldsWrap);
+    } else {
+      const fields = Array.isArray(active.fields) ? active.fields : [];
+      for (let i = 0; i < fields.length; i++) {
+        if (fields[i].type === "repeater") renderWebsiteRepeaterField_(fieldsWrap, fields[i]);
+        else renderWebsiteScalarField_(fieldsWrap, fields[i]);
+      }
+    }
+    mount.appendChild(fieldsWrap);
+  };
+
+  // Render all Website editor shell parts.
+  const renderWebsiteEditorShell_ = () => {
+    if (!hasLoadedPreviewData_()) {
+      state.websiteEditorActiveSectionId = "";
+    } else if (state.websiteEditorActiveSectionId && !getWebsiteEditorSectionById_(state.websiteEditorActiveSectionId)) {
+      state.websiteEditorActiveSectionId = "";
+    }
+    syncWebsiteWorkspaceModeClass_();
+    renderWebsiteSectionOverview_();
+    renderWebsiteSectionEditor_();
+    setPublicProfileControlsEnabled_(hasLoadedPreviewData_());
+  };
+
+  // Bind one quick-edit field by input id.
+  const bindWebsiteQuickField_ = (fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field) return;
+    const input = $("#" + toStr(field.id).trim());
+    if (!input) return;
+    const commit = () => {
+      try {
+        if (typeof input.setCustomValidity === "function") input.setCustomValidity("");
+        commitWebsiteScalarField_(field, input.value);
+      } catch (err) {
+        const message = toErrorMessage(err);
+        setPublicProfileStatus("Update failed: " + message, true);
+        setWebsiteQuickStatus_(message, true);
+        if (typeof input.setCustomValidity === "function") {
+          input.setCustomValidity(message);
+          if (typeof input.reportValidity === "function") input.reportValidity();
+          input.setCustomValidity("");
+        }
+      }
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("blur", commit);
+  };
+
+  // Bind static Website-tab controls.
+  const bindWebsiteEditorUi_ = () => {
+    if (state.websiteEditorUiBound) return;
+    state.websiteEditorUiBound = true;
+
+    for (let i = 0; i < WEBSITE_QUICK_FIELDS.length; i++) {
+      bindWebsiteQuickField_(WEBSITE_QUICK_FIELDS[i]);
+    }
   };
 
   // Set the roster status message.
@@ -4456,88 +5942,7 @@
     }
     renderAutoRefreshUi();
 
-    const pageTitleInput = $("#pageTitle");
-    if (pageTitleInput) {
-      // Handle commit page title.
-      const commitPageTitle = () => {
-        if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return;
-        const nextTitle = toStr(pageTitleInput.value).trim() || "Roster Overview";
-        pageTitleInput.value = nextTitle;
-        if (toStr(state.lastRosterData.pageTitle).trim() === nextTitle) return;
-        state.lastRosterData.pageTitle = nextTitle;
-        const publishBtn = $("#publishBtn");
-        if (publishBtn) publishBtn.disabled = false;
-        setStatus("Page title updated.");
-        markReportStale("Preview changed after page title update. Re-run compare with preview.");
-        renderPreviewFromState();
-      };
-      pageTitleInput.addEventListener("change", commitPageTitle);
-      pageTitleInput.addEventListener("blur", commitPageTitle);
-    }
-
-    const publicDiscordInviteInput = $("#publicDiscordInviteUrl");
-    const publicBannerMediaUrlInput = $("#publicBannerMediaUrl");
-    const publicSquareMediaUrlInput = $("#publicSquareMediaUrl");
-    const publicProfileJsonInput = $("#publicProfileJson");
-    const applyPublicProfileBtn = $("#applyPublicProfileBtn");
-    const clearPublicProfileBtn = $("#clearPublicProfileBtn");
-
-    // Bind one URL input to public-config persistence.
-    const bindPublicUrlInput_ = (inputEl, fieldKey, label) => {
-      if (!inputEl) return;
-      // Handle commit URL from editor input.
-      const commit = () => {
-        try {
-          commitPublicUrlFieldFromEditor_(fieldKey, inputEl, label);
-        } catch (err) {
-          syncPublicConfigEditorFromState_({ preserveStatus: true });
-          setPublicProfileStatus("Update failed: " + toErrorMessage(err), true);
-          alert("Public setting update failed: " + toErrorMessage(err));
-        }
-      };
-      inputEl.addEventListener("change", commit);
-      inputEl.addEventListener("blur", commit);
-    };
-
-    bindPublicUrlInput_(publicDiscordInviteInput, "discordInviteUrl", "Discord invite URL");
-    bindPublicUrlInput_(publicBannerMediaUrlInput, "bannerMediaUrl", "Banner media URL");
-    bindPublicUrlInput_(publicSquareMediaUrlInput, "squareMediaUrl", "Square media URL");
-
-    if (publicProfileJsonInput) {
-      publicProfileJsonInput.addEventListener("keydown", (e) => {
-        if (!e || !(e.ctrlKey || e.metaKey) || toStr(e.key).toLowerCase() !== "enter") return;
-        e.preventDefault();
-        if (applyPublicProfileBtn && applyPublicProfileBtn.disabled) return;
-        try {
-          applyPublicProfileJsonFromEditor_();
-        } catch (err) {
-          setPublicProfileStatus("Apply failed: " + toErrorMessage(err), true);
-          alert("Website profile apply failed: " + toErrorMessage(err));
-        }
-      });
-    }
-
-    if (applyPublicProfileBtn) {
-      applyPublicProfileBtn.onclick = () => {
-        try {
-          applyPublicProfileJsonFromEditor_();
-        } catch (err) {
-          setPublicProfileStatus("Apply failed: " + toErrorMessage(err), true);
-          alert("Website profile apply failed: " + toErrorMessage(err));
-        }
-      };
-    }
-
-    if (clearPublicProfileBtn) {
-      clearPublicProfileBtn.onclick = () => {
-        try {
-          clearPublicProfileFromEditor_();
-        } catch (err) {
-          setPublicProfileStatus("Clear failed: " + toErrorMessage(err), true);
-          alert("Website profile clear failed: " + toErrorMessage(err));
-        }
-      };
-    }
+    bindWebsiteEditorUi_();
     syncPublicConfigEditorFromState_();
 
     const excludeWarOutInput = $("#excludeWarOut");
