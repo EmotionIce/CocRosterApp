@@ -1631,6 +1631,13 @@ function removeRosterPlayersByTagSet_(roster, tagSetRaw) {
 // Build tracked war history tag set.
 function buildTrackedWarHistoryTagSet_(roster, warPerformanceRaw, nowIso) {
 	const out = buildRosterPoolTagSet_(roster);
+	const projectedTagSet = buildRosterPublicLineupProjectionTagSet_(roster);
+	const projectedTags = Object.keys(projectedTagSet);
+	for (let i = 0; i < projectedTags.length; i++) {
+		const tag = normalizeTag_(projectedTags[i]);
+		if (!tag) continue;
+		out[tag] = true;
+	}
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	const membershipByTag = warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" ? warPerformance.membershipByTag : {};
 	const nowMs = parseIsoToMs_(nowIso) || Date.now();
@@ -1815,11 +1822,17 @@ function metricCompareValue_(value) {
 }
 
 // Build history retention tag set.
-function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, regularWarRaw, nowIso) {
+function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, regularWarRaw, nowIso, projectedTagSetRaw) {
 	const out = {};
 	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
 	for (const rawTag in rosterPoolTagSet) {
 		if (!Object.prototype.hasOwnProperty.call(rosterPoolTagSet, rawTag)) continue;
+		const tag = normalizeTag_(rawTag);
+		if (tag) out[tag] = true;
+	}
+	const projectedTagSet = projectedTagSetRaw && typeof projectedTagSetRaw === "object" ? projectedTagSetRaw : {};
+	for (const rawTag in projectedTagSet) {
+		if (!Object.prototype.hasOwnProperty.call(projectedTagSet, rawTag)) continue;
 		const tag = normalizeTag_(rawTag);
 		if (tag) out[tag] = true;
 	}

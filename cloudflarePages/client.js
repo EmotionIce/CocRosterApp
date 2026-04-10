@@ -23,6 +23,7 @@
         : { format: (value) => String(value) };
 
     let lastRenderedData = null;
+    let lastRenderedRosterDisplayById = Object.create(null);
     let lastRenderedRosterFreshnessKey = "";
     let searchUiBound = false;
     let publicViewUiBound = false;
@@ -1448,6 +1449,184 @@
         };
     };
 
+    // Build roster player lookup by tag.
+    const buildRosterPlayerByTag = (rosterRaw) => {
+        const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+        const out = Object.create(null);
+        const players = []
+            .concat(Array.isArray(roster.main) ? roster.main : [])
+            .concat(Array.isArray(roster.subs) ? roster.subs : [])
+            .concat(Array.isArray(roster.missing) ? roster.missing : []);
+        for (let i = 0; i < players.length; i++) {
+            const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+            const tag = normalizeClanTag(player.tag);
+            if (!tag || Object.prototype.hasOwnProperty.call(out, tag)) continue;
+            out[tag] = player;
+        }
+        return out;
+    };
+
+    // Build roster public display model (projection-first without mutating canonical sections).
+    const buildRosterPublicDisplayModel = (rosterRaw) => {
+        const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+        const mainCanonical = Array.isArray(roster.main) ? roster.main : [];
+        const subsCanonical = Array.isArray(roster.subs) ? roster.subs : [];
+        const missingCanonical = Array.isArray(roster.missing) ? roster.missing : [];
+        const canonicalByTag = buildRosterPlayerByTag(roster);
+        const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object"
+            ? roster.publicLineupProjection
+            : null;
+        const projectionPlayersRaw = projection && projection.active === true && Array.isArray(projection.players)
+            ? projection.players
+            : [];
+        const projectionSource = toStr(projection && projection.source).trim();
+        const projectionTrackingMode = toStr(projection && projection.trackingMode).trim() || getRosterTrackingMode(roster);
+        const projectionUpdatedAt = toStr(projection && projection.updatedAt).trim();
+        const projectionHasMapPosition = projectionPlayersRaw.some((playerRaw) => {
+            const mapPosition = Number(playerRaw && playerRaw.mapPosition);
+            return Number.isFinite(mapPosition) && mapPosition > 0;
+        });
+        const projectionPlayersOrdered = projectionPlayersRaw.slice().sort((leftRaw, rightRaw) => {
+            if (projectionHasMapPosition) {
+                const leftMapPositionRaw = Number(leftRaw && leftRaw.mapPosition);
+                const rightMapPositionRaw = Number(rightRaw && rightRaw.mapPosition);
+                const leftMapPosition = Number.isFinite(leftMapPositionRaw) && leftMapPositionRaw > 0
+                    ? Math.floor(leftMapPositionRaw)
+                    : Number.MAX_SAFE_INTEGER;
+                const rightMapPosition = Number.isFinite(rightMapPositionRaw) && rightMapPositionRaw > 0
+                    ? Math.floor(rightMapPositionRaw)
+                    : Number.MAX_SAFE_INTEGER;
+                if (leftMapPosition !== rightMapPosition) return leftMapPosition - rightMapPosition;
+            }
+            const left = normalizePlayer(leftRaw);
+            const right = normalizePlayer(rightRaw);
+            const leftTh = toNonNegativeInt(left.th);
+            const rightTh = toNonNegativeInt(right.th);
+            if (leftTh !== rightTh) return rightTh - leftTh;
+            return left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0;
+        });
+        const activeTagSet = Object.create(null);
+
+        // Merge canonical player metadata with projected live lineup metadata.
+        const mergeProjectedPlayer = (projectedRaw) => {
+            const projected = projectedRaw && typeof projectedRaw === "object" ? projectedRaw : {};
+            const projectedTag = normalizeClanTag(projected.tag);
+            if (!projectedTag) return null;
+            const canonicalSeed = canonicalByTag[projectedTag] && typeof canonicalByTag[projectedTag] === "object"
+                ? canonicalByTag[projectedTag]
+                : {};
+            const merged = Object.assign({}, canonicalSeed, projected);
+            merged.tag = projectedTag;
+            const projectedThRaw = Number(projected.th);
+            if (Number.isFinite(projectedThRaw) && projectedThRaw > 0) merged.th = Math.floor(projectedThRaw);
+            const projectedMapPositionRaw = Number(projected.mapPosition);
+            merged.mapPosition = Number.isFinite(projectedMapPositionRaw) && projectedMapPositionRaw > 0
+                ? Math.floor(projectedMapPositionRaw)
+                : null;
+            merged.trackingMode = toStr(projected.trackingMode).trim() || projectionTrackingMode;
+            merged.source = toStr(projected.source).trim() || projectionSource;
+            merged.updatedAt = toStr(projected.updatedAt).trim() || projectionUpdatedAt;
+            merged.synthetic = projected.synthetic === true || !Object.prototype.hasOwnProperty.call(canonicalByTag, projectedTag);
+            merged.slot = null;
+            return merged;
+        };
+
+        // Dedupe by player tag while preserving first-seen order.
+        const dedupePlayersByTag = (playersRaw) => {
+            const players = Array.isArray(playersRaw) ? playersRaw : [];
+            const out = [];
+            const seen = Object.create(null);
+            for (let i = 0; i < players.length; i++) {
+                const tag = normalizeClanTag(players[i] && players[i].tag);
+                if (!tag || seen[tag]) continue;
+                seen[tag] = true;
+                out.push(players[i]);
+            }
+            return out;
+        };
+
+        const projectedMain = [];
+        for (let i = 0; i < projectionPlayersOrdered.length; i++) {
+            const mergedProjectedPlayer = mergeProjectedPlayer(projectionPlayersOrdered[i]);
+            if (!mergedProjectedPlayer) continue;
+            const tag = normalizeClanTag(mergedProjectedPlayer.tag);
+            if (!tag || activeTagSet[tag]) continue;
+            activeTagSet[tag] = true;
+            projectedMain.push(mergedProjectedPlayer);
+        }
+
+        const displayMain = projectedMain.concat(
+            mainCanonical.filter((playerRaw) => {
+                const tag = normalizeClanTag(playerRaw && playerRaw.tag);
+                return !tag || !activeTagSet[tag];
+            }),
+        );
+        const displaySubs = subsCanonical.filter((playerRaw) => {
+            const tag = normalizeClanTag(playerRaw && playerRaw.tag);
+            return !tag || !activeTagSet[tag];
+        });
+        const displayMissing = missingCanonical.filter((playerRaw) => {
+            const tag = normalizeClanTag(playerRaw && playerRaw.tag);
+            return !tag || !activeTagSet[tag];
+        });
+
+        const main = dedupePlayersByTag(displayMain);
+        const subs = dedupePlayersByTag(displaySubs);
+        const missing = dedupePlayersByTag(displayMissing);
+        return {
+            main: main,
+            subs: subs,
+            missing: missing,
+            activeTagSet: activeTagSet,
+            badges: {
+                main: main.length,
+                subs: subs.length,
+                missing: missing.length,
+            },
+        };
+    };
+
+    // Build roster display bundle for rendering/search.
+    const buildRosterDisplayBundle = (rostersRaw, optionsRaw) => {
+        const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const useProjection = options.useProjection !== false;
+        const outRosters = [];
+        const byRosterId = Object.create(null);
+        for (let i = 0; i < rosters.length; i++) {
+            const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+            const trackingMode = getRosterTrackingMode(roster);
+            const model = useProjection
+                ? buildRosterPublicDisplayModel(roster)
+                : {
+                    main: Array.isArray(roster.main) ? roster.main : [],
+                    subs: Array.isArray(roster.subs) ? roster.subs : [],
+                    missing: Array.isArray(roster.missing) ? roster.missing : [],
+                    badges: {
+                        main: Array.isArray(roster.main) ? roster.main.length : 0,
+                        subs: Array.isArray(roster.subs) ? roster.subs.length : 0,
+                        missing: Array.isArray(roster.missing) ? roster.missing.length : 0,
+                    },
+                };
+            const nextRoster = Object.assign({}, roster, {
+                trackingMode: trackingMode,
+                main: model.main,
+                subs: model.subs,
+                missing: model.missing,
+                badges: trackingMode === "regularWar"
+                    ? { main: model.badges.main, subs: model.badges.subs, missing: model.badges.missing }
+                    : { main: model.badges.main, subs: model.badges.subs },
+            });
+            outRosters.push(nextRoster);
+            const rosterId = toStr(nextRoster && nextRoster.id).trim();
+            if (rosterId) byRosterId[rosterId] = nextRoster;
+        }
+        return {
+            rosters: outRosters,
+            byRosterId: byRosterId,
+        };
+    };
+
     // Find roster player by tag.
     const findRosterPlayerByTag = (roster, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
@@ -1614,13 +1793,41 @@
         const tag = normalizeClanTag(tagRaw);
         const rosterId = toStr(rosterIdRaw).trim();
         const rosters = lastRenderedData && Array.isArray(lastRenderedData.rosters) ? lastRenderedData.rosters : [];
+        const displayByRosterId = lastRenderedRosterDisplayById && typeof lastRenderedRosterDisplayById === "object"
+            ? lastRenderedRosterDisplayById
+            : Object.create(null);
         if (!tag || !rosters.length) return null;
 
+        // Handle find canonical entry.
+        const findCanonicalEntry = (roster) => {
+            const sections = [
+                { role: "main", players: Array.isArray(roster && roster.main) ? roster.main : [] },
+                { role: "sub", players: Array.isArray(roster && roster.subs) ? roster.subs : [] },
+                { role: "missing", players: Array.isArray(roster && roster.missing) ? roster.missing : [] },
+            ];
+            for (let s = 0; s < sections.length; s++) {
+                const section = sections[s];
+                const players = Array.isArray(section.players) ? section.players : [];
+                for (let i = 0; i < players.length; i++) {
+                    const player = normalizePlayer(players[i]);
+                    if (normalizeClanTag(player.tag) !== tag) continue;
+                    return {
+                        role: section.role,
+                        index: i,
+                        rawPlayer: players[i],
+                        player: player,
+                    };
+                }
+            }
+            return null;
+        };
+
         // Handle scan roster.
-        const scanRoster = (roster) => {
-            const main = Array.isArray(roster && roster.main) ? roster.main : [];
-            const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
-            const missing = Array.isArray(roster && roster.missing) ? roster.missing : [];
+        const scanRoster = (roster, displayRosterRaw) => {
+            const displayRoster = displayRosterRaw && typeof displayRosterRaw === "object" ? displayRosterRaw : roster;
+            const main = Array.isArray(displayRoster && displayRoster.main) ? displayRoster.main : [];
+            const subs = Array.isArray(displayRoster && displayRoster.subs) ? displayRoster.subs : [];
+            const missing = Array.isArray(displayRoster && displayRoster.missing) ? displayRoster.missing : [];
             const trackingMode = getRosterTrackingMode(roster);
             const suggestionModel = trackingMode === "cwl" ? getRosterBenchSuggestionModel(roster) : null;
             const sections = [
@@ -1633,13 +1840,14 @@
                 const section = sections[s];
                 const players = Array.isArray(section.players) ? section.players : [];
                 for (let i = 0; i < players.length; i++) {
-                    const player = normalizePlayer(players[i]);
-                    if (normalizeClanTag(player.tag) !== tag) continue;
+                    const displayPlayer = normalizePlayer(players[i]);
+                    if (normalizeClanTag(displayPlayer.tag) !== tag) continue;
+                    const canonicalEntry = findCanonicalEntry(roster);
                     return {
                         rosterId: toStr(roster && roster.id).trim(),
                         rosterTitle: toStr(roster && roster.title).trim(),
                         trackingMode,
-                        player,
+                        player: displayPlayer,
                         rawPlayer: players[i],
                         role: section.role,
                         index: i,
@@ -1649,6 +1857,7 @@
                         warPerformance: roster && roster.warPerformance,
                         suggestionModel,
                         suggestion: trackingMode === "cwl" ? getPlayerBenchSuggestion(suggestionModel, tag) : null,
+                        canonicalRole: canonicalEntry ? canonicalEntry.role : "",
                     };
                 }
             }
@@ -1658,12 +1867,13 @@
         if (rosterId) {
             for (const roster of rosters) {
                 if (toStr(roster && roster.id).trim() !== rosterId) continue;
-                return scanRoster(roster);
+                return scanRoster(roster, displayByRosterId[rosterId]);
             }
         }
 
         for (const roster of rosters) {
-            const found = scanRoster(roster);
+            const id = toStr(roster && roster.id).trim();
+            const found = scanRoster(roster, displayByRosterId[id]);
             if (found) return found;
         }
         return null;
@@ -2574,6 +2784,9 @@
         return buildStaticAssetUrl("assets/icons/th" + level + ".webp");
     };
 
+    // Get Discord icon URL.
+    const getDiscordIconUrl = () => buildStaticAssetUrl("assets/icons/discord.webp");
+
     const LEAGUE_ICON_ASSET_BY_FAMILY = {
         unranked: "assets/icons/league-unranked.webp",
         skeleton: "assets/icons/league-skeleton.webp",
@@ -2710,6 +2923,42 @@
             console.log("[league-badge]", { source: source, chosen: meta, from: source.hasApiIconUrls ? "api-iconUrls-fallback" : "no-icon" });
         }
         return meta;
+    };
+
+    // Get roster card league badge meta via local static assets only.
+    const getRosterCardLeagueBadgeMeta = (playerRaw, dataRaw) => {
+        // Resolve local icon for a league name/family pair.
+        const resolveLocalLeagueMeta = (nameRaw, familyRaw) => {
+            const name = toStr(nameRaw).trim();
+            const key = normalizeLeagueFamilyKey(familyRaw || resolveHomeLeagueAssetFamily(name));
+            if (!key) return null;
+            if (!Object.prototype.hasOwnProperty.call(leagueIconCache, key)) {
+                leagueIconCache[key] = { dataUrl: getLeagueIconUrlFromFamily(key) };
+            }
+            const localEntry = leagueIconCache[key] && typeof leagueIconCache[key] === "object" ? leagueIconCache[key] : null;
+            const src = localEntry && localEntry.dataUrl ? toStr(localEntry.dataUrl).trim() : "";
+            if (!src) return null;
+            return {
+                name: name || "Home league",
+                key: key,
+                src: src,
+            };
+        };
+
+        const directSource = extractHomeLeagueBadgeSource(playerRaw);
+        if (directSource && directSource.name) {
+            const directMeta = resolveLocalLeagueMeta(directSource.name, directSource.fallbackAssetFamily);
+            if (directMeta) return directMeta;
+        }
+
+        const tag = normalizeClanTag(playerRaw && playerRaw.tag);
+        if (!tag) return null;
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : lastRenderedData;
+        const metricsEntry = getPlayerMetricsEntry(tag, data);
+        const latestSnapshot = readMetricsLatestSnapshot(metricsEntry);
+        if (!latestSnapshot || typeof latestSnapshot !== "object") return null;
+        const descriptor = resolveLeaderboardLeagueDescriptorFromSnapshot(latestSnapshot);
+        return resolveLocalLeagueMeta(descriptor && descriptor.name, descriptor && descriptor.family);
     };
 
     // Swap this generated palette helper for local TH asset mapping later if desired.
@@ -4581,6 +4830,100 @@
         return banner;
     };
 
+    // Build compact public form score badge meta.
+    const buildPlayerPublicFormScore = (trackingModeRaw, cwlStatsRaw, regularWarStatsRaw, longTermStatsRaw) => {
+        const trackingMode = toStr(trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+        const cwlStats = cwlStatsRaw && typeof cwlStatsRaw === "object" ? cwlStatsRaw : {};
+        const regularWarStats = regularWarStatsRaw && typeof regularWarStatsRaw === "object" ? regularWarStatsRaw : {};
+        const regularCurrent = regularWarStats.current && typeof regularWarStats.current === "object"
+            ? regularWarStats.current
+            : {};
+        const longTermStats = longTermStatsRaw && typeof longTermStatsRaw === "object" ? longTermStatsRaw : {};
+        const longTermRegular = longTermStats.regular && typeof longTermStats.regular === "object"
+            ? longTermStats.regular
+            : {};
+        const longTermCwl = longTermStats.cwl && typeof longTermStats.cwl === "object"
+            ? longTermStats.cwl
+            : {};
+        const longTermOverall = longTermStats.overall && typeof longTermStats.overall === "object"
+            ? longTermStats.overall
+            : {};
+        const normalizeStarsPerAttack = (valueRaw) => {
+            const value = Number(valueRaw);
+            if (!Number.isFinite(value)) return null;
+            return clamp01(value / 3);
+        };
+        const normalizeDestruction = (valueRaw) => {
+            const value = Number(valueRaw);
+            if (!Number.isFinite(value)) return null;
+            return clamp01(value / 100);
+        };
+
+        const components = [];
+        if (trackingMode === "regularWar") {
+            const attacksUsed = toNonNegativeInt(regularCurrent.attacksUsed);
+            const starsTotal = toNonNegativeInt(regularCurrent.starsTotal);
+            const currentStarsEfficiency = attacksUsed > 0
+                ? normalizeStarsPerAttack(starsTotal / attacksUsed)
+                : null;
+            const currentAvgDestruction = normalizeDestruction(regularCurrent.avgDestruction);
+            const preferredLongTermStars = longTermRegular.avgStarsPerAttack != null
+                ? longTermRegular.avgStarsPerAttack
+                : longTermOverall.avgStarsPerAttack;
+            const longTermStarsEfficiency = normalizeStarsPerAttack(preferredLongTermStars);
+            components.push(
+                { weight: 0.55, value: currentStarsEfficiency },
+                { weight: 0.25, value: currentAvgDestruction },
+                { weight: 0.20, value: longTermStarsEfficiency }
+            );
+        } else {
+            const starsPerformance = cwlStats.starsPerf != null ? clamp01(cwlStats.starsPerf) : null;
+            const avgDestruction = normalizeDestruction(cwlStats.avgDestruction);
+            const preferredLongTermStars = longTermCwl.avgStarsPerAttack != null
+                ? longTermCwl.avgStarsPerAttack
+                : longTermOverall.avgStarsPerAttack;
+            const longTermStarsEfficiency = normalizeStarsPerAttack(preferredLongTermStars);
+            components.push(
+                { weight: 0.60, value: starsPerformance },
+                { weight: 0.25, value: avgDestruction },
+                { weight: 0.15, value: longTermStarsEfficiency }
+            );
+        }
+
+        let weightedValue = 0;
+        let includedWeight = 0;
+        for (let i = 0; i < components.length; i++) {
+            const component = components[i] || {};
+            const value = Number(component.value);
+            const weight = Number(component.weight);
+            if (!Number.isFinite(value) || !Number.isFinite(weight) || weight <= 0) continue;
+            weightedValue += clamp01(value) * weight;
+            includedWeight += weight;
+        }
+
+        // Require enough available signal before showing a score.
+        if (includedWeight < 0.35) {
+            return {
+                valueText: "--",
+                score: null,
+                tone: "neutral",
+                ariaLabel: "Form score unavailable due to limited data",
+            };
+        }
+
+        const score = Math.round(clamp01(weightedValue / includedWeight) * 100);
+        let tone = "low";
+        if (score >= 80) tone = "strong";
+        else if (score >= 65) tone = "good";
+        else if (score >= 45) tone = "fair";
+        return {
+            valueText: String(score),
+            score: score,
+            tone: tone,
+            ariaLabel: "Form score " + score + " out of 100",
+        };
+    };
+
     // Render player card.
     const renderPlayerCard = (rawPlayer, ctx) => {
         const context = ctx && typeof ctx === "object" ? ctx : {};
@@ -4594,14 +4937,13 @@
         const cwlStats = getPlayerCwlStats(context.cwlStats, playerTag);
         const regularWarStats = getPlayerRegularWarStats(context.regularWarStats, playerTag, context.warPerformance);
         const longTermStats = getPlayerLongTermWarStats(context.warPerformance, playerTag);
-        const overallLongTermIndicator = longTermStats.overall.avgStarsPerAttack != null
-            ? ("overall " + formatFixed(longTermStats.overall.avgStarsPerAttack, 2) + " stars/atk")
-            : "overall stars/atk -";
+        const publicFormScore = buildPlayerPublicFormScore(trackingMode, cwlStats, regularWarStats, longTermStats);
         const playerSuggestion = hideSuggestions || trackingMode !== "cwl"
             ? null
             : getPlayerBenchSuggestion(context.suggestionModel, playerTag);
 
         const wrap = el("div", "player");
+        wrap.classList.add("roster-player-card");
         wrap.dataset.tag = playerTag;
         wrap.dataset.rosterId = toStr(context.rosterId).trim();
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.status === "out") wrap.classList.add("suggest-bench");
@@ -4618,10 +4960,6 @@
         const left = el("div", "player-left");
         const right = el("div", "player-right");
 
-        const slotLabel = trackingMode === "regularWar"
-            ? (role === "main" ? (player.slot == null ? "IN" : ("#" + toStr(player.slot))) : (role === "missing" ? "MISS" : "OUT"))
-            : (role === "sub" ? "SUB" : (player.slot == null ? "#?" : "#" + toStr(player.slot)));
-        left.appendChild(el("div", "player-slot", slotLabel));
         const identity = el("div", "player-ident");
         const nameRow = el("div", "player-name-row");
         nameRow.appendChild(el("div", "player-name", player.name));
@@ -4631,7 +4969,41 @@
         identity.appendChild(nameRow);
         left.appendChild(identity);
 
-        right.appendChild(el("div", "player-th", player.th === "" ? "TH?" : "TH" + toStr(player.th)));
+        const townHallLevel = toNonNegativeInt(player.th);
+        const townHallIconUrl = getTownHallIconUrl(townHallLevel);
+        const townHallBadge = el("div", "player-th");
+        if (townHallIconUrl) {
+            const thIcon = document.createElement("img");
+            thIcon.className = "player-th-icon";
+            thIcon.src = townHallIconUrl;
+            thIcon.alt = "Town Hall " + (townHallLevel > 0 ? toStr(townHallLevel) : "?");
+            thIcon.width = 22;
+            thIcon.height = 22;
+            thIcon.loading = "lazy";
+            thIcon.decoding = "async";
+            townHallBadge.appendChild(thIcon);
+        } else {
+            townHallBadge.appendChild(el("span", "player-th-fallback", townHallLevel > 0 ? ("TH" + toStr(townHallLevel)) : "TH?"));
+        }
+        right.appendChild(townHallBadge);
+
+        const leagueBadgeMeta = getRosterCardLeagueBadgeMeta(rawPlayer, context.data);
+        const leagueIconSrc = leagueBadgeMeta && leagueBadgeMeta.src
+            ? leagueBadgeMeta.src
+            : getLeagueIconUrlFromFamily("unranked");
+        if (leagueIconSrc) {
+            const leagueBadge = el("div", "player-league");
+            const leagueIcon = document.createElement("img");
+            leagueIcon.className = "player-league-icon";
+            leagueIcon.src = leagueIconSrc;
+            leagueIcon.alt = (leagueBadgeMeta && leagueBadgeMeta.name) ? leagueBadgeMeta.name : "League";
+            leagueIcon.width = 22;
+            leagueIcon.height = 22;
+            leagueIcon.loading = "lazy";
+            leagueIcon.decoding = "async";
+            leagueBadge.appendChild(leagueIcon);
+            right.appendChild(leagueBadge);
+        }
 
         const cwlBadge = el("div", "player-cwl");
         if (trackingMode === "regularWar") {
@@ -4645,9 +5017,12 @@
                 cwlBadge.appendChild(el("span", "player-cwl-indicator", "!"));
             }
         } else {
-            if (cwlStats.starsTotal < 8) cwlBadge.classList.add("alert");
+            const belowFullRewardThreshold = cwlStats.starsTotal < 8;
+            const pendingAttack = cwlStats.currentWarAttackPending >= 1;
+            if (belowFullRewardThreshold) cwlBadge.classList.add("needs-stars");
+            if (pendingAttack) cwlBadge.classList.add("pending");
             cwlBadge.appendChild(el("span", "player-cwl-value", cwlStats.starsTotal + "/8"));
-            if (cwlStats.starsTotal < 8) {
+            if (pendingAttack) {
                 cwlBadge.appendChild(el("span", "player-cwl-indicator", "!"));
             }
         }
@@ -4656,76 +5031,65 @@
         top.appendChild(left);
         top.appendChild(right);
 
-        const bottom = el("div", "player-bottom");
-        if (player.discord) bottom.appendChild(el("span", "player-discord", player.discord));
-        for (const note of player.notes) bottom.appendChild(el("span", "player-note", note));
+        const metaRow = el("div", "player-meta-row");
+        const discordLine = el("div", "player-discord-line");
+        const discordIconUrl = getDiscordIconUrl();
+        if (discordIconUrl) {
+            const discordIcon = document.createElement("img");
+            discordIcon.className = "player-discord-icon";
+            discordIcon.src = discordIconUrl;
+            discordIcon.alt = "";
+            discordIcon.width = 13;
+            discordIcon.height = 13;
+            discordIcon.loading = "lazy";
+            discordIcon.decoding = "async";
+            discordLine.appendChild(discordIcon);
+        }
+        discordLine.appendChild(el("span", "player-discord-text", toStr(player.discord).trim() || "No Discord set"));
+
+        const formBadge = el("span", "player-form-badge tone-" + publicFormScore.tone);
+        formBadge.setAttribute("role", "img");
+        formBadge.setAttribute("aria-label", publicFormScore.ariaLabel);
+        formBadge.appendChild(el("span", "player-form-icon", "Form"));
+        formBadge.appendChild(el("span", "player-form-value", publicFormScore.valueText));
+
+        metaRow.appendChild(discordLine);
+        metaRow.appendChild(formBadge);
+
+        const attentionItems = [];
+        for (let i = 0; i < player.notes.length; i++) {
+            attentionItems.push({ tone: "note", text: player.notes[i] });
+        }
         if (trackingMode === "regularWar") {
-            bottom.appendChild(el("span", "player-admin-metric", "current stars " + formatNumber(regularWarStats.current.starsTotal)));
-            if (regularWarStats.current.avgDestruction != null) {
-                bottom.appendChild(el(
-                    "span",
-                    "player-admin-metric",
-                    "current avg destr " + Math.round(regularWarStats.current.avgDestruction) + "%"
-                ));
-            }
-            if (role === "main" && regularWarStats.currentWarState === "inwar" && regularWarStats.current.attacksRemaining > 0) {
-                bottom.appendChild(el(
-                    "span",
-                    "player-admin-metric alert",
-                    formatNumber(regularWarStats.current.attacksRemaining) + " " + pluralize(regularWarStats.current.attacksRemaining, "attack", "attacks") + " left"
-                ));
-            }
             if (regularWarStats.current.missedAttacks > 0) {
-                bottom.appendChild(el(
-                    "span",
-                    "player-admin-metric alert",
-                    "missed " + regularWarStats.current.missedAttacks + " " + pluralize(regularWarStats.current.missedAttacks, "attack", "attacks")
-                ));
+                attentionItems.push({
+                    tone: "warning",
+                    text: "missed " + regularWarStats.current.missedAttacks + " " + pluralize(regularWarStats.current.missedAttacks, "attack", "attacks"),
+                });
             }
         } else {
-            const perfLabel = cwlStats.starsPerf != null
-                ? (Math.round(cwlStats.starsPerf * 100) + "%")
-                : "-";
-            bottom.appendChild(el("span", "player-admin-metric", "perf " + perfLabel));
-            if (cwlStats.avgDestruction != null) {
-                bottom.appendChild(el("span", "player-admin-metric", "avg destr " + Math.round(cwlStats.avgDestruction) + "%"));
-            }
-            if (cwlStats.currentWarAttackPending >= 1) {
-                bottom.appendChild(el(
-                    "span",
-                    "player-admin-metric alert",
-                    "didnt attack yet today"
-                ));
-            }
             if (cwlStats.missedAttacks >= 1) {
-                bottom.appendChild(el(
-                    "span",
-                    "player-admin-metric alert",
-                    "missed " + cwlStats.missedAttacks + " " + pluralize(cwlStats.missedAttacks, "attack", "attacks")
-                ));
+                attentionItems.push({
+                    tone: "warning",
+                    text: "missed " + cwlStats.missedAttacks + " " + pluralize(cwlStats.missedAttacks, "attack", "attacks"),
+                });
             }
             if (typeof window !== "undefined" && window.ROSTER_ADMIN_MODE) {
-                if (player.excludeAsSwapTarget) {
-                    bottom.appendChild(el(
-                        "span",
-                        "player-admin-metric alert",
-                        "swap target disabled"
-                    ));
-                }
-                if (player.excludeAsSwapSource) {
-                    bottom.appendChild(el(
-                        "span",
-                        "player-admin-metric alert",
-                        "swap source disabled"
-                    ));
-                }
+                if (player.excludeAsSwapTarget) attentionItems.push({ tone: "warning", text: "swap target disabled" });
+                if (player.excludeAsSwapSource) attentionItems.push({ tone: "warning", text: "swap source disabled" });
             }
         }
-        bottom.appendChild(el("span", "player-admin-metric", overallLongTermIndicator));
-        bottom.appendChild(el("span", "player-tag", player.tag || ""));
 
         wrap.appendChild(top);
-        wrap.appendChild(bottom);
+        wrap.appendChild(metaRow);
+        if (attentionItems.length) {
+            const attentionRow = el("div", "player-attention-row");
+            for (let i = 0; i < attentionItems.length; i++) {
+                const item = attentionItems[i];
+                attentionRow.appendChild(el("span", "player-attention-item " + item.tone, item.text));
+            }
+            wrap.appendChild(attentionRow);
+        }
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.noteText) {
             wrap.appendChild(el("div", "player-suggest-note", playerSuggestion.noteText));
         }
@@ -4776,6 +5140,7 @@
     // Render roster section.
     const renderRosterSection = (label, players, optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const data = options.data && typeof options.data === "object" ? options.data : null;
         const role = options.role;
         const trackingMode = options.trackingMode;
         const rosterId = options.rosterId;
@@ -4804,6 +5169,7 @@
                 warPerformance: warPerformance,
                 suggestionModel: suggestionModel,
                 hideSuggestions: hideSuggestions,
+                data: data,
             }));
         }
         frag.appendChild(list);
@@ -4865,6 +5231,7 @@
             warPerformance: options.warPerformance,
             suggestionModel: options.suggestionModel,
             hideSuggestions: options.hideSuggestions,
+            data: options.data,
             hideHeading: true,
         }));
         section.appendChild(body);
@@ -4883,6 +5250,7 @@
     // Render roster card.
     const renderRosterCard = (roster, opts) => {
         const options = opts && typeof opts === "object" ? opts : {};
+        const rosterData = options.data && typeof options.data === "object" ? options.data : null;
         const showEmptySections = options.showEmptySections !== false;
         const hideSuggestions = !!options.hideSuggestions;
         const expandMissingByDefault = !!options.expandMissingByDefault;
@@ -4996,6 +5364,7 @@
                     warPerformance: roster && roster.warPerformance,
                     suggestionModel,
                     hideSuggestions,
+                    data: rosterData,
                 }));
             }
             if (showEmptySections || subPlayers.length) {
@@ -5009,6 +5378,7 @@
                     warPerformance: roster && roster.warPerformance,
                     suggestionModel,
                     hideSuggestions,
+                    data: rosterData,
                 }));
             }
             if (showEmptySections || missingPlayers.length) {
@@ -5022,6 +5392,7 @@
                     warPerformance: roster && roster.warPerformance,
                     suggestionModel,
                     hideSuggestions,
+                    data: rosterData,
                     defaultExpanded: expandMissingByDefault,
                 }));
             }
@@ -5037,6 +5408,7 @@
                     warPerformance: roster && roster.warPerformance,
                     suggestionModel,
                     hideSuggestions,
+                    data: rosterData,
                 }));
             }
             if (showEmptySections || subPlayers.length) {
@@ -5050,6 +5422,7 @@
                     warPerformance: roster && roster.warPerformance,
                     suggestionModel,
                     hideSuggestions,
+                    data: rosterData,
                 }));
             }
         }
@@ -6057,12 +6430,17 @@
         const target = $("#rosters");
         if (!target) return;
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
-        const allRosters = Array.isArray(data.rosters) ? data.rosters : getOrderedRostersFromData(data);
+        const canonicalRosters = Array.isArray(data.rosters) ? data.rosters : getOrderedRostersFromData(data);
+        const isAdminMode = typeof window !== "undefined" && !!window.ROSTER_ADMIN_MODE;
+        const displayBundle = buildRosterDisplayBundle(canonicalRosters, {
+            useProjection: !isAdminMode,
+        });
+        const allRosters = displayBundle.rosters;
+        lastRenderedRosterDisplayById = displayBundle.byRosterId;
         const searchInput = $("#rosterSearchInput");
         const rawQuery = searchInput ? toStr(searchInput.value) : "";
         const filtered = filterRostersByQuery(allRosters, rawQuery);
         const isSearchMode = !!filtered.query;
-        const isAdminMode = typeof window !== "undefined" && !!window.ROSTER_ADMIN_MODE;
         const hideSuggestions = isSearchMode && !isAdminMode;
 
         target.textContent = "";
@@ -6071,6 +6449,7 @@
                 showEmptySections: !isSearchMode,
                 hideSuggestions: hideSuggestions,
                 expandMissingByDefault: isSearchMode,
+                data: data,
             }));
         }
 
@@ -6199,6 +6578,10 @@
 
         const safeData = data && typeof data === "object" ? data : {};
         const allRosters = getOrderedRostersFromData(safeData);
+        const rosterDisplayBundle = buildRosterDisplayBundle(allRosters, {
+            useProjection: !isAdminMode,
+        });
+        lastRenderedRosterDisplayById = rosterDisplayBundle.byRosterId;
         lastRenderedData = Object.assign({}, safeData, {
             rosters: allRosters,
             rosterOrder: buildRosterOrderFromRosters(allRosters),

@@ -104,6 +104,72 @@ function sanitizePublicConfig_(raw) {
 	return Object.keys(out).length ? out : null;
 }
 
+// Sanitize roster public lineup projection.
+function sanitizeRosterPublicLineupProjection_(rawProjection, rosterPoolTagSetRaw, trackingModeRaw) {
+	if (!rawProjection || typeof rawProjection !== "object" || Array.isArray(rawProjection)) return null;
+	const projection = rawProjection;
+	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+	const defaultTrackingMode = String(trackingModeRaw == null ? "" : trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+	const projectionTrackingModeRaw = String(projection.trackingMode == null ? "" : projection.trackingMode).trim();
+	const projectionTrackingMode = projectionTrackingModeRaw === "regularWar" || projectionTrackingModeRaw === "cwl" ? projectionTrackingModeRaw : defaultTrackingMode;
+	const source = String(projection.source == null ? "" : projection.source).trim();
+	const unavailableReason = String(projection.unavailableReason == null ? "" : projection.unavailableReason).trim();
+	const updatedAt = String(projection.updatedAt == null ? "" : projection.updatedAt).trim();
+	const playersRaw = Array.isArray(projection.players) ? projection.players : [];
+	const players = [];
+	const seen = {};
+
+	for (let i = 0; i < playersRaw.length; i++) {
+		const rawPlayer = playersRaw[i] && typeof playersRaw[i] === "object" ? playersRaw[i] : {};
+		const tag = normalizeTag_(rawPlayer.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		const thRaw = Number(rawPlayer.th);
+		const th = isFinite(thRaw) ? Math.max(0, Math.floor(thRaw)) : 0;
+		const mapPositionRaw = Number(rawPlayer.mapPosition);
+		const mapPosition = isFinite(mapPositionRaw) && mapPositionRaw > 0 ? Math.floor(mapPositionRaw) : null;
+		const playerTrackingModeRaw = String(rawPlayer.trackingMode == null ? "" : rawPlayer.trackingMode).trim();
+		const playerTrackingMode = playerTrackingModeRaw === "regularWar" || playerTrackingModeRaw === "cwl" ? playerTrackingModeRaw : projectionTrackingMode;
+		const playerSource = String(rawPlayer.source == null ? "" : rawPlayer.source).trim() || source;
+		const playerUpdatedAt = String(rawPlayer.updatedAt == null ? "" : rawPlayer.updatedAt).trim() || updatedAt;
+		const synthetic = !rosterPoolTagSet[tag];
+		players.push({
+			slot: null,
+			name: typeof rawPlayer.name === "string" ? rawPlayer.name : "",
+			discord: typeof rawPlayer.discord === "string" ? rawPlayer.discord : "",
+			th: th,
+			tag: tag,
+			notes: sanitizeNotes_(rawPlayer.notes != null ? rawPlayer.notes : rawPlayer.note),
+			excludeAsSwapTarget: toBooleanFlag_(rawPlayer.excludeAsSwapTarget),
+			excludeAsSwapSource: toBooleanFlag_(rawPlayer.excludeAsSwapSource),
+			mapPosition: mapPosition,
+			trackingMode: playerTrackingMode,
+			source: playerSource,
+			synthetic: synthetic,
+			updatedAt: playerUpdatedAt,
+		});
+	}
+
+	const hasActiveField = Object.prototype.hasOwnProperty.call(projection, "active");
+	const active = hasActiveField ? projection.active === true && players.length > 0 : players.length > 0;
+	const out = {
+		active: active,
+		trackingMode: projectionTrackingMode,
+		source: source,
+		unavailableReason: unavailableReason,
+		updatedAt: updatedAt,
+		players: active ? players : [],
+	};
+	const hasProjectionContent =
+		active ||
+		out.players.length > 0 ||
+		!!source ||
+		!!unavailableReason ||
+		!!updatedAt ||
+		hasActiveField;
+	return hasProjectionContent ? out : null;
+}
+
 // Handle count roster payload.
 function countRosterPayload_(rosterData) {
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -209,8 +275,12 @@ function validateRosterData_(data) {
 			if (!playerTag) continue;
 			rosterUsableTagSet[playerTag] = true;
 		}
+		const sanitizedPublicLineupProjection = sanitizeRosterPublicLineupProjection_(r.publicLineupProjection, rosterPoolTagSet, trackingMode);
+		const projectedRetentionTagSet = buildRosterPublicLineupProjectionTagSet_({
+			publicLineupProjection: sanitizedPublicLineupProjection,
+		});
 		let sanitizedWarPerformance = sanitizeRosterWarPerformance_(r.warPerformance);
-		const retentionTagSet = buildHistoryRetentionTagSet_(rosterPoolTagSet, sanitizedWarPerformance, r.regularWar, new Date().toISOString());
+		const retentionTagSet = buildHistoryRetentionTagSet_(rosterPoolTagSet, sanitizedWarPerformance, r.regularWar, new Date().toISOString(), projectedRetentionTagSet);
 		const sanitizedCwlStats = sanitizeRosterCwlStats_(r.cwlStats, retentionTagSet);
 		const sanitizedRegularWar = sanitizeRosterRegularWar_(r.regularWar, retentionTagSet);
 		sanitizedWarPerformance = backfillWarPerformanceFromLegacyRegularAggregate_(sanitizedWarPerformance, sanitizedRegularWar);
@@ -234,6 +304,7 @@ function validateRosterData_(data) {
 		if (sanitizedCwlStats) nextRoster.cwlStats = sanitizedCwlStats;
 		if (sanitizedRegularWar) nextRoster.regularWar = sanitizedRegularWar;
 		if (sanitizedWarPerformance) nextRoster.warPerformance = sanitizedWarPerformance;
+		if (sanitizedPublicLineupProjection) nextRoster.publicLineupProjection = sanitizedPublicLineupProjection;
 		if (sanitizedCwlPreparation) nextRoster.cwlPreparation = sanitizedCwlPreparation;
 		const prepActive = trackingMode === "cwl" && !!(sanitizedCwlPreparation && sanitizedCwlPreparation.enabled);
 		if (prepActive) {

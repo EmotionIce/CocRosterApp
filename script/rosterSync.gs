@@ -334,10 +334,139 @@ function createRosterPlayerFromSeed_(tagRaw, seedRaw, memberRaw) {
 	};
 }
 
+// Build canonical roster player by tag.
+function buildCanonicalRosterPlayerByTag_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const out = {};
+	const players = []
+		.concat(Array.isArray(roster.main) ? roster.main : [])
+		.concat(Array.isArray(roster.subs) ? roster.subs : [])
+		.concat(Array.isArray(roster.missing) ? roster.missing : []);
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || out[tag]) continue;
+		out[tag] = player;
+	}
+	return out;
+}
+
+// Build roster stats tracked tag set.
+function buildRosterStatsTrackedTagSet_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const out = buildRosterPoolTagSet_(roster);
+	const projectedTagSet = buildRosterPublicLineupProjectionTagSet_(roster);
+	const projectedTags = Object.keys(projectedTagSet);
+	for (let i = 0; i < projectedTags.length; i++) {
+		const tag = normalizeTag_(projectedTags[i]);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+// Build roster public lineup projection from members.
+function buildRosterPublicLineupProjectionFromMembers_(rosterDataRaw, rosterRaw, membersRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const trackingModeRaw = String(options.trackingMode == null ? getRosterTrackingMode_(roster) : options.trackingMode).trim();
+	const trackingMode = trackingModeRaw === "regularWar" ? "regularWar" : "cwl";
+	const source = String(options.source == null ? "" : options.source).trim();
+	const unavailableReason = String(options.unavailableReason == null ? "" : options.unavailableReason).trim();
+	const updatedAt = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
+	const canonicalPlayerByTag = buildCanonicalRosterPlayerByTag_(roster);
+	const canonicalTagSet = buildRosterPoolTagSet_(roster);
+	const seedPlayerByTag = buildRosterPlayerSeedByTag_(rosterData);
+	const members = mapApiMembers_(membersRaw);
+	const hasMapPosition = members.some((member) => typeof member.mapPosition === "number" && isFinite(member.mapPosition));
+	const orderedMembers = hasMapPosition
+		? members.slice().sort((left, right) => {
+				const leftPos = typeof left.mapPosition === "number" && isFinite(left.mapPosition) ? left.mapPosition : Number.MAX_SAFE_INTEGER;
+				const rightPos = typeof right.mapPosition === "number" && isFinite(right.mapPosition) ? right.mapPosition : Number.MAX_SAFE_INTEGER;
+				if (leftPos !== rightPos) return leftPos - rightPos;
+				return compareByOrderingRule_(left, right);
+			})
+		: members.slice().sort(compareByOrderingRule_);
+	const players = [];
+	const seen = {};
+	for (let i = 0; i < orderedMembers.length; i++) {
+		const member = orderedMembers[i] && typeof orderedMembers[i] === "object" ? orderedMembers[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		const seed = canonicalPlayerByTag[tag] || seedPlayerByTag[tag];
+		const player = createRosterPlayerFromSeed_(tag, seed, member);
+		player.slot = null;
+		player.mapPosition = typeof member.mapPosition === "number" && isFinite(member.mapPosition) && member.mapPosition > 0 ? Math.floor(member.mapPosition) : null;
+		player.trackingMode = trackingMode;
+		player.source = source;
+		player.synthetic = !canonicalTagSet[tag];
+		player.updatedAt = updatedAt;
+		players.push(player);
+	}
+	return {
+		active: players.length > 0,
+		trackingMode: trackingMode,
+		source: source,
+		unavailableReason: unavailableReason,
+		updatedAt: updatedAt,
+		players: players,
+	};
+}
+
+// Set roster public lineup projection.
+function setRosterPublicLineupProjection_(rosterRaw, projectionRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster) return;
+	const projection = projectionRaw && typeof projectionRaw === "object" ? projectionRaw : {};
+	const playersRaw = Array.isArray(projection.players) ? projection.players : [];
+	const players = [];
+	const seen = {};
+	for (let i = 0; i < playersRaw.length; i++) {
+		const player = playersRaw[i] && typeof playersRaw[i] === "object" ? playersRaw[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		players.push(player);
+	}
+	const trackingModeRaw = String(projection.trackingMode == null ? getRosterTrackingMode_(roster) : projection.trackingMode).trim();
+	const trackingMode = trackingModeRaw === "regularWar" ? "regularWar" : "cwl";
+	const source = String(projection.source == null ? "" : projection.source).trim();
+	const unavailableReason = String(projection.unavailableReason == null ? "" : projection.unavailableReason).trim();
+	const updatedAt = String(projection.updatedAt == null ? "" : projection.updatedAt).trim() || new Date().toISOString();
+	const active = projection.active === true && players.length > 0;
+	roster.publicLineupProjection = {
+		active: active,
+		trackingMode: trackingMode,
+		source: source,
+		unavailableReason: unavailableReason,
+		updatedAt: updatedAt,
+		players: active ? players : [],
+	};
+}
+
+// Mark roster public lineup projection inactive.
+function setRosterPublicLineupProjectionInactive_(rosterRaw, optionsRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster) return;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	setRosterPublicLineupProjection_(roster, {
+		active: false,
+		trackingMode: String(options.trackingMode == null ? getRosterTrackingMode_(roster) : options.trackingMode).trim(),
+		source: String(options.source == null ? "" : options.source).trim(),
+		unavailableReason: String(options.unavailableReason == null ? "" : options.unavailableReason).trim(),
+		updatedAt: String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString(),
+		players: [],
+	});
+}
+
 // Prune tag from roster tracking state.
 function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 	const tag = normalizeTag_(tagRaw);
 	if (!tag || !roster || typeof roster !== "object") return false;
+	const projectedTagSet = buildRosterPublicLineupProjectionTagSet_(roster);
+	if (projectedTagSet[tag]) return false;
 	let changed = false;
 
 	const regularWar = roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : null;
@@ -829,6 +958,7 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 	let main = dedupePlayers(roster.main);
 	let subs = dedupePlayers(roster.subs);
 	let missing = dedupePlayers(roster.missing);
+	const projectedTagSet = buildRosterPublicLineupProjectionTagSet_(roster);
 
 	const trackedByTag = {};
 	const trackedTags = [];
@@ -855,6 +985,13 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 	regularWar.byTag = byTag;
 	regularWar.membershipByTag = membershipByTag;
 	roster.regularWar = regularWar;
+	// Remove regular-war tracked state unless the tag is currently projected for public active lineup display.
+	const pruneRegularWarTrackedTag = (tagRaw) => {
+		const tag = normalizeTag_(tagRaw);
+		if (!tag || projectedTagSet[tag]) return;
+		delete byTag[tag];
+		delete membershipByTag[tag];
+	};
 
 	// Ensure membership.
 	const ensureMembership = (tag) => {
@@ -918,8 +1055,7 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 		if (owner && owner !== rosterId) {
 			removed++;
 			removedCrossOwned++;
-			delete byTag[tag];
-			delete membershipByTag[tag];
+			pruneRegularWarTrackedTag(tag);
 			continue;
 		}
 
@@ -946,8 +1082,7 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 		if (owner && owner !== rosterId) {
 			removed++;
 			removedCrossOwned++;
-			delete byTag[tag];
-			delete membershipByTag[tag];
+			pruneRegularWarTrackedTag(tag);
 			continue;
 		}
 
@@ -992,8 +1127,7 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 		if (owner && owner !== rosterId) {
 			removed++;
 			removedCrossOwned++;
-			delete byTag[tag];
-			delete membershipByTag[tag];
+			pruneRegularWarTrackedTag(tag);
 			continue;
 		}
 
@@ -1006,8 +1140,7 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 		const expired = missingSinceMs > 0 && nowMs - missingSinceMs >= REGULAR_WAR_MISSING_GRACE_MS;
 		if (expired) {
 			removed++;
-			delete byTag[tag];
-			delete membershipByTag[tag];
+			pruneRegularWarTrackedTag(tag);
 			continue;
 		}
 
@@ -1057,6 +1190,13 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 	}
 
 	const finalTagSet = buildRosterPoolTagSet_(roster);
+	const projectedFinalTagSet = buildRosterPublicLineupProjectionTagSet_(roster);
+	const projectedFinalTags = Object.keys(projectedFinalTagSet);
+	for (let i = 0; i < projectedFinalTags.length; i++) {
+		const tag = normalizeTag_(projectedFinalTags[i]);
+		if (!tag) continue;
+		finalTagSet[tag] = true;
+	}
 	const byTagKeys = Object.keys(byTag);
 	for (let i = 0; i < byTagKeys.length; i++) {
 		const tag = normalizeTag_(byTagKeys[i]);
@@ -1167,9 +1307,11 @@ function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw, optionsRaw) {
 function applyTodayLineupSync_(roster, participantsRaw) {
 	const main = Array.isArray(roster && roster.main) ? roster.main : [];
 	const subs = Array.isArray(roster && roster.subs) ? roster.subs : [];
-	const rosterPool = main.concat(subs);
+	const missing = Array.isArray(roster && roster.missing) ? roster.missing : [];
+	const rosterPool = main.concat(subs).concat(missing);
 	const beforeMainOrder = main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
 	const beforeSubsOrder = subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const beforeMissingOrder = missing.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
 
 	const poolByTag = {};
 	const poolTagsInOrder = [];
@@ -1243,32 +1385,45 @@ function applyTodayLineupSync_(roster, participantsRaw) {
 	const nonParticipantTags = poolTagsInOrder.filter((tag) => !participantSet[tag]);
 	const nonSet = {};
 	for (let i = 0; i < nonParticipantTags.length; i++) nonSet[nonParticipantTags[i]] = true;
+	const missingTagSet = {};
+	for (let i = 0; i < missing.length; i++) {
+		const tag = normalizeTag_(missing[i] && missing[i].tag);
+		if (!tag) continue;
+		missingTagSet[tag] = true;
+	}
 
 	const subsOrderedTags = [];
 	for (let i = 0; i < subs.length; i++) {
 		const tag = normalizeTag_(subs[i] && subs[i].tag);
-		if (tag && nonSet[tag]) subsOrderedTags.push(tag);
+		if (tag && nonSet[tag] && !missingTagSet[tag]) subsOrderedTags.push(tag);
 	}
 	const subsOrderedSet = {};
 	for (let i = 0; i < subsOrderedTags.length; i++) subsOrderedSet[subsOrderedTags[i]] = true;
 
 	for (let i = 0; i < main.length; i++) {
 		const tag = normalizeTag_(main[i] && main[i].tag);
-		if (tag && nonSet[tag] && !subsOrderedSet[tag]) {
+		if (tag && nonSet[tag] && !subsOrderedSet[tag] && !missingTagSet[tag]) {
 			subsOrderedTags.push(tag);
 			subsOrderedSet[tag] = true;
 		}
 	}
 
 	const remainder = nonParticipantTags
-		.filter((tag) => !subsOrderedSet[tag])
+		.filter((tag) => !subsOrderedSet[tag] && !missingTagSet[tag])
 		.map((tag) => poolByTag[tag])
 		.sort(compareByOrderingRule_)
 		.map((p) => normalizeTag_(p && p.tag));
 	for (let i = 0; i < remainder.length; i++) subsOrderedTags.push(remainder[i]);
+	const missingOrderedTags = [];
+	for (let i = 0; i < missing.length; i++) {
+		const tag = normalizeTag_(missing[i] && missing[i].tag);
+		if (!tag || !nonSet[tag]) continue;
+		missingOrderedTags.push(tag);
+	}
 
 	roster.main = orderedParticipantTags.map((tag) => poolByTag[tag]).filter(Boolean);
 	roster.subs = subsOrderedTags.map((tag) => poolByTag[tag]).filter(Boolean);
+	roster.missing = missingOrderedTags.map((tag) => poolByTag[tag]).filter(Boolean);
 	const dedupeResult = dedupeRosterSectionsByTag_(roster);
 	if (dedupeResult.changed) {
 		const rosterId = String((roster && roster.id) || "").trim() || "unknown";
@@ -1282,7 +1437,14 @@ function applyTodayLineupSync_(roster, participantsRaw) {
 
 	const afterMainOrder = roster.main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
 	const afterSubsOrder = roster.subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
-	if (beforeMainOrder.join("|") !== afterMainOrder.join("|") || beforeSubsOrder.join("|") !== afterSubsOrder.join("|") || updated > 0 || dedupeResult.changed) {
+	const afterMissingOrder = roster.missing.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	if (
+		beforeMainOrder.join("|") !== afterMainOrder.join("|") ||
+		beforeSubsOrder.join("|") !== afterSubsOrder.join("|") ||
+		beforeMissingOrder.join("|") !== afterMissingOrder.join("|") ||
+		updated > 0 ||
+		dedupeResult.changed
+	) {
 		clearRosterBenchSuggestions_(roster);
 	}
 
@@ -1326,6 +1488,7 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = new Date().toISOString();
 	const prefetchedCurrentRegularWarByClanTag =
 		options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object" ? options.prefetchedCurrentRegularWarByClanTag : {};
 	const prefetchedRegularWarErrorByClanTag =
@@ -1336,7 +1499,14 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {};
 	const prefetchedCwlWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
 	const prefetchedCwlWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
+	try {
 	if (ctx.trackingMode === "cwl" && isCwlPreparationActive_(ctx.roster)) {
+		setRosterPublicLineupProjectionInactive_(ctx.roster, {
+			trackingMode: "cwl",
+			source: "cwlPreparation",
+			unavailableReason: "cwlPreparationBlocked",
+			updatedAt: nowIso,
+		});
 		const prep = getRosterCwlPreparation_(ctx.roster);
 		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
@@ -1366,6 +1536,12 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		const currentWarMeta = currentWar && currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : {};
 		const unavailableReason = String((currentWarMeta && currentWarMeta.unavailableReason) || "").trim();
 		if (unavailableReason === "privateWarLog") {
+			setRosterPublicLineupProjectionInactive_(ctx.roster, {
+				trackingMode: "regularWar",
+				source: "regularWarCurrentWar",
+				unavailableReason: "privateWarLog",
+				updatedAt: nowIso,
+			});
 			const previousRegularWar = ctx.roster.regularWar && typeof ctx.roster.regularWar === "object" ? ctx.roster.regularWar : {};
 			const previousCurrentWar = sanitizeRegularWarCurrentWar_(previousRegularWar.currentWar);
 			const nextCurrentWar = Object.assign({}, previousCurrentWar);
@@ -1397,6 +1573,12 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			.toLowerCase();
 		const isLiveRegularWar = state === "preparation" || state === "inwar";
 		if (!isLiveRegularWar) {
+			setRosterPublicLineupProjectionInactive_(ctx.roster, {
+				trackingMode: "regularWar",
+				source: "regularWarCurrentWar",
+				unavailableReason: "noCurrentWar",
+				updatedAt: nowIso,
+			});
 			const outRosterData = validateRosterData_(ctx.rosterData);
 			return {
 				ok: true,
@@ -1411,6 +1593,14 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 				},
 			};
 		}
+		setRosterPublicLineupProjection_(
+			ctx.roster,
+			buildRosterPublicLineupProjectionFromMembers_(ctx.rosterData, ctx.roster, currentWar.participants, {
+				trackingMode: "regularWar",
+				source: "regularWarCurrentWar",
+				updatedAt: nowIso,
+			}),
+		);
 		const result = applyTodayLineupSync_(ctx.roster, currentWar.participants);
 		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
@@ -1439,6 +1629,12 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		}
 	} catch (err) {
 		if (err && Number(err.statusCode) === 404) {
+			setRosterPublicLineupProjectionInactive_(ctx.roster, {
+				trackingMode: "cwl",
+				source: "cwlCurrentWar",
+				unavailableReason: "leagueGroup404",
+				updatedAt: nowIso,
+			});
 			const outRosterData = validateRosterData_(ctx.rosterData);
 			return {
 				ok: true,
@@ -1453,6 +1649,12 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		throw new Error("Invalid CWL league group payload.");
 	}
 	if (!leaguegroup.clanFound) {
+		setRosterPublicLineupProjectionInactive_(ctx.roster, {
+			trackingMode: "cwl",
+			source: "cwlCurrentWar",
+			unavailableReason: "clanNotInLeagueGroup",
+			updatedAt: nowIso,
+		});
 		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
 			ok: true,
@@ -1461,6 +1663,12 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		};
 	}
 	if (!Array.isArray(leaguegroup.warTags) || !leaguegroup.warTags.length) {
+		setRosterPublicLineupProjectionInactive_(ctx.roster, {
+			trackingMode: "cwl",
+			source: "cwlCurrentWar",
+			unavailableReason: "noWarTags",
+			updatedAt: nowIso,
+		});
 		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
 			ok: true,
@@ -1474,6 +1682,12 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		prefetchedCwlWarErrorByTag: prefetchedCwlWarErrorByTag,
 	});
 	if (!currentWar) {
+		setRosterPublicLineupProjectionInactive_(ctx.roster, {
+			trackingMode: "cwl",
+			source: "cwlCurrentWar",
+			unavailableReason: "noUsableWars",
+			updatedAt: nowIso,
+		});
 		const outRosterData = validateRosterData_(ctx.rosterData);
 		return {
 			ok: true,
@@ -1482,6 +1696,14 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		};
 	}
 
+	setRosterPublicLineupProjection_(
+		ctx.roster,
+		buildRosterPublicLineupProjectionFromMembers_(ctx.rosterData, ctx.roster, currentWar.members, {
+			trackingMode: "cwl",
+			source: "cwlCurrentWar",
+			updatedAt: nowIso,
+		}),
+	);
 	const result = applyTodayLineupSync_(ctx.roster, currentWar.members);
 	const outRosterData = validateRosterData_(ctx.rosterData);
 	return {
@@ -1489,6 +1711,37 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		rosterData: outRosterData,
 		result: Object.assign({ mode: "cwl" }, result),
 	};
+	} catch (err) {
+		const mode = ctx.trackingMode === "regularWar" ? "regularWar" : "cwl";
+		const source = mode === "regularWar" ? "regularWarCurrentWar" : "cwlCurrentWar";
+		const failureMessage = errorMessage_(err);
+		Logger.log("syncClanTodayLineupCore unexpected failure rosterId=%s mode=%s error=%s", ctx.rosterId, mode, failureMessage);
+		setRosterPublicLineupProjectionInactive_(ctx.roster, {
+			trackingMode: mode,
+			source: source,
+			unavailableReason: "syncFailed",
+			updatedAt: nowIso,
+		});
+		const outRosterData = validateRosterData_(ctx.rosterData);
+		return {
+			ok: false,
+			rosterData: outRosterData,
+			result: {
+				mode: mode,
+				activeSet: Array.isArray(ctx.roster.main) ? ctx.roster.main.length : 0,
+				benched: Array.isArray(ctx.roster.subs) ? ctx.roster.subs.length : 0,
+				missing: Array.isArray(ctx.roster.missing) ? ctx.roster.missing.length : 0,
+				updated: 0,
+				unavailableReason: "syncFailed",
+				message: "lineup sync failed: " + failureMessage,
+			},
+			error: {
+				step: "syncClanTodayLineup",
+				code: "lineupSyncUnexpectedFailure",
+				message: failureMessage,
+			},
+		};
+	}
 }
 
 // Refresh CWL stats core.
@@ -1604,7 +1857,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 
 	const warPerformance = prepareWarPerformanceForRefresh_(ctx.roster, nowIso);
-	const rosterPoolTagSet = buildRosterPoolTagSet_(ctx.roster);
+	const statsTrackedTagSet = buildRosterStatsTrackedTagSet_(ctx.roster);
 	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
 	const byTag = {};
 	let warsProcessed = 0;
@@ -1628,7 +1881,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		for (let j = 0; j < members.length; j++) {
 			const member = members[j] && typeof members[j] === "object" ? members[j] : {};
 			const tag = normalizeTag_(member.tag);
-			if (!tag || !rosterPoolTagSet[tag]) continue;
+			if (!tag || !statsTrackedTagSet[tag]) continue;
 
 			if (!byTag[tag]) {
 				byTag[tag] = createEmptyCwlStatEntry_();
@@ -1707,7 +1960,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	const previousSnapshot = sanitizeRegularWarSnapshot_(warPerformance.lastRegularWarSnapshot);
 	const lifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
 	warPerformance.regularWarLifecycle = lifecycle;
-	const trackedTagSet = buildRosterPoolTagSet_(ctx.roster);
+	const trackedTagSet = buildRosterStatsTrackedTagSet_(ctx.roster);
 	const trackedTags = Object.keys(trackedTagSet);
 
 	let currentWar = null;
@@ -1900,6 +2153,19 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	setMembership(ctx.roster.main, "active");
 	setMembership(ctx.roster.subs, "active");
 	setMembership(ctx.roster.missing, "temporaryMissing");
+	const projectedActiveTagSet = buildRosterPublicLineupProjectionTagSet_(ctx.roster);
+	const projectedActiveTags = Object.keys(projectedActiveTagSet);
+	for (let i = 0; i < projectedActiveTags.length; i++) {
+		const tag = normalizeTag_(projectedActiveTags[i]);
+		if (!tag || !trackedTagSet[tag]) continue;
+		const previousMembership = sanitizeRegularWarMembershipEntry_(previousMembershipByTag[tag]);
+		membershipByTag[tag] = {
+			firstSeenAt: previousMembership.firstSeenAt || nowIso,
+			lastSeenAt: nowIso,
+			missingSince: "",
+			status: "active",
+		};
+	}
 
 	ctx.roster.regularWar = {
 		lastRefreshedAt: nowIso,

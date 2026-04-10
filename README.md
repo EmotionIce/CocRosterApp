@@ -42,8 +42,7 @@ This project demonstrates end-to-end product engineering in a real production se
   - publish with cooldown and locking.
 - XLSX import compare/apply workflow.
 - Website editor:
-  - compact quick edits for commonly changed fields,
-  - section-based editor (`General`, `Brand`, `Navigation`, `Hero`, `Journey`, `Family`, `War`, `CWL`, `Network`, `Proof`, `Final CTA`, `Media`, `Advanced JSON`),
+  - section-based editor (`General`, `Hero`, `Journey`, `Family`, `War`, `CWL`, `Network`, `Proof`, `Final CTA`, `Advanced JSON`),
   - repeater controls for ordered arrays,
   - advanced JSON escape hatch for exact override control.
 
@@ -158,15 +157,9 @@ The project now supports config-driven family branding without backend changes.
 ### Recommended workflow
 1. Open `/console` and unlock.
 2. Go to `Website`.
-3. Use Quick Edits for common updates:
-   - page title,
-   - Discord URL,
-   - banner/square media URLs,
-   - hero title,
-   - primary CTA label.
-4. Use section editors for structured copy updates.
-5. Use `Advanced JSON` only when you need exact low-level control.
-6. Publish from the command bar.
+3. Use section editors for all landing copy and media updates.
+4. Use `Advanced JSON` only when you need exact low-level control.
+5. Publish from the command bar.
 
 ### Import mapping seeds
 `importMappingSeeds` can be provided in profile JSON for XLSX clan-name auto-mapping:

@@ -59,14 +59,6 @@
     el.style.color = isError ? "#fca5a5" : "#6b7280";
   };
 
-  // Set quick-edit status copy.
-  const setWebsiteQuickStatus_ = (msg, isError) => {
-    const el = $("#websiteQuickStatus");
-    if (!el) return;
-    el.textContent = msg || "";
-    el.style.color = isError ? "#fca5a5" : "#94a3b8";
-  };
-
   // Return whether a preview payload is loaded.
   const hasLoadedPreviewData_ = () => !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters));
 
@@ -173,32 +165,46 @@
     {
       id: "general",
       label: "General",
-      description: "Page-level settings and landing URLs used by the public shell.",
+      description: "Core page, brand, navigation, Discord, and media settings.",
       fields: [
         { key: "general.pageTitle", source: "page", type: "text", path: "pageTitle", label: "Page title", description: "Browser title and roster heading." },
+        { key: "general.brandEyebrow", source: "profile", type: "text", path: "brand.eyebrow", label: "Brand eyebrow", description: "Short descriptor shown near the logo." },
+        {
+          key: "general.navigation",
+          type: "group",
+          label: "Navigation labels",
+          description: "Labels for navigation and admin entry points.",
+          fields: [
+            { key: "general.nav.homeLabel", source: "profile", type: "text", path: "nav.homeLabel", label: "Home label" },
+            { key: "general.nav.rostersLabel", source: "profile", type: "text", path: "nav.rostersLabel", label: "Rosters label" },
+            { key: "general.nav.leaderboardLabel", source: "profile", type: "text", path: "nav.leaderboardLabel", label: "Leaderboard label" },
+            { key: "general.nav.discordLabel", source: "profile", type: "text", path: "nav.discordLabel", label: "Discord label" },
+            { key: "general.nav.adminLabel", source: "profile", type: "text", path: "nav.adminLabel", label: "Admin label" },
+          ],
+        },
         { key: "general.discordInviteUrl", source: "landing", type: "url", path: "discordInviteUrl", label: "Discord invite URL", description: "Main invite link used for all Discord CTAs." },
-        { key: "general.bannerMediaUrl", source: "landing", type: "url", path: "bannerMediaUrl", label: "Banner media URL", description: "Landing hero banner media source." },
-        { key: "general.squareMediaUrl", source: "landing", type: "url", path: "squareMediaUrl", label: "Square media URL", description: "Landing square media source." },
-      ],
-    },
-    {
-      id: "brand",
-      label: "Brand",
-      description: "Top-of-page brand copy.",
-      fields: [
-        { key: "brand.eyebrow", source: "profile", type: "text", path: "brand.eyebrow", label: "Brand eyebrow", description: "Short descriptor shown near the logo." },
-      ],
-    },
-    {
-      id: "navigation",
-      label: "Navigation",
-      description: "Labels for navigation and admin entry points.",
-      fields: [
-        { key: "nav.homeLabel", source: "profile", type: "text", path: "nav.homeLabel", label: "Home label" },
-        { key: "nav.rostersLabel", source: "profile", type: "text", path: "nav.rostersLabel", label: "Rosters label" },
-        { key: "nav.leaderboardLabel", source: "profile", type: "text", path: "nav.leaderboardLabel", label: "Leaderboard label" },
-        { key: "nav.discordLabel", source: "profile", type: "text", path: "nav.discordLabel", label: "Discord label" },
-        { key: "nav.adminLabel", source: "profile", type: "text", path: "nav.adminLabel", label: "Admin label" },
+        {
+          key: "general.bannerMedia",
+          type: "group",
+          label: "Banner media",
+          description: "Banner media source and display copy.",
+          fields: [
+            { key: "general.bannerMediaUrl", source: "landing", type: "url", path: "bannerMediaUrl", label: "Banner media URL", description: "Landing hero banner media source." },
+            { key: "general.media.bannerLabel", source: "profile", type: "text", path: "media.bannerLabel", label: "Banner media label" },
+            { key: "general.media.bannerPlaceholderLabel", source: "profile", type: "text", path: "media.bannerPlaceholderLabel", label: "Banner placeholder label" },
+          ],
+        },
+        {
+          key: "general.squareMedia",
+          type: "group",
+          label: "Square media",
+          description: "Square media source and display copy.",
+          fields: [
+            { key: "general.squareMediaUrl", source: "landing", type: "url", path: "squareMediaUrl", label: "Square media URL", description: "Landing square media source." },
+            { key: "general.media.squareLabel", source: "profile", type: "text", path: "media.squareLabel", label: "Square media label" },
+            { key: "general.media.squarePlaceholderLabel", source: "profile", type: "text", path: "media.squarePlaceholderLabel", label: "Square placeholder label" },
+          ],
+        },
       ],
     },
     {
@@ -365,31 +371,12 @@
       ],
     },
     {
-      id: "media",
-      label: "Media",
-      description: "Landing media labels and placeholder copy.",
-      fields: [
-        { key: "media.bannerLabel", source: "profile", type: "text", path: "media.bannerLabel", label: "Banner media label" },
-        { key: "media.squareLabel", source: "profile", type: "text", path: "media.squareLabel", label: "Square media label" },
-        { key: "media.bannerPlaceholderLabel", source: "profile", type: "text", path: "media.bannerPlaceholderLabel", label: "Banner placeholder label" },
-        { key: "media.squarePlaceholderLabel", source: "profile", type: "text", path: "media.squarePlaceholderLabel", label: "Square placeholder label" },
-      ],
-    },
-    {
       id: "advanced",
       label: "Advanced JSON",
       description: "Raw JSON override editor, validation, and import/export helpers.",
       advanced: true,
       fields: [],
     },
-  ];
-  const WEBSITE_QUICK_FIELDS = [
-    { id: "pageTitle", source: "page", type: "text", path: "pageTitle", label: "Page title" },
-    { id: "publicDiscordInviteUrl", source: "landing", type: "url", path: "discordInviteUrl", label: "Discord invite URL" },
-    { id: "publicBannerMediaUrl", source: "landing", type: "url", path: "bannerMediaUrl", label: "Banner media URL" },
-    { id: "publicSquareMediaUrl", source: "landing", type: "url", path: "squareMediaUrl", label: "Square media URL" },
-    { id: "publicHeroTitleQuick", source: "profile", type: "textarea", path: "hero.title", label: "Hero title" },
-    { id: "publicHeroPrimaryCtaQuick", source: "profile", type: "text", path: "hero.primaryCtaLabel", label: "Primary CTA label" },
   ];
   const WEBSITE_EDITOR_SECTION_BY_ID = {};
   for (let i = 0; i < WEBSITE_EDITOR_SECTIONS.length; i++) {
@@ -674,6 +661,13 @@
   // Return whether a field currently has an explicit override.
   const hasWebsiteFieldOverride_ = (fieldRaw) => {
     const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : {};
+    if (field.type === "group") {
+      const nested = Array.isArray(field.fields) ? field.fields : [];
+      for (let i = 0; i < nested.length; i++) {
+        if (hasWebsiteFieldOverride_(nested[i])) return true;
+      }
+      return false;
+    }
     if (field.source === "page") {
       const current = toStr(state.lastRosterData && state.lastRosterData.pageTitle).trim() || WEBSITE_PAGE_TITLE_DEFAULT;
       return current !== WEBSITE_PAGE_TITLE_DEFAULT;
@@ -718,28 +712,15 @@
     setStatus(toStr(statusMessageRaw).trim() || "Website profile updated.");
   };
 
-  // Sync website-profile editor fields from loaded preview state.
+  // Sync website-profile editor state from loaded preview data.
   const syncPublicConfigEditorFromState_ = (optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     const preserveStatus = options.preserveStatus === true;
     const hasPreview = hasLoadedPreviewData_();
-    const pageTitleInput = $("#pageTitle");
-    const discordInput = $("#publicDiscordInviteUrl");
-    const bannerInput = $("#publicBannerMediaUrl");
-    const squareInput = $("#publicSquareMediaUrl");
-    const heroTitleQuick = $("#publicHeroTitleQuick");
-    const heroPrimaryQuick = $("#publicHeroPrimaryCtaQuick");
     const profileJsonInput = $("#publicProfileJson");
 
     if (!hasPreview) {
-      if (pageTitleInput) pageTitleInput.value = "";
-      if (discordInput) discordInput.value = "";
-      if (bannerInput) bannerInput.value = "";
-      if (squareInput) squareInput.value = "";
-      if (heroTitleQuick) heroTitleQuick.value = "";
-      if (heroPrimaryQuick) heroPrimaryQuick.value = "";
       if (profileJsonInput) profileJsonInput.value = "";
-      setWebsiteQuickStatus_("Unlock to edit website content.", false);
       if (!preserveStatus) setPublicProfileStatus("");
       renderWebsiteEditorShell_();
       return;
@@ -747,64 +728,10 @@
 
     const root = isPlainObject_(state.lastRosterData.publicConfig) ? state.lastRosterData.publicConfig : {};
     const mergedProfile = getMergedProfileOverride_(root);
-    const pageTitleValue = toStr(state.lastRosterData.pageTitle).trim() || WEBSITE_PAGE_TITLE_DEFAULT;
-    const discordValue = resolveLandingUrlValue_(root, "discordInviteUrl") || PUBLIC_LANDING_EDITOR_DEFAULTS.discordInviteUrl;
-    const bannerValue = resolveLandingUrlValue_(root, "bannerMediaUrl") || PUBLIC_LANDING_EDITOR_DEFAULTS.bannerMediaUrl;
-    const squareValue = resolveLandingUrlValue_(root, "squareMediaUrl") || PUBLIC_LANDING_EDITOR_DEFAULTS.squareMediaUrl;
-    const heroTitleValue = hasValueByPath_(mergedProfile, "hero.title")
-      ? toStr(readValueByPath_(mergedProfile, "hero.title"))
-      : toStr(readValueByPath_(PUBLIC_PROFILE_EDITOR_DEFAULTS, "hero.title"));
-    const heroPrimaryValue = hasValueByPath_(mergedProfile, "hero.primaryCtaLabel")
-      ? toStr(readValueByPath_(mergedProfile, "hero.primaryCtaLabel"))
-      : toStr(readValueByPath_(PUBLIC_PROFILE_EDITOR_DEFAULTS, "hero.primaryCtaLabel"));
-
-    if (pageTitleInput) pageTitleInput.value = pageTitleValue;
-    if (discordInput) discordInput.value = discordValue;
-    if (bannerInput) bannerInput.value = bannerValue;
-    if (squareInput) squareInput.value = squareValue;
-    if (heroTitleQuick) heroTitleQuick.value = heroTitleValue;
-    if (heroPrimaryQuick) heroPrimaryQuick.value = heroPrimaryValue;
     if (profileJsonInput) profileJsonInput.value = Object.keys(mergedProfile).length ? jsonPretty(mergedProfile) : "";
 
-    setWebsiteQuickStatus_("Quick edits save on blur. Publish when ready.", false);
     if (!preserveStatus) setPublicProfileStatus("");
     renderWebsiteEditorShell_();
-  };
-
-  // Commit one public URL field from editor to preview payload.
-  const commitPublicUrlFieldFromEditor_ = (fieldKeyRaw, inputRaw, labelRaw) => {
-    const fieldKey = toStr(fieldKeyRaw).trim();
-    const label = toStr(labelRaw).trim() || fieldKey;
-    if (!fieldKey) return;
-    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
-
-    const input = inputRaw && typeof inputRaw === "object" ? inputRaw : null;
-    const rawValue = toStr(input && input.value).trim();
-    const normalized = normalizePublicConfigUrl_(rawValue);
-    if (rawValue && !normalized) {
-      throw new Error(label + " must start with http:// or https://");
-    }
-
-    const fallbackValue = toStr(PUBLIC_LANDING_EDITOR_DEFAULTS[fieldKey]).trim();
-    const beforeSnapshot = snapshotWebsitePayload_();
-    const root = getLoadedPublicConfigRoot_();
-    if (!root) throw new Error(PREVIEW_NOT_READY_MESSAGE);
-    if (!normalized || normalized === fallbackValue) {
-      clearLandingUrlAliases_(root, fieldKey);
-    } else {
-      setLandingUrlOverride_(root, fieldKey, normalized);
-    }
-    cleanupLoadedPublicConfig_();
-
-    const afterSnapshot = snapshotWebsitePayload_();
-    if (beforeSnapshot === afterSnapshot) {
-      syncPublicConfigEditorFromState_({ preserveStatus: true });
-      return false;
-    }
-    applyPublicConfigMutation_(label + " updated.");
-    setPublicProfileStatus(label + " updated.", false);
-    syncPublicConfigEditorFromState_({ preserveStatus: true });
-    return true;
   };
 
   // Apply website-profile JSON from editor into preview payload.
@@ -1055,18 +982,26 @@
       const root = getLoadedPublicConfigRoot_();
       if (!root) return;
       normalizeProfilePlacement_(root);
-      for (let i = 0; i < fields.length; i++) {
-        const field = fields[i];
-        if (!field || typeof field !== "object") continue;
+      const resetField_ = (fieldRaw) => {
+        const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+        if (!field) return;
+        if (field.type === "group") {
+          const nested = Array.isArray(field.fields) ? field.fields : [];
+          for (let i = 0; i < nested.length; i++) resetField_(nested[i]);
+          return;
+        }
         if (field.source === "page") {
           state.lastRosterData.pageTitle = WEBSITE_PAGE_TITLE_DEFAULT;
-          continue;
+          return;
         }
         if (field.source === "landing") {
           clearLandingUrlAliases_(root, field.path);
-          continue;
+          return;
         }
         if (isPlainObject_(root.profile)) deleteValueByPath_(root.profile, field.path);
+      };
+      for (let i = 0; i < fields.length; i++) {
+        resetField_(fields[i]);
       }
       if (section.advanced === true) {
         if (Object.prototype.hasOwnProperty.call(root, "profile")) delete root.profile;
@@ -1107,6 +1042,36 @@
     renderWebsiteSectionEditor_();
   };
 
+  // Count explicit overrides inside one field or group.
+  const countWebsiteFieldOverrides_ = (fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field) return 0;
+    if (field.type === "group") {
+      const nested = Array.isArray(field.fields) ? field.fields : [];
+      let nestedCount = 0;
+      for (let i = 0; i < nested.length; i++) {
+        nestedCount += countWebsiteFieldOverrides_(nested[i]);
+      }
+      return nestedCount;
+    }
+    return hasWebsiteFieldOverride_(field) ? 1 : 0;
+  };
+
+  // Count leaf editable fields inside one field or group.
+  const countWebsiteLeafFields_ = (fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field) return 0;
+    if (field.type === "group") {
+      const nested = Array.isArray(field.fields) ? field.fields : [];
+      let nestedCount = 0;
+      for (let i = 0; i < nested.length; i++) {
+        nestedCount += countWebsiteLeafFields_(nested[i]);
+      }
+      return nestedCount;
+    }
+    return 1;
+  };
+
   // Count explicit overrides inside one section.
   const countSectionOverrides_ = (sectionRaw) => {
     const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
@@ -1121,7 +1086,19 @@
     const fields = Array.isArray(section.fields) ? section.fields : [];
     let count = 0;
     for (let i = 0; i < fields.length; i++) {
-      if (hasWebsiteFieldOverride_(fields[i])) count += 1;
+      count += countWebsiteFieldOverrides_(fields[i]);
+    }
+    return count;
+  };
+
+  // Count leaf editable fields inside one section.
+  const countSectionLeafFields_ = (sectionRaw) => {
+    const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
+    if (!section || section.advanced === true) return 0;
+    const fields = Array.isArray(section.fields) ? section.fields : [];
+    let count = 0;
+    for (let i = 0; i < fields.length; i++) {
+      count += countWebsiteLeafFields_(fields[i]);
     }
     return count;
   };
@@ -1217,6 +1194,146 @@
     input.addEventListener("change", commit);
     input.addEventListener("blur", commit);
     mount.appendChild(row);
+  };
+
+  // Render one grouped scalar control inside a group card.
+  const renderWebsiteGroupedScalarField_ = (mount, fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field || !mount) return;
+
+    const wrap = document.createElement("label");
+    wrap.className = "admin-field website-group-subfield";
+
+    const title = document.createElement("span");
+    title.className = "admin-field-label";
+    title.textContent = toStr(field.label).trim() || "Field";
+    wrap.appendChild(title);
+
+    const input = field.type === "textarea" || field.type === "tokenText"
+      ? document.createElement("textarea")
+      : document.createElement("input");
+    if (input.tagName === "INPUT") {
+      input.type = field.type === "url" ? "url" : "text";
+      input.className = "admin-input";
+    } else {
+      input.className = "admin-textarea";
+      input.rows = field.type === "textarea" ? 3 : 2;
+    }
+    input.value = toStr(getWebsiteFieldEffectiveValue_(field));
+    input.placeholder = toStr(field.placeholder).trim();
+    input.setAttribute("data-website-control", "1");
+    wrap.appendChild(input);
+
+    const descText = toStr(field.description).trim();
+    if (descText) {
+      const desc = document.createElement("span");
+      desc.className = "small muted";
+      desc.textContent = descText;
+      wrap.appendChild(desc);
+    }
+
+    if (field.type === "tokenText") {
+      const tokenRow = document.createElement("div");
+      tokenRow.className = "website-token-hints";
+      const tokens = Array.isArray(field.tokens) ? field.tokens : [];
+      for (let i = 0; i < tokens.length; i++) {
+        const chip = document.createElement("span");
+        chip.className = "website-token-chip";
+        chip.textContent = toStr(tokens[i]).trim();
+        tokenRow.appendChild(chip);
+      }
+      wrap.appendChild(tokenRow);
+    }
+
+    const message = document.createElement("div");
+    message.className = "website-field-message";
+    wrap.appendChild(message);
+
+    const commit = () => {
+      try {
+        if (typeof input.setCustomValidity === "function") input.setCustomValidity("");
+        commitWebsiteScalarField_(field, input.value);
+      } catch (err) {
+        const detail = toErrorMessage(err);
+        message.textContent = detail;
+        message.classList.add("is-error");
+        setPublicProfileStatus("Update failed: " + detail, true);
+        if (typeof input.setCustomValidity === "function") {
+          input.setCustomValidity(detail);
+          if (typeof input.reportValidity === "function") input.reportValidity();
+          input.setCustomValidity("");
+        }
+      }
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("blur", commit);
+    mount.appendChild(wrap);
+  };
+
+  // Render one grouped card that contains multiple Website controls.
+  const renderWebsiteGroupField_ = (mount, fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field || !mount) return;
+
+    const row = document.createElement("div");
+    row.className = "website-field";
+
+    const head = document.createElement("div");
+    head.className = "website-field-head";
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "website-field-title";
+    const title = document.createElement("strong");
+    title.textContent = toStr(field.label).trim() || "Group";
+    titleWrap.appendChild(title);
+    const descText = toStr(field.description).trim();
+    if (descText) {
+      const desc = document.createElement("span");
+      desc.textContent = descText;
+      titleWrap.appendChild(desc);
+    }
+    head.appendChild(titleWrap);
+
+    const overrideCount = countWebsiteFieldOverrides_(field);
+    const fieldCount = Math.max(1, countWebsiteLeafFields_(field));
+    const stateBadge = document.createElement("span");
+    stateBadge.className = "website-field-state" + (overrideCount > 0 ? " is-override" : "");
+    stateBadge.textContent = overrideCount > 0
+      ? (overrideCount + "/" + fieldCount + " override" + (overrideCount === 1 ? "" : "s"))
+      : "Default";
+    head.appendChild(stateBadge);
+    row.appendChild(head);
+
+    const fieldsWrap = document.createElement("div");
+    fieldsWrap.className = "website-group-fields";
+    const nested = Array.isArray(field.fields) ? field.fields : [];
+    for (let i = 0; i < nested.length; i++) {
+      const nestedField = nested[i];
+      if (!nestedField || typeof nestedField !== "object") continue;
+      if (nestedField.type === "group") {
+        renderWebsiteGroupField_(fieldsWrap, nestedField);
+      } else if (nestedField.type === "repeater") {
+        renderWebsiteRepeaterField_(fieldsWrap, nestedField);
+      } else {
+        renderWebsiteGroupedScalarField_(fieldsWrap, nestedField);
+      }
+    }
+    row.appendChild(fieldsWrap);
+    mount.appendChild(row);
+  };
+
+  // Render one schema field by type.
+  const renderWebsiteFieldBySchema_ = (mount, fieldRaw) => {
+    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
+    if (!field || !mount) return;
+    if (field.type === "group") {
+      renderWebsiteGroupField_(mount, field);
+      return;
+    }
+    if (field.type === "repeater") {
+      renderWebsiteRepeaterField_(mount, field);
+      return;
+    }
+    renderWebsiteScalarField_(mount, field);
   };
 
   // Read effective repeater items as a mutable array copy.
@@ -1641,7 +1758,7 @@
 
       const meta = document.createElement("div");
       meta.className = "website-section-card__meta";
-      const fieldCount = section.advanced === true ? 0 : (Array.isArray(section.fields) ? section.fields.length : 0);
+      const fieldCount = countSectionLeafFields_(section);
       const fieldHint = document.createElement("span");
       fieldHint.className = "small muted";
       fieldHint.textContent = section.advanced === true
@@ -1700,8 +1817,7 @@
     } else {
       const fields = Array.isArray(active.fields) ? active.fields : [];
       for (let i = 0; i < fields.length; i++) {
-        if (fields[i].type === "repeater") renderWebsiteRepeaterField_(fieldsWrap, fields[i]);
-        else renderWebsiteScalarField_(fieldsWrap, fields[i]);
+        renderWebsiteFieldBySchema_(fieldsWrap, fields[i]);
       }
     }
     mount.appendChild(fieldsWrap);
@@ -1720,39 +1836,10 @@
     setPublicProfileControlsEnabled_(hasLoadedPreviewData_());
   };
 
-  // Bind one quick-edit field by input id.
-  const bindWebsiteQuickField_ = (fieldRaw) => {
-    const field = fieldRaw && typeof fieldRaw === "object" ? fieldRaw : null;
-    if (!field) return;
-    const input = $("#" + toStr(field.id).trim());
-    if (!input) return;
-    const commit = () => {
-      try {
-        if (typeof input.setCustomValidity === "function") input.setCustomValidity("");
-        commitWebsiteScalarField_(field, input.value);
-      } catch (err) {
-        const message = toErrorMessage(err);
-        setPublicProfileStatus("Update failed: " + message, true);
-        setWebsiteQuickStatus_(message, true);
-        if (typeof input.setCustomValidity === "function") {
-          input.setCustomValidity(message);
-          if (typeof input.reportValidity === "function") input.reportValidity();
-          input.setCustomValidity("");
-        }
-      }
-    };
-    input.addEventListener("change", commit);
-    input.addEventListener("blur", commit);
-  };
-
   // Bind static Website-tab controls.
   const bindWebsiteEditorUi_ = () => {
     if (state.websiteEditorUiBound) return;
     state.websiteEditorUiBound = true;
-
-    for (let i = 0; i < WEBSITE_QUICK_FIELDS.length; i++) {
-      bindWebsiteQuickField_(WEBSITE_QUICK_FIELDS[i]);
-    }
   };
 
   // Set the roster status message.
@@ -5750,9 +5837,6 @@
       if (!rosterData || !Array.isArray(rosterData.rosters)) {
         throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
       }
-
-      const pageTitleInput = $("#pageTitle");
-      if (pageTitleInput) pageTitleInput.value = toStr(rosterData.pageTitle).trim() || "Roster Overview";
 
       state.lastRosterData = rosterData;
       normalizeRosterOrderInData_(state.lastRosterData);

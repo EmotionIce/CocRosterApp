@@ -784,29 +784,6 @@
       min-width: 0;
     }
 
-    .website-quick-edits {
-      border: 1px solid #1f2937;
-      border-radius: 12px;
-      background: rgba(9, 15, 28, 0.58);
-      padding: 10px;
-      display: grid;
-      gap: 10px;
-      min-width: 0;
-    }
-
-    .website-quick-grid {
-      display: grid;
-      gap: 10px;
-      grid-template-columns: 1fr;
-      min-width: 0;
-    }
-
-    .website-quick-status {
-      min-height: 16px;
-      color: #94a3b8;
-      word-break: break-word;
-    }
-
     .website-editor-workspace {
       display: grid;
       gap: 12px;
@@ -910,10 +887,11 @@
     }
 
     .website-section-editor {
-      border: 1px solid #1f2937;
-      border-radius: 12px;
-      background: rgba(9, 15, 28, 0.64);
-      padding: 10px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      padding: 0;
       display: grid;
       gap: 10px;
       min-width: 0;
@@ -974,6 +952,20 @@
       background: rgba(15, 23, 42, 0.44);
       display: grid;
       gap: 7px;
+      min-width: 0;
+    }
+
+    .website-group-fields {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .website-group-subfield {
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px;
+      background: rgba(2, 6, 23, 0.34);
       min-width: 0;
     }
 
@@ -1780,10 +1772,6 @@
     }
 
     @media (min-width: 980px) {
-      .website-quick-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
       .website-editor-workspace {
         grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
         align-items: start;
@@ -1815,10 +1803,6 @@
       }
 
       .admin-tabs {
-        grid-template-columns: 1fr;
-      }
-
-      .website-quick-grid {
         grid-template-columns: 1fr;
       }
 
@@ -1945,7 +1929,7 @@
       </nav>
 
 <!-- Primary roster-management tab content. -->
-<section id="adminTabRosters" class="admin-tab-panel card" role="tabpanel" aria-labelledby="adminTabBtnRosters">
+      <section id="adminTabRosters" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabBtnRosters">
         <div class="admin-section-head">
           <h2>Rosters</h2>
           <p class="small muted">
@@ -1956,7 +1940,7 @@
       </section>
 
 <!-- Spreadsheet import workflow and diff tools. -->
-<section id="adminTabImport" class="admin-tab-panel card hidden" role="tabpanel"
+      <section id="adminTabImport" class="admin-tab-panel hidden" role="tabpanel"
         aria-labelledby="adminTabBtnImport">
         <div class="admin-section-head admin-section-head--row">
           <div>
@@ -2026,7 +2010,7 @@
       </section>
 
 <!-- Draft preview and publish controls for staged roster edits. -->
-<section id="adminTabPreview" class="admin-tab-panel card hidden" role="tabpanel"
+      <section id="adminTabPreview" class="admin-tab-panel hidden" role="tabpanel"
         aria-labelledby="adminTabBtnPreview">
         <div class="admin-section-head">
           <h2>Preview</h2>
@@ -2051,7 +2035,7 @@
         <div id="load-error" class="card hidden"></div>
       </section>
 
-      <section id="adminTabWebsite" class="admin-tab-panel card hidden" role="tabpanel"
+      <section id="adminTabWebsite" class="admin-tab-panel hidden" role="tabpanel"
         aria-labelledby="adminTabBtnWebsite">
         <div class="admin-section-head">
           <h2>Website</h2>
@@ -2059,50 +2043,6 @@
         </div>
 
         <div class="website-editor-shell">
-          <div class="website-quick-edits">
-            <div class="admin-section-head">
-              <h3>Quick Edits</h3>
-              <p class="small muted">Frequently updated fields for fast edits.</p>
-            </div>
-
-            <div class="website-quick-grid">
-              <label class="admin-field" for="pageTitle">
-                <span class="admin-field-label">Page title</span>
-                <input id="pageTitle" class="admin-input" data-website-control="1" placeholder="Roster Overview" />
-              </label>
-
-              <label class="admin-field" for="publicDiscordInviteUrl">
-                <span class="admin-field-label">Discord invite URL</span>
-                <input id="publicDiscordInviteUrl" class="admin-input" data-website-control="1"
-                  placeholder="https://discord.gg/your-invite" />
-              </label>
-
-              <label class="admin-field" for="publicBannerMediaUrl">
-                <span class="admin-field-label">Banner media URL</span>
-                <input id="publicBannerMediaUrl" class="admin-input" data-website-control="1" placeholder="https://..." />
-              </label>
-
-              <label class="admin-field" for="publicSquareMediaUrl">
-                <span class="admin-field-label">Square media URL</span>
-                <input id="publicSquareMediaUrl" class="admin-input" data-website-control="1" placeholder="https://..." />
-              </label>
-
-              <label class="admin-field" for="publicHeroTitleQuick">
-                <span class="admin-field-label">Hero title</span>
-                <input id="publicHeroTitleQuick" class="admin-input" data-website-control="1"
-                  placeholder="Main landing headline" />
-              </label>
-
-              <label class="admin-field" for="publicHeroPrimaryCtaQuick">
-                <span class="admin-field-label">Primary CTA label</span>
-                <input id="publicHeroPrimaryCtaQuick" class="admin-input" data-website-control="1"
-                  placeholder="Join on Discord" />
-              </label>
-            </div>
-
-            <div id="websiteQuickStatus" class="website-quick-status small muted"></div>
-          </div>
-
           <div id="websiteEditorWorkspace" class="website-editor-workspace">
             <div id="websiteSectionList" class="website-section-list" aria-label="Website sections"></div>
             <div id="websiteSectionEditor" class="website-section-editor" aria-live="polite"></div>

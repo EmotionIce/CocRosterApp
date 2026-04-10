@@ -74,6 +74,39 @@ function buildRosterPoolTagSet_(roster) {
 	return out;
 }
 
+// Collect roster public lineup projection players.
+function collectRosterPublicLineupProjectionPlayers_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object" ? roster.publicLineupProjection : null;
+	if (!projection) return [];
+	const players = Array.isArray(projection.players) ? projection.players : [];
+	const isActive = projection.active === true || (!Object.prototype.hasOwnProperty.call(projection, "active") && players.length > 0);
+	if (!isActive) return [];
+
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		out.push(player);
+	}
+	return out;
+}
+
+// Build roster public lineup projection tag set.
+function buildRosterPublicLineupProjectionTagSet_(rosterRaw) {
+	const out = {};
+	const players = collectRosterPublicLineupProjectionPlayers_(rosterRaw);
+	for (let i = 0; i < players.length; i++) {
+		const tag = normalizeTag_(players[i] && players[i].tag);
+		if (!tag) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
 // Sanitize roster bench suggestions.
 function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	if (rawSuggestions == null) return null;
