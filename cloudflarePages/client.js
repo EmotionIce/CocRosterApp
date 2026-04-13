@@ -51,6 +51,11 @@
     const profileState = {
         root: null,
         titleEl: null,
+        subtitleEl: null,
+        topbarLeagueEl: null,
+        topbarThEl: null,
+        topbarStatusEl: null,
+        topbarFormEl: null,
         bodyEl: null,
         closeEl: null,
         open: false,
@@ -1986,6 +1991,114 @@
         '<div class="profile-notice' + (tone ? (" profile-notice--" + tone) : "") + '"><div class="profile-notice__label">' +
         escapeHtml(label) + '</div><div class="profile-notice__text">' + escapeHtml(text) + "</div></div>";
 
+    // Render compact topbar TH token.
+    const renderCompactTopbarTownHallToken = (levelRaw) => {
+        const level = toNonNegativeInt(levelRaw);
+        const iconDataUrl = level > 0 && Object.prototype.hasOwnProperty.call(townHallIconCache, level)
+            ? toStr(townHallIconCache[level]).trim()
+            : "";
+        if (iconDataUrl) {
+            return '<span class="profile-modal__th-token"><img class="profile-modal__th-token-icon" src="' +
+                escapeAttr(iconDataUrl) + '" alt="Town Hall ' + escapeAttr(String(level)) + '"></span>';
+        }
+        return '<span class="profile-modal__th-token profile-modal__th-token--fallback">TH' +
+            escapeHtml(level > 0 ? String(level) : "?") + "</span>";
+    };
+
+    // Render compact topbar league token.
+    const renderCompactTopbarLeagueToken = (badgeRaw) => {
+        const badge = badgeRaw && typeof badgeRaw === "object" ? badgeRaw : {};
+        const src = toStr(badge.src).trim() || getLeagueIconUrlFromFamily("unranked");
+        const name = toStr(badge.name).trim() || "Unranked";
+        if (src) {
+            return '<img class="profile-modal__league-icon" src="' + escapeAttr(src) + '" alt="' +
+                escapeAttr(name) + '" loading="eager" decoding="async">';
+        }
+        return '<span class="profile-modal__league-fallback" aria-label="' + escapeAttr(name) + '">' +
+            escapeHtml(name.slice(0, 3).toUpperCase() || "LG") + "</span>";
+    };
+
+    // Render compact topbar live status chip.
+    const renderProfileTopbarStatusChip = (textRaw, toneRaw) => {
+        const text = toStr(textRaw).trim() || "Status unavailable";
+        const tone = toStr(toneRaw).trim().toLowerCase();
+        const allowedTone = tone === "alert" || tone === "warning" || tone === "success" || tone === "info"
+            ? tone
+            : "neutral";
+        return '<span class="profile-modal__status-chip profile-modal__status-chip--' + allowedTone + '">' +
+            escapeHtml(text) + "</span>";
+    };
+
+    // Render compact topbar form badge.
+    const renderProfileTopbarFormBadge = (formScoreRaw) => {
+        const formScore = formScoreRaw && typeof formScoreRaw === "object" ? formScoreRaw : {};
+        const toneRaw = toStr(formScore.tone).trim().toLowerCase();
+        const tone = toneRaw === "low" || toneRaw === "fair" || toneRaw === "good" || toneRaw === "strong"
+            ? toneRaw
+            : "neutral";
+        const valueText = toStr(formScore.valueText).trim() || "--";
+        const ariaLabel = toStr(formScore.ariaLabel).trim() || "Form score unavailable";
+        return '<span class="player-form-badge profile-modal__form-badge tone-' + tone + '" role="img" aria-label="' +
+            escapeAttr(ariaLabel) + '"><span class="player-form-icon">Form</span><span class="player-form-value">' +
+            escapeHtml(valueText) + "</span></span>";
+    };
+
+    // Build compact live status meta for topbar.
+    const buildProfileTopbarLiveStatusMeta = (trackingModeRaw, roleRaw, regularWarRaw, cwlRaw) => {
+        const trackingMode = toStr(trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+        const role = toStr(roleRaw).trim().toLowerCase();
+        const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
+        const cwl = cwlRaw && typeof cwlRaw === "object" ? cwlRaw : {};
+        if (trackingMode === "regularWar") {
+            const state = toStr(regularWar.currentWarState).trim().toLowerCase();
+            const attacksRemaining = toNonNegativeInt(regularWar.current && regularWar.current.attacksRemaining);
+            const missedAttacks = toNonNegativeInt(regularWar.current && regularWar.current.missedAttacks);
+            if (regularWar.currentWarUnavailableReason === "privateWarLog") {
+                return { text: "Live war log private", tone: "warning" };
+            }
+            if (state === "inwar" && attacksRemaining > 0) {
+                return {
+                    text: "In war • " + attacksRemaining + " " + pluralize(attacksRemaining, "attack", "attacks") + " left",
+                    tone: "alert",
+                };
+            }
+            if (state === "inwar") return { text: "In war • attacks done", tone: "success" };
+            if (state === "preparation") return { text: "Preparation day", tone: "info" };
+            if (state === "warended" && missedAttacks > 0) return { text: "War ended • missed attacks", tone: "alert" };
+            if (state === "warended") return { text: "War ended", tone: "info" };
+            if (role === "main") return { text: "In regular rotation", tone: "success" };
+            if (role === "missing") return { text: "Temporarily missing", tone: "warning" };
+            return { text: "Out of war", tone: "neutral" };
+        }
+
+        if (cwl.currentWarAttackPending >= 1) return { text: "CWL • attack pending", tone: "alert" };
+        if (toNonNegativeInt(cwl.missedAttacks) > 0) return { text: "CWL • missed attacks", tone: "alert" };
+        if (toNonNegativeInt(cwl.possibleStars) > 0 && toNonNegativeInt(cwl.starsTotal) < 8) return { text: "CWL • below 8-star target", tone: "warning" };
+        if (toNonNegativeInt(cwl.starsTotal) >= 8) return { text: "CWL • reward target met", tone: "success" };
+        return { text: "CWL • in progress", tone: "info" };
+    };
+
+    // Render sticky profile modal topbar values.
+    const renderProfileModalTopbar = (optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const name = toStr(options.name).trim() || "Player profile";
+        const tag = toStr(options.tag).trim() || "-";
+        const townHallLevel = toNonNegativeInt(options.townHallLevel);
+        const leagueBadge = options.leagueBadge && typeof options.leagueBadge === "object" ? options.leagueBadge : null;
+        const liveStatus = options.liveStatus && typeof options.liveStatus === "object" ? options.liveStatus : {};
+
+        if (profileState.titleEl) profileState.titleEl.textContent = name;
+        if (profileState.subtitleEl) profileState.subtitleEl.textContent = tag;
+        if (profileState.topbarLeagueEl) profileState.topbarLeagueEl.innerHTML = renderCompactTopbarLeagueToken(leagueBadge);
+        if (profileState.topbarThEl) profileState.topbarThEl.innerHTML = renderCompactTopbarTownHallToken(townHallLevel);
+        if (profileState.topbarStatusEl) {
+            profileState.topbarStatusEl.innerHTML = renderProfileTopbarStatusChip(liveStatus.text, liveStatus.tone);
+        }
+        if (profileState.topbarFormEl) {
+            profileState.topbarFormEl.innerHTML = renderProfileTopbarFormBadge(options.formScore);
+        }
+    };
+
     // Format signed number.
     const formatSignedNumber = (valueRaw) => {
         const value = Number(valueRaw);
@@ -2185,6 +2298,22 @@
         };
     };
 
+    // Format a legend point day label.
+    const formatLegendPointDayLabel = (pointRaw) => {
+        const point = pointRaw && typeof pointRaw === "object" ? pointRaw : {};
+        const dayKey = toStr(point.dayKey).trim();
+        const capturedAt = toStr(point.capturedAt).trim();
+        if (capturedAt) {
+            const capturedDate = new Date(capturedAt);
+            if (Number.isFinite(capturedDate.getTime())) return capturedDate.toLocaleDateString();
+        }
+        if (dayKey && /^\d{4}-\d{2}-\d{2}$/.test(dayKey)) {
+            const dayDate = new Date(dayKey + "T00:00:00Z");
+            if (Number.isFinite(dayDate.getTime())) return dayDate.toLocaleDateString();
+        }
+        return dayKey || "-";
+    };
+
     // Render legend trend sparkline.
     const renderLegendTrendSparkline = (pointsRaw) => {
         const points = Array.isArray(pointsRaw) ? pointsRaw : [];
@@ -2240,6 +2369,7 @@
                 x: x,
                 y: y,
                 dayKey: point.dayKey,
+                capturedAt: point.capturedAt,
                 trophies: toNonNegativeInt(point.trophies),
             };
         });
@@ -2260,6 +2390,7 @@
         const selectedIndex = chartPoints.length - 1;
         const selectedPoint = chartPoints[selectedIndex];
         const selectedDelta = computeLegendDelta(points, selectedIndex);
+        const selectedDayText = formatLegendPointDayLabel(points[selectedIndex]);
         const tooltipLeftPct = Math.max(8, Math.min(92, (selectedPoint.x / width) * 100));
         const deltaText = selectedDelta.available ? formatSignedNumber(selectedDelta.delta) : "\u2013";
 
@@ -2290,8 +2421,14 @@
                 "</svg>",
                 '<div class="profile-legend-trend__axis"><span>', escapeHtml(startDay), '</span><span>', escapeHtml(endDay), "</span></div>",
                 '<div class="profile-legend-tooltip" data-legend-tooltip="1" style="left:', tooltipLeftPct.toFixed(2), '%;">',
+                '<div class="profile-legend-tooltip__row"><span class="profile-legend-tooltip__label">Day</span><span class="profile-legend-tooltip__value" data-legend-day="1">', escapeHtml(selectedDayText), "</span></div>",
                 '<div class="profile-legend-tooltip__row"><span class="profile-legend-tooltip__label">Final</span><span class="profile-legend-tooltip__value" data-legend-final="1">', escapeHtml(formatNumber(selectedPoint.trophies)), "</span></div>",
                 '<div class="profile-legend-tooltip__row"><span class="profile-legend-tooltip__label">&#177; Delta</span><span class="profile-legend-tooltip__value" data-legend-delta="1">', escapeHtml(deltaText), "</span></div>",
+                "</div>",
+                '<div class="profile-legend-detail-strip" data-legend-detail-strip="1">',
+                '<div class="profile-legend-detail-strip__item"><span class="profile-legend-detail-strip__label">Day</span><span class="profile-legend-detail-strip__value" data-legend-day="1">', escapeHtml(selectedDayText), "</span></div>",
+                '<div class="profile-legend-detail-strip__item"><span class="profile-legend-detail-strip__label">Final</span><span class="profile-legend-detail-strip__value" data-legend-final="1">', escapeHtml(formatNumber(selectedPoint.trophies)), "</span></div>",
+                '<div class="profile-legend-detail-strip__item"><span class="profile-legend-detail-strip__label">Delta</span><span class="profile-legend-detail-strip__value" data-legend-delta="1">', escapeHtml(deltaText), "</span></div>",
                 "</div>",
                 "</div>",
                 "</div>",
@@ -2337,16 +2474,25 @@
         const selectedIndex = Math.max(0, Math.min(chartPoints.length - 1, toNonNegativeInt(selectedIndexRaw)));
         const selectedPoint = chartPoints[selectedIndex];
         const delta = computeLegendDelta(points, selectedIndex);
+        const dayText = formatLegendPointDayLabel(points[selectedIndex]);
         const tooltipLeftPct = Math.max(8, Math.min(92, (selectedPoint.x / chartState.width) * 100));
 
-        const finalEl = stage.querySelector("[data-legend-final='1']");
-        const deltaEl = stage.querySelector("[data-legend-delta='1']");
+        const finalEls = stage.querySelectorAll("[data-legend-final='1']");
+        const deltaEls = stage.querySelectorAll("[data-legend-delta='1']");
+        const dayEls = stage.querySelectorAll("[data-legend-day='1']");
         const tooltipEl = stage.querySelector("[data-legend-tooltip='1']");
         const cursorLine = stage.querySelector("[data-legend-cursor-line='1']");
         const cursorDot = stage.querySelector("[data-legend-cursor-dot='1']");
 
-        if (finalEl) finalEl.textContent = formatNumber(selectedPoint.trophies);
-        if (deltaEl) deltaEl.textContent = delta.available ? formatSignedNumber(delta.delta) : "\u2013";
+        finalEls.forEach((el) => {
+            el.textContent = formatNumber(selectedPoint.trophies);
+        });
+        deltaEls.forEach((el) => {
+            el.textContent = delta.available ? formatSignedNumber(delta.delta) : "\u2013";
+        });
+        dayEls.forEach((el) => {
+            el.textContent = dayText;
+        });
         if (tooltipEl && tooltipEl.style) tooltipEl.style.left = tooltipLeftPct.toFixed(2) + "%";
         if (cursorLine) {
             cursorLine.setAttribute("x1", selectedPoint.x.toFixed(2));
@@ -2508,6 +2654,92 @@
         });
     };
 
+    // Bind long-term segmented section.
+    const bindLongTermSegmentedSection = (sectionEl) => {
+        const section = sectionEl && sectionEl.querySelector ? sectionEl : null;
+        if (!section || section.dataset.longTermBound === "1") return;
+        section.dataset.longTermBound = "1";
+
+        const buttons = Array.from(section.querySelectorAll("[data-longterm-segment]"));
+        const panels = Array.from(section.querySelectorAll("[data-longterm-panel]"));
+        if (!buttons.length || !panels.length) return;
+        const panelByKey = Object.create(null);
+        for (let i = 0; i < panels.length; i++) {
+            const key = toStr(panels[i].dataset && panels[i].dataset.longtermPanel).trim().toLowerCase();
+            if (key) panelByKey[key] = panels[i];
+        }
+        let activeKey = "";
+
+        // Set active long-term segment.
+        const setActiveSegment = (keyRaw) => {
+            const key = toStr(keyRaw).trim().toLowerCase();
+            if (!key || !panelByKey[key]) return;
+            activeKey = key;
+            for (let i = 0; i < buttons.length; i++) {
+                const button = buttons[i];
+                const buttonKey = toStr(button.dataset && button.dataset.longtermSegment).trim().toLowerCase();
+                const isActive = buttonKey === activeKey;
+                button.classList.toggle("is-active", isActive);
+                button.setAttribute("aria-pressed", isActive ? "true" : "false");
+                button.setAttribute("tabindex", isActive ? "0" : "-1");
+            }
+            for (let i = 0; i < panels.length; i++) {
+                const panel = panels[i];
+                const panelKey = toStr(panel.dataset && panel.dataset.longtermPanel).trim().toLowerCase();
+                const isActive = panelKey === activeKey;
+                panel.classList.toggle("is-active", isActive);
+                panel.hidden = !isActive;
+                panel.setAttribute("aria-hidden", isActive ? "false" : "true");
+            }
+        };
+
+        for (let i = 0; i < buttons.length; i++) {
+            const button = buttons[i];
+            const key = toStr(button.dataset && button.dataset.longtermSegment).trim().toLowerCase();
+            if (!key || !panelByKey[key]) continue;
+            button.addEventListener("click", (event) => {
+                event.preventDefault();
+                setActiveSegment(key);
+            });
+            button.addEventListener("keydown", (event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") return;
+                event.preventDefault();
+                const enabledButtons = buttons.filter((candidate) => !candidate.disabled);
+                const currentIndex = enabledButtons.indexOf(button);
+                if (currentIndex < 0) return;
+                if (event.key === "Home") {
+                    enabledButtons[0].click();
+                    enabledButtons[0].focus();
+                    return;
+                }
+                if (event.key === "End") {
+                    enabledButtons[enabledButtons.length - 1].click();
+                    enabledButtons[enabledButtons.length - 1].focus();
+                    return;
+                }
+                const direction = event.key === "ArrowRight" ? 1 : -1;
+                const nextIndex = (currentIndex + direction + enabledButtons.length) % enabledButtons.length;
+                const nextButton = enabledButtons[nextIndex];
+                if (!nextButton) return;
+                nextButton.click();
+                nextButton.focus();
+            });
+        }
+
+        const defaultKey = toStr(section.dataset && section.dataset.longtermDefault).trim().toLowerCase();
+        const firstKey = toStr(buttons[0] && buttons[0].dataset && buttons[0].dataset.longtermSegment).trim().toLowerCase();
+        setActiveSegment(defaultKey || firstKey);
+    };
+
+    // Initialize long-term segmented sections.
+    const initLongTermSegmentedSections = (containerRaw) => {
+        const container = containerRaw && containerRaw.querySelectorAll ? containerRaw : null;
+        if (!container) return;
+        container.querySelectorAll("[data-longterm-segmented='1']").forEach((section) => {
+            bindLongTermSegmentedSection(section);
+        });
+    };
+
     // Return whether legend league name.
     const isLegendLeagueName = (nameRaw) => {
         const text = toStr(nameRaw).trim();
@@ -2587,7 +2819,7 @@
             title: "Legends Journey",
             subtitle: "Recent trophy movement across tracked days.",
             bodyHtml: sectionBody,
-            open: true,
+            open: false,
             sectionClass: "profile-disclosure--legend",
         });
     };
@@ -2786,6 +3018,8 @@
 
     // Get Discord icon URL.
     const getDiscordIconUrl = () => buildStaticAssetUrl("assets/icons/discord.webp");
+    // Get no-Discord icon URL.
+    const getNoDiscordIconUrl = () => buildStaticAssetUrl("assets/icons/no-discord.webp");
 
     const LEAGUE_ICON_ASSET_BY_FAMILY = {
         unranked: "assets/icons/league-unranked.webp",
@@ -3016,10 +3250,11 @@
         const localPlayer = context && context.player ? context.player : {};
         const tag = normalizeClanTag((response && response.tag) || player.tag || localPlayer.tag);
         const displayName = toStr(localPlayer.name).trim() || toStr(player.name).trim() || "Player profile";
-        if (mode === "loading") {
-            profileState.bodyEl.innerHTML = renderProfileLoadingScreen(context, displayName, tag);
-            return;
-        }
+        const trackingMode = context && context.trackingMode === "regularWar" ? "regularWar" : "cwl";
+        const role = toStr(context && context.role).trim().toLowerCase();
+        const cwl = context && context.cwl ? context.cwl : getPlayerCwlStats(null, tag);
+        const regularWar = context && context.regularWar ? context.regularWar : getPlayerRegularWarStats(null, tag, context && context.warPerformance);
+        const longTerm = context && context.longTerm ? context.longTerm : getPlayerLongTermWarStats(context && context.warPerformance, tag);
         const townHallLevel = player.townHallLevel != null ? player.townHallLevel : localPlayer.th;
         const builderHall = toNonNegativeInt(player.builderHallLevel);
         const clanName = toStr(player.clan && player.clan.name).trim();
@@ -3027,12 +3262,9 @@
         const leagueBadge = getHomeLeagueBadgeMeta(player);
         const leagueName = leagueBadge && leagueBadge.name ? leagueBadge.name : "";
         const roleRaw = formatRole(player.role);
-        const roleLabel = roleRaw && roleRaw.toLowerCase() !== "member" ? roleRaw : "";
-        const trackingMode = context && context.trackingMode === "regularWar" ? "regularWar" : "cwl";
-        const role = toStr(context && context.role).trim().toLowerCase();
-        const cwl = context && context.cwl ? context.cwl : getPlayerCwlStats(null, tag);
-        const regularWar = context && context.regularWar ? context.regularWar : getPlayerRegularWarStats(null, tag, context && context.warPerformance);
-        const longTerm = context && context.longTerm ? context.longTerm : getPlayerLongTermWarStats(context && context.warPerformance, tag);
+        const roleLabel = roleRaw || "Member";
+        const publicFormScore = buildPlayerPublicFormScore(trackingMode, cwl, regularWar, longTerm);
+        const liveStatusMeta = buildProfileTopbarLiveStatusMeta(trackingMode, role, regularWar, cwl);
         const placementLabel = buildPlacementLabel(context);
         const hasStoredTh = localPlayer.th !== "" && localPlayer.th != null;
         const localStoredThLabel = hasStoredTh ? ("TH" + localPlayer.th) : "Not set";
@@ -3059,7 +3291,18 @@
 
         requestTownHallIcon(townHallLevel);
         requestLeagueIcon(player);
-        profileState.titleEl.textContent = displayName;
+        renderProfileModalTopbar({
+            name: displayName,
+            tag: tag,
+            townHallLevel: townHallLevel,
+            leagueBadge: leagueBadge,
+            liveStatus: liveStatusMeta,
+            formScore: publicFormScore,
+        });
+        if (mode === "loading") {
+            profileState.bodyEl.innerHTML = renderProfileLoadingScreen(context, displayName, tag);
+            return;
+        }
 
         const actionButtons = [
             '<a class="profile-action-btn" href="' + escapeAttr(getPlayerProfileUrl(tag)) + '">Open player in-game</a>',
@@ -3068,122 +3311,116 @@
             actionButtons.push('<button type="button" class="profile-action-btn secondary" data-profile-edit="1">Edit player</button>');
         }
 
-        const leagueBadgeHtml = [
-            '<div class="profile-league-badge">',
-            (leagueBadge && leagueBadge.src)
-                ? ('<img class="profile-league-badge__icon" src="' + escapeAttr(leagueBadge.src) + '" alt="' + escapeAttr(leagueName || "Home league") + '">')
-                : '<div class="profile-league-badge__fallback">League</div>',
-            '<div class="profile-league-badge__copy"><div class="profile-league-badge__label">Home league</div><div class="profile-league-badge__name">' + escapeHtml(leagueName || "Unranked") + "</div></div>",
-            "</div>",
-        ].join("");
-
         const placementTone = context && context.player
             ? (trackingMode === "regularWar"
-                ? (role === "main" ? "success" : (role === "missing" ? "alert" : ""))
-                : (role === "sub" ? "alert" : "success"))
+                ? (role === "main" ? "success" : (role === "missing" ? "alert" : "warning"))
+                : (role === "sub" ? "warning" : "success"))
             : "";
-        const heroAlertCards = trackingMode === "regularWar"
-            ? (() => {
-                const showAggregateStatusNotice = regularWar.aggregateStatusLevel === "warning"
-                    && !!regularWar.aggregateStatusMessage
-                    && !(regularWar.currentWarUnavailableReason === "privateWarLog" && regularWar.aggregateStatusLevel !== "warning");
-                return [
-                    regularWar.currentWarUnavailableReason === "privateWarLog"
-                        ? renderNotice("Live war data", "Unavailable because the clan war log is private.", "alert")
-                        : "",
-                    showAggregateStatusNotice
-                        ? renderNotice("Aggregate status", regularWar.aggregateStatusMessage, "info")
-                        : "",
-                    regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0
-                        ? renderNotice("Pending", formatNumber(regularWar.current.attacksRemaining) + " " + pluralize(regularWar.current.attacksRemaining, "attack", "attacks") + " left in current war", "alert")
-                        : "",
-                    regularWar.current.missedAttacks > 0
-                        ? renderNotice("Missed", "Missed " + formatNumber(regularWar.current.missedAttacks) + " " + pluralize(regularWar.current.missedAttacks, "attack", "attacks"), "alert")
-                        : "",
-                ].filter(Boolean).join("");
-            })()
-            : [
-                cwl.currentWarAttackPending >= 1 ? renderNotice("Pending", "Current CWL attack pending", "alert") : "",
-                cwl.missedAttacks > 0 ? renderNotice("Missed", "Missed " + formatNumber(cwl.missedAttacks) + " " + pluralize(cwl.missedAttacks, "attack", "attacks"), "alert") : "",
-                cwl.possibleStars > 0 && cwl.starsTotal < 8 ? renderNotice("Target", "Below 8-star reward target", "alert") : "",
-            ].filter(Boolean).join("");
-
-        const heroSnapshotItems = trackingMode === "regularWar"
-            ? [
-                renderHeroSnapshotItem("Placement", rosterSlot, { tone: placementTone }),
-                renderHeroSnapshotItem("Roster", rosterName),
-                renderHeroSnapshotItem("Current war state", formatWarStateLabel(regularWar.currentWarState || "notinwar")),
-                renderHeroSnapshotItem("Current attacks", regularCurrentAttacksLabel, {
-                    tone: regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0 ? "alert" : "",
-                }),
-                renderHeroSnapshotItem("Attacks remaining", regularCurrentRemainingLabel, {
-                    tone: regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0 ? "alert" : "",
-                }),
-                renderHeroSnapshotItem("Current stars", regularCurrentStarsLabel),
-            ].filter(Boolean).join("")
-            : [
-                renderHeroSnapshotItem("Roster slot", rosterSlot, { tone: placementTone }),
-                renderHeroSnapshotItem("Roster", rosterName),
-                renderHeroSnapshotItem("CWL stars", cwlStarsLabel, { tone: cwl.possibleStars > 0 ? (cwl.starsTotal < 8 ? "alert" : "success") : "" }),
-                renderHeroSnapshotItem("Avg destruction", cwlAvgDestructionLabel),
-                renderHeroSnapshotItem("Attacks made", cwlAttacksLabel),
-                suggestion ? renderHeroSnapshotItem("Suggestion", suggestion.statusLabel, { tone: suggestion.status === "out" ? "alert" : "success" }) : "",
-            ].filter(Boolean).join("");
-        const heroSnapshotTitle = trackingMode === "regularWar" ? "Roster and war snapshot" : "Roster and CWL snapshot";
-        const heroSnapshotSubtitle = trackingMode === "regularWar"
-            ? "Operational status for current roster and regular war usage"
-            : "Operational status for current roster usage";
-
+        const regularWarStateLabel = formatWarStateLabel(regularWar.currentWarState || "notinwar");
         const clanDisplay = clanName || clanTag
             ? (clanName || "Clan") + (clanTag ? (" " + clanTag) : "")
             : "No clan";
 
-        const heroHtml = [
-            '<section class="profile-hero">',
-            '<div class="profile-hero__top">',
-            '<div class="profile-hero__identity">',
-            '<div class="profile-hero__visuals">', renderTownHallBadge(townHallLevel, player.townHallWeaponLevel), "</div>",
-            '<div class="profile-hero__content">',
-            '<h2 class="profile-hero__name">', escapeHtml(displayName), "</h2>",
-            '<div class="profile-hero__tag">', escapeHtml(tag || "-"), "</div>",
-            '<div class="profile-hero__identity-meta">',
-            leagueBadgeHtml,
-            '<div class="profile-hero__identity-line"><span class="profile-hero__identity-label">Clan</span><span class="profile-hero__identity-value">' + escapeHtml(clanDisplay) + "</span></div>",
-            roleLabel ? ('<div class="profile-hero__identity-line"><span class="profile-hero__identity-label">Role</span><span class="profile-hero__identity-value profile-hero__identity-value--role">' + escapeHtml(roleLabel) + "</span></div>") : "",
+        const renderOverviewIdentityLine = (label, value, options) => {
+            const opts = options && typeof options === "object" ? options : {};
+            return '<div class="profile-overview__identity-line' + (opts.alert ? " is-alert" : "") + '">' +
+                '<span class="profile-overview__identity-label">' + escapeHtml(label) + "</span>" +
+                '<span class="profile-overview__identity-value">' + escapeHtml(toStr(value).trim() || "-") + "</span></div>";
+        };
+
+        const overviewQuickItems = trackingMode === "regularWar"
+            ? [
+                renderSummaryItem("Roster status", rosterSlot, { tone: placementTone }),
+                renderSummaryItem("War state", regularWarStateLabel),
+                renderSummaryItem("Current attacks", regularCurrentAttacksLabel, {
+                    tone: regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0 ? "alert" : "",
+                }),
+                renderSummaryItem("Current stars", regularCurrentStarsLabel, {
+                    subText: regularCurrentAvgDestructionLabel !== "-" ? ("Avg " + regularCurrentAvgDestructionLabel) : "",
+                }),
+            ]
+            : [
+                renderSummaryItem("Roster status", rosterSlot, { tone: placementTone }),
+                renderSummaryItem("CWL stars", cwlStarsLabel, {
+                    tone: cwl.possibleStars > 0 ? (cwl.starsTotal < 8 ? "alert" : "success") : "",
+                }),
+                renderSummaryItem("Avg destruction", cwlAvgDestructionLabel),
+                suggestion
+                    ? renderSummaryItem("Suggestion", suggestion.statusLabel, { tone: suggestion.status === "out" ? "warning" : "success" })
+                    : renderSummaryItem("Attacks made", cwlAttacksLabel),
+            ];
+
+        const overviewDangerNotices = [];
+        const overviewInfoNotices = [];
+        const overviewNoteNotices = [];
+        for (let i = 0; i < localNotes.length; i++) {
+            overviewNoteNotices.push(renderNotice("Roster note", localNotes[i], "note"));
+        }
+        if (trackingMode === "cwl" && suggestion && suggestion.noteText) {
+            overviewNoteNotices.push(renderNotice("Suggestion note", suggestion.noteText, "note"));
+        }
+        if (storedThMismatch) {
+            overviewInfoNotices.push(renderNotice("TH mismatch", "Stored TH and official TH differ.", "warning"));
+        }
+        if (officialNameDiffers) {
+            overviewInfoNotices.push(renderNotice("Official name mismatch", "Official profile name differs from local roster name.", "warning"));
+        }
+        if (trackingMode === "regularWar") {
+            if (regularWar.currentWarUnavailableReason === "privateWarLog") {
+                overviewInfoNotices.push(renderNotice("Live war data", "Unavailable because the clan war log is private.", "warning"));
+            }
+            if (regularWar.aggregateStatusLevel === "warning" && regularWar.aggregateStatusMessage) {
+                overviewInfoNotices.push(renderNotice("Aggregate status", regularWar.aggregateStatusMessage, "warning"));
+            }
+            if (regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0) {
+                overviewDangerNotices.push(renderNotice("Pending attacks", formatNumber(regularWar.current.attacksRemaining) + " attacks remaining in the current war.", "alert"));
+            }
+            if (regularWar.current.missedAttacks > 0) {
+                overviewDangerNotices.push(renderNotice("Missed attacks", "Missed " + formatNumber(regularWar.current.missedAttacks) + " attacks.", "alert"));
+            }
+        } else {
+            if (cwl.currentWarAttackPending >= 1) overviewDangerNotices.push(renderNotice("Pending attack", "Current CWL attack pending.", "alert"));
+            if (cwl.missedAttacks > 0) overviewDangerNotices.push(renderNotice("Missed attacks", "Missed " + formatNumber(cwl.missedAttacks) + " attacks.", "alert"));
+            if (cwl.possibleStars > 0 && cwl.starsTotal < 8) overviewDangerNotices.push(renderNotice("Reward target", "Below 8-star CWL threshold.", "alert"));
+        }
+
+        const renderNoticeRow = (itemsRaw, toneRaw) => {
+            const items = Array.isArray(itemsRaw) ? itemsRaw.filter(Boolean) : [];
+            if (!items.length) return "";
+            return '<div class="profile-overview__notice-row profile-overview__notice-row--' + escapeAttr(toStr(toneRaw).trim() || "note") + '">' + items.join("") + "</div>";
+        };
+
+        const overviewHtml = [
+            '<section class="profile-overview">',
+            '<div class="profile-overview__layout">',
+            '<div class="profile-overview__identity">',
+            '<div class="profile-overview__identity-head">',
+            '<div class="profile-overview__th-wrap">', renderTownHallBadge(townHallLevel, player.townHallWeaponLevel), "</div>",
+            '<div class="profile-overview__identity-copy"><h2 class="profile-overview__name">', escapeHtml(displayName), '</h2><div class="profile-overview__tag">', escapeHtml(tag || "-"), "</div></div>",
             "</div>",
-            '<div class="profile-hero__actions">', actionButtons.join(""), "</div>",
+            '<div class="profile-overview__identity-meta">',
+            renderOverviewIdentityLine("Discord", discordLabel),
+            renderOverviewIdentityLine("Clan", clanDisplay),
+            renderOverviewIdentityLine("Home league", leagueName || "Unranked"),
+            renderOverviewIdentityLine("Clan role", roleLabel || "Member"),
             "</div>",
+            '<div class="profile-overview__actions">', actionButtons.join(""), "</div>",
             "</div>",
-            '<div class="profile-hero__snapshot">',
-            '<div class="profile-hero__snapshot-head">',
-            '<div class="profile-hero__snapshot-title">', escapeHtml(heroSnapshotTitle), "</div>",
-            '<div class="profile-hero__snapshot-subtitle">', escapeHtml(heroSnapshotSubtitle), "</div>",
+            '<aside class="profile-overview__snapshot"><div class="profile-overview__snapshot-title">Quick snapshot</div><div class="profile-overview__snapshot-grid">', overviewQuickItems.join(""), "</div></aside>",
             "</div>",
-            '<div class="profile-hero__snapshot-grid">', heroSnapshotItems, "</div>",
-            "</div>",
-            "</div>",
-            heroAlertCards ? ('<div class="profile-hero__alerts">' + heroAlertCards + "</div>") : "",
+            renderNoticeRow(overviewDangerNotices, "danger"),
+            renderNoticeRow(overviewInfoNotices, "warning"),
+            renderNoticeRow(overviewNoteNotices, "note"),
             "</section>",
         ].join("");
-
-        const notesHtml = localNotes.length
-            ? localNotes.map((note) => renderChip(note, "profile-chip--success")).join("")
-            : "";
-        const rosterNotesHtml = [
-            trackingMode === "cwl" && suggestion && suggestion.noteText
-                ? ('<div class="profile-notes-block__hint">Suggestion note: ' + escapeHtml(suggestion.noteText) + "</div>")
-                : "",
-            notesHtml
-                ? ('<div class="profile-chip-list">' + notesHtml + "</div>")
-                : '<div class="profile-empty">No roster notes.</div>',
-        ].join("");
+        const heroHtml = overviewHtml;
 
         const localInfoCards = context && context.player ? [
             renderMetaCard("Roster name", context.rosterTitle || "-", {
                 emptyText: "Not assigned",
                 subText: context.rosterId ? ("Roster ID " + context.rosterId) : "",
             }),
-            renderMetaCard("Placement", placementLabel, { alert: role === "sub" || role === "missing" }),
+            renderMetaCard("Roster status", placementLabel, { alert: role === "sub" || role === "missing" }),
             renderMetaCard("Discord", discordLabel, { emptyText: "Not set" }),
             renderMetaCard("Stored TH", localStoredThLabel, {
                 alert: storedThMismatch,
@@ -3194,56 +3431,72 @@
                     emptyText: "None",
                     alert: suggestion && suggestion.status === "out",
                 })
-                : renderMetaCard("Current war state", formatWarStateLabel(regularWar.currentWarState || "notinwar")),
-            officialNameDiffers ? renderMetaCard("Official name", player.name) : "",
+                : renderMetaCard("Current war state", regularWarStateLabel),
+            officialNameDiffers ? renderMetaCard("Official name", player.name, { alert: true }) : "",
+            trackingMode === "cwl" && suggestion && suggestion.noteText ? renderMetaCard("Suggestion note", suggestion.noteText) : "",
         ].filter(Boolean).join("") : "";
 
         const cwlStatsHtml = [
             renderStatCard("CWL season", cwl.season || "-"),
-            renderStatCard("Stars total / possible", cwlStarsLabel, {
+            renderStatCard("CWL stars", cwlStarsLabel, {
                 progress: cwl.starsPerf,
                 alert: cwl.possibleStars > 0 && cwl.starsTotal < 8,
             }),
-            renderStatCard("Stars performance", formatPercent(cwl.starsPerf, 0), { progress: cwl.starsPerf }),
-            renderStatCard("Average destruction", cwlAvgDestructionLabel, { progress: cwl.avgDestruction != null ? (Number(cwl.avgDestruction) / 100) : null }),
-            renderStatCard("Destruction performance", formatPercent(cwl.destructionPerf, 0), { progress: cwl.destructionPerf }),
-            renderStatCard("Resolved war days", formatNumber(cwl.resolvedWarDays)),
+            renderStatCard("Avg destruction", cwlAvgDestructionLabel, {
+                progress: cwl.avgDestruction != null ? (Number(cwl.avgDestruction) / 100) : null,
+            }),
             renderStatCard("Attacks made", cwlAttacksLabel),
-            renderStatCard("Counted attacks", formatNumber(cwl.countedAttacks)),
             renderStatCard("Missed attacks", formatNumber(cwl.missedAttacks), { alert: cwl.missedAttacks > 0 }),
             renderStatCard("Attack pending", cwl.currentWarAttackPending >= 1 ? "Yes" : "No", { alert: cwl.currentWarAttackPending >= 1 }),
-            renderStatCard("Three-star attacks", formatNumber(cwl.threeStarCount)),
-            renderStatCard("Hit up", formatNumber(cwl.hitUpCount)),
-            renderStatCard("Same TH hits", formatNumber(cwl.sameThHitCount)),
-            renderStatCard("Hit down", formatNumber(cwl.hitDownCount)),
+            renderStatCard("Reward threshold", cwl.possibleStars > 0 ? (cwl.starsTotal >= 8 ? "Met" : "Below 8 stars") : "N/A", {
+                alert: cwl.possibleStars > 0 && cwl.starsTotal < 8,
+                success: cwl.possibleStars > 0 && cwl.starsTotal >= 8,
+            }),
+            renderStatCard("Hit up / same / down", formatNumber(cwl.hitUpCount) + " / " + formatNumber(cwl.sameThHitCount) + " / " + formatNumber(cwl.hitDownCount)),
         ].join("");
         const regularWarStatsHtml = [
-            renderStatCard("Placement", placementLabel, { alert: role === "sub" || role === "missing" }),
-            renderStatCard("Current war state", formatWarStateLabel(regularWar.currentWarState || "notinwar")),
-            renderStatCard("Current attacks used / allowed", regularCurrentAttacksLabel),
-            renderStatCard("Current attacks remaining", regularCurrentRemainingLabel, {
+            renderStatCard("Current war state", regularWarStateLabel),
+            renderStatCard("Attacks used / allowed", regularCurrentAttacksLabel),
+            renderStatCard("Attacks remaining", regularCurrentRemainingLabel, {
                 alert: regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0,
             }),
             renderStatCard("Current stars", regularCurrentStarsLabel),
-            renderStatCard("Current avg destruction", regularCurrentAvgDestructionLabel),
-            renderStatCard("Current missed attacks", formatNumber(regularWar.current.missedAttacks), {
+            renderStatCard("Avg destruction", regularCurrentAvgDestructionLabel),
+            renderStatCard("Missed attacks", formatNumber(regularWar.current.missedAttacks), {
                 alert: regularWar.current.missedAttacks > 0,
             }),
-            renderStatCard("Current three-star attacks", formatNumber(regularWar.current.threeStarCount)),
-            renderStatCard("Current hit up", formatNumber(regularWar.current.hitUpCount)),
-            renderStatCard("Current same TH hits", formatNumber(regularWar.current.sameThHitCount)),
-            renderStatCard("Current hit down", formatNumber(regularWar.current.hitDownCount)),
+            renderStatCard("Pending attacks", regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0 ? "Yes" : "No", {
+                alert: regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0,
+            }),
+            renderStatCard("Hit up / same / down", formatNumber(regularWar.current.hitUpCount) + " / " + formatNumber(regularWar.current.sameThHitCount) + " / " + formatNumber(regularWar.current.hitDownCount)),
         ].join("");
 
-        const overallLongTermStatsHtml = renderLongTermStatsCards(longTerm.overall, {
+        const renderLongTermFocusedStatsCards = (statsRaw, options) => {
+            const stats = statsRaw && typeof statsRaw === "object" ? statsRaw : {};
+            const opts = options && typeof options === "object" ? options : {};
+            return [
+                renderStatCard("Participations", formatNumber(opts.participationsValue), {
+                    subText: toStr(opts.participationsSubText).trim(),
+                }),
+                renderStatCard("Attacks made", formatNumber(stats.attacksMade)),
+                renderStatCard("Missed attacks", formatNumber(stats.missedAttacks), { alert: stats.missedAttacks > 0 }),
+                renderStatCard("Avg stars per attack", stats.avgStarsPerAttack != null ? formatFixed(stats.avgStarsPerAttack, 2) : "-"),
+                renderStatCard("Avg destruction per attack", stats.avgDestructionPerAttack != null ? formatPercent(stats.avgDestructionPerAttack, 0) : "-", {
+                    progress: stats.avgDestructionPerAttack != null ? (Number(stats.avgDestructionPerAttack) / 100) : null,
+                }),
+                renderStatCard("Three-star attacks", formatNumber(stats.threeStarCount)),
+                renderStatCard("Hit up / same / down", formatNumber(stats.hitUpCount) + " / " + formatNumber(stats.sameThHitCount) + " / " + formatNumber(stats.hitDownCount)),
+            ].join("");
+        };
+        const overallLongTermStatsHtml = renderLongTermFocusedStatsCards(longTerm.overall, {
             participationsValue: longTerm.overall.participationCount,
             participationsSubText: "Regular wars + resolved CWL war days",
         });
-        const regularLongTermStatsHtml = renderLongTermStatsCards(longTerm.regular, {
+        const regularLongTermStatsHtml = renderLongTermFocusedStatsCards(longTerm.regular, {
             participationsValue: longTerm.regular.warsInLineup,
             participationsSubText: "Regular wars in lineup",
         });
-        const cwlLongTermStatsHtml = renderLongTermStatsCards(longTerm.cwl, {
+        const cwlLongTermStatsHtml = renderLongTermFocusedStatsCards(longTerm.cwl, {
             participationsValue: longTerm.cwl.resolvedWarDays,
             participationsSubText: "Resolved CWL war days",
         });
@@ -3263,71 +3516,72 @@
         const longTermHistoryBodyHtml = longTerm.hasAnyHistory
             ? [
                 longTermCoverageNotice,
-                '<div class="profile-section-grid">',
-                '<div class="profile-subsection">',
-                '<div class="profile-subsection__title">Overall combined long-term history</div>',
-                '<div class="profile-stats-grid">', overallLongTermStatsHtml, "</div>",
+                '<div class="profile-longterm" data-longterm-segmented="1" data-longterm-default="overall">',
+                '<div class="profile-longterm__controls" role="group" aria-label="Long-term view">',
+                '<button type="button" class="profile-longterm__toggle is-active" data-longterm-segment="overall" aria-pressed="true">Overall</button>',
+                '<button type="button" class="profile-longterm__toggle" data-longterm-segment="regular" aria-pressed="false">Regular</button>',
+                '<button type="button" class="profile-longterm__toggle" data-longterm-segment="cwl" aria-pressed="false">CWL</button>',
                 "</div>",
-                '<div class="profile-section-grid profile-section-grid--two">',
-                '<div class="profile-subsection">',
-                '<div class="profile-subsection__title">Regular war long-term breakdown</div>',
-                '<div class="profile-stats-grid">', regularLongTermStatsHtml, "</div>",
+                '<div class="profile-longterm__panel is-active" data-longterm-panel="overall" aria-hidden="false">',
+                '<div class="profile-stats-grid profile-stats-grid--dense">', overallLongTermStatsHtml, "</div>",
                 "</div>",
-                '<div class="profile-subsection">',
-                '<div class="profile-subsection__title">CWL long-term breakdown</div>',
-                '<div class="profile-stats-grid">', cwlLongTermStatsHtml, "</div>",
+                '<div class="profile-longterm__panel" data-longterm-panel="regular" aria-hidden="true" hidden>',
+                '<div class="profile-stats-grid profile-stats-grid--dense">', regularLongTermStatsHtml, "</div>",
                 "</div>",
+                '<div class="profile-longterm__panel" data-longterm-panel="cwl" aria-hidden="true" hidden>',
+                '<div class="profile-stats-grid profile-stats-grid--dense">', cwlLongTermStatsHtml, "</div>",
                 "</div>",
                 "</div>",
             ].join("")
             : '<div class="profile-empty">No finalized long-term war history is stored for this player yet.</div>';
 
         const cwlPreviewItems = [
-            renderSummaryItem("Season", cwl.season || "-"),
             renderSummaryItem("CWL stars", cwlStarsLabel, { tone: cwl.possibleStars > 0 ? (cwl.starsTotal < 8 ? "alert" : "success") : "" }),
-            renderSummaryItem("Avg destruction", cwlAvgDestructionLabel),
             suggestion
-                ? renderSummaryItem("Suggestion", suggestion.statusLabel, { tone: suggestion.status === "out" ? "alert" : "success" })
-                : renderSummaryItem("Notes", localNotes.length ? formatNumber(localNotes.length) : "0", { subText: pluralize(localNotes.length, "note", "notes") }),
+                ? renderSummaryItem("Suggestion", suggestion.statusLabel, { tone: suggestion.status === "out" ? "warning" : "success" })
+                : renderSummaryItem("Attacks made", cwlAttacksLabel),
         ];
         const regularWarPreviewItems = [
-            renderSummaryItem("Placement", context && context.player ? placementLabel : "-", { tone: placementTone }),
-            renderSummaryItem("War state", formatWarStateLabel(regularWar.currentWarState || "notinwar")),
-            renderSummaryItem("Current attacks", regularCurrentAttacksLabel, {
-                tone: regularWar.currentWarState === "inwar" && regularWar.current.attacksRemaining > 0 ? "alert" : "",
-            }),
-            renderSummaryItem("Current stars", regularCurrentStarsLabel),
+            renderSummaryItem("Roster", context && context.player ? placementLabel : "-", { tone: placementTone }),
+            renderSummaryItem("Live status", liveStatusMeta.text, { tone: liveStatusMeta.tone }),
         ];
         const longTermPreviewItems = [
-            renderSummaryItem("Overall stars/atk", longTerm.overall.avgStarsPerAttack != null ? formatFixed(longTerm.overall.avgStarsPerAttack, 2) : "-"),
             renderSummaryItem("Participations", formatNumber(longTerm.overall.participationCount)),
-            renderSummaryItem("Missed attacks", formatNumber(longTerm.overall.missedAttacks), {
-                tone: longTerm.overall.missedAttacks > 0 ? "alert" : "",
-            }),
-            renderSummaryItem("Three-stars", formatNumber(longTerm.overall.threeStarCount)),
+            renderSummaryItem("Avg stars/atk", longTerm.overall.avgStarsPerAttack != null ? formatFixed(longTerm.overall.avgStarsPerAttack, 2) : "-"),
         ];
         const trackingPreviewItems = trackingMode === "regularWar" ? regularWarPreviewItems : cwlPreviewItems;
         const trackingStatsHtml = trackingMode === "regularWar" ? regularWarStatsHtml : cwlStatsHtml;
-        const trackingStatsTitle = trackingMode === "regularWar" ? "Current regular war tracking" : "Current CWL season tracking";
-        const trackingDisclosureTitle = trackingMode === "regularWar" ? "Current war and roster context" : "Current CWL season and roster context";
+        const trackingStatsTitle = "Live war/CWL context";
+        const trackingDisclosureTitle = "Current context";
         const trackingDisclosureSubtitle = trackingMode === "regularWar"
-            ? "Current roster placement and live regular-war usage for this player."
-            : (cwl.season ? ("Current season " + cwl.season + " usage and roster context for this player.") : "Current CWL usage and roster context for this player.");
+            ? "Roster context and live regular-war details."
+            : (cwl.season ? ("Roster context and season " + cwl.season + " CWL details.") : "Roster context and live CWL details.");
         const trackingDisclosureSource = trackingMode === "regularWar" ? "Local roster + current regular war" : "Local roster + current CWL season";
-        const longTermDisclosureTitle = "Overall long-term war performance";
-        const longTermDisclosureSubtitle = "Combined persistent history from regular wars and CWL wars.";
+        const longTermDisclosureTitle = "Long-term performance";
+        const longTermDisclosureSubtitle = "Segmented history across Overall, Regular, and CWL.";
         const longTermDisclosureSource = "Shared warPerformance history";
+        const liveContextWarningNotices = [];
+        if (trackingMode === "regularWar") {
+            if (regularWar.currentWarUnavailableReason === "privateWarLog") {
+                liveContextWarningNotices.push(renderNotice("Live war data", "Unavailable because the clan war log is private.", "warning"));
+            }
+            if (regularWar.aggregateStatusLevel === "warning" && regularWar.aggregateStatusMessage) {
+                liveContextWarningNotices.push(renderNotice("Aggregate status", regularWar.aggregateStatusMessage, "warning"));
+            }
+        } else if (cwl.possibleStars > 0 && cwl.starsTotal < 8) {
+            liveContextWarningNotices.push(renderNotice("Reward target", "Below the 8-star CWL threshold.", "warning"));
+        }
 
         const trackingRosterBodyHtml = [
             '<div class="profile-section-grid profile-section-grid--two">',
-            '<div class="profile-subsection">',
-            '<div class="profile-subsection__title">Local roster info</div>',
+            '<div class="profile-subsection profile-subsection--dense">',
+            '<div class="profile-subsection__title">Roster context</div>',
             '<div class="profile-meta-grid">', localInfoCards || '<div class="profile-empty">No local roster details are available.</div>', "</div>",
-            '<div class="profile-notes-block"><div class="profile-notes-block__label">Roster notes</div>', rosterNotesHtml, "</div>",
             "</div>",
-            '<div class="profile-subsection">',
+            '<div class="profile-subsection profile-subsection--dense">',
             '<div class="profile-subsection__title">', escapeHtml(trackingStatsTitle), "</div>",
-            '<div class="profile-stats-grid">', trackingStatsHtml, "</div>",
+            liveContextWarningNotices.length ? ('<div class="profile-overview__notice-row profile-overview__notice-row--warning">' + liveContextWarningNotices.join("") + "</div>") : "",
+            '<div class="profile-stats-grid profile-stats-grid--dense">', trackingStatsHtml, "</div>",
             "</div>",
             "</div>",
         ].join("");
@@ -3338,68 +3592,120 @@
                 escapeHtml(errorText || "Unknown error.") + "</div></div>";
             const localSections = [
                 renderDisclosureSection({
-                    title: longTermDisclosureTitle,
-                    subtitle: longTermDisclosureSubtitle,
-                    source: longTermDisclosureSource,
-                    summaryItems: longTermPreviewItems,
-                    bodyHtml: longTermHistoryBodyHtml,
-                    open: true,
-                }),
-                renderDisclosureSection({
                     title: trackingDisclosureTitle,
                     subtitle: "Local roster details remain available even when the official profile request fails.",
                     source: trackingDisclosureSource,
                     summaryItems: trackingPreviewItems,
                     bodyHtml: rosterBody,
+                    open: true,
+                }),
+                renderDisclosureSection({
+                    title: longTermDisclosureTitle,
+                    subtitle: longTermDisclosureSubtitle,
+                    source: longTermDisclosureSource,
+                    summaryItems: longTermPreviewItems,
+                    bodyHtml: longTermHistoryBodyHtml,
                     open: false,
                 }),
             ].join("");
             profileState.bodyEl.innerHTML = heroHtml + localSections;
             syncProfileDisclosureState(profileState.bodyEl);
+            initLongTermSegmentedSections(profileState.bodyEl);
             return;
         }
 
-        const officialSnapshotHtml = [
-            renderStatCard("Trophies", formatNumber(player.trophies)),
-            renderStatCard("Best trophies", formatNumber(player.bestTrophies)),
-            renderStatCard("War stars", formatNumber(player.warStars)),
-            renderStatCard("Exp level", formatNumber(player.expLevel)),
-            renderStatCard("Attack wins", formatNumber(player.attackWins)),
-            renderStatCard("Defense wins", formatNumber(player.defenseWins)),
-            renderStatCard("Donations", formatNumber(player.donations)),
-            renderStatCard("Donations received", formatNumber(player.donationsReceived)),
-            renderStatCard("Clan capital contributions", formatNumber(player.clanCapitalContributions)),
+        const renderOfficialSnapshotGroup = (title, cards) =>
+            '<div class="profile-subsection profile-subsection--dense"><div class="profile-subsection__title">' + escapeHtml(title) +
+            '</div><div class="profile-stats-grid profile-stats-grid--dense">' + cards.join("") + "</div></div>";
+        const officialSnapshotBodyHtml = [
+            '<div class="profile-section-grid">',
+            renderOfficialSnapshotGroup("Combat", [
+                renderStatCard("Trophies", formatNumber(player.trophies)),
+                renderStatCard("Best trophies", formatNumber(player.bestTrophies)),
+                renderStatCard("War stars", formatNumber(player.warStars)),
+                renderStatCard("Attack wins", formatNumber(player.attackWins)),
+                renderStatCard("Defense wins", formatNumber(player.defenseWins)),
+            ]),
+            renderOfficialSnapshotGroup("Contribution", [
+                renderStatCard("Donations", formatNumber(player.donations)),
+                renderStatCard("Donations received", formatNumber(player.donationsReceived)),
+                renderStatCard("Clan capital contributions", formatNumber(player.clanCapitalContributions)),
+            ]),
+            renderOfficialSnapshotGroup("Account", [
+                renderStatCard("Exp level", formatNumber(player.expLevel)),
+                renderStatCard("Builder Hall", builderHall > 0 ? ("BH" + builderHall) : "-"),
+                renderStatCard("Builder trophies", formatNumber(player.versusTrophies)),
+            ]),
+            "</div>",
         ].join("");
 
         // Build army village.
-        const buildArmyVillage = (label, key) => {
+        const buildArmyVillageData = (key) => {
             const isBuilder = key === "builderBase";
             const heroes = sortArmyItems((player.heroes || []).filter((item) => toStr(item && item.village).toLowerCase().indexOf(isBuilder ? "builder" : "home") >= 0 || (!item.village && !isBuilder)), "heroes", key);
             const troops = sortArmyItems((player.troops || []).filter((item) => toStr(item && item.village).toLowerCase().indexOf(isBuilder ? "builder" : "home") >= 0 || (!item.village && !isBuilder)), "troops", key);
             const spells = isBuilder ? [] : sortArmyItems((player.spells || []).filter(() => !isBuilder), "spells", key);
-            const groups = [
-                ["Heroes", heroes],
-                ["Troops", troops],
-                ["Spells", spells],
-            ].filter((group) => group[1].length).map((group) =>
-                '<div class="profile-unit-group"><div class="profile-unit-group__title">' + escapeHtml(group[0]) + '</div><div class="profile-unit-list">' +
-                group[1].map((item) => {
-                    const level = toNonNegativeInt(item && item.level);
-                    const maxLevel = toNonNegativeInt(item && item.maxLevel);
-                    return '<div class="profile-unit-row"><div class="profile-unit-row__top"><div class="profile-unit-row__name">' + escapeHtml(item && item.name) + '</div>' +
-                        (item && item.superTroopIsActive ? renderChip("Active", "profile-chip--success") : "") +
-                        '</div><div class="profile-unit-row__level">Level ' + escapeHtml(formatNumber(level)) + (maxLevel > 0 ? (" / " + escapeHtml(formatNumber(maxLevel))) : "") + '</div>' +
-                        (maxLevel > 0 ? renderProgress(level / maxLevel, level >= maxLevel ? "success" : "") : "") + "</div>";
-                }).join("") +
-                "</div></div>"
-            ).join("");
             return {
-                html: groups ? ('<div class="profile-village-card"><div class="profile-village-card__title">' + escapeHtml(label) + "</div>" + groups + "</div>") : "",
+                heroes: heroes,
+                troops: troops,
+                spells: spells,
                 counts: { heroes: heroes.length, troops: troops.length, spells: spells.length },
             };
         };
-        const homeArmy = buildArmyVillage("Home Village", "homeVillage");
-        const builderArmy = buildArmyVillage("Builder Base", "builderBase");
+        const renderVillageUnitRows = (itemsRaw) => {
+            const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+            return items.map((item) => {
+                const level = toNonNegativeInt(item && item.level);
+                const maxLevel = toNonNegativeInt(item && item.maxLevel);
+                return '<div class="profile-unit-row"><div class="profile-unit-row__top"><div class="profile-unit-row__name">' + escapeHtml(item && item.name) + '</div>' +
+                    (item && item.superTroopIsActive ? renderChip("Active", "profile-chip--success") : "") +
+                    '</div><div class="profile-unit-row__level">Level ' + escapeHtml(formatNumber(level)) + (maxLevel > 0 ? (" / " + escapeHtml(formatNumber(maxLevel))) : "") + '</div>' +
+                    (maxLevel > 0 ? renderProgress(level / maxLevel, level >= maxLevel ? "success" : "") : "") + "</div>";
+            }).join("");
+        };
+        const renderVillageGroup = (label, itemsRaw, openByDefault) => {
+            const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+            if (!items.length) return "";
+            return '<details class="profile-village-group"' + (openByDefault ? " open" : "") + '><summary><span class="profile-village-group__title">' +
+                escapeHtml(label) + '</span><span class="profile-village-group__count">' + escapeHtml(formatNumber(items.length)) + "</span></summary>" +
+                '<div class="profile-unit-list profile-unit-list--dense">' + renderVillageUnitRows(items) + "</div></details>";
+        };
+        const renderVillageSummaryPill = (label, value) =>
+            '<div class="profile-village-summary-pill"><span class="profile-village-summary-pill__label">' + escapeHtml(label) +
+            '</span><span class="profile-village-summary-pill__value">' + escapeHtml(value) + "</span></div>";
+
+        const homeArmy = buildArmyVillageData("homeVillage");
+        const builderArmy = buildArmyVillageData("builderBase");
+        const homeVillageHtml = [
+            '<div class="profile-village-card">',
+            '<div class="profile-village-card__title">Home Village</div>',
+            '<div class="profile-village-summary-grid">',
+            renderVillageSummaryPill("Heroes", formatNumber(homeArmy.counts.heroes)),
+            renderVillageSummaryPill("Troops", formatNumber(homeArmy.counts.troops)),
+            renderVillageSummaryPill("Spells", formatNumber(homeArmy.counts.spells)),
+            "</div>",
+            renderVillageGroup("Heroes", homeArmy.heroes, true),
+            renderVillageGroup("Troops", homeArmy.troops, false),
+            renderVillageGroup("Spells", homeArmy.spells, false),
+            "</div>",
+        ].join("");
+        const hasBuilderData = builderHall > 0 || player.versusTrophies != null || player.bestVersusTrophies != null || player.versusBattleWins != null
+            || builderArmy.counts.heroes > 0 || builderArmy.counts.troops > 0;
+        const builderVillageHtml = hasBuilderData
+            ? [
+                '<div class="profile-village-card profile-village-card--secondary">',
+                '<div class="profile-village-card__title">Builder Base</div>',
+                '<div class="profile-village-summary-grid">',
+                renderVillageSummaryPill("Builder Hall", builderHall > 0 ? ("BH" + builderHall) : "-"),
+                renderVillageSummaryPill("Trophies", formatNumber(player.versusTrophies)),
+                renderVillageSummaryPill("Wins", formatNumber(player.versusBattleWins)),
+                "</div>",
+                renderVillageGroup("Heroes", builderArmy.heroes, false),
+                renderVillageGroup("Troops", builderArmy.troops, false),
+                "</div>",
+            ].join("")
+            : "";
+        const villageProgressBodyHtml = '<div class="profile-village-grid">' + homeVillageHtml + builderVillageHtml + "</div>";
 
         const labels = Array.isArray(player.labels) ? player.labels : [];
         const hasLabels = labels.length > 0;
@@ -3445,61 +3751,44 @@
 
         const sections = [
             renderDisclosureSection({
-                title: longTermDisclosureTitle,
-                subtitle: longTermDisclosureSubtitle,
-                source: longTermDisclosureSource,
-                summaryItems: longTermPreviewItems,
-                bodyHtml: longTermHistoryBodyHtml,
-                open: true,
-            }),
-            renderDisclosureSection({
                 title: trackingDisclosureTitle,
                 subtitle: trackingDisclosureSubtitle,
                 source: trackingDisclosureSource,
                 summaryItems: trackingPreviewItems,
                 bodyHtml: trackingRosterBodyHtml,
+                open: true,
+            }),
+            renderDisclosureSection({
+                title: longTermDisclosureTitle,
+                subtitle: longTermDisclosureSubtitle,
+                source: longTermDisclosureSource,
+                summaryItems: longTermPreviewItems,
+                bodyHtml: longTermHistoryBodyHtml,
                 open: false,
             }),
-            legendsJourneySection,
             renderDisclosureSection({
                 title: "Official snapshot",
-                subtitle: "Primary official totals for profile, activity, and contribution.",
+                subtitle: "Grouped official totals for combat, contribution, and account context.",
                 source: "Official Clash data",
                 summaryItems: [
                     renderSummaryItem("Trophies", formatNumber(player.trophies)),
                     renderSummaryItem("War stars", formatNumber(player.warStars)),
-                    renderSummaryItem("Donations", formatNumber(player.donations)),
                 ],
-                bodyHtml: '<div class="profile-stats-grid">' + officialSnapshotHtml + "</div>",
+                bodyHtml: officialSnapshotBodyHtml,
+                open: false,
             }),
             renderDisclosureSection({
-                title: "Home Village progress",
-                subtitle: "Heroes, troops, and spells grouped for fast progression checks.",
+                title: "Village progress",
+                subtitle: "Home Village first, then Builder Base as lower-priority context.",
                 source: "Official Clash data",
                 summaryItems: [
-                    renderSummaryItem("Heroes", homeArmy.counts.heroes ? formatNumber(homeArmy.counts.heroes) : "-"),
-                    renderSummaryItem("Troops", homeArmy.counts.troops ? formatNumber(homeArmy.counts.troops) : "-"),
-                    renderSummaryItem("Spells", homeArmy.counts.spells ? formatNumber(homeArmy.counts.spells) : "-"),
-                ],
-                bodyHtml: homeArmy.html || '<div class="profile-empty">No home village troop, hero, or spell data is available.</div>',
-            }),
-            (builderHall > 0 || player.versusTrophies != null || player.bestVersusTrophies != null || player.versusBattleWins != null || builderArmy.html) ? renderDisclosureSection({
-                title: "Builder Base",
-                subtitle: "Secondary profile context for builder-side progress.",
-                source: "Official Clash data",
-                summaryItems: [
+                    renderSummaryItem("Home heroes", homeArmy.counts.heroes ? formatNumber(homeArmy.counts.heroes) : "-"),
                     renderSummaryItem("Builder Hall", builderHall > 0 ? ("BH" + builderHall) : "-"),
-                    renderSummaryItem("Builder trophies", formatNumber(player.versusTrophies)),
-                    renderSummaryItem("Wins", formatNumber(player.versusBattleWins)),
                 ],
-                bodyHtml: '<div class="profile-section-grid"><div class="profile-subsection"><div class="profile-subsection__title">Builder Base stats</div><div class="profile-stats-grid">' + [
-                    renderStatCard("Builder Hall", builderHall > 0 ? ("BH" + builderHall) : "-"),
-                    renderStatCard("Builder base trophies", formatNumber(player.versusTrophies)),
-                    renderStatCard("Best builder base trophies", formatNumber(player.bestVersusTrophies)),
-                    renderStatCard("Versus battle wins", formatNumber(player.versusBattleWins)),
-                ].join("") + "</div></div>" + (builderArmy.html ? ('<div class="profile-subsection"><div class="profile-subsection__title">Builder Base units</div>' + builderArmy.html + "</div>") : "") + "</div>",
-                sectionClass: "profile-disclosure--secondary",
-            }) : "",
+                bodyHtml: villageProgressBodyHtml,
+                open: false,
+            }),
+            legendsJourneySection,
             hasAccountExtras ? renderDisclosureSection({
                 title: "Account extras",
                 subtitle: "Optional account metadata and long-tail profile details.",
@@ -3509,15 +3798,18 @@
                     renderSummaryItem("Achievements", formatNumber(achievements.length)),
                 ],
                 bodyHtml: '<div class="profile-section-grid profile-section-grid--two">' +
-                    (hasLabels ? ('<div class="profile-subsection"><div class="profile-subsection__title">Labels</div><div class="profile-label-list">' + labelsHtml + "</div></div>") : "") +
-                    (hasAchievements ? ('<div class="profile-subsection"><div class="profile-subsection__title">Achievements</div>' + achievementsHtml + "</div></div>") : "") +
-                    (houseCards ? ('<div class="profile-subsection"><div class="profile-subsection__title">Player House</div><div class="profile-meta-grid">' + houseCards + "</div></div>") : "") +
+                    (hasLabels ? ('<div class="profile-subsection profile-subsection--dense"><div class="profile-subsection__title">Labels</div><div class="profile-label-list">' + labelsHtml + "</div></div>") : "") +
+                    (hasAchievements ? ('<div class="profile-subsection profile-subsection--dense"><div class="profile-subsection__title">Achievements</div>' + achievementsHtml + "</div></div>") : "") +
+                    (houseCards ? ('<div class="profile-subsection profile-subsection--dense"><div class="profile-subsection__title">Player House</div><div class="profile-meta-grid">' + houseCards + "</div></div>") : "") +
                     "</div>",
+                sectionClass: "profile-disclosure--secondary",
+                open: false,
             }) : "",
         ].filter(Boolean).join("");
 
         profileState.bodyEl.innerHTML = heroHtml + sections;
         syncProfileDisclosureState(profileState.bodyEl);
+        initLongTermSegmentedSections(profileState.bodyEl);
         initLegendsJourneySections(profileState.bodyEl);
     };
 
@@ -3789,7 +4081,14 @@
             '<div class="profile-modal__backdrop" data-profile-dismiss="backdrop"></div>',
             '<div class="profile-modal__panel glass-surface glass-surface--strong" role="dialog" aria-modal="true" aria-labelledby="' + PROFILE_MODAL_ID + 'Title">',
             '<div class="profile-modal__topbar glass-surface glass-surface--soft">',
-            '<div class="profile-modal__title-wrap"><div class="profile-modal__eyebrow">Player profile</div><div class="profile-modal__title" id="' + PROFILE_MODAL_ID + 'Title">Player profile</div></div>',
+            '<div class="profile-modal__topbar-main">',
+            '<div class="profile-modal__topbar-id">',
+            '<div class="profile-modal__topbar-league" data-profile-topbar-league="1"></div>',
+            '<div class="profile-modal__topbar-th" data-profile-topbar-th="1"></div>',
+            '<div class="profile-modal__title-wrap"><div class="profile-modal__title" id="' + PROFILE_MODAL_ID + 'Title">Player profile</div><div class="profile-modal__subtitle" data-profile-topbar-tag="1">-</div></div>',
+            '</div>',
+            '<div class="profile-modal__topbar-meta"><div class="profile-modal__topbar-status" data-profile-topbar-status="1"></div><div class="profile-modal__topbar-form" data-profile-topbar-form="1"></div></div>',
+            '</div>',
             '<button type="button" class="profile-modal__close" data-profile-dismiss="close" aria-label="Close player profile">Close</button>',
             '</div>',
             '<div class="profile-modal__body"></div>',
@@ -3819,6 +4118,11 @@
         document.body.appendChild(root);
         profileState.root = root;
         profileState.titleEl = root.querySelector(".profile-modal__title");
+        profileState.subtitleEl = root.querySelector("[data-profile-topbar-tag='1']");
+        profileState.topbarLeagueEl = root.querySelector("[data-profile-topbar-league='1']");
+        profileState.topbarThEl = root.querySelector("[data-profile-topbar-th='1']");
+        profileState.topbarStatusEl = root.querySelector("[data-profile-topbar-status='1']");
+        profileState.topbarFormEl = root.querySelector("[data-profile-topbar-form='1']");
         profileState.bodyEl = root.querySelector(".profile-modal__body");
         profileState.closeEl = root.querySelector(".profile-modal__close");
         return root;
@@ -5033,7 +5337,8 @@
 
         const metaRow = el("div", "player-meta-row");
         const discordLine = el("div", "player-discord-line");
-        const discordIconUrl = getDiscordIconUrl();
+        const discordHandle = toStr(player.discord).trim();
+        const discordIconUrl = discordHandle ? getDiscordIconUrl() : getNoDiscordIconUrl();
         if (discordIconUrl) {
             const discordIcon = document.createElement("img");
             discordIcon.className = "player-discord-icon";
@@ -5045,7 +5350,11 @@
             discordIcon.decoding = "async";
             discordLine.appendChild(discordIcon);
         }
-        discordLine.appendChild(el("span", "player-discord-text", toStr(player.discord).trim() || "No Discord set"));
+        if (discordHandle) {
+            discordLine.appendChild(el("span", "player-discord-text", discordHandle));
+        } else {
+            discordLine.setAttribute("aria-label", "No Discord set");
+        }
 
         const formBadge = el("span", "player-form-badge tone-" + publicFormScore.tone);
         formBadge.setAttribute("role", "img");
