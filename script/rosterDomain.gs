@@ -407,6 +407,35 @@ function normalizePreparationLockState_(rawValue, rosterPoolTagSetRaw) {
 	return out;
 }
 
+// Normalize explicit CWL preparation roster assignments.
+function normalizePreparationAssignedTagSet_(rawValue, rosterPoolTagSetRaw) {
+	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+	const out = {};
+	const keys = Object.keys(raw);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag || !rosterPoolTagSet[tag]) continue;
+		if (!toBooleanFlag_(raw[keys[i]])) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
+// Normalize explicit CWL preparation roster exclusions.
+function normalizePreparationExcludedTagSet_(rawValue) {
+	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+	const out = {};
+	const keys = Object.keys(raw);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag || !isValidPlayerTag_(tag)) continue;
+		if (!toBooleanFlag_(raw[keys[i]])) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
 // Sanitize roster CWL preparation.
 function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingModeRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -418,6 +447,24 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 	const lockTags = Object.keys(lockStateByTag);
 	const enabledRaw = raw ? toBooleanFlag_(raw.enabled) : false;
 	const enabled = trackingMode === "cwl" ? enabledRaw : false;
+	const hasAssignedSource = !!(raw && raw.assignedTagSet && typeof raw.assignedTagSet === "object" && !Array.isArray(raw.assignedTagSet));
+	let assignedTagSet = trackingMode === "cwl" && enabled ? normalizePreparationAssignedTagSet_(raw && raw.assignedTagSet, rosterPoolTagSet) : {};
+	if (trackingMode === "cwl" && enabled && !hasAssignedSource) {
+		const poolTags = Object.keys(rosterPoolTagSet);
+		for (let i = 0; i < poolTags.length; i++) {
+			const tag = normalizeTag_(poolTags[i]);
+			if (tag) assignedTagSet[tag] = true;
+		}
+	}
+	const excludedTagSet = trackingMode === "cwl" && enabled ? normalizePreparationExcludedTagSet_(raw && raw.excludedTagSet) : {};
+	const excludedTags = Object.keys(excludedTagSet);
+	for (let i = 0; i < excludedTags.length; i++) {
+		const tag = normalizeTag_(excludedTags[i]);
+		if (!tag) continue;
+		delete lockStateByTag[tag];
+		delete assignedTagSet[tag];
+	}
+	const assignedTags = Object.keys(assignedTagSet);
 	const rosterSize = normalizePreparationRosterSize_(raw && raw.rosterSize, defaultRosterSize);
 	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
 	if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
@@ -425,12 +472,14 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 	}
 	const lastAppliedAt = raw && typeof raw.lastAppliedAt === "string" ? raw.lastAppliedAt.trim() : "";
 	const hasSource = !!raw;
-	const hasMeaningfulContent = hasSource || enabled || lockTags.length > 0;
+	const hasMeaningfulContent = hasSource || enabled || lockTags.length > 0 || assignedTags.length > 0 || excludedTags.length > 0;
 	if (!hasMeaningfulContent) return null;
 	const out = {
 		enabled: enabled,
 		rosterSize: rosterSize,
 		lockStateByTag: lockStateByTag,
+		assignedTagSet: assignedTagSet,
+		excludedTagSet: excludedTagSet,
 		algorithm: CWL_PREPARATION_ALGORITHM,
 	};
 	if (lastAppliedAt) out.lastAppliedAt = lastAppliedAt;
@@ -490,9 +539,13 @@ function getRosterCwlPreparation_(rosterRaw) {
 			enabled: false,
 			rosterSize: fallbackRosterSize,
 			lockStateByTag: {},
+			assignedTagSet: {},
+			excludedTagSet: {},
 			algorithm: CWL_PREPARATION_ALGORITHM,
 		};
 	if (!sanitized.lockStateByTag || typeof sanitized.lockStateByTag !== "object") sanitized.lockStateByTag = {};
+	if (!sanitized.assignedTagSet || typeof sanitized.assignedTagSet !== "object") sanitized.assignedTagSet = {};
+	if (!sanitized.excludedTagSet || typeof sanitized.excludedTagSet !== "object") sanitized.excludedTagSet = {};
 	if (!sanitized.algorithm) sanitized.algorithm = CWL_PREPARATION_ALGORITHM;
 	return sanitized;
 }
@@ -621,9 +674,13 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 			enabled: false,
 			rosterSize: fallbackRosterSize,
 			lockStateByTag: {},
+			assignedTagSet: {},
+			excludedTagSet: {},
 			algorithm: CWL_PREPARATION_ALGORITHM,
 		};
 	if (!prep.lockStateByTag || typeof prep.lockStateByTag !== "object") prep.lockStateByTag = {};
+	if (!prep.assignedTagSet || typeof prep.assignedTagSet !== "object") prep.assignedTagSet = {};
+	if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
 	prep.algorithm = CWL_PREPARATION_ALGORITHM;
 
 	const lockStateByTag = prep.lockStateByTag;
@@ -641,6 +698,8 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 
 	if (trackingMode !== "cwl" || !prep.enabled) {
 		prep.enabled = false;
+		prep.assignedTagSet = {};
+		prep.excludedTagSet = {};
 		roster.cwlPreparation = prep;
 		return {
 			enabled: false,
@@ -659,7 +718,14 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 		throw new Error("CWL Preparation Mode invalid: lockedIn count (" + lockedInCount + ") exceeds roster size (" + prep.rosterSize + ").");
 	}
 
-	const ranking = buildCwlPreparationRanking_(roster, { poolEntries: poolEntries });
+	const excludedTagSet = prep.excludedTagSet && typeof prep.excludedTagSet === "object" ? prep.excludedTagSet : {};
+	const availablePoolEntries = [];
+	for (let i = 0; i < poolEntries.length; i++) {
+		const tag = normalizeTag_(poolEntries[i] && poolEntries[i].tag);
+		if (!tag || excludedTagSet[tag]) continue;
+		availablePoolEntries.push(poolEntries[i]);
+	}
+	const ranking = buildCwlPreparationRanking_(roster, { poolEntries: availablePoolEntries });
 	const ranked = Array.isArray(ranking.ranked) ? ranking.ranked : [];
 	const rankedByTag = ranking.byTag && typeof ranking.byTag === "object" ? ranking.byTag : {};
 	const lockedInEntries = [];
@@ -719,6 +785,13 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 	const afterMainTags = roster.main.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
 	const afterSubsTags = roster.subs.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
 	const afterMissingTags = roster.missing.map((player) => normalizeTag_(player && player.tag)).filter((tag) => tag);
+	const nextAssignedTagSet = {};
+	const assignedPlayers = roster.main.concat(roster.subs);
+	for (let i = 0; i < assignedPlayers.length; i++) {
+		const tag = normalizeTag_(assignedPlayers[i] && assignedPlayers[i].tag);
+		if (tag) nextAssignedTagSet[tag] = true;
+	}
+	prep.assignedTagSet = nextAssignedTagSet;
 	const compositionChanged =
 		beforeMainTags.join("|") !== afterMainTags.join("|") ||
 		beforeSubsTags.join("|") !== afterSubsTags.join("|") ||

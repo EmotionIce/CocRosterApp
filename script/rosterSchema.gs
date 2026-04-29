@@ -304,6 +304,13 @@ function validateRosterData_(data) {
 			cwlPreparation: sanitizedCwlPreparation,
 			publicLineupProjection: sanitizedPublicLineupProjection,
 		});
+		if (trackingMode === "cwl" && sanitizedCwlPreparation && sanitizedCwlPreparation.enabled && sanitizedCwlPreparation.excludedTagSet) {
+			const excludedTags = Object.keys(sanitizedCwlPreparation.excludedTagSet);
+			for (let j = 0; j < excludedTags.length; j++) {
+				const excludedTag = normalizeTag_(excludedTags[j]);
+				if (excludedTag) projectedRetentionTagSet[excludedTag] = true;
+			}
+		}
 		let sanitizedWarPerformance = sanitizeRosterWarPerformance_(r.warPerformance);
 		const retentionTagSet = buildHistoryRetentionTagSet_(rosterPoolTagSet, sanitizedWarPerformance, r.regularWar, new Date().toISOString(), projectedRetentionTagSet);
 		const sanitizedCwlStats = sanitizeRosterCwlStats_(r.cwlStats, retentionTagSet);
