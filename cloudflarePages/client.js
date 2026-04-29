@@ -1481,11 +1481,22 @@
         const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object"
             ? roster.publicLineupProjection
             : null;
-        const projectionPlayersRaw = projection && projection.active === true && Array.isArray(projection.players)
+        const rosterTrackingMode = getRosterTrackingMode(roster);
+        const projectionSource = toStr(projection && projection.source).trim();
+        const projectionTrackingModeRaw = toStr(projection && projection.trackingMode).trim();
+        const projectionTrackingMode = projectionTrackingModeRaw === "regularWar" || projectionTrackingModeRaw === "cwl"
+            ? projectionTrackingModeRaw
+            : rosterTrackingMode;
+        const projectionSourceCompatible = rosterTrackingMode === "cwl"
+            ? projectionSource !== "regularWarCurrentWar"
+            : projectionSource !== "cwlCurrentWar" && projectionSource !== "cwlPreparation";
+        const projectionCompatible = !!projection
+            && projectionTrackingMode === rosterTrackingMode
+            && projectionSourceCompatible
+            && !(rosterTrackingMode === "cwl" && isCwlPreparationActivePublic_(roster));
+        const projectionPlayersRaw = projectionCompatible && projection.active === true && Array.isArray(projection.players)
             ? projection.players
             : [];
-        const projectionSource = toStr(projection && projection.source).trim();
-        const projectionTrackingMode = toStr(projection && projection.trackingMode).trim() || getRosterTrackingMode(roster);
         const projectionUpdatedAt = toStr(projection && projection.updatedAt).trim();
         const projectionHasMapPosition = projectionPlayersRaw.some((playerRaw) => {
             const mapPosition = Number(playerRaw && playerRaw.mapPosition);

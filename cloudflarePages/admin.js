@@ -2187,6 +2187,170 @@
   const getRosterTrackingMode = (rosterRaw) =>
     rosterRaw && rosterRaw.trackingMode === "regularWar" ? "regularWar" : "cwl";
 
+  // Return projection tracking mode with roster mode fallback.
+  const getPublicLineupProjectionTrackingModeLocal_ = (projectionRaw, rosterTrackingModeRaw) => {
+    const rosterTrackingMode = rosterTrackingModeRaw === "regularWar" ? "regularWar" : "cwl";
+    const projection = projectionRaw && typeof projectionRaw === "object" && !Array.isArray(projectionRaw)
+      ? projectionRaw
+      : {};
+    const raw = toStr(projection.trackingMode).trim();
+    return raw === "regularWar" || raw === "cwl" ? raw : rosterTrackingMode;
+  };
+
+  // Return whether a projection source belongs to the same tracking mode.
+  const isPublicLineupProjectionSourceCompatibleLocal_ = (sourceRaw, trackingModeRaw) => {
+    const source = toStr(sourceRaw).trim();
+    const trackingMode = trackingModeRaw === "regularWar" ? "regularWar" : "cwl";
+    if (trackingMode === "cwl") return source !== "regularWarCurrentWar";
+    return source !== "cwlCurrentWar" && source !== "cwlPreparation";
+  };
+
+  // Return whether a public lineup projection can affect this roster's public display.
+  const isRosterPublicLineupProjectionCompatibleLocal_ = (rosterRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+    if (!roster) return false;
+    const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object" && !Array.isArray(roster.publicLineupProjection)
+      ? roster.publicLineupProjection
+      : null;
+    if (!projection) return false;
+    const trackingMode = getRosterTrackingMode(roster);
+    const projectionTrackingMode = getPublicLineupProjectionTrackingModeLocal_(projection, trackingMode);
+    if (projectionTrackingMode !== trackingMode) return false;
+    if (!isPublicLineupProjectionSourceCompatibleLocal_(projection.source, trackingMode)) return false;
+    if (trackingMode === "cwl" && isCwlPreparationActiveLocal_(roster)) return false;
+    return true;
+  };
+
+  // Normalize or remove a roster public lineup projection in preview data.
+  const normalizeRosterPublicLineupProjectionLocal_ = (rosterRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+    if (!roster) return false;
+    const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object" && !Array.isArray(roster.publicLineupProjection)
+      ? roster.publicLineupProjection
+      : null;
+    if (!projection) return false;
+    if (!isRosterPublicLineupProjectionCompatibleLocal_(roster)) {
+      delete roster.publicLineupProjection;
+      return true;
+    }
+
+    let changed = false;
+    const trackingMode = getRosterTrackingMode(roster);
+    const projectionTrackingMode = getPublicLineupProjectionTrackingModeLocal_(projection, trackingMode);
+    if (projection.trackingMode !== projectionTrackingMode) {
+      projection.trackingMode = projectionTrackingMode;
+      changed = true;
+    }
+    const players = Array.isArray(projection.players) ? projection.players : [];
+    const nextPlayers = [];
+    const seen = {};
+    for (let i = 0; i < players.length; i++) {
+      const player = players[i] && typeof players[i] === "object" ? players[i] : {};
+      const tag = normalizeTag(player.tag);
+      if (!tag || seen[tag]) {
+        changed = true;
+        continue;
+      }
+      seen[tag] = true;
+      if (player.tag !== tag) {
+        player.tag = tag;
+        changed = true;
+      }
+      nextPlayers.push(player);
+    }
+    if (projection.active === true && !nextPlayers.length) {
+      delete roster.publicLineupProjection;
+      return true;
+    }
+    if (players.length !== nextPlayers.length) changed = true;
+    projection.players = projection.active === true ? nextPlayers : [];
+    return changed;
+  };
+
+  // Normalize all roster public lineup projections in loaded preview data.
+  const normalizeAllRosterPublicLineupProjectionsLocal_ = () => {
+    let changed = false;
+    const rosters = getRosters();
+    for (let i = 0; i < rosters.length; i++) {
+      if (normalizeRosterPublicLineupProjectionLocal_(rosters[i])) changed = true;
+    }
+    return changed;
+  };
+
+  // Remove a tag from one roster public lineup projection.
+  const pruneTagFromRosterPublicLineupProjectionLocal_ = (rosterRaw, tagRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+    const tag = normalizeTag(tagRaw);
+    if (!roster || !tag) return false;
+    const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object" && !Array.isArray(roster.publicLineupProjection)
+      ? roster.publicLineupProjection
+      : null;
+    if (!projection || !Array.isArray(projection.players)) return false;
+    const nextPlayers = projection.players.filter((player) => normalizeTag(player && player.tag) !== tag);
+    if (nextPlayers.length === projection.players.length) return false;
+    if (nextPlayers.length) {
+      projection.players = nextPlayers;
+    } else {
+      delete roster.publicLineupProjection;
+    }
+    return true;
+  };
+
+  // Remove a tag from every public lineup projection in preview data.
+  const pruneTagFromAllRosterPublicLineupProjectionsLocal_ = (tagRaw) => {
+    const tag = normalizeTag(tagRaw);
+    if (!tag) return false;
+    let changed = false;
+    const rosters = getRosters();
+    for (let i = 0; i < rosters.length; i++) {
+      if (pruneTagFromRosterPublicLineupProjectionLocal_(rosters[i], tag)) changed = true;
+    }
+    return changed;
+  };
+
+  // Sync one projected player with an edited canonical player.
+  const syncRosterPublicLineupProjectionPlayerLocal_ = (rosterRaw, currentTagRaw, playerRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+    const currentTag = normalizeTag(currentTagRaw);
+    const player = playerRaw && typeof playerRaw === "object" ? playerRaw : null;
+    const nextTag = normalizeTag(player && player.tag);
+    if (!roster || !currentTag || !player || !nextTag) return false;
+    const projection = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object" && !Array.isArray(roster.publicLineupProjection)
+      ? roster.publicLineupProjection
+      : null;
+    if (!projection || !Array.isArray(projection.players)) return false;
+
+    let changed = false;
+    const nextPlayers = [];
+    const seen = {};
+    for (let i = 0; i < projection.players.length; i++) {
+      const projected = projection.players[i] && typeof projection.players[i] === "object" ? projection.players[i] : {};
+      const projectedTag = normalizeTag(projected.tag);
+      if (projectedTag === currentTag) {
+        projected.slot = null;
+        projected.name = toStr(player.name).trim() || "(no name)";
+        projected.discord = toStr(player.discord).trim();
+        projected.th = toNonNegativeIntLocal_(player.th);
+        projected.tag = nextTag;
+        projected.notes = normalizeNotes(player.notes);
+        projected.excludeAsSwapTarget = !!player.excludeAsSwapTarget;
+        projected.excludeAsSwapSource = !!player.excludeAsSwapSource;
+        changed = true;
+      }
+      const finalTag = normalizeTag(projected.tag);
+      if (!finalTag || seen[finalTag]) {
+        changed = true;
+        continue;
+      }
+      seen[finalTag] = true;
+      nextPlayers.push(projected);
+    }
+    if (!changed) return false;
+    if (nextPlayers.length) projection.players = nextPlayers;
+    else delete roster.publicLineupProjection;
+    return true;
+  };
+
   // Normalize notes.
   const normalizeNotes = (rawNotes) => {
     if (Array.isArray(rawNotes)) {
@@ -3567,6 +3731,7 @@
     normalizeRosterOrderInData_(state.lastRosterData);
     reindexAllRosters();
     rebalanceAllActiveCwlPreparationRostersLocal_({ recordAppliedAt: false, enforceLockedInLimit: false });
+    normalizeAllRosterPublicLineupProjectionsLocal_();
     clearSavedBenchSuggestionsFromPreview_();
     clearSuggestionMarks_();
     renderPreviewFromState();
@@ -3776,6 +3941,7 @@
       transferPreparationLockOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
       rebalanceRosterIfPreparationActiveLocal_(sourceRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
       rebalanceRosterIfPreparationActiveLocal_(targetRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
     } catch (err) {
       rosters[sourceLoc.rosterIndex] = sourceSnapshot;
       rosters[targetIndex] = targetSnapshot;
@@ -3810,6 +3976,7 @@
         roster.cwlPreparation = prep;
       }
       rebalanceRosterIfPreparationActiveLocal_(roster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
     } catch (err) {
       rosters[loc.rosterIndex] = rosterSnapshot;
       throw err;
@@ -3858,6 +4025,8 @@
       player.notes = normalizeNotes(draft && draft.notes);
       movePreparationLockForEditedTagLocal_(roster, currentTag, nextTag);
       rebalanceRosterIfPreparationActiveLocal_(roster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      syncRosterPublicLineupProjectionPlayerLocal_(roster, currentTag, player);
+      if (nextTag !== currentTag) pruneTagFromAllRosterPublicLineupProjectionsLocal_(currentTag);
     } catch (err) {
       rosters[loc.rosterIndex] = rosterSnapshot;
       throw err;
@@ -3898,6 +4067,7 @@
 
     normalizePlayerFlagsInPlace(player);
     player[flagName] = !!nextValue;
+    syncRosterPublicLineupProjectionPlayerLocal_(roster, playerTag, player);
 
     const label = flagName === "excludeAsSwapTarget" ? "swap target" : "swap source";
     const stateLabel = player[flagName] ? "disabled" : "enabled";
@@ -3932,7 +4102,7 @@
     const rosterSnapshot = cloneJson(targetRoster);
     const targetList = trackingMode === "regularWar" ? targetRoster.subs : targetRoster.main;
     try {
-      targetList.push({
+      const nextPlayer = {
         slot: null,
         name: toStr(draft && draft.name).trim() || "(no name)",
         discord: toStr(draft && draft.discord).trim(),
@@ -3941,7 +4111,9 @@
         notes: normalizeNotes(draft && draft.notes),
         excludeAsSwapTarget: false,
         excludeAsSwapSource: false,
-      });
+      };
+      targetList.push(nextPlayer);
+      syncRosterPublicLineupProjectionPlayerLocal_(targetRoster, tag, nextPlayer);
       rebalanceRosterIfPreparationActiveLocal_(targetRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
     } catch (err) {
       const rosterIndex = rosters.findIndex((r) => toStr(r && r.id).trim() === rosterId);
@@ -5097,6 +5269,7 @@
       normalizeRosterOrderInData_(state.lastRosterData);
       reindexAllRosters();
       rebalanceAllActiveCwlPreparationRostersLocal_({ recordAppliedAt: false, enforceLockedInLimit: false });
+      normalizeAllRosterPublicLineupProjectionsLocal_();
       clearSuggestionMarks_();
       renderPreviewFromState();
       const publishBtn = $("#publishBtn");
@@ -5311,6 +5484,7 @@
       recordAppliedAt: false,
       enforceLockedInLimit: false,
     });
+    normalizeAllRosterPublicLineupProjectionsLocal_();
     clearSuggestionMarks_();
     syncPublicConfigEditorFromState_({ preserveStatus: true });
     renderPreviewFromState();
@@ -5660,6 +5834,7 @@
             }
             reindexRoster(r);
           }
+          normalizeRosterPublicLineupProjectionLocal_(r);
         } catch (err) {
           rosters[rosterIndex] = rosterSnapshot;
           alert("Tracking mode update failed: " + toErrorMessage(err));
@@ -5845,6 +6020,7 @@
       state.swapInMarksByRoster = {};
       state.suggestionNotesByRoster = {};
       reindexAllRosters();
+      normalizeAllRosterPublicLineupProjectionsLocal_();
       setAddPreviewRosterStatus("", false);
       setAddPlayerStatus("", false);
       syncPublicConfigEditorFromState_({ preserveStatus: true });
@@ -6174,6 +6350,9 @@
 
         syncRosterOrderFromCurrentArray_(state.lastRosterData);
         normalizeRosterOrderInData_(state.lastRosterData);
+        reindexAllRosters();
+        rebalanceAllActiveCwlPreparationRostersLocal_({ recordAppliedAt: false, enforceLockedInLimit: false });
+        normalizeAllRosterPublicLineupProjectionsLocal_();
 
         $("#publishBtn").disabled = true;
         setStatus("Publishing...");

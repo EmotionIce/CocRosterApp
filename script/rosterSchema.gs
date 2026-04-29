@@ -170,6 +170,22 @@ function sanitizeRosterPublicLineupProjection_(rawProjection, rosterPoolTagSetRa
 	return hasProjectionContent ? out : null;
 }
 
+// Return whether a public lineup projection is compatible with the canonical roster state.
+function shouldKeepRosterPublicLineupProjection_(projectionRaw, trackingModeRaw, cwlPreparationRaw) {
+	const projection = projectionRaw && typeof projectionRaw === "object" && !Array.isArray(projectionRaw) ? projectionRaw : null;
+	if (!projection) return false;
+	const trackingMode = String(trackingModeRaw == null ? "" : trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+	const projectionTrackingModeRaw = String(projection.trackingMode == null ? "" : projection.trackingMode).trim();
+	const projectionTrackingMode = projectionTrackingModeRaw === "regularWar" || projectionTrackingModeRaw === "cwl" ? projectionTrackingModeRaw : trackingMode;
+	if (projectionTrackingMode !== trackingMode) return false;
+	const source = String(projection.source == null ? "" : projection.source).trim();
+	if (trackingMode === "cwl" && source === "regularWarCurrentWar") return false;
+	if (trackingMode === "regularWar" && (source === "cwlCurrentWar" || source === "cwlPreparation")) return false;
+	const cwlPreparation = cwlPreparationRaw && typeof cwlPreparationRaw === "object" && !Array.isArray(cwlPreparationRaw) ? cwlPreparationRaw : null;
+	if (trackingMode === "cwl" && cwlPreparation && cwlPreparation.enabled === true) return false;
+	return true;
+}
+
 // Handle count roster payload.
 function countRosterPayload_(rosterData) {
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -275,8 +291,17 @@ function validateRosterData_(data) {
 			if (!playerTag) continue;
 			rosterUsableTagSet[playerTag] = true;
 		}
-		const sanitizedPublicLineupProjection = sanitizeRosterPublicLineupProjection_(r.publicLineupProjection, rosterPoolTagSet, trackingMode);
+		const sanitizedCwlPreparation = sanitizeRosterCwlPreparation_(r.cwlPreparation, rosterPoolTagSet, trackingMode, {
+			defaultRosterSize: normalizePreparationRosterSize_(outMain.length, CWL_PREPARATION_MIN_ROSTER_SIZE),
+			enforceLockedInLimit: true,
+		});
+		let sanitizedPublicLineupProjection = sanitizeRosterPublicLineupProjection_(r.publicLineupProjection, rosterPoolTagSet, trackingMode);
+		if (!shouldKeepRosterPublicLineupProjection_(sanitizedPublicLineupProjection, trackingMode, sanitizedCwlPreparation)) {
+			sanitizedPublicLineupProjection = null;
+		}
 		const projectedRetentionTagSet = buildRosterPublicLineupProjectionTagSet_({
+			trackingMode: trackingMode,
+			cwlPreparation: sanitizedCwlPreparation,
 			publicLineupProjection: sanitizedPublicLineupProjection,
 		});
 		let sanitizedWarPerformance = sanitizeRosterWarPerformance_(r.warPerformance);
@@ -285,10 +310,6 @@ function validateRosterData_(data) {
 		const sanitizedRegularWar = sanitizeRosterRegularWar_(r.regularWar, retentionTagSet);
 		sanitizedWarPerformance = backfillWarPerformanceFromLegacyRegularAggregate_(sanitizedWarPerformance, sanitizedRegularWar);
 		const sanitizedBenchSuggestions = sanitizeRosterBenchSuggestions_(r.benchSuggestions, rosterUsableTagSet);
-		const sanitizedCwlPreparation = sanitizeRosterCwlPreparation_(r.cwlPreparation, rosterPoolTagSet, trackingMode, {
-			defaultRosterSize: normalizePreparationRosterSize_(outMain.length, CWL_PREPARATION_MIN_ROSTER_SIZE),
-			enforceLockedInLimit: true,
-		});
 
 		// Recompute badges to match array lengths (this avoids drift)
 		const nextRoster = {

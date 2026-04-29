@@ -82,6 +82,14 @@ function collectRosterPublicLineupProjectionPlayers_(rosterRaw) {
 	const players = Array.isArray(projection.players) ? projection.players : [];
 	const isActive = projection.active === true || (!Object.prototype.hasOwnProperty.call(projection, "active") && players.length > 0);
 	if (!isActive) return [];
+	const rosterTrackingMode = getRosterTrackingMode_(roster);
+	const projectionTrackingModeRaw = String(projection.trackingMode == null ? "" : projection.trackingMode).trim();
+	const projectionTrackingMode = projectionTrackingModeRaw === "regularWar" || projectionTrackingModeRaw === "cwl" ? projectionTrackingModeRaw : rosterTrackingMode;
+	if (projectionTrackingMode !== rosterTrackingMode) return [];
+	const projectionSource = String(projection.source == null ? "" : projection.source).trim();
+	if (rosterTrackingMode === "cwl" && projectionSource === "regularWarCurrentWar") return [];
+	if (rosterTrackingMode === "regularWar" && (projectionSource === "cwlCurrentWar" || projectionSource === "cwlPreparation")) return [];
+	if (rosterTrackingMode === "cwl" && isCwlPreparationActive_(roster)) return [];
 
 	const out = [];
 	const seen = {};
