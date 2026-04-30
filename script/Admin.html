@@ -499,13 +499,15 @@
     }
 
     .auto-refresh-panel {
-      display: grid;
-      gap: 4px;
-      padding: 8px 10px;
-      border: 1px solid #334155;
-      border-radius: 10px;
-      background: rgba(15, 23, 42, 0.72);
-      min-width: 230px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 12px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      min-width: 0;
     }
 
     .auto-refresh-toggle-row {
@@ -527,10 +529,12 @@
     }
 
     .auto-refresh-status {
-      font-size: 11px;
+      font-size: 12px;
       line-height: 1.35;
       color: #94a3b8;
-      white-space: pre-line;
+      white-space: normal;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     .chip-list {
@@ -787,17 +791,20 @@
     }
 
     .admin-secondary-controls {
-      padding: 12px;
-      border-color: rgba(71, 85, 105, 0.62);
-      background: linear-gradient(180deg, rgba(11, 18, 32, 0.8), rgba(9, 15, 27, 0.72));
+      margin: 0;
+      padding: 0 2px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
       display: grid;
-      gap: 10px;
+      gap: 8px;
       min-width: 0;
     }
 
     .admin-secondary-grid {
       display: grid;
-      grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+      grid-template-columns: minmax(220px, 360px) minmax(220px, 360px);
       gap: 10px;
       align-items: start;
       min-width: 0;
@@ -882,8 +889,24 @@
 
     .admin-section-head--row {
       grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
+      align-items: start;
       gap: 8px;
+    }
+
+    .admin-section-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .admin-section-actions .btn {
+      min-height: 34px;
+      padding: 7px 11px;
+      border-radius: 10px;
+      font-size: 12px;
+      line-height: 1.1;
     }
 
     .roster-card-list {
@@ -1005,10 +1028,10 @@
     }
 
     .import-surface {
-      border: 1px solid #1f2937;
-      border-radius: 14px;
-      padding: 12px;
-      background: rgba(11, 18, 32, 0.58);
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+      background: transparent;
       display: grid;
       gap: 12px;
       min-width: 0;
@@ -1128,11 +1151,6 @@
       display: grid;
       gap: 8px;
       min-width: 0;
-    }
-
-    .preview-toolbar {
-      justify-content: flex-start;
-      gap: 8px;
     }
 
     .preview-mount-card {
@@ -1535,7 +1553,7 @@
         </div>
       </section>
 
-      <section class="card admin-secondary-controls">
+      <section class="admin-secondary-controls">
         <div class="admin-secondary-grid">
           <label class="admin-field" for="pageTitle">
             <span class="admin-field-label">Page title</span>
@@ -1551,16 +1569,12 @@
             <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
           </div>
         </div>
-
-        <div class="small muted">
-          Load active config into preview, run roster or import operations, then publish.
-        </div>
       </section>
 
       <nav class="admin-tabs" role="tablist" aria-label="Admin sections">
         <button id="adminTabBtnRosters" class="admin-tab is-active" type="button" role="tab"
           aria-selected="true" aria-controls="adminTabRosters" data-admin-tab="rosters" tabindex="0">
-          Rosters
+          Roster setup
         </button>
         <button id="adminTabBtnImport" class="admin-tab" type="button" role="tab" aria-selected="false"
           aria-controls="adminTabImport" data-admin-tab="import" tabindex="-1">
@@ -1568,30 +1582,32 @@
         </button>
         <button id="adminTabBtnPreview" class="admin-tab" type="button" role="tab" aria-selected="false"
           aria-controls="adminTabPreview" data-admin-tab="preview" tabindex="-1">
-          Preview
+          Rosters
         </button>
       </nav>
 
-<!-- Primary roster-management tab content. -->
-<section id="adminTabRosters" class="admin-tab-panel card" role="tabpanel" aria-labelledby="adminTabBtnRosters">
-        <div class="admin-section-head">
-          <h2>Rosters</h2>
-          <p class="small muted">
-            Per roster workflow: test connection, sync roster pool, sync lineup, refresh tracking stats, bench suggestions (CWL), and clear marks.
-          </p>
+<!-- Primary roster setup tab content. -->
+<section id="adminTabRosters" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabBtnRosters">
+        <div class="admin-section-head admin-section-head--row">
+          <div>
+            <h2>Roster setup</h2>
+          </div>
+          <div class="admin-section-actions">
+            <button id="toggleAddPreviewRosterPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
+              aria-controls="addPreviewRosterPanel">
+              Add roster
+            </button>
+          </div>
         </div>
         <div id="connectedRostersList" class="roster-card-list"></div>
       </section>
 
 <!-- Spreadsheet import workflow and diff tools. -->
-<section id="adminTabImport" class="admin-tab-panel card hidden" role="tabpanel"
+<section id="adminTabImport" class="admin-tab-panel hidden" role="tabpanel"
         aria-labelledby="adminTabBtnImport">
         <div class="admin-section-head admin-section-head--row">
           <div>
             <h2>Import</h2>
-            <p class="small muted">
-              XLSX import is additive only. Missing rows never remove existing players from preview.
-            </p>
           </div>
           <span id="importStalePill" class="pill hidden">Compare is stale</span>
         </div>
@@ -1623,19 +1639,17 @@
 
           <div class="import-section">
             <div class="import-subhead">Allowed clans</div>
-            <div class="small muted">No selection means all imported clans are allowed.</div>
             <div id="allowedClansWrap" class="chip-list"></div>
           </div>
 
           <div class="import-section">
             <div class="import-subhead">Clan to roster mapping</div>
-            <div class="small muted">Unmapped entries remain review-only and will not be applied.</div>
             <div id="clanMappingList" class="clan-mapping-list"></div>
           </div>
 
           <div class="import-section">
             <div class="admin-actions import-action-row">
-              <button id="compareImportBtn" class="btn secondary" type="button" disabled>Compare with preview</button>
+              <button id="compareImportBtn" class="btn secondary" type="button" disabled>Compare with rosters</button>
               <button id="applyImportBtn" class="btn" type="button" disabled>Apply updates</button>
               <span id="importActionStatus" class="small muted"></span>
             </div>
@@ -1653,27 +1667,23 @@
         </div>
       </section>
 
-<!-- Draft preview and publish controls for staged roster edits. -->
-<section id="adminTabPreview" class="admin-tab-panel card hidden" role="tabpanel"
+<!-- Roster preview and publish controls for staged roster edits. -->
+<section id="adminTabPreview" class="admin-tab-panel hidden" role="tabpanel"
         aria-labelledby="adminTabBtnPreview">
-        <div class="admin-section-head">
-          <h2>Preview</h2>
-          <p class="small muted">Live preview renderer and manual add controls for loaded preview data.</p>
-        </div>
-
-        <div class="admin-actions preview-toolbar">
-          <button id="toggleAddPreviewRosterPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
-            aria-controls="addPreviewRosterPanel">
-            Add roster
-          </button>
-          <button id="toggleAddPlayerPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
-            aria-controls="addPlayerPanel">
-            Add member
-          </button>
+        <div class="admin-section-head admin-section-head--row">
+          <div>
+            <h2>Rosters</h2>
+          </div>
+          <div class="admin-section-actions">
+            <button id="toggleAddPlayerPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
+              aria-controls="addPlayerPanel">
+              Add member
+            </button>
+          </div>
         </div>
 
         <div id="loading" class="card preview-mount-card">
-          <div class="empty">Waiting for preview...</div>
+          <div class="empty">No rosters loaded.</div>
         </div>
         <div id="rosters"></div>
         <div id="load-error" class="card hidden"></div>
@@ -1687,11 +1697,11 @@
       aria-label="Close Add roster"></button>
     <div class="admin-overlay-sheet" role="document">
       <div class="admin-overlay-head">
-        <h2 id="addPreviewRosterTitleText" class="admin-overlay-title">Add roster to loaded preview</h2>
+        <h2 id="addPreviewRosterTitleText" class="admin-overlay-title">Add roster</h2>
         <button type="button" class="btn secondary admin-overlay-close" data-overlay-close="addPreviewRosterPanel">Close</button>
       </div>
       <div class="admin-overlay-body">
-        <span id="addPreviewRosterHint" class="small muted">Load active config first.</span>
+        <span id="addPreviewRosterHint" class="small muted"></span>
 
         <label class="admin-field" for="addPreviewRosterId">
           <span class="admin-field-label">Roster ID</span>
@@ -1729,11 +1739,11 @@
       aria-label="Close Add member"></button>
     <div class="admin-overlay-sheet" role="document">
       <div class="admin-overlay-head">
-        <h2 id="addPlayerTitleText" class="admin-overlay-title">Add member to loaded preview</h2>
+        <h2 id="addPlayerTitleText" class="admin-overlay-title">Add member</h2>
         <button type="button" class="btn secondary admin-overlay-close" data-overlay-close="addPlayerPanel">Close</button>
       </div>
       <div class="admin-overlay-body">
-        <span id="addPlayerHint" class="small muted">Load active config first.</span>
+        <span id="addPlayerHint" class="small muted"></span>
 
         <label class="admin-field" for="addPlayerRoster">
           <span class="admin-field-label">Roster</span>

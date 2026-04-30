@@ -5,7 +5,7 @@
   const $ = (sel) => document.querySelector(sel);
   // Convert a value to a string safely.
   const toStr = (v) => (v == null ? "" : String(v));
-  const PREVIEW_NOT_READY_MESSAGE = "Admin data is not loaded yet. Refresh the page and unlock again.";
+  const PREVIEW_NOT_READY_MESSAGE = "Roster data is not loaded yet. Refresh the page and unlock again.";
 
   const state = {
     password: "",
@@ -708,7 +708,7 @@
     renderPreviewFromState();
     const publishBtn = $("#publishBtn");
     if (publishBtn) publishBtn.disabled = false;
-    markReportStale("Preview changed after website profile update. Re-run compare with preview.");
+    markReportStale("Rosters changed after website profile update. Re-run compare with rosters.");
     setStatus(toStr(statusMessageRaw).trim() || "Website profile updated.");
   };
 
@@ -2590,24 +2590,20 @@
     const cfg = settings && typeof settings === "object" ? settings : null;
     if (!cfg) return "Disabled";
 
-    const lines = [];
     const enabled = !!cfg.enabled;
-    lines.push(enabled ? "Enabled" : "Disabled");
-
-    const lastSuccess = formatLocalTimestamp(cfg.lastSuccessfulActiveRefreshAt);
-    lines.push("Last successful active refresh: " + (lastSuccess || "never"));
-
+    const parts = [enabled ? "Enabled" : "Disabled"];
     const runStatus = toStr(cfg.lastRunStatus).trim().toLowerCase() || "unknown";
     const lastRunAt = formatLocalTimestamp(cfg.lastRunFinishedAt);
-    lines.push("Last run: " + runStatus + (lastRunAt ? (" (" + lastRunAt + ")") : ""));
-
-    const archiveDate = toStr(cfg.lastArchiveDate).trim();
-    lines.push("Last archive date: " + (archiveDate || "none"));
+    if (lastRunAt) {
+      parts.push("Last run " + runStatus + " at " + lastRunAt);
+    } else if (runStatus !== "unknown") {
+      parts.push("Last run " + runStatus);
+    }
 
     const issueSummary = toStr(cfg.lastIssueSummary).trim();
-    if (issueSummary) lines.push("Last issue: " + issueSummary);
+    if (issueSummary) parts.push("Issue: " + issueSummary);
 
-    return lines.join("\n");
+    return parts.join(" | ");
   };
 
   // Render auto refresh UI.
@@ -2623,7 +2619,7 @@
 
     if (statusEl) {
       if (state.autoRefreshBusy) {
-        statusEl.textContent = "Updating auto-refresh settings...";
+        statusEl.textContent = "Updating...";
         statusEl.style.color = "#94a3b8";
         return;
       }
@@ -2687,7 +2683,7 @@
   // Clone current roster data for server.
   const cloneCurrentRosterDataForServer_ = () => {
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-      throw new Error("No roster preview is loaded.");
+      throw new Error("No rosters loaded.");
     }
     return cloneJson(state.lastRosterData);
   };
@@ -2845,11 +2841,11 @@
 
     if (!hasLoadedPreview) {
       setAddPreviewRosterPanelOpen(false);
-      if (hint) hint.textContent = "Preview loads automatically after unlock.";
+      if (hint) hint.textContent = "Roster data is not loaded.";
       return;
     }
 
-    if (hint) hint.textContent = "Creates a new empty roster in the current preview.";
+    if (hint) hint.textContent = "";
   };
 
   // Refresh add player UI.
@@ -2873,7 +2869,7 @@
       addBtn.disabled = true;
       if (toggleBtn) toggleBtn.disabled = true;
       setAddPlayerPanelOpen(false);
-      if (hint) hint.textContent = "Preview loads automatically after unlock.";
+      if (hint) hint.textContent = "No rosters loaded.";
       return;
     }
 
@@ -2893,15 +2889,7 @@
     // Update mode hint.
     const updateModeHint = () => {
       if (!hint) return;
-      const selectedId = toStr(rosterSelect.value).trim();
-      const liveRosters = getRosters().filter((r) => toStr(r && r.id).trim());
-      const selectedRoster =
-        liveRosters.find((r) => toStr(r && r.id).trim() === selectedId) ||
-        (liveRosters.length ? liveRosters[0] : null);
-      const mode = getRosterTrackingMode(selectedRoster);
-      hint.textContent = mode === "regularWar"
-        ? "Adds the new player to the out-of-war section of the selected roster."
-        : "Adds the new player to main slots of the selected roster.";
+      hint.textContent = "";
     };
     rosterSelect.onchange = updateModeHint;
 
@@ -3826,7 +3814,7 @@
 
   // Mark report stale.
   const markReportStale = (reasonRaw) => {
-    const reason = toStr(reasonRaw).trim() || "Preview changed. Re-run compare with preview before applying XLSX updates.";
+    const reason = toStr(reasonRaw).trim() || "Rosters changed. Re-run compare with rosters before applying XLSX updates.";
     if (!state.importSession || !state.importSession.comparison) return;
     state.importSession.stale = true;
     state.importSession.staleReason = reason;
@@ -3846,7 +3834,7 @@
     markReportStale();
     const publishBtn = $("#publishBtn");
     if (publishBtn) publishBtn.disabled = false;
-    setStatus(msg || "Preview updated.");
+    setStatus(msg || "Rosters updated.");
   };
 
   // Find player location by tag.
@@ -4028,7 +4016,7 @@
   // Handle move player to roster.
   const movePlayerToRoster = (playerTagRaw, targetRosterIdRaw) => {
     const rosters = getRosters();
-    if (!rosters.length) throw new Error("No roster preview is loaded.");
+    if (!rosters.length) throw new Error("No rosters loaded.");
 
     const playerTag = normalizeTag(playerTagRaw);
     const targetRosterId = toStr(targetRosterIdRaw).trim();
@@ -4075,7 +4063,7 @@
   // Remove player from preview.
   const removePlayerFromPreview = (playerTagRaw) => {
     const rosters = getRosters();
-    if (!rosters.length) throw new Error("No roster preview is loaded.");
+    if (!rosters.length) throw new Error("No rosters loaded.");
 
     const playerTag = normalizeTag(playerTagRaw);
     if (!playerTag) throw new Error("Player tag is missing.");
@@ -4111,13 +4099,13 @@
       throw err;
     }
 
-    applyPreviewMutation(playerTag + " removed from preview.");
+    applyPreviewMutation(playerTag + " removed.");
   };
 
   // Update player info.
   const updatePlayerInfo = (currentTagRaw, draft) => {
     const rosters = getRosters();
-    if (!rosters.length) throw new Error("No roster preview is loaded.");
+    if (!rosters.length) throw new Error("No rosters loaded.");
 
     const currentTag = normalizeTag(currentTagRaw);
     if (!currentTag) throw new Error("Current player tag is missing.");
@@ -4206,7 +4194,7 @@
   // Add player to preview.
   const addPlayerToPreview = (draft) => {
     const rosters = getRosters();
-    if (!rosters.length) throw new Error("No roster preview is loaded.");
+    if (!rosters.length) throw new Error("No rosters loaded.");
 
     const rosterId = toStr(draft && draft.rosterId).trim();
     if (!rosterId) throw new Error("Select a roster.");
@@ -4265,7 +4253,7 @@
   // Add roster to preview.
   const addRosterToPreview = (draft) => {
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-      throw new Error("No roster preview is loaded.");
+      throw new Error("No rosters loaded.");
     }
 
     const rosterId = toStr(draft && draft.id).trim();
@@ -4301,7 +4289,7 @@
   // Remove roster from preview.
   const removeRosterFromPreview = (rosterIdRaw) => {
     const rosters = getRosters();
-    if (!rosters.length) throw new Error("No roster preview is loaded.");
+    if (!rosters.length) throw new Error("No rosters loaded.");
 
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) throw new Error("Roster ID is required.");
@@ -4321,7 +4309,7 @@
   // Handle move roster in preview.
   const moveRosterInPreview = (rosterIdRaw, directionRaw) => {
     const rosters = getRosters();
-    if (!rosters.length) throw new Error("No roster preview is loaded.");
+    if (!rosters.length) throw new Error("No rosters loaded.");
 
     const rosterId = toStr(rosterIdRaw).trim();
     if (!rosterId) throw new Error("Roster ID is required.");
@@ -4528,7 +4516,7 @@
       const rosterTitle = toStr(ctx.rosterTitle).trim();
       const rosterLabel = rosterTitle ? (rosterTitle + " (" + rosterId + ")") : rosterId;
       const ok = confirm(
-        "Remove " + rosterLabel + " from the loaded preview?\n\nThis is not live until you click Publish."
+        "Remove " + rosterLabel + " from rosters?\n\nPublish to make this live."
       );
       if (!ok) return;
 
@@ -4829,7 +4817,7 @@
 
     removeBtn.onclick = () => {
       clearPendingProfileReopen();
-      const ok = confirm("Remove " + playerTag + " from this preview?");
+      const ok = confirm("Remove " + playerTag + " from this roster?");
       if (!ok) return;
       try {
         removePlayerFromPreview(playerTag);
@@ -5003,7 +4991,7 @@
   const invalidateImportComparison = (reasonRaw) => {
     if (!state.importSession || !state.importSession.comparison) return;
     state.importSession.stale = true;
-    state.importSession.staleReason = toStr(reasonRaw).trim() || "Preview changed. Re-run compare with preview.";
+    state.importSession.staleReason = toStr(reasonRaw).trim() || "Rosters changed. Re-run compare with rosters.";
   };
 
   // Render import summary.
@@ -5039,9 +5027,9 @@
     if (!compare || !compare.summary) {
       addLine("Sheet used: " + (session.sheetName || "first sheet"));
       addLine("Rows read: " + (Number.isFinite(Number(session.totalRowsRead)) ? Number(session.totalRowsRead) : 0));
-      addLine("Normalized members parsed: " + (Array.isArray(session.accounts) ? session.accounts.length : 0));
+      addLine("Members found: " + (Array.isArray(session.accounts) ? session.accounts.length : 0));
       addLine("Invalid rows: " + (Array.isArray(session.invalidRows) ? session.invalidRows.length : 0));
-      addLine("Run Compare with preview to build update buckets.");
+      addLine("Run Compare with rosters.");
       noDataEl.classList.add("hidden");
       debugDetails.classList.add("hidden");
       debugPre.textContent = "";
@@ -5051,21 +5039,21 @@
     const summary = compare.summary;
     addLine("Sheet used: " + (summary.sheetName || session.sheetName || "first sheet"));
     addLine("Rows read: " + (Number.isFinite(Number(summary.totalRowsRead)) ? Number(summary.totalRowsRead) : 0));
-    addLine("Normalized members parsed: " + (Number.isFinite(Number(summary.normalizedMembersParsed)) ? Number(summary.normalizedMembersParsed) : 0));
-    addLine("Matched unchanged: " + (Number.isFinite(Number(summary.matchedUnchanged)) ? Number(summary.matchedUnchanged) : 0));
-    addLine("Matched with updates: " + (Number.isFinite(Number(summary.matchedWithUpdates)) ? Number(summary.matchedWithUpdates) : 0));
-    addLine("New addable: " + (Number.isFinite(Number(summary.newAddable)) ? Number(summary.newAddable) : 0));
-    addLine("Review-only: " + (Number.isFinite(Number(summary.reviewOnly)) ? Number(summary.reviewOnly) : 0));
+    addLine("Members found: " + (Number.isFinite(Number(summary.normalizedMembersParsed)) ? Number(summary.normalizedMembersParsed) : 0));
+    addLine("Unchanged: " + (Number.isFinite(Number(summary.matchedUnchanged)) ? Number(summary.matchedUnchanged) : 0));
+    addLine("Updates: " + (Number.isFinite(Number(summary.matchedWithUpdates)) ? Number(summary.matchedWithUpdates) : 0));
+    addLine("New members: " + (Number.isFinite(Number(summary.newAddable)) ? Number(summary.newAddable) : 0));
+    addLine("Needs review: " + (Number.isFinite(Number(summary.reviewOnly)) ? Number(summary.reviewOnly) : 0));
     addLine("Ignored (war out): " + (Number.isFinite(Number(summary.ignoredWarOut)) ? Number(summary.ignoredWarOut) : 0));
     addLine("Ignored (clan not allowed): " + (Number.isFinite(Number(summary.ignoredClanNotAllowed)) ? Number(summary.ignoredClanNotAllowed) : 0));
     addLine("Ignored (missing Discord): " + (Number.isFinite(Number(summary.ignoredMissingDiscord)) ? Number(summary.ignoredMissingDiscord) : 0));
-    addLine("Matched rows missing imported Discord: " + (Number.isFinite(Number(summary.matchedWithoutImportedDiscord)) ? Number(summary.matchedWithoutImportedDiscord) : 0));
-    addLine("Matched rows missing Discord in source + preview: " + (Number.isFinite(Number(summary.matchedWithoutAnyDiscord)) ? Number(summary.matchedWithoutAnyDiscord) : 0));
+    addLine("Missing Discord in import: " + (Number.isFinite(Number(summary.matchedWithoutImportedDiscord)) ? Number(summary.matchedWithoutImportedDiscord) : 0));
+    addLine("Missing Discord in both import and rosters: " + (Number.isFinite(Number(summary.matchedWithoutAnyDiscord)) ? Number(summary.matchedWithoutAnyDiscord) : 0));
     addLine("Invalid rows: " + (Number.isFinite(Number(summary.invalidRows)) ? Number(summary.invalidRows) : 0));
-    addLine("Final actionable total: " + (Number.isFinite(Number(summary.actionableTotal)) ? Number(summary.actionableTotal) : 0));
+    addLine("Ready to apply: " + (Number.isFinite(Number(summary.actionableTotal)) ? Number(summary.actionableTotal) : 0));
 
     if (session.stale) {
-      addLine("Status: stale - " + (session.staleReason || "Preview changed. Re-run compare with preview."));
+      addLine("Status: stale - " + (session.staleReason || "Rosters changed. Re-run compare with rosters."));
     }
 
     noDataEl.classList.toggle("hidden", !(summary && summary.noDataToAdd));
@@ -5119,7 +5107,7 @@
       checkbox.addEventListener("change", () => {
         if (!state.importSession) return;
         state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());
-        invalidateImportComparison("Filters changed. Re-run compare with preview.");
+        invalidateImportComparison("Filters changed. Re-run compare with rosters.");
         renderImportUi();
       });
 
@@ -5204,7 +5192,7 @@
           state.importSession.importedClanValues,
           state.lastRosterData
         );
-        invalidateImportComparison("Mapping changed. Re-run compare with preview.");
+        invalidateImportComparison("Mapping changed. Re-run compare with rosters.");
         renderImportUi();
       });
 
@@ -5261,7 +5249,7 @@
 
     if (compareBtn) {
       compareBtn.disabled = !hasPreview || !hasParsed || state.importCompareBusy || state.importApplyBusy || state.bulkRefreshBusy;
-      compareBtn.textContent = state.importCompareBusy ? "Comparing..." : "Compare with preview";
+      compareBtn.textContent = state.importCompareBusy ? "Comparing..." : "Compare with rosters";
     }
 
     if (applyBtn) {
@@ -5283,7 +5271,7 @@
     if (!meta) return;
     const session = state.importSession;
     if (!session) {
-      meta.textContent = "Import a member list workbook. The first sheet will be used.";
+      meta.textContent = "";
       return;
     }
     const parsedCount = Array.isArray(session.accounts) ? session.accounts.length : 0;
@@ -5291,14 +5279,14 @@
     const ignoredCount = Array.isArray(session.ignoredRows) ? session.ignoredRows.length : 0;
     const fileName = toStr(session.fileName).trim();
     const filePrefix = fileName ? (fileName + " - ") : "";
-    meta.textContent = filePrefix + "using sheet '" + (session.sheetName || "first sheet") + "', rows read " + session.totalRowsRead + ", parsed " + parsedCount + ", invalid " + invalidCount + ", blank rows " + ignoredCount + ".";
+    meta.textContent = filePrefix + parsedCount + " members, " + invalidCount + " invalid, " + ignoredCount + " blank.";
   };
 
   // Render import UI.
   const renderImportUi = () => {
     const mappingChanged = alignImportMappingWithPreview();
     if (mappingChanged) {
-      invalidateImportComparison("Import mapping changed because preview rosters changed. Re-run compare with preview.");
+      invalidateImportComparison("Import mapping changed because rosters changed. Re-run compare with rosters.");
     }
     renderImportLoadWarning();
     renderXlsxMeta();
@@ -5321,7 +5309,7 @@
     }
 
     state.importCompareBusy = true;
-    setImportActionStatus("Comparing import against preview...", false);
+    setImportActionStatus("Comparing import against rosters...", false);
     renderImportUi();
     try {
       state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());
@@ -5358,7 +5346,7 @@
           ? Number(summary.matchedWithoutAnyDiscord)
           : 0;
         const suffix = missingBoth > 0
-          ? (" " + missingBoth + " matched member(s) have no Discord in both import and preview.")
+          ? (" " + missingBoth + " matched member(s) have no Discord in both import and rosters.")
           : "";
         setImportActionStatus("Comparison complete: " + actionable + " actionable change(s)." + suffix, false);
       }
@@ -5380,7 +5368,7 @@
       throw new Error("Run compare first.");
     }
     if (state.importSession.stale) {
-      throw new Error("Comparison is stale. Re-run compare with preview.");
+      throw new Error("Comparison is stale. Re-run compare with rosters.");
     }
 
     const actionable = Number.isFinite(Number(state.importSession.comparison.summary.actionableTotal))
@@ -5416,7 +5404,7 @@
       const updatedCount = Number.isFinite(Number(appliedSummary.updatedCount)) ? Number(appliedSummary.updatedCount) : 0;
       const addedCount = Number.isFinite(Number(appliedSummary.addedCount)) ? Number(appliedSummary.addedCount) : 0;
       setImportActionStatus("Applied updates: " + updatedCount + " updated, " + addedCount + " added.", false);
-      setStatus("Import updates applied to preview.");
+      setStatus("Import updates applied.");
 
       await runImportComparison();
     } finally {
@@ -5642,7 +5630,7 @@
     if (!rosters.length) {
       const empty = document.createElement("div");
       empty.className = "roster-card-empty";
-      empty.textContent = "Preview loads automatically after unlock.";
+      empty.textContent = "No rosters loaded.";
       mount.appendChild(empty);
       return;
     }
@@ -5917,7 +5905,7 @@
           const publishBtn = $("#publishBtn");
           if (publishBtn) publishBtn.disabled = false;
           setStatus("Connected clan tag updated for " + rosterId + ".");
-          markReportStale("Preview changed after updating connected clan tags.");
+          markReportStale("Rosters changed after updating connected clan tags.");
         }
       };
 
@@ -5983,14 +5971,14 @@
         const publishBtn = $("#publishBtn");
         if (publishBtn) publishBtn.disabled = false;
         setStatus("Tracking mode updated for " + rosterId + ".");
-        markReportStale("Preview changed after tracking mode update. Re-run compare with preview.");
+        markReportStale("Rosters changed after tracking mode update. Re-run compare with rosters.");
         renderPreviewFromState();
       });
 
       // Ensure server ready.
       const ensureServerReady = () => {
         if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
-          throw new Error("No roster preview is loaded.");
+          throw new Error("No rosters loaded.");
         }
         if (!state.password) {
           throw new Error("Unlock admin first.");
@@ -6028,7 +6016,7 @@
         renderPreviewFromState();
         const publishBtn = $("#publishBtn");
         if (publishBtn) publishBtn.disabled = false;
-        markReportStale("Preview changed after clearing marks. Re-run compare with preview.");
+        markReportStale("Rosters changed after clearing marks. Re-run compare with rosters.");
         setRowStatus("saved suggestions cleared", false);
       };
 
@@ -6166,7 +6154,7 @@
 
       if (state.importSession) {
         alignImportMappingWithPreview();
-        invalidateImportComparison("Preview changed after loading active config. Re-run compare with preview.");
+        invalidateImportComparison("Rosters changed after loading active config. Re-run compare with rosters.");
       }
 
       renderPreviewFromState();
@@ -6265,7 +6253,7 @@
           alert("Unlocked, but failed to load auto-refresh settings: " + toErrorMessage(settingsErr));
         }
         setLoginStatus("Unlocked. Loading active config...");
-        refreshStartupLoader_("Step 3 of 3", "Loading active roster preview...");
+        refreshStartupLoader_("Step 3 of 3", "Loading rosters...");
         try {
           await loadActiveConfigIntoPreview({
             silentError: true,
@@ -6350,7 +6338,7 @@
     const handleImportFilterChange = () => {
       if (!state.importSession) return;
       state.importSession.filters = window.RosterGenerator.normalizeImportFilters(readImportFiltersFromUi());
-      invalidateImportComparison("Filters changed. Re-run compare with preview.");
+      invalidateImportComparison("Filters changed. Re-run compare with rosters.");
       renderImportUi();
     };
     if (excludeWarOutInput) {
@@ -6435,7 +6423,7 @@
 
           renderImportUi();
           const parsed = Array.isArray(nextSession.accounts) ? nextSession.accounts.length : 0;
-          setImportActionStatus("Import loaded. Run compare with preview.", false);
+          setImportActionStatus("Import loaded. Run compare with rosters.", false);
           setStatus("Imported " + parsed + " member row(s) from sheet '" + (nextSession.sheetName || "first sheet") + "'.");
         } catch (err) {
           setImportLoadFailureWarning(failedFileName, err);
