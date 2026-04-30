@@ -184,6 +184,7 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 	const membersKeyByClanTag = {};
 	const regularWarKeyByClanTag = {};
 	const leagueGroupKeyByClanTag = {};
+	const currentWarProbeClanTagSet = {};
 
 	// Build batched path entries keyed by endpoint type and clan tag.
 	for (let i = 0; i < connectedClanTags.length; i++) {
@@ -199,21 +200,28 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 	for (let i = 0; i < regularWarClanTags.length; i++) {
 		const clanTag = normalizeTag_(regularWarClanTags[i]);
 		if (!clanTag) continue;
-		const key = "regularWar:" + clanTag;
-		regularWarKeyByClanTag[clanTag] = key;
-		entries.push({
-			key: key,
-			path: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar",
-		});
+		currentWarProbeClanTagSet[clanTag] = true;
 	}
 	for (let i = 0; i < cwlClanTags.length; i++) {
 		const clanTag = normalizeTag_(cwlClanTags[i]);
 		if (!clanTag) continue;
+		currentWarProbeClanTagSet[clanTag] = true;
 		const key = "leagueGroup:" + clanTag;
 		leagueGroupKeyByClanTag[clanTag] = key;
 		entries.push({
 			key: key,
 			path: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup",
+		});
+	}
+	const currentWarProbeClanTags = Object.keys(currentWarProbeClanTagSet);
+	for (let i = 0; i < currentWarProbeClanTags.length; i++) {
+		const clanTag = normalizeTag_(currentWarProbeClanTags[i]);
+		if (!clanTag) continue;
+		const key = "regularWar:" + clanTag;
+		regularWarKeyByClanTag[clanTag] = key;
+		entries.push({
+			key: key,
+			path: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar",
 		});
 	}
 
@@ -249,9 +257,9 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 		}
 	}
 
-	// Regular-war fetches treat 404/private-war-log as handled unavailable states.
-	for (let i = 0; i < regularWarClanTags.length; i++) {
-		const clanTag = normalizeTag_(regularWarClanTags[i]);
+	// Current-war fetches treat 404/private-war-log as handled unavailable states.
+	for (let i = 0; i < currentWarProbeClanTags.length; i++) {
+		const clanTag = normalizeTag_(currentWarProbeClanTags[i]);
 		if (!clanTag) continue;
 		const key = regularWarKeyByClanTag[clanTag];
 		if (!key) continue;
@@ -431,6 +439,298 @@ function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 	return message;
 }
 
+// Count canonical roster pool slots without changing player data.
+function countRosterPoolSlotsForTransition_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	return (
+		(Array.isArray(roster.main) ? roster.main.length : 0) +
+		(Array.isArray(roster.subs) ? roster.subs.length : 0) +
+		(Array.isArray(roster.missing) ? roster.missing.length : 0)
+	);
+}
+
+// Resolve the CWL league group used by automatic tracking-mode detection.
+function resolveLeagueGroupForAutomaticTransition_(clanTagRaw, optionsRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const rawByClanTag =
+		options.prefetchedLeaguegroupRawByClanTag && typeof options.prefetchedLeaguegroupRawByClanTag === "object" ? options.prefetchedLeaguegroupRawByClanTag : {};
+	const errorByClanTag =
+		options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {};
+	if (!clanTag) return { ok: false, source: "none", state: "", clanFound: false, isMalformed: false, statusCode: 0, errorMessage: "missing clan tag" };
+	if (Object.prototype.hasOwnProperty.call(errorByClanTag, clanTag)) {
+		const err = errorByClanTag[clanTag];
+		return {
+			ok: false,
+			source: "prefetchError",
+			state: "",
+			clanFound: false,
+			isMalformed: false,
+			statusCode: Number(err && err.statusCode) || 0,
+			errorMessage: errorMessage_(err),
+		};
+	}
+
+	let raw = null;
+	let source = "directFetch";
+	if (Object.prototype.hasOwnProperty.call(rawByClanTag, clanTag)) {
+		raw = rawByClanTag[clanTag];
+		source = "prefetch";
+	} else {
+		try {
+			raw = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup");
+			rawByClanTag[clanTag] = raw;
+		} catch (err) {
+			errorByClanTag[clanTag] = err;
+			return {
+				ok: false,
+				source: Number(err && err.statusCode) === 404 ? "directFetch404" : "directFetchError",
+				state: "",
+				clanFound: false,
+				isMalformed: false,
+				statusCode: Number(err && err.statusCode) || 0,
+				errorMessage: errorMessage_(err),
+			};
+		}
+	}
+
+	const mapped = mapLeagueGroupDataForClan_(clanTag, raw);
+	return {
+		ok: true,
+		source: source,
+		state: normalizeWarState_(mapped && mapped.state),
+		rawState: String((mapped && mapped.rawState) || ""),
+		clanFound: !!(mapped && mapped.clanFound),
+		isMalformed: !!(mapped && mapped.isMalformed),
+		leaguegroup: mapped,
+		statusCode: 0,
+		errorMessage: "",
+	};
+}
+
+// Resolve the regular current war used by automatic tracking-mode detection.
+function resolveCurrentRegularWarForAutomaticTransition_(clanTagRaw, optionsRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const currentWarByClanTag =
+		options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object" ? options.prefetchedCurrentRegularWarByClanTag : {};
+	const errorByClanTag =
+		options.prefetchedRegularWarErrorByClanTag && typeof options.prefetchedRegularWarErrorByClanTag === "object" ? options.prefetchedRegularWarErrorByClanTag : {};
+	if (!clanTag) return { ok: false, source: "none", state: "", sideMatches: false, statusCode: 0, errorMessage: "missing clan tag" };
+	if (Object.prototype.hasOwnProperty.call(errorByClanTag, clanTag)) {
+		const err = errorByClanTag[clanTag];
+		return {
+			ok: false,
+			source: "prefetchError",
+			state: "",
+			sideMatches: false,
+			statusCode: Number(err && err.statusCode) || 0,
+			errorMessage: errorMessage_(err),
+		};
+	}
+
+	let currentWar = null;
+	let source = "directFetch";
+	if (Object.prototype.hasOwnProperty.call(currentWarByClanTag, clanTag)) {
+		currentWar = currentWarByClanTag[clanTag];
+		source = "prefetch";
+	} else {
+		try {
+			currentWar = fetchCurrentRegularWar_(clanTag);
+			currentWarByClanTag[clanTag] = currentWar;
+		} catch (err) {
+			errorByClanTag[clanTag] = err;
+			return {
+				ok: false,
+				source: "directFetchError",
+				state: "",
+				sideMatches: false,
+				statusCode: Number(err && err.statusCode) || 0,
+				errorMessage: errorMessage_(err),
+			};
+		}
+	}
+
+	const currentWarMeta = currentWar && currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : {};
+	const state = normalizeWarState_((currentWar && currentWar.state) || currentWarMeta.state);
+	const clanSide = currentWar && currentWar.clanSide && typeof currentWar.clanSide === "object" ? currentWar.clanSide : null;
+	const opponentSide = currentWar && currentWar.opponentSide && typeof currentWar.opponentSide === "object" ? currentWar.opponentSide : null;
+	const available = !!(currentWar && currentWar.available);
+	const sideMatches =
+		available &&
+		(normalizeTag_(clanSide && clanSide.tag) === clanTag ||
+			normalizeTag_(opponentSide && opponentSide.tag) === clanTag ||
+			normalizeTag_(currentWarMeta.clanTag) === clanTag);
+	return {
+		ok: true,
+		source: source,
+		state: state,
+		sideMatches: !!sideMatches,
+		available: available,
+		unavailableReason: String((currentWarMeta && currentWarMeta.unavailableReason) || ""),
+		currentWar: currentWar,
+		statusCode: 0,
+		errorMessage: "",
+	};
+}
+
+// Return whether mapped current-war data is a positive regular-war signal.
+function isActiveRegularWarTransitionSignal_(probeRaw) {
+	const probe = probeRaw && typeof probeRaw === "object" ? probeRaw : {};
+	if (!probe.ok || !probe.available || !probe.sideMatches) return false;
+	return isActiveWarState_(probe.state);
+}
+
+// Disable CWL preparation without touching player sections.
+function disableCwlPreparationForAutomaticTransition_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster) return false;
+	const prep = getRosterCwlPreparation_(roster);
+	const wasEnabled = !!(prep && prep.enabled);
+	prep.enabled = false;
+	roster.cwlPreparation = prep;
+	clearRosterBenchSuggestions_(roster);
+	return wasEnabled;
+}
+
+// Detect and apply automatic CWL/regular-war mode transitions from official API state.
+function detectAndApplyAutomaticTrackingModeTransition_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = new Date().toISOString();
+	const roster = rosterData ? findRosterInDataById_(rosterData, rosterId) : null;
+	const result = {
+		mode: "automaticTrackingModeTransition",
+		ran: true,
+		changed: false,
+		cwlPreparationDisabled: false,
+		switchedToRegularWar: false,
+		clanTag: "",
+		initialTrackingMode: "",
+		finalTrackingMode: "",
+		leagueGroupSource: "",
+		leagueGroupState: "",
+		leagueGroupClanFound: false,
+		leagueGroupMalformed: false,
+		currentWarSource: "",
+		currentWarState: "",
+		currentWarSideMatches: false,
+		message: "",
+	};
+	const messages = [];
+
+	if (!roster) {
+		result.message = "automatic tracking-mode detection skipped: roster not found";
+		return { ok: true, rosterData: rosterDataRaw, result: result };
+	}
+
+	const clanTag = normalizeTag_(roster.connectedClanTag);
+	result.clanTag = clanTag;
+	result.initialTrackingMode = getRosterTrackingMode_(roster);
+	result.finalTrackingMode = result.initialTrackingMode;
+	if (!clanTag || !isValidClanTag_(clanTag)) {
+		result.message = "automatic tracking-mode detection skipped: connected clan tag missing or invalid";
+		return { ok: true, rosterData: rosterDataRaw, result: result };
+	}
+	if (result.initialTrackingMode !== "cwl") {
+		result.message = "automatic tracking-mode detection skipped: roster is not in CWL mode";
+		Logger.log("automaticTrackingModeTransition rosterId=%s clanTag=%s skipped=%s", rosterId, clanTag, "notCwl");
+		return { ok: true, rosterData: rosterDataRaw, result: result };
+	}
+
+	const beforePoolCount = countRosterPoolSlotsForTransition_(roster);
+	let activeCwlGroupDetected = false;
+	if (isCwlPreparationActive_(roster)) {
+		const leagueProbe = resolveLeagueGroupForAutomaticTransition_(clanTag, options);
+		result.leagueGroupSource = String(leagueProbe.source || "");
+		result.leagueGroupState = normalizeWarState_(leagueProbe.state);
+		result.leagueGroupClanFound = !!leagueProbe.clanFound;
+		result.leagueGroupMalformed = !!leagueProbe.isMalformed;
+		if (leagueProbe.ok && !leagueProbe.isMalformed && leagueProbe.clanFound && isActiveWarState_(leagueProbe.state)) {
+			activeCwlGroupDetected = true;
+			disableCwlPreparationForAutomaticTransition_(roster);
+			setRosterPublicLineupProjectionInactive_(roster, {
+				trackingMode: "cwl",
+				source: "cwlPreparation",
+				unavailableReason: "activeCwlLeagueGroup",
+				updatedAt: nowIso,
+			});
+			result.changed = true;
+			result.cwlPreparationDisabled = true;
+			messages.push("CWL Preparation Mode disabled automatically because active CWL league group was detected");
+		} else {
+			const detail = leagueProbe.ok
+				? "state=" + (result.leagueGroupState || "unknown") + ", clanFound=" + result.leagueGroupClanFound + ", malformed=" + result.leagueGroupMalformed
+				: "source=" + result.leagueGroupSource + ", status=" + (leagueProbe.statusCode || 0);
+			messages.push("CWL Preparation Mode kept active: no positive active CWL league-group signal (" + detail + ")");
+		}
+	}
+
+	if (activeCwlGroupDetected) {
+		messages.push("CWL tracking kept active: active CWL league-group signal takes priority over regular-war switching");
+	} else if (getRosterTrackingMode_(roster) === "cwl" && !isCwlPreparationActive_(roster)) {
+		const currentWarProbe = resolveCurrentRegularWarForAutomaticTransition_(clanTag, options);
+		result.currentWarSource = String(currentWarProbe.source || "");
+		result.currentWarState = normalizeWarState_(currentWarProbe.state);
+		result.currentWarSideMatches = !!currentWarProbe.sideMatches;
+		if (isActiveRegularWarTransitionSignal_(currentWarProbe)) {
+			roster.trackingMode = "regularWar";
+			disableCwlPreparationForAutomaticTransition_(roster);
+			setRosterPublicLineupProjectionInactive_(roster, {
+				trackingMode: "regularWar",
+				source: "regularWarCurrentWar",
+				unavailableReason: "automaticModeSwitch",
+				updatedAt: nowIso,
+			});
+			clearRosterBenchSuggestions_(roster);
+			result.changed = true;
+			result.switchedToRegularWar = true;
+			messages.push("Roster switched automatically to regularWar because active regular war was detected");
+		} else {
+			const detail = currentWarProbe.ok
+				? "state=" + (result.currentWarState || "unknown") + ", sideMatches=" + result.currentWarSideMatches + ", available=" + !!currentWarProbe.available
+				: "source=" + result.currentWarSource + ", status=" + (currentWarProbe.statusCode || 0);
+			messages.push("CWL tracking kept active: no positive active regular-war signal (" + detail + ")");
+		}
+	}
+
+	const afterPoolCount = countRosterPoolSlotsForTransition_(roster);
+	if (afterPoolCount !== beforePoolCount) {
+		throw new Error("Automatic tracking-mode transition changed roster pool count for roster '" + rosterId + "' (" + beforePoolCount + " -> " + afterPoolCount + ").");
+	}
+
+	const validatedRosterData = validateRosterData_(rosterData);
+	const finalRoster = findRosterInDataById_(validatedRosterData, rosterId);
+	const finalPoolCount = countRosterPoolSlotsForTransition_(finalRoster);
+	if (finalPoolCount !== beforePoolCount) {
+		throw new Error("Automatic tracking-mode transition validation changed roster pool count for roster '" + rosterId + "' (" + beforePoolCount + " -> " + finalPoolCount + ").");
+	}
+	result.finalTrackingMode = finalRoster ? getRosterTrackingMode_(finalRoster) : getRosterTrackingMode_(roster);
+	result.message = messages.length ? messages.join("; ") : "automatic tracking-mode detection completed: no mode change";
+	Logger.log(
+		"automaticTrackingModeTransition rosterId=%s clanTag=%s initialMode=%s finalMode=%s prepDisabled=%s switchedRegularWar=%s leagueGroupSource=%s leagueGroupState=%s leagueGroupClanFound=%s currentWarSource=%s currentWarState=%s currentWarSideMatches=%s changed=%s",
+		rosterId,
+		clanTag,
+		result.initialTrackingMode,
+		result.finalTrackingMode,
+		result.cwlPreparationDisabled,
+		result.switchedToRegularWar,
+		result.leagueGroupSource,
+		result.leagueGroupState,
+		result.leagueGroupClanFound,
+		result.currentWarSource,
+		result.currentWarState,
+		result.currentWarSideMatches,
+		result.changed,
+	);
+	return {
+		ok: true,
+		rosterData: validatedRosterData,
+		result: result,
+	};
+}
+
 // Run a single-roster refresh pipeline with per-step rollback and issue tracking.
 function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const rosterPipelineStartMs = Date.now();
@@ -477,12 +777,14 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	// Step status payload returned to callers and surfaced in refresh-all diagnostics.
 	const steps = {
 		pool: { ok: false, skipped: false, message: "", result: null },
+		modeTransition: { ok: false, skipped: false, message: "", result: null },
 		lineup: { ok: false, skipped: false, message: "", result: null },
 		stats: { ok: false, skipped: false, partialFailure: false, message: "", result: null },
 		bench: { ok: false, skipped: false, message: "", result: null },
 	};
 	const stepDurationMs = {
 		pool: 0,
+		modeTransition: 0,
 		lineup: 0,
 		stats: 0,
 		bench: 0,
@@ -506,8 +808,11 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const initialTrackingMode = getCurrentTrackingMode();
 	// Step labels are intentionally user-facing because they flow into issue summaries.
 	const poolStepLabel = "sync clan roster pool";
-	const lineupStepLabel = initialTrackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup";
-	const statsStepLabel = initialTrackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats";
+	const modeTransitionStepLabel = "detect tracking mode";
+	const getLineupStepLabel = () => (getCurrentTrackingMode() === "regularWar" ? "sync current war lineup" : "sync today lineup");
+	const getStatsStepLabel = () => (getCurrentTrackingMode() === "regularWar" ? "refresh tracking stats" : "refresh CWL stats");
+	const initialLineupStepLabel = initialTrackingMode === "regularWar" ? "sync current war lineup" : "sync today lineup";
+	const initialStatsStepLabel = initialTrackingMode === "regularWar" ? "refresh tracking stats" : "refresh CWL stats";
 	const benchStepLabel = "compute bench suggestions";
 
 	// Record pipeline issues in a normalized, user-facing format.
@@ -618,8 +923,9 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		const notFoundMessage = "Roster not found in current refresh payload.";
 		steps.pool.message = notFoundMessage;
 		addIssue("pipeline", notFoundMessage);
-		markSkippedAfterFailedStep("lineup", lineupStepLabel, poolStepLabel);
-		markSkippedAfterFailedStep("stats", statsStepLabel, poolStepLabel);
+		markIntentionalSkip("modeTransition", "automatic tracking-mode detection skipped: roster not found");
+		markSkippedAfterFailedStep("lineup", initialLineupStepLabel, poolStepLabel);
+		markSkippedAfterFailedStep("stats", initialStatsStepLabel, poolStepLabel);
 		markSkippedAfterFailedStep("bench", benchStepLabel, poolStepLabel);
 	} else {
 		const hasConnectedClanTag = !!normalizeTag_(initialRoster.connectedClanTag);
@@ -634,21 +940,34 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		}
 
 		const poolStepOk = !!steps.pool.ok;
-		const trackingModeForPipeline = getCurrentTrackingMode();
+		if (!hasConnectedClanTag) {
+			markIntentionalSkip("modeTransition", "automatic tracking-mode detection skipped: connected clan tag missing");
+		} else if (!poolStepOk) {
+			markIntentionalSkip("modeTransition", "automatic tracking-mode detection skipped: roster pool sync did not complete");
+		} else {
+			runStepWithRollback("modeTransition", modeTransitionStepLabel, () => detectAndApplyAutomaticTrackingModeTransition_(rosterData, rosterId, pipelinePrefetchOptions));
+		}
+
+		const modeTransitionStepOk = !!steps.modeTransition.ok;
+		const trackingModeForLineup = getCurrentTrackingMode();
+		const lineupStepLabel = getLineupStepLabel();
 		// CWL Preparation Mode deliberately freezes live lineup imports until the roster is finalized.
-		if (trackingModeForPipeline === "cwl" && isCwlPreparationActiveForCurrentRoster()) {
+		if (trackingModeForLineup === "cwl" && isCwlPreparationActiveForCurrentRoster()) {
 			markIntentionalSkip("lineup", "live CWL lineup sync blocked by CWL Preparation Mode");
-		} else if (!hasConnectedClanTag || !poolStepOk) {
-			markSkippedAfterFailedStep("lineup", lineupStepLabel, poolStepLabel);
+		} else if (!hasConnectedClanTag || !poolStepOk || !modeTransitionStepOk) {
+			markSkippedAfterFailedStep("lineup", lineupStepLabel, !poolStepOk || !hasConnectedClanTag ? poolStepLabel : modeTransitionStepLabel);
 		} else {
 			runStepWithRollback("lineup", lineupStepLabel, () => syncClanTodayLineupCore_(rosterData, rosterId, pipelinePrefetchOptions));
 		}
 
 		const lineupStepOk = !!steps.lineup.ok;
+		const trackingModeForStats = getCurrentTrackingMode();
+		const statsStepLabel = getStatsStepLabel();
 		// Regular-war mode can still refresh historical stats when lineup sync fails.
-		const allowStatsWithoutLineup = trackingModeForPipeline === "regularWar";
-		if (!hasConnectedClanTag || !poolStepOk || (!lineupStepOk && !allowStatsWithoutLineup)) {
-			markSkippedAfterFailedStep("stats", statsStepLabel, !poolStepOk || !hasConnectedClanTag ? poolStepLabel : lineupStepLabel);
+		const allowStatsWithoutLineup = trackingModeForStats === "regularWar";
+		if (!hasConnectedClanTag || !poolStepOk || !modeTransitionStepOk || (!lineupStepOk && !allowStatsWithoutLineup)) {
+			const failedStepLabel = !poolStepOk || !hasConnectedClanTag ? poolStepLabel : !modeTransitionStepOk ? modeTransitionStepLabel : lineupStepLabel;
+			markSkippedAfterFailedStep("stats", statsStepLabel, failedStepLabel);
 		} else {
 			if (!lineupStepOk && allowStatsWithoutLineup) {
 				Logger.log(
@@ -661,14 +980,15 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 
 		const statsStepOk = !!steps.stats.ok;
 		const statsResult = steps.stats.result && typeof steps.stats.result === "object" ? steps.stats.result : {};
+		const trackingModeForBench = getCurrentTrackingMode();
 		// If no active CWL exists and nothing changed, bench planning would only churn stale output.
-		const skipBenchForNoActiveCwl = trackingModeForPipeline === "cwl" && statsStepOk && !!statsResult.cwlUnavailable && !!statsResult.statsUnchanged;
-		if (trackingModeForPipeline !== "cwl") {
+		const skipBenchForNoActiveCwl = trackingModeForBench === "cwl" && statsStepOk && !!statsResult.cwlUnavailable && !!statsResult.statsUnchanged;
+		if (trackingModeForBench !== "cwl") {
 			markIntentionalSkip("bench", "bench suggestions are disabled for regular war rosters");
 		} else if (isCwlPreparationActiveForCurrentRoster()) {
 			markIntentionalSkip("bench", "bench suggestions disabled during CWL Preparation Mode");
-		} else if (!hasConnectedClanTag || !poolStepOk || !lineupStepOk || !statsStepOk) {
-			const failedStepLabel = !poolStepOk || !hasConnectedClanTag ? poolStepLabel : !lineupStepOk ? lineupStepLabel : statsStepLabel;
+		} else if (!hasConnectedClanTag || !poolStepOk || !modeTransitionStepOk || !lineupStepOk || !statsStepOk) {
+			const failedStepLabel = !poolStepOk || !hasConnectedClanTag ? poolStepLabel : !modeTransitionStepOk ? modeTransitionStepLabel : !lineupStepOk ? lineupStepLabel : statsStepLabel;
 			markSkippedAfterFailedStep("bench", benchStepLabel, failedStepLabel);
 		} else if (skipBenchForNoActiveCwl) {
 			markIntentionalSkip("bench", "compute bench suggestions skipped: no active CWL available");
@@ -692,10 +1012,11 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const hasIssues = issues.length > 0;
 	const totalPipelineDurationMs = Math.max(0, Date.now() - rosterPipelineStartMs);
 	Logger.log(
-		"refreshRosterPipeline timing rosterId=%s trackingMode=%s poolMs=%s lineupMs=%s statsMs=%s benchMs=%s totalMs=%s statsPartialFailure=%s hasIssues=%s",
+		"refreshRosterPipeline timing rosterId=%s trackingMode=%s poolMs=%s modeTransitionMs=%s lineupMs=%s statsMs=%s benchMs=%s totalMs=%s statsPartialFailure=%s hasIssues=%s",
 		rosterId,
 		finalTrackingMode,
 		stepDurationMs.pool,
+		stepDurationMs.modeTransition,
 		stepDurationMs.lineup,
 		stepDurationMs.stats,
 		stepDurationMs.bench,

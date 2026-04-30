@@ -1286,9 +1286,7 @@ function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, now
 			available: currentWar.available == null ? currentWarMetaRaw.available : currentWar.available,
 		}),
 	);
-	const state = String(warMeta.state == null ? "" : warMeta.state)
-		.trim()
-		.toLowerCase();
+	const state = normalizeWarState_(warMeta.state);
 	if (state !== "preparation" && state !== "inwar" && state !== "warended") return null;
 
 	const sides = getWarSidesForClan_(currentWar, clanTag);
@@ -1701,9 +1699,7 @@ function sanitizeRegularWarMembershipEntry_(entryRaw) {
 // Sanitize regular war current war.
 function sanitizeRegularWarCurrentWar_(rawCurrentWar) {
 	const currentWar = rawCurrentWar && typeof rawCurrentWar === "object" ? rawCurrentWar : {};
-	const state = String(currentWar.state == null ? "" : currentWar.state)
-		.trim()
-		.toLowerCase();
+	const state = normalizeWarState_(currentWar.state);
 	const clanTag = normalizeTag_(currentWar.clanTag);
 	const opponentTag = normalizeTag_(currentWar.opponentTag);
 	const preparationStartTime = typeof currentWar.preparationStartTime === "string" ? currentWar.preparationStartTime : "";

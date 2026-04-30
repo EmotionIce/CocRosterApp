@@ -299,7 +299,7 @@ function buildCwlSeasonContext_(roster, config, optionsRaw) {
 				if (!pickWarSideForClan_(war, clanTag)) continue;
 				foundClanWar = true;
 
-				const warState = String((war && war.state) || "").toLowerCase();
+			const warState = normalizeWarState_(war && war.state);
 				if (warState === "warended") roundState = "completed";
 				else if (warState === "inwar") roundState = "locked";
 				else roundState = "editable";

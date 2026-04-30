@@ -448,7 +448,7 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 	const enabledRaw = raw ? toBooleanFlag_(raw.enabled) : false;
 	const enabled = trackingMode === "cwl" ? enabledRaw : false;
 	const hasAssignedSource = !!(raw && raw.assignedTagSet && typeof raw.assignedTagSet === "object" && !Array.isArray(raw.assignedTagSet));
-	let assignedTagSet = trackingMode === "cwl" && enabled ? normalizePreparationAssignedTagSet_(raw && raw.assignedTagSet, rosterPoolTagSet) : {};
+	let assignedTagSet = trackingMode === "cwl" ? normalizePreparationAssignedTagSet_(raw && raw.assignedTagSet, rosterPoolTagSet) : {};
 	if (trackingMode === "cwl" && enabled && !hasAssignedSource) {
 		const poolTags = Object.keys(rosterPoolTagSet);
 		for (let i = 0; i < poolTags.length; i++) {
@@ -456,7 +456,7 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 			if (tag) assignedTagSet[tag] = true;
 		}
 	}
-	const excludedTagSet = trackingMode === "cwl" && enabled ? normalizePreparationExcludedTagSet_(raw && raw.excludedTagSet) : {};
+	const excludedTagSet = trackingMode === "cwl" ? normalizePreparationExcludedTagSet_(raw && raw.excludedTagSet) : {};
 	const excludedTags = Object.keys(excludedTagSet);
 	for (let i = 0; i < excludedTags.length; i++) {
 		const tag = normalizeTag_(excludedTags[i]);

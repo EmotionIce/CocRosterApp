@@ -1405,7 +1405,7 @@ function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw, optionsRaw) {
 		if (!war || typeof war !== "object" || Array.isArray(war)) {
 			throw new Error("Invalid CWL war payload for war tag " + warTag + ".");
 		}
-		const state = String((war && war.state) || "").toLowerCase();
+		const state = normalizeWarState_(war && war.state);
 		if (state !== "preparation" && state !== "inwar") continue;
 
 		const side = pickWarSideForClan_(war, clanTag);
@@ -1689,9 +1689,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 				},
 			};
 		}
-		const state = String((currentWar && currentWar.state) || "")
-			.trim()
-			.toLowerCase();
+		const state = normalizeWarState_(currentWar && currentWar.state);
 		const isLiveRegularWar = state === "preparation" || state === "inwar";
 		if (!isLiveRegularWar) {
 			setRosterPublicLineupProjectionInactive_(ctx.roster, {
@@ -1955,7 +1953,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		if (!war || typeof war !== "object" || Array.isArray(war)) {
 			throw new Error("Invalid CWL war payload for war tag " + warTag + ".");
 		}
-		const warState = String((war && war.state) || "").toLowerCase();
+		const warState = normalizeWarState_(war && war.state);
 		if (warState !== "inwar" && warState !== "warended") continue;
 
 		const side = pickWarSideForClan_(war, ctx.clanTag);
@@ -2112,10 +2110,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		currentWarMeta.unavailableReason = "";
 		currentWarMeta.statusMessage = "";
 	}
-	const currentWarState =
-		String((currentWar && currentWar.state) || currentWarMeta.state || "")
-			.trim()
-			.toLowerCase() || "notinwar";
+	const currentWarState = normalizeWarState_((currentWar && currentWar.state) || currentWarMeta.state) || "notinwar";
 	currentWarMeta.state = currentWarState;
 
 	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);

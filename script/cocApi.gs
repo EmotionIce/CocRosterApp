@@ -15,6 +15,19 @@ function getRosterTrackingMode_(rosterRaw) {
 	return roster.trackingMode === "regularWar" ? "regularWar" : "cwl";
 }
 
+// Normalize Clash war or league-group state values.
+function normalizeWarState_(value) {
+	return String(value == null ? "" : value)
+		.trim()
+		.toLowerCase();
+}
+
+// Return whether a war-like state is actively usable.
+function isActiveWarState_(value) {
+	const state = normalizeWarState_(value);
+	return state === "preparation" || state === "inwar";
+}
+
 // Return whether valid player tag.
 function isValidPlayerTag_(tagRaw) {
 	const tag = normalizeTag_(tagRaw);
@@ -452,6 +465,8 @@ function mapLeagueGroupDataForClan_(clanTagRaw, leaguegroupRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
 	const data = leaguegroupRaw && typeof leaguegroupRaw === "object" ? leaguegroupRaw : {};
+	const rawState = data && data.state != null ? String(data.state) : "";
+	const state = normalizeWarState_(rawState);
 	const hasClansArray = Array.isArray(data && data.clans);
 	const hasRoundsArray = Array.isArray(data && data.rounds);
 	const clans = hasClansArray ? data.clans : [];
@@ -465,6 +480,8 @@ function mapLeagueGroupDataForClan_(clanTagRaw, leaguegroupRaw) {
 	}
 	return {
 		isMalformed: !hasClansArray || !hasRoundsArray,
+		state: state,
+		rawState: rawState,
 		clanFound: !!clanEntry,
 		members: mapApiMembers_(clanEntry && clanEntry.members),
 		warTags: extractLeagueGroupWarTags_(data),
@@ -558,9 +575,7 @@ function buildPrivateRegularWarResult_(clanTagRaw) {
 function mapCurrentRegularWarFromApiData_(clanTagRaw, warRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const warObj = warRaw && typeof warRaw === "object" ? warRaw : {};
-	const state = String((warObj && warObj.state) || "")
-		.trim()
-		.toLowerCase();
+	const state = normalizeWarState_(warObj && warObj.state);
 	const clanSide = pickWarSideForClan_(warObj, clanTag);
 	if (!clanSide) {
 		return buildNoCurrentRegularWarResult_(clanTag);
