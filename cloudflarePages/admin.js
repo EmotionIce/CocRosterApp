@@ -28,6 +28,8 @@
     websiteEditorActiveSectionId: "",
     websiteEditorUiBound: false,
   };
+  let adminCompactTabsScrollBound = false;
+  let adminCompactTabsVisibilityRaf = 0;
 
   // Set the global status message.
   const setStatus = (msg) => {
@@ -1914,6 +1916,8 @@
   const normalizeAdminTabKey_ = (tabKeyRaw) => toStr(tabKeyRaw).trim().toLowerCase();
   // Get admin tab buttons.
   const getAdminTabButtons = () => Array.from(document.querySelectorAll('[data-admin-tab]'));
+  // Get compact admin tab buttons.
+  const getAdminCompactTabButtons = () => Array.from(document.querySelectorAll("[data-admin-compact-tab]"));
 
   // Return available tab keys from DOM, preferring known key order.
   const getAvailableAdminTabKeys_ = () => {
@@ -1951,6 +1955,72 @@
     return $("#adminTab" + tabKey.charAt(0).toUpperCase() + tabKey.slice(1));
   };
 
+  // Sync compact admin tab button state.
+  const syncAdminCompactTabsUi = () => {
+    const buttons = getAdminCompactTabButtons();
+    const activeTab = normalizeAdminTabKey_(state.activeAdminTab);
+    for (const btn of buttons) {
+      const key = normalizeAdminTabKey_(btn && btn.dataset && btn.dataset.adminCompactTab);
+      const active = key === activeTab;
+      btn.classList.toggle("is-active", active);
+      if (active) btn.setAttribute("aria-current", "page");
+      else btn.removeAttribute("aria-current");
+    }
+  };
+
+  // Set compact admin tabs visible.
+  const setAdminCompactTabsVisible_ = (visibleRaw) => {
+    const visible = !!visibleRaw;
+    const commandBar = $(".admin-command-bar");
+    const compactTabs = $("#adminCommandCompactTabs");
+    if (commandBar) commandBar.classList.toggle("is-compact-tabs-visible", visible);
+    if (compactTabs) compactTabs.setAttribute("aria-hidden", visible ? "false" : "true");
+    const buttons = getAdminCompactTabButtons();
+    for (const btn of buttons) {
+      btn.tabIndex = visible ? 0 : -1;
+    }
+  };
+
+  // Sync compact admin tabs visibility with the primary navigation position.
+  const syncAdminCompactTabsVisibility = () => {
+    const panel = $("#adminPanel");
+    const commandBar = $(".admin-command-bar");
+    const primaryTabs = $(".admin-shell > .admin-tabs") || $(".admin-tabs");
+    const compactTabs = $("#adminCommandCompactTabs");
+    if (!panel || panel.classList.contains("hidden") || !commandBar || !primaryTabs || !compactTabs) {
+      setAdminCompactTabsVisible_(false);
+      return;
+    }
+
+    const commandRect = commandBar.getBoundingClientRect();
+    const tabsRect = primaryTabs.getBoundingClientRect();
+    const viewportHeight = Math.max(
+      1,
+      (typeof window !== "undefined" && window.innerHeight) ||
+      (document.documentElement && document.documentElement.clientHeight) ||
+      1
+    );
+    const navHasScrolledPastBar = tabsRect.bottom <= commandRect.bottom + 1;
+    const navIsNotBelowViewport = tabsRect.bottom <= viewportHeight;
+    setAdminCompactTabsVisible_(navHasScrolledPastBar && navIsNotBelowViewport);
+  };
+
+  // Queue compact admin tab visibility sync.
+  const queueAdminCompactTabsVisibilitySync = () => {
+    if (typeof window === "undefined") {
+      syncAdminCompactTabsVisibility();
+      return;
+    }
+    if (adminCompactTabsVisibilityRaf) return;
+    const scheduleFrame = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame.bind(window)
+      : (fn) => window.setTimeout(fn, 16);
+    adminCompactTabsVisibilityRaf = scheduleFrame(() => {
+      adminCompactTabsVisibilityRaf = 0;
+      syncAdminCompactTabsVisibility();
+    });
+  };
+
   // Set active admin tab.
   const setActiveAdminTab = (tabKeyRaw, optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -1984,6 +2054,7 @@
       panel.classList.toggle("hidden", !active);
       panel.setAttribute("aria-hidden", active ? "false" : "true");
     }
+    syncAdminCompactTabsUi();
   };
 
   // Set auth card unlocked.
@@ -2459,6 +2530,28 @@
         }
       });
     });
+  };
+
+  // Bind compact admin tabs shown inside the sticky command bar.
+  const bindAdminCompactTabs = () => {
+    const buttons = getAdminCompactTabButtons();
+    for (const btn of buttons) {
+      if (btn.dataset && btn.dataset.compactTabBound === "true") continue;
+      if (btn.dataset) btn.dataset.compactTabBound = "true";
+      btn.addEventListener("click", () => {
+        const key = normalizeAdminTabKey_(btn && btn.dataset && btn.dataset.adminCompactTab);
+        setActiveAdminTab(key, { focusButton: false });
+      });
+    }
+
+    if (!adminCompactTabsScrollBound && typeof window !== "undefined") {
+      adminCompactTabsScrollBound = true;
+      window.addEventListener("scroll", queueAdminCompactTabsVisibilitySync, { passive: true });
+      window.addEventListener("resize", queueAdminCompactTabsVisibilitySync, { passive: true });
+    }
+
+    syncAdminCompactTabsUi();
+    syncAdminCompactTabsVisibility();
   };
 
   // Bind overlay close handlers.
@@ -6186,8 +6279,10 @@
     }
 
     bindAdminTabs();
+    bindAdminCompactTabs();
     bindOverlayCloseHandlers();
     setActiveAdminTab(state.activeAdminTab, { focusButton: false });
+    queueAdminCompactTabsVisibilitySync();
     setAuthCardUnlocked(false);
     renderPreviewFromState();
     renderImportUi();
@@ -6239,6 +6334,7 @@
         show("#adminPanel", true);
         setAuthCardUnlocked(true);
         setActiveAdminTab(state.activeAdminTab, { focusButton: false });
+        queueAdminCompactTabsVisibilitySync();
         if (loginBtn) {
           loginBtn.disabled = true;
           loginBtn.textContent = "Unlocked";

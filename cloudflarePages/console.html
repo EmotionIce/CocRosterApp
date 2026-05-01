@@ -751,6 +751,66 @@
       flex: 0 0 auto;
     }
 
+    .admin-command-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 5px;
+      max-height: 0;
+      margin-top: -4px;
+      margin-bottom: -4px;
+      opacity: 0;
+      overflow: hidden;
+      pointer-events: none;
+      transform: translateY(-5px);
+      transition: max-height 180ms ease, margin 180ms ease, opacity 160ms ease, transform 180ms ease;
+      will-change: max-height, opacity, transform;
+    }
+
+    .admin-command-bar.is-compact-tabs-visible .admin-command-tabs {
+      max-height: 38px;
+      margin-top: 0;
+      margin-bottom: 4px;
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .admin-command-tab {
+      min-width: 0;
+      min-height: 30px;
+      padding: 5px 7px;
+      border: 1px solid rgba(51, 65, 85, 0.92);
+      border-radius: 9px;
+      background: rgba(15, 23, 42, 0.74);
+      color: #cbd5e1;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 760;
+      line-height: 1.1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 140ms ease;
+      white-space: nowrap;
+    }
+
+    .admin-command-tab:hover {
+      border-color: rgba(245, 214, 125, 0.42);
+      background: rgba(30, 41, 59, 0.88);
+      color: #f8fafc;
+    }
+
+    .admin-command-tab:focus-visible {
+      outline: none;
+      border-color: rgba(252, 235, 178, 0.82);
+      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.18);
+    }
+
+    .admin-command-tab.is-active {
+      border-color: rgba(245, 214, 125, 0.68);
+      background: linear-gradient(160deg, rgba(245, 214, 125, 0.2), rgba(30, 41, 59, 0.58));
+      color: #f8fafc;
+    }
+
     .admin-command-footer {
       display: grid;
       gap: 4px;
@@ -1759,6 +1819,11 @@
       .admin-startup-loader__core {
         animation: none;
       }
+
+      .admin-command-tabs,
+      .admin-command-tab {
+        transition: none;
+      }
     }
 
     @media (min-width: 1180px) {
@@ -1903,6 +1968,13 @@
               Public Page
             </a>
           </div>
+
+          <nav id="adminCommandCompactTabs" class="admin-command-tabs" aria-label="Compact admin sections" aria-hidden="true">
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="rosters" aria-label="Roster setup" tabindex="-1">Setup</button>
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="import" aria-label="Import" tabindex="-1">Import</button>
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="preview" aria-label="Rosters" tabindex="-1">Rosters</button>
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="website" aria-label="Website" tabindex="-1">Website</button>
+          </nav>
 
           <div class="admin-command-footer">
             <div id="status" class="small admin-global-status"></div>

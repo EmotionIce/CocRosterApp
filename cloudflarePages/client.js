@@ -801,6 +801,7 @@
         if (!query) return "";
         try {
             const params = new URLSearchParams(query);
+            if (params.has("rosters")) return PUBLIC_PAGE_QUERY_VALUES.rosters;
             return toStr(params.get("page")).trim().toLowerCase();
         } catch (err) {
             return "";
@@ -6688,6 +6689,17 @@
         removeGlobalLoadingCard();
     };
 
+    // Scroll public view to top after navigation.
+    const scrollPublicViewToTop = () => {
+        if (typeof window === "undefined" || !window || window.ROSTER_ADMIN_MODE) return;
+        if (typeof window.scrollTo !== "function") return;
+        try {
+            window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+        } catch (err) {
+            window.scrollTo(0, 0);
+        }
+    };
+
     // Set public view.
     const setPublicView = (viewRaw) => {
         const nextView = sanitizePublicViewValue(viewRaw);
@@ -6704,6 +6716,7 @@
         syncPublicViewVisibility(nextView);
         if (lastRenderedData) render(lastRenderedData);
         else renderDataPendingViewState(nextView);
+        scrollPublicViewToTop();
     };
 
     // Set leaderboard roster filter.
