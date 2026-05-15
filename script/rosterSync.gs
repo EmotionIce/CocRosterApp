@@ -602,11 +602,23 @@ function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 		for (let i = 0; i < warKeys.length; i++) {
 			const warKey = warKeys[i];
 			const entry = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
-			if (!entry || !entry.statsByTag || typeof entry.statsByTag !== "object") continue;
-			if (!Object.prototype.hasOwnProperty.call(entry.statsByTag, tag)) continue;
-			delete entry.statsByTag[tag];
+			if (!entry) continue;
+			const statsByTag = entry.statsByTag && typeof entry.statsByTag === "object" ? entry.statsByTag : {};
+			const formStatsByTag = entry.formStatsByTag && typeof entry.formStatsByTag === "object" ? entry.formStatsByTag : {};
+			let entryChanged = false;
+			if (Object.prototype.hasOwnProperty.call(statsByTag, tag)) {
+				delete statsByTag[tag];
+				entryChanged = true;
+			}
+			if (Object.prototype.hasOwnProperty.call(formStatsByTag, tag)) {
+				delete formStatsByTag[tag];
+				entryChanged = true;
+			}
+			if (!entryChanged) continue;
+			entry.statsByTag = statsByTag;
+			entry.formStatsByTag = formStatsByTag;
 			historyChanged = true;
-			if (Object.keys(entry.statsByTag).length < 1) {
+			if (Object.keys(entry.statsByTag).length < 1 && Object.keys(entry.formStatsByTag).length < 1) {
 				delete historyByKey[warKey];
 			} else {
 				historyByKey[warKey] = sanitizeRegularWarHistoryEntry_(entry, warKey);

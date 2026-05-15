@@ -101,11 +101,14 @@ function createEmptyWarPerformanceStats_() {
 		warsInLineup: 0,
 		daysInLineup: 0,
 		resolvedWarDays: 0,
+		possibleAttacks: 0,
+		usedAttacks: 0,
 		attacksMade: 0,
 		attacksMissed: 0,
 		starsTotal: 0,
 		totalDestruction: 0,
 		countedAttacks: 0,
+		formEligibleAttacks: 0,
 		threeStarCount: 0,
 		hitUpCount: 0,
 		sameThHitCount: 0,
@@ -115,6 +118,15 @@ function createEmptyWarPerformanceStats_() {
 
 // Create an empty war performance entry.
 function createEmptyWarPerformanceEntry_() {
+	return {
+		overall: createEmptyWarPerformanceStats_(),
+		regular: createEmptyWarPerformanceStats_(),
+		cwl: createEmptyWarPerformanceStats_(),
+	};
+}
+
+// Create an empty form-eligible war-performance entry.
+function createEmptyFormWarPerformanceEntry_() {
 	return {
 		overall: createEmptyWarPerformanceStats_(),
 		regular: createEmptyWarPerformanceStats_(),
@@ -158,11 +170,18 @@ function sanitizeWarPerformanceStatsEntry_(entryRaw) {
 	out.warsInLineup = toNonNegativeInt_(entry.warsInLineup);
 	out.daysInLineup = toNonNegativeInt_(entry.daysInLineup);
 	out.resolvedWarDays = toNonNegativeInt_(entry.resolvedWarDays);
+	out.possibleAttacks = toNonNegativeInt_(
+		entry.possibleAttacks != null
+			? entry.possibleAttacks
+			: toNonNegativeInt_(entry.attacksMade) + toNonNegativeInt_(entry.attacksMissed),
+	);
+	out.usedAttacks = toNonNegativeInt_(entry.usedAttacks != null ? entry.usedAttacks : entry.attacksMade);
 	out.attacksMade = toNonNegativeInt_(entry.attacksMade);
 	out.attacksMissed = toNonNegativeInt_(entry.attacksMissed);
 	out.starsTotal = toNonNegativeInt_(entry.starsTotal);
 	out.totalDestruction = toNonNegativeInt_(entry.totalDestruction);
 	out.countedAttacks = toNonNegativeInt_(entry.countedAttacks);
+	out.formEligibleAttacks = toNonNegativeInt_(entry.formEligibleAttacks != null ? entry.formEligibleAttacks : entry.countedAttacks);
 	out.threeStarCount = toNonNegativeInt_(entry.threeStarCount);
 	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
 	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
@@ -177,6 +196,20 @@ function sanitizeWarPerformanceEntry_(entryRaw) {
 	out.overall = sanitizeWarPerformanceStatsEntry_(entry.overall);
 	out.regular = sanitizeWarPerformanceStatsEntry_(entry.regular);
 	out.cwl = sanitizeWarPerformanceStatsEntry_(entry.cwl);
+	const formStatsRaw = entry.formStats && typeof entry.formStats === "object" ? entry.formStats : null;
+	if (formStatsRaw) {
+		const formStats = createEmptyFormWarPerformanceEntry_();
+		formStats.overall = sanitizeWarPerformanceStatsEntry_(formStatsRaw.overall);
+		formStats.regular = sanitizeWarPerformanceStatsEntry_(formStatsRaw.regular);
+		formStats.cwl = sanitizeWarPerformanceStatsEntry_(formStatsRaw.cwl);
+		if (
+			hasWarPerformanceStatsData_(formStats.overall) ||
+			hasWarPerformanceStatsData_(formStats.regular) ||
+			hasWarPerformanceStatsData_(formStats.cwl)
+		) {
+			out.formStats = formStats;
+		}
+	}
 	return out;
 }
 
@@ -327,6 +360,7 @@ function createEmptyRegularWarHistoryEntry_(warKeyRaw) {
 		lastRepairAttemptAt: "",
 		repairedAt: "",
 		statsByTag: {},
+		formStatsByTag: {},
 	};
 }
 
@@ -364,6 +398,7 @@ function sanitizeRegularWarHistoryEntry_(entryRaw, warKeyRaw) {
 	out.lastRepairAttemptAt = typeof entry.lastRepairAttemptAt === "string" ? entry.lastRepairAttemptAt : "";
 	out.repairedAt = typeof entry.repairedAt === "string" ? entry.repairedAt : "";
 	out.statsByTag = sanitizeRegularWarHistoryStatsByTag_(entry.statsByTag);
+	out.formStatsByTag = sanitizeRegularWarHistoryStatsByTag_(entry.formStatsByTag);
 	if (!out.lastUpdatedAt) out.lastUpdatedAt = out.finalizedAt;
 	if (out.incomplete && !out.firstIncompleteAt) out.firstIncompleteAt = out.finalizedAt || out.lastUpdatedAt;
 	return out;
@@ -415,6 +450,14 @@ function sanitizeRegularWarSnapshot_(rawSnapshot) {
 		if (!tag) continue;
 		statsByTag[tag] = sanitizeWarPerformanceStatsEntry_(statsByTagRaw[statTags[i]]);
 	}
+	const formStatsByTagRaw = snapshot.formStatsByTag && typeof snapshot.formStatsByTag === "object" ? snapshot.formStatsByTag : {};
+	const formStatsByTag = {};
+	const formStatTags = Object.keys(formStatsByTagRaw);
+	for (let i = 0; i < formStatTags.length; i++) {
+		const tag = normalizeTag_(formStatTags[i]);
+		if (!tag) continue;
+		formStatsByTag[tag] = sanitizeWarPerformanceStatsEntry_(formStatsByTagRaw[formStatTags[i]]);
+	}
 
 	const currentByTagRaw = snapshot.currentByTag && typeof snapshot.currentByTag === "object" ? snapshot.currentByTag : {};
 	const currentByTag = {};
@@ -432,6 +475,7 @@ function sanitizeRegularWarSnapshot_(rawSnapshot) {
 		isComplete: snapshot.isComplete == null ? true : toBooleanFlag_(snapshot.isComplete),
 		source: typeof snapshot.source === "string" ? snapshot.source : "",
 		statsByTag: statsByTag,
+		formStatsByTag: formStatsByTag,
 		currentByTag: currentByTag,
 	};
 }
@@ -552,11 +596,14 @@ function hasWarPerformanceStatsData_(statsRaw) {
 		stats.warsInLineup > 0 ||
 		stats.daysInLineup > 0 ||
 		stats.resolvedWarDays > 0 ||
+		stats.possibleAttacks > 0 ||
+		stats.usedAttacks > 0 ||
 		stats.attacksMade > 0 ||
 		stats.attacksMissed > 0 ||
 		stats.starsTotal > 0 ||
 		stats.totalDestruction > 0 ||
 		stats.countedAttacks > 0 ||
+		stats.formEligibleAttacks > 0 ||
 		stats.threeStarCount > 0 ||
 		stats.hitUpCount > 0 ||
 		stats.sameThHitCount > 0 ||
@@ -569,11 +616,14 @@ function mapRegularAggregateToWarPerformanceStats_(aggregateRaw) {
 	const aggregate = sanitizeRegularWarAggregateEntry_(aggregateRaw);
 	const out = createEmptyWarPerformanceStats_();
 	out.warsInLineup = aggregate.warsInLineup;
+	out.possibleAttacks = aggregate.attacksMade + aggregate.attacksMissed;
+	out.usedAttacks = aggregate.attacksMade;
 	out.attacksMade = aggregate.attacksMade;
 	out.attacksMissed = aggregate.attacksMissed;
 	out.starsTotal = aggregate.starsTotal;
 	out.totalDestruction = aggregate.totalDestruction;
 	out.countedAttacks = aggregate.countedAttacks;
+	out.formEligibleAttacks = aggregate.countedAttacks;
 	out.threeStarCount = aggregate.threeStarCount;
 	out.hitUpCount = aggregate.hitUpCount;
 	out.sameThHitCount = aggregate.sameThHitCount;
@@ -804,6 +854,7 @@ function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
 	const baselineByTag = sanitizeRegularWarLegacyBaselineByTag_(warPerformance.regularWarLegacyBaselineByTag);
 	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
 	const aggregateRegularByTag = {};
+	const aggregateRegularFormByTag = {};
 	const baselineTags = Object.keys(baselineByTag);
 	for (let i = 0; i < baselineTags.length; i++) {
 		const tag = normalizeTag_(baselineTags[i]);
@@ -822,6 +873,14 @@ function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
 			if (!aggregateRegularByTag[tag]) aggregateRegularByTag[tag] = createEmptyWarPerformanceStats_();
 			mergeWarPerformanceStats_(aggregateRegularByTag[tag], sanitizeWarPerformanceStatsEntry_(statsByTag[statTags[j]]));
 		}
+		const formStatsByTag = entry && entry.formStatsByTag && typeof entry.formStatsByTag === "object" ? entry.formStatsByTag : {};
+		const formStatTags = Object.keys(formStatsByTag);
+		for (let j = 0; j < formStatTags.length; j++) {
+			const tag = normalizeTag_(formStatTags[j]);
+			if (!tag) continue;
+			if (!aggregateRegularFormByTag[tag]) aggregateRegularFormByTag[tag] = createEmptyWarPerformanceStats_();
+			mergeWarPerformanceStats_(aggregateRegularFormByTag[tag], sanitizeWarPerformanceStatsEntry_(formStatsByTag[formStatTags[j]]));
+		}
 	}
 
 	const currentByTagRaw = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
@@ -836,6 +895,8 @@ function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
 	const allTagSet = {};
 	const aggregateTags = Object.keys(aggregateRegularByTag);
 	for (let i = 0; i < aggregateTags.length; i++) allTagSet[aggregateTags[i]] = true;
+	const aggregateFormTags = Object.keys(aggregateRegularFormByTag);
+	for (let i = 0; i < aggregateFormTags.length; i++) allTagSet[aggregateFormTags[i]] = true;
 	for (let i = 0; i < currentTags.length; i++) {
 		const tag = normalizeTag_(currentTags[i]);
 		if (!tag) continue;
@@ -853,12 +914,34 @@ function rebuildRegularWarAggregatesFromHistory_(warPerformanceRaw, nowIsoRaw) {
 		const overallStats = createEmptyWarPerformanceStats_();
 		mergeWarPerformanceStats_(overallStats, regularStats);
 		mergeWarPerformanceStats_(overallStats, cwlStats);
+		const currentFormEntry = currentEntry.formStats && typeof currentEntry.formStats === "object" ? currentEntry.formStats : null;
+		const regularFormStats = aggregateRegularFormByTag[tag]
+			? sanitizeWarPerformanceStatsEntry_(aggregateRegularFormByTag[tag])
+			: createEmptyWarPerformanceStats_();
+		const cwlFormStats = currentFormEntry
+			? sanitizeWarPerformanceStatsEntry_(currentFormEntry.cwl)
+			: createEmptyWarPerformanceStats_();
+		const overallFormStats = createEmptyWarPerformanceStats_();
+		mergeWarPerformanceStats_(overallFormStats, regularFormStats);
+		mergeWarPerformanceStats_(overallFormStats, cwlFormStats);
 		if (!hasWarPerformanceStatsData_(overallStats) && !hasWarPerformanceStatsData_(regularStats) && !hasWarPerformanceStatsData_(cwlStats)) continue;
-		rebuiltByTag[tag] = {
+		const rebuiltEntry = {
 			overall: overallStats,
 			regular: regularStats,
 			cwl: cwlStats,
 		};
+		if (
+			hasWarPerformanceStatsData_(overallFormStats) ||
+			hasWarPerformanceStatsData_(regularFormStats) ||
+			hasWarPerformanceStatsData_(cwlFormStats)
+		) {
+			rebuiltEntry.formStats = {
+				overall: overallFormStats,
+				regular: regularFormStats,
+				cwl: cwlFormStats,
+			};
+		}
+		rebuiltByTag[tag] = rebuiltEntry;
 	}
 
 	warPerformance.regularWarLegacyBaselineByTag = baselineByTag;
@@ -902,11 +985,14 @@ function mergeWarPerformanceStats_(dest, src) {
 	dest.warsInLineup = toNonNegativeInt_(dest.warsInLineup) + toNonNegativeInt_(src.warsInLineup);
 	dest.daysInLineup = toNonNegativeInt_(dest.daysInLineup) + toNonNegativeInt_(src.daysInLineup);
 	dest.resolvedWarDays = toNonNegativeInt_(dest.resolvedWarDays) + toNonNegativeInt_(src.resolvedWarDays);
+	dest.possibleAttacks = toNonNegativeInt_(dest.possibleAttacks) + toNonNegativeInt_(src.possibleAttacks);
+	dest.usedAttacks = toNonNegativeInt_(dest.usedAttacks) + toNonNegativeInt_(src.usedAttacks != null ? src.usedAttacks : src.attacksMade);
 	dest.attacksMade = toNonNegativeInt_(dest.attacksMade) + toNonNegativeInt_(src.attacksMade);
 	dest.attacksMissed = toNonNegativeInt_(dest.attacksMissed) + toNonNegativeInt_(src.attacksMissed);
 	dest.starsTotal = toNonNegativeInt_(dest.starsTotal) + toNonNegativeInt_(src.starsTotal);
 	dest.totalDestruction = toNonNegativeInt_(dest.totalDestruction) + toNonNegativeInt_(src.totalDestruction);
 	dest.countedAttacks = toNonNegativeInt_(dest.countedAttacks) + toNonNegativeInt_(src.countedAttacks);
+	dest.formEligibleAttacks = toNonNegativeInt_(dest.formEligibleAttacks) + toNonNegativeInt_(src.formEligibleAttacks != null ? src.formEligibleAttacks : src.countedAttacks);
 	dest.threeStarCount = toNonNegativeInt_(dest.threeStarCount) + toNonNegativeInt_(src.threeStarCount);
 	dest.hitUpCount = toNonNegativeInt_(dest.hitUpCount) + toNonNegativeInt_(src.hitUpCount);
 	dest.sameThHitCount = toNonNegativeInt_(dest.sameThHitCount) + toNonNegativeInt_(src.sameThHitCount);
@@ -961,11 +1047,14 @@ function buildWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThBy
 		if (mode === "cwl") {
 			stats.daysInLineup = 1;
 			stats.resolvedWarDays = 1;
+			stats.possibleAttacks = 1;
 			stats.attacksMissed = attacks.length === 0 ? 1 : 0;
 		} else {
 			stats.warsInLineup = 1;
+			stats.possibleAttacks = attacksPerMember;
 			stats.attacksMissed = Math.max(0, attacksPerMember - attacks.length);
 		}
+		stats.usedAttacks = attacks.length;
 		stats.attacksMade = attacks.length;
 		const attackerTh = readTownHallLevel_(member);
 		for (let j = 0; j < attacks.length; j++) {
@@ -977,6 +1066,99 @@ function buildWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThBy
 			stats.starsTotal += stars;
 			stats.totalDestruction += destruction;
 			stats.countedAttacks++;
+			stats.formEligibleAttacks++;
+			if (stars === 3) stats.threeStarCount++;
+			if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
+				if (attackerTh < defenderTh) stats.hitUpCount++;
+				else if (attackerTh > defenderTh) stats.hitDownCount++;
+				else stats.sameThHitCount++;
+			}
+		}
+		out[tag] = stats;
+	}
+	return out;
+}
+
+// Build form-eligible regular-war stats when attack chronology proves which attacks happened before max stars.
+// The additive bucket keeps the full opportunity model explicit: possibleAttacks, usedAttacks/attacksMade,
+// countedAttacks/formEligibleAttacks, and attacksMissed for the existing frontend reliability penalty.
+function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThByTagRaw, trackedTagSet, teamSizeRaw) {
+	const members = Array.isArray(membersRaw) ? membersRaw : [];
+	const opponentThByTag = opponentThByTagRaw && typeof opponentThByTagRaw === "object" ? opponentThByTagRaw : {};
+	const attacksPerMember = toNonNegativeInt_(attacksPerMemberRaw);
+	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
+	const teamSize = toNonNegativeInt_(teamSizeRaw) || members.length;
+	const maxStars = teamSize * 3;
+	if (!(maxStars > 0)) return null;
+
+	const orderedAttacks = [];
+	for (let i = 0; i < members.length; i++) {
+		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
+		const attackerTag = normalizeTag_(member.tag);
+		if (!attackerTag) continue;
+		const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+		for (let j = 0; j < attacks.length; j++) {
+			const attack = attacks[j] && typeof attacks[j] === "object" ? attacks[j] : {};
+			const attackOrder = Number(attack.order);
+			const defenderTag = normalizeTag_(attack.defenderTag);
+			if (!Number.isFinite(attackOrder) || attackOrder <= 0 || !defenderTag) return null;
+			orderedAttacks.push({
+				attackerTag: attackerTag,
+				attackIndex: j,
+				order: Math.floor(attackOrder),
+				defenderTag: defenderTag,
+				stars: Math.min(3, toNonNegativeInt_(attack.stars)),
+			});
+		}
+	}
+
+	orderedAttacks.sort((left, right) => left.order - right.order);
+	for (let i = 1; i < orderedAttacks.length; i++) {
+		if (orderedAttacks[i - 1].order === orderedAttacks[i].order) return null;
+	}
+
+	const eligibleAttackIndexByTag = {};
+	const bestStarsByDefenderTag = {};
+	let securedStars = 0;
+	for (let i = 0; i < orderedAttacks.length; i++) {
+		const orderedAttack = orderedAttacks[i];
+		const isFormEligible = securedStars < maxStars;
+		if (!eligibleAttackIndexByTag[orderedAttack.attackerTag]) eligibleAttackIndexByTag[orderedAttack.attackerTag] = {};
+		eligibleAttackIndexByTag[orderedAttack.attackerTag][orderedAttack.attackIndex] = isFormEligible;
+
+		const previousBestStars = toNonNegativeInt_(bestStarsByDefenderTag[orderedAttack.defenderTag]);
+		if (orderedAttack.stars > previousBestStars) {
+			bestStarsByDefenderTag[orderedAttack.defenderTag] = orderedAttack.stars;
+			securedStars += orderedAttack.stars - previousBestStars;
+		}
+	}
+
+	const out = {};
+	for (let i = 0; i < members.length; i++) {
+		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+		const stats = createEmptyWarPerformanceStats_();
+		stats.warsInLineup = 1;
+		stats.possibleAttacks = attacksPerMember;
+		stats.usedAttacks = attacks.length;
+		stats.attacksMade = attacks.length;
+		stats.attacksMissed = Math.max(0, attacksPerMember - attacks.length);
+		const attackerTh = readTownHallLevel_(member);
+		const eligibleAttackIndexes = eligibleAttackIndexByTag[tag] && typeof eligibleAttackIndexByTag[tag] === "object" ? eligibleAttackIndexByTag[tag] : {};
+		for (let j = 0; j < attacks.length; j++) {
+			if (eligibleAttackIndexes[j] !== true) continue;
+			const attack = attacks[j] && typeof attacks[j] === "object" ? attacks[j] : {};
+			const stars = toNonNegativeInt_(attack.stars);
+			const destruction = readAttackDestruction_(attack);
+			const defenderTag = normalizeTag_(attack.defenderTag);
+			const defenderTh = defenderTag && Object.prototype.hasOwnProperty.call(opponentThByTag, defenderTag) ? opponentThByTag[defenderTag] : null;
+			stats.starsTotal += stars;
+			stats.totalDestruction += destruction;
+			stats.countedAttacks++;
+			stats.formEligibleAttacks++;
 			if (stars === 3) stats.threeStarCount++;
 			if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
 				if (attackerTh < defenderTh) stats.hitUpCount++;
@@ -995,6 +1177,17 @@ function computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet) {
 	if (!sides) return {};
 	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
 	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "regular");
+}
+
+// Compute form-eligible regular-war stats from war when attack chronology is reliable enough to filter post-max-star attacks.
+function computeRegularWarFormStatsFromWar_(war, clanTag, trackedTagSet) {
+	const sides = getWarSidesForClan_(war, clanTag);
+	if (!sides) return null;
+	const members = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
+	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
+	const currentWarMeta = war && war.currentWarMeta && typeof war.currentWarMeta === "object" ? war.currentWarMeta : {};
+	const teamSize = toNonNegativeInt_(war && war.teamSize != null ? war.teamSize : currentWarMeta.teamSize) || members.length;
+	return buildFormEligibleRegularWarStatsFromMembers_(members, sides.attacksPerMember, opponentThByTag, trackedTagSet, teamSize);
 }
 
 // Compute CWL war stats from war.
@@ -1128,6 +1321,13 @@ function upsertRegularWarHistoryEntry_(warPerformanceRaw, warKeyRaw, statsByTagR
 
 	const sanitizedStatsByTag = sanitizeRegularWarHistoryStatsByTag_(statsByTagRaw);
 	const hasIncomingStats = Object.keys(sanitizedStatsByTag).length > 0;
+	// Determine whether formStatsByTag was explicitly provided by the caller.  Use the raw options object
+	// to detect undefined versus deliberate empty object or null.  This allows us to clear stale
+	// form stats when the caller explicitly passes an empty formStatsByTag value.
+	const formStatsProvided = optionsRaw && Object.prototype.hasOwnProperty.call(optionsRaw, "formStatsByTag");
+	// Sanitize the incoming form stats, but do not treat absence the same as an explicit empty object.
+	const sanitizedFormStatsByTag = sanitizeRegularWarHistoryStatsByTag_(options.formStatsByTag);
+	const hasIncomingFormStats = Object.keys(sanitizedFormStatsByTag).length > 0;
 	if (!hasIncomingStats && !(existing && existing.statsByTag && Object.keys(existing.statsByTag).length > 0)) {
 		return { applied: false, warKey: warKey, repaired: false, authoritative: authoritative, incomplete: incomplete, reason: "missingStatsByTag" };
 	}
@@ -1156,6 +1356,20 @@ function upsertRegularWarHistoryEntry_(warPerformanceRaw, warKeyRaw, statsByTagR
 	}
 	if (hasIncomingStats) {
 		next.statsByTag = sanitizedStatsByTag;
+	}
+	// Apply formStatsByTag according to whether it was explicitly provided.
+	// If the caller provided formStatsByTag explicitly, apply the sanitized form stats when data exists,
+	// or clear the existing formStatsByTag when no data is present.
+	if (formStatsProvided) {
+		if (hasIncomingFormStats) {
+			next.formStatsByTag = sanitizedFormStatsByTag;
+		} else {
+			// Explicitly provided but sanitized to no data: clear to an empty object.
+			next.formStatsByTag = {};
+		}
+	} else if (hasIncomingFormStats) {
+		// For backward compatibility: if no explicit flag but sanitized has data, still assign.
+		next.formStatsByTag = sanitizedFormStatsByTag;
 	}
 
 	historyByKey[warKey] = sanitizeRegularWarHistoryEntry_(next, warKey);
@@ -1268,7 +1482,7 @@ function markWarPerformanceFinalization_(warPerformance, modeRaw, identifierRaw,
 }
 
 // Apply war snapshot to long term aggregate.
-function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifierRaw, statsByTagRaw, nowIso, source, reason, incomplete) {
+function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifierRaw, statsByTagRaw, nowIso, source, reason, incomplete, formStatsByTagRaw) {
 	const target = resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw);
 	const mode = target.mode;
 	if (!warPerformance || typeof warPerformance !== "object") {
@@ -1290,6 +1504,7 @@ function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifie
 			reason: reason,
 			incomplete: incomplete,
 			authoritative: !toBooleanFlag_(incomplete),
+			formStatsByTag: formStatsByTagRaw,
 		});
 		return {
 			applied: !!historyResult.applied,
@@ -1324,7 +1539,18 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 	const warKey = getStableRegularWarKey_(war, clanTag);
 	if (!warKey) return false;
 	const warStatsByTag = computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet);
-	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "regular", warKey, warStatsByTag, nowIso, source || "regularWarFinalized", reason || "regularWarFinalized", !!incomplete);
+	const formStatsByTag = computeRegularWarFormStatsFromWar_(war, clanTag, trackedTagSet);
+	const result = applyWarSnapshotToLongTermAggregate_(
+		warPerformance,
+		"regular",
+		warKey,
+		warStatsByTag,
+		nowIso,
+		source || "regularWarFinalized",
+		reason || "regularWarFinalized",
+		!!incomplete,
+		formStatsByTag,
+	);
 	return !!result.applied;
 }
 
@@ -1333,7 +1559,9 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 	const snapshot = sanitizeRegularWarSnapshot_(snapshotRaw);
 	if (!snapshot || !snapshot.warMeta || !snapshot.warMeta.warKey) return false;
 	const statsByTagRaw = snapshot.statsByTag && typeof snapshot.statsByTag === "object" ? snapshot.statsByTag : {};
+	const formStatsByTagRaw = snapshot.formStatsByTag && typeof snapshot.formStatsByTag === "object" ? snapshot.formStatsByTag : {};
 	const filteredStats = {};
+	const filteredFormStats = {};
 	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
 	const tags = Object.keys(statsByTagRaw);
 	for (let i = 0; i < tags.length; i++) {
@@ -1342,7 +1570,24 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 		if (useTrackedFilter && !trackedTagSet[tag]) continue;
 		filteredStats[tag] = sanitizeWarPerformanceStatsEntry_(statsByTagRaw[tags[i]]);
 	}
-	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "regular", snapshot.warMeta.warKey, filteredStats, nowIso, source || "regularWarSnapshotFinalized", reason || "regularWarSnapshotFinalized", !!incomplete);
+	const formTags = Object.keys(formStatsByTagRaw);
+	for (let i = 0; i < formTags.length; i++) {
+		const tag = normalizeTag_(formTags[i]);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		filteredFormStats[tag] = sanitizeWarPerformanceStatsEntry_(formStatsByTagRaw[formTags[i]]);
+	}
+	const result = applyWarSnapshotToLongTermAggregate_(
+		warPerformance,
+		"regular",
+		snapshot.warMeta.warKey,
+		filteredStats,
+		nowIso,
+		source || "regularWarSnapshotFinalized",
+		reason || "regularWarSnapshotFinalized",
+		!!incomplete,
+		Object.keys(filteredFormStats).length > 0 ? filteredFormStats : null,
+	);
 	return !!result.applied;
 }
 
@@ -1375,12 +1620,25 @@ function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, now
 	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
 	const members = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
 	const statsByTag = buildWarStatsFromMembers_(members, attacksPerMember, opponentThByTag, trackedTagSet, "regular");
+	const formStatsByTag = buildFormEligibleRegularWarStatsFromMembers_(
+		members,
+		attacksPerMember,
+		opponentThByTag,
+		trackedTagSet,
+		toNonNegativeInt_(warMeta.teamSize) || members.length,
+	);
 	if (state !== "warended") {
 		const statTags = Object.keys(statsByTag);
 		for (let i = 0; i < statTags.length; i++) {
 			const tag = normalizeTag_(statTags[i]);
 			if (!tag || !statsByTag[tag]) continue;
 			statsByTag[tag].attacksMissed = 0;
+		}
+		const formStatTags = formStatsByTag && typeof formStatsByTag === "object" ? Object.keys(formStatsByTag) : [];
+		for (let i = 0; i < formStatTags.length; i++) {
+			const tag = normalizeTag_(formStatTags[i]);
+			if (!tag || !formStatsByTag[tag]) continue;
+			formStatsByTag[tag].attacksMissed = 0;
 		}
 	}
 	const currentByTag = {};
@@ -1428,6 +1686,7 @@ function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, now
 		isComplete: true,
 		source: "currentWar",
 		statsByTag: statsByTag,
+		formStatsByTag: formStatsByTag || {},
 		currentByTag: currentByTag,
 	};
 }

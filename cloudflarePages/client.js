@@ -1116,6 +1116,12 @@
         };
     };
 
+    // Return any additive form-specific long-term buckets without changing the raw public stats layer.
+    const getPlayerLongTermFormStats = (warPerformanceRaw, tagRaw) => {
+        const entry = getWarPerformancePlayerEntry(warPerformanceRaw, tagRaw);
+        return entry.formStats && typeof entry.formStats === "object" ? entry.formStats : null;
+    };
+
     // Get player CWL stats.
     const getPlayerCwlStats = (cwlStatsRaw, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
@@ -5334,6 +5340,36 @@
             ? warPerformanceRaw.regularWarHistoryByKey
             : {};
 
+    // Form-specific buckets can legitimately have zero counted attacks when all used attacks were post-max-star farms.
+    // Presence therefore means stored additive data exists, not that the bucket currently yields a score.
+    const hasStoredPlayerFormStatsBucketData = (statsRaw) => {
+        const stats = statsRaw && typeof statsRaw === "object" ? statsRaw : null;
+        if (!stats) return false;
+        const keys = [
+            "warsInLineup",
+            "daysInLineup",
+            "resolvedWarDays",
+            "possibleAttacks",
+            "usedAttacks",
+            "attacksMade",
+            "missedAttacks",
+            "attacksMissed",
+            "starsTotal",
+            "totalDestruction",
+            "countedAttacks",
+            "formEligibleAttacks",
+            "threeStarCount",
+            "hitUpCount",
+            "sameThHitCount",
+            "hitDownCount",
+        ];
+        for (let i = 0; i < keys.length; i++) {
+            const value = readOptionalPlayerFormMetric(stats, keys[i]);
+            if (value != null && value > 0) return true;
+        }
+        return false;
+    };
+
     // Build the recent regular-war form bucket from finalized history only; live wars never enter Form.
     const getPlayerRecentRegularWarFormBucket = (warPerformanceRaw, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
@@ -5345,7 +5381,10 @@
             const entry = historyByKey[keys[i]];
             if (!entry || typeof entry !== "object" || entry.authoritative !== true) continue;
             const statsByTag = entry.statsByTag && typeof entry.statsByTag === "object" ? entry.statsByTag : {};
-            const playerStats = statsByTag[tag] && typeof statsByTag[tag] === "object" ? statsByTag[tag] : null;
+            const formStatsByTag = entry.formStatsByTag && typeof entry.formStatsByTag === "object" ? entry.formStatsByTag : {};
+            const playerStats = formStatsByTag[tag] && typeof formStatsByTag[tag] === "object"
+                ? formStatsByTag[tag]
+                : (statsByTag[tag] && typeof statsByTag[tag] === "object" ? statsByTag[tag] : null);
             if (!playerStats) continue;
             recentEntries.push({
                 finalizedAt: toStr(entry.finalizedAt).trim(),
@@ -5457,15 +5496,27 @@
         const longTermOverall = longTermStats.overall && typeof longTermStats.overall === "object"
             ? longTermStats.overall
             : {};
+        const longTermFormStats = getPlayerLongTermFormStats(warPerformanceRaw, tagRaw);
+        const longTermFormRegular = longTermFormStats && hasStoredPlayerFormStatsBucketData(longTermFormStats.regular)
+            ? longTermFormStats.regular
+            : null;
+        const longTermFormOverall = longTermFormStats && hasStoredPlayerFormStatsBucketData(longTermFormStats.overall)
+            ? longTermFormStats.overall
+            : null;
         const recentBucket = trackingMode === "regularWar"
             ? getPlayerRecentRegularWarFormBucket(warPerformanceRaw, tagRaw)
             : normalizePlayerFormStatsBucket(cwlStats);
-        const preferredLongTermBucket = trackingMode === "regularWar" ? longTermRegular : longTermCwl;
+        const preferredLongTermBucket = trackingMode === "regularWar"
+            ? (longTermFormRegular || longTermRegular)
+            : longTermCwl;
+        const fallbackLongTermBucket = trackingMode === "regularWar"
+            ? (longTermFormOverall || longTermOverall)
+            : longTermOverall;
         const recentSignal = scorePlayerFormStatsBucket(recentBucket);
         const preferredLongTermSignal = scorePlayerFormStatsBucket(preferredLongTermBucket);
         const longTermSignal = preferredLongTermSignal.value != null
             ? preferredLongTermSignal
-            : scorePlayerFormStatsBucket(longTermOverall);
+            : scorePlayerFormStatsBucket(fallbackLongTermBucket);
         const blendedValue = blendPlayerFormSignals(recentSignal, longTermSignal);
         if (blendedValue == null || !Number.isFinite(Number(blendedValue))) {
             return {
