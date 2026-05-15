@@ -165,6 +165,7 @@ function writePublishedRosterData_(rosterDataRaw) {
 			publishArchiveCleanupDeleted,
 		);
 		markActiveDataWriteSuccess_(publishedAt, ACTIVE_DATA_WRITE_SOURCE_PUBLISH);
+		reconcileRegularWarFinalizationTriggerState_(validated);
 		return meta;
 	} catch (err) {
 		rethrowWithDuplicateRosterTagDetails_(validationStepLabel, err, duplicateDiagnosticsRosterData);
@@ -372,6 +373,153 @@ function reconcileAutoRefreshTriggerState_() {
 	return { enabled: true, triggerId: triggerId, hasTrigger: !!triggerId };
 }
 
+// Handle list regular-war finalization triggers.
+function listRegularWarFinalizationTriggers_() {
+	const all = ScriptApp.getProjectTriggers();
+	return all.filter((trigger) => {
+		try {
+			return String(trigger.getHandlerFunction() || "") === REGULAR_WAR_FINALIZATION_HANDLER_NAME;
+		} catch (err) {
+			return false;
+		}
+	});
+}
+
+// Remove regular-war finalization triggers.
+function removeRegularWarFinalizationTriggers_() {
+	const triggers = listRegularWarFinalizationTriggers_();
+	let removed = 0;
+	for (let i = 0; i < triggers.length; i++) {
+		try {
+			ScriptApp.deleteTrigger(triggers[i]);
+			removed++;
+		} catch (err) {
+			Logger.log("Unable to delete regular-war finalization trigger: %s", errorMessage_(err));
+		}
+	}
+	return removed;
+}
+
+// Find the next regular-war finalization attempt due across active published rosters.
+function findNextRegularWarFinalizationDueAt_(rosterDataRaw) {
+	const rosterData = validateRosterData_(rosterDataRaw);
+	const rosters = Array.isArray(rosterData && rosterData.rosters) ? rosterData.rosters : [];
+	let earliestDueMs = 0;
+
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		if (getRosterTrackingMode_(roster) !== "regularWar") continue;
+
+		const warPerformance = roster.warPerformance && typeof roster.warPerformance === "object" ? roster.warPerformance : {};
+		const lifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
+		let dueAt = lifecycle.finalizationDueAt;
+		if (!dueAt) {
+			const regularWar = roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : {};
+			const currentWar = sanitizeRegularWarCurrentWar_(regularWar.currentWar);
+			if ((currentWar.state === "preparation" || currentWar.state === "inwar") && currentWar.endTime) {
+				dueAt = buildRegularWarFinalizationInitialDueAt_(currentWar.endTime);
+			}
+		}
+
+		const dueMs = parseIsoToMs_(dueAt);
+		if (!(dueMs > 0)) continue;
+		if (!earliestDueMs || dueMs < earliestDueMs) earliestDueMs = dueMs;
+	}
+
+	return earliestDueMs > 0 ? new Date(earliestDueMs).toISOString() : "";
+}
+
+// Ensure one one-shot trigger exists for the next due regular-war finalization attempt.
+function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw) {
+	const props = PropertiesService.getScriptProperties();
+	const dueAt = String(dueAtRaw == null ? "" : dueAtRaw).trim();
+	const configuredId = String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim();
+	const configuredDueAt = String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY) || "").trim();
+	const triggers = listRegularWarFinalizationTriggers_();
+	let keep = null;
+
+	if (configuredId && configuredDueAt === dueAt) {
+		for (let i = 0; i < triggers.length; i++) {
+			if (getTriggerUniqueId_(triggers[i]) === configuredId) {
+				keep = triggers[i];
+				break;
+			}
+		}
+	}
+
+	if (!keep) {
+		for (let i = 0; i < triggers.length; i++) {
+			try {
+				ScriptApp.deleteTrigger(triggers[i]);
+			} catch (err) {
+				Logger.log("Unable to delete stale regular-war finalization trigger: %s", errorMessage_(err));
+			}
+		}
+		const dueMs = parseIsoToMs_(dueAt);
+		if (!(dueMs > 0)) return null;
+		const earliestAllowedMs = Date.now() + REGULAR_WAR_FINALIZATION_MIN_TRIGGER_DELAY_MS;
+		const scheduledMs = Math.max(dueMs, earliestAllowedMs);
+		keep = ScriptApp.newTrigger(REGULAR_WAR_FINALIZATION_HANDLER_NAME).timeBased().at(new Date(scheduledMs)).create();
+	}
+
+	const keepId = getTriggerUniqueId_(keep);
+	const dedupeTriggers = listRegularWarFinalizationTriggers_();
+	for (let i = 0; i < dedupeTriggers.length; i++) {
+		const trigger = dedupeTriggers[i];
+		const triggerId = getTriggerUniqueId_(trigger);
+		const isKeptTrigger = !!keep && ((keepId && triggerId === keepId) || (!keepId && trigger === keep));
+		if (isKeptTrigger) continue;
+		try {
+			ScriptApp.deleteTrigger(trigger);
+		} catch (err) {
+			Logger.log("Unable to delete duplicate regular-war finalization trigger: %s", errorMessage_(err));
+		}
+	}
+
+	return keep;
+}
+
+// Reconcile one-shot regular-war finalization trigger state against the active published payload.
+function reconcileRegularWarFinalizationTriggerState_(rosterDataRaw) {
+	const props = PropertiesService.getScriptProperties();
+	if (!isAutoRefreshEnabled_()) {
+		removeRegularWarFinalizationTriggers_();
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
+		return { enabled: false, triggerId: "", triggerAt: "", hasTrigger: false };
+	}
+
+	let rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	if (!rosterData) {
+		const snapshot = readActiveRosterSnapshot_();
+		rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : null;
+	}
+	const nextDueAt = rosterData ? findNextRegularWarFinalizationDueAt_(rosterData) : "";
+	if (!nextDueAt) {
+		removeRegularWarFinalizationTriggers_();
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
+		return { enabled: true, triggerId: "", triggerAt: "", hasTrigger: false };
+	}
+
+	const trigger = ensureSingleRegularWarFinalizationTrigger_(nextDueAt);
+	const triggerId = getTriggerUniqueId_(trigger);
+	if (triggerId) props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY, triggerId);
+	else props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+	props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY, nextDueAt);
+	return { enabled: true, triggerId: triggerId, triggerAt: nextDueAt, hasTrigger: !!triggerId };
+}
+
+// Best-effort trigger reconciliation for background flows that should not fail because scheduling cleanup failed.
+function tryReconcileRegularWarFinalizationTriggerState_(rosterDataRaw) {
+	try {
+		return reconcileRegularWarFinalizationTriggerState_(rosterDataRaw);
+	} catch (err) {
+		Logger.log("Unable to reconcile regular-war finalization trigger: %s", errorMessage_(err));
+		return null;
+	}
+}
+
 // Handle read auto refresh settings.
 function readAutoRefreshSettings_() {
 	const props = PropertiesService.getScriptProperties();
@@ -402,6 +550,9 @@ function readAutoRefreshSettings_() {
 		lastRunIssueCount: lastRunIssueCount,
 		lastSuccessfulActiveRefreshAt: getLastSuccessfulActiveWriteAt_(),
 		lastArchiveDate: lastArchiveDate,
+		regularWarFinalizationTriggerId: String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim(),
+		regularWarFinalizationTriggerAt: String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY) || "").trim(),
+		hasRegularWarFinalizationTrigger: !!String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim(),
 	};
 }
 
@@ -413,6 +564,7 @@ function autoRefreshActiveRosterTick() {
 
 	if (!isAutoRefreshEnabled_()) {
 		setAutoRefreshRunResult_("skipped", "Auto-refresh skipped because it is disabled.", "", 0, "", startedAt, new Date().toISOString());
+		tryReconcileRegularWarFinalizationTriggerState_();
 		return { ok: true, skipped: true, reason: "disabled" };
 	}
 
@@ -463,9 +615,11 @@ function autoRefreshActiveRosterTick() {
 					Logger.log("Unable to cleanup stale auto-refresh archives: %s", errorMessage_(cleanupErr));
 				}
 				setAutoRefreshRunResult_("skipped", summary, "", 0, "", startedAt, new Date().toISOString());
+				tryReconcileRegularWarFinalizationTriggerState_();
 				return { ok: true, skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
 			}
 			setAutoRefreshRunResult_("skipped", "Auto-refresh skipped.", "", 0, "", startedAt, new Date().toISOString());
+			tryReconcileRegularWarFinalizationTriggerState_();
 			return { ok: true, skipped: true, reason: reason || "skipped" };
 		}
 		runIssueCount = runResult.issueCount;
@@ -493,6 +647,7 @@ function autoRefreshActiveRosterTick() {
 		}
 
 		setAutoRefreshRunResult_("ok", summary, "", runIssueCount, runIssueSummary, startedAt, new Date().toISOString());
+		tryReconcileRegularWarFinalizationTriggerState_();
 		Logger.log("autoRefreshActiveRosterTick ok: %s", summary);
 		return {
 			ok: true,
@@ -504,11 +659,68 @@ function autoRefreshActiveRosterTick() {
 	} catch (err) {
 		if (isActiveRosterJobLockBusyError_(err)) {
 			setAutoRefreshRunResult_("skipped", "Auto-refresh skipped due to overlap with another active roster refresh/publish flow.", "", 0, "", startedAt, new Date().toISOString());
+			tryReconcileRegularWarFinalizationTriggerState_();
 			return { ok: true, skipped: true, reason: "overlap" };
 		}
 		const message = errorMessage_(err);
 		setAutoRefreshRunResult_("error", "Auto-refresh run failed.", message, runIssueCount, runIssueSummary, startedAt, new Date().toISOString());
+		tryReconcileRegularWarFinalizationTriggerState_();
 		Logger.log("autoRefreshActiveRosterTick failed: %s", message);
+		return { ok: false, error: message };
+	}
+}
+
+// Handle one-shot regular-war finalization attempts near war end.
+function regularWarFinalizationTick() {
+	const startedAt = new Date().toISOString();
+	if (!isAutoRefreshEnabled_()) {
+		reconcileRegularWarFinalizationTriggerState_();
+		return { ok: true, skipped: true, reason: "disabled" };
+	}
+
+	try {
+		let sourceSnapshot = null;
+		let writeResult = null;
+		const runResult = runRefreshAllRostersCore_(
+			function () {
+				sourceSnapshot = readActiveRosterSnapshot_();
+				return sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
+			},
+			{
+				lockOwner: "regular-war-finalization",
+				lockWaitMs: ACTIVE_ROSTER_JOB_LOCK_WAIT_MS,
+				onAfterRun: function (resultRaw) {
+					const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
+					if (!result || result.skipped) return;
+					if (!sourceSnapshot || !sourceSnapshot.rosterData) {
+						throw new Error("Regular-war finalization source snapshot is missing.");
+					}
+					writeResult = writeAutoRefreshedActiveRosterData_(sourceSnapshot, result.rosterData);
+				},
+			},
+		);
+		reconcileRegularWarFinalizationTriggerState_();
+		Logger.log(
+			"regularWarFinalizationTick ok startedAt=%s processedRosters=%s issueCount=%s changed=%s",
+			startedAt,
+			toNonNegativeInt_(runResult && runResult.processedRosters),
+			toNonNegativeInt_(runResult && runResult.issueCount),
+			!!(writeResult && writeResult.changed),
+		);
+		return {
+			ok: true,
+			processedRosters: toNonNegativeInt_(runResult && runResult.processedRosters),
+			issueCount: toNonNegativeInt_(runResult && runResult.issueCount),
+			changed: !!(writeResult && writeResult.changed),
+		};
+	} catch (err) {
+		const message = errorMessage_(err);
+		Logger.log("regularWarFinalizationTick failed: %s", message);
+		try {
+			reconcileRegularWarFinalizationTriggerState_();
+		} catch (reconcileErr) {
+			Logger.log("regularWarFinalizationTick reconcile failed after error: %s", errorMessage_(reconcileErr));
+		}
 		return { ok: false, error: message };
 	}
 }

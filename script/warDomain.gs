@@ -138,6 +138,12 @@ function createEmptyRegularWarLifecycleState_() {
 		activeWarKey: "",
 		activeWarState: "notinwar",
 		activeWarLastSeenAt: "",
+		activeWarEndTime: "",
+		finalizationStatus: "idle",
+		finalizationDueAt: "",
+		finalizationAttemptCount: 0,
+		lastFinalizationAttemptAt: "",
+		lastFinalizationError: "",
 		lastFinalizedWarKey: "",
 		lastFinalizedAt: "",
 		lastFinalizationSource: "",
@@ -177,6 +183,17 @@ function sanitizeWarPerformanceEntry_(entryRaw) {
 // Sanitize regular war lifecycle state.
 function sanitizeRegularWarLifecycleState_(rawState) {
 	const state = rawState && typeof rawState === "object" ? rawState : {};
+	const finalizationStatusRaw = String(state.finalizationStatus == null ? "" : state.finalizationStatus)
+		.trim()
+		.toLowerCase();
+	const finalizationStatus =
+		finalizationStatusRaw === "tracking" ||
+		finalizationStatusRaw === "retrying" ||
+		finalizationStatusRaw === "finalized" ||
+		finalizationStatusRaw === "provisional" ||
+		finalizationStatusRaw === "exhausted"
+			? finalizationStatusRaw
+			: "idle";
 	return {
 		activeWarKey: String(state.activeWarKey == null ? "" : state.activeWarKey).trim(),
 		activeWarState:
@@ -184,11 +201,74 @@ function sanitizeRegularWarLifecycleState_(rawState) {
 				.trim()
 				.toLowerCase() || "notinwar",
 		activeWarLastSeenAt: typeof state.activeWarLastSeenAt === "string" ? state.activeWarLastSeenAt : "",
+		activeWarEndTime: typeof state.activeWarEndTime === "string" ? state.activeWarEndTime : "",
+		finalizationStatus: finalizationStatus,
+		finalizationDueAt: typeof state.finalizationDueAt === "string" ? state.finalizationDueAt : "",
+		finalizationAttemptCount: toNonNegativeInt_(state.finalizationAttemptCount),
+		lastFinalizationAttemptAt: typeof state.lastFinalizationAttemptAt === "string" ? state.lastFinalizationAttemptAt : "",
+		lastFinalizationError: typeof state.lastFinalizationError === "string" ? state.lastFinalizationError : "",
 		lastFinalizedWarKey: String(state.lastFinalizedWarKey == null ? "" : state.lastFinalizedWarKey).trim(),
 		lastFinalizedAt: typeof state.lastFinalizedAt === "string" ? state.lastFinalizedAt : "",
 		lastFinalizationSource: typeof state.lastFinalizationSource === "string" ? state.lastFinalizationSource : "",
 		lastFinalizationIncomplete: toBooleanFlag_(state.lastFinalizationIncomplete),
 	};
+}
+
+// Build the first scheduled finalization attempt time from a live war end time.
+function buildRegularWarFinalizationInitialDueAt_(endTimeRaw) {
+	const endMs = parseIsoToMs_(endTimeRaw);
+	if (!(endMs > 0)) return "";
+	return new Date(endMs + REGULAR_WAR_FINALIZATION_INITIAL_DELAY_MS).toISOString();
+}
+
+// Build the next retry attempt time after an unsuccessful authoritative finalization attempt.
+function buildRegularWarFinalizationRetryDueAt_(attemptCountRaw, nowIsoRaw) {
+	const attemptCount = toNonNegativeInt_(attemptCountRaw);
+	const delayIndex = attemptCount - 1;
+	if (delayIndex < 0 || delayIndex >= REGULAR_WAR_FINALIZATION_RETRY_DELAYS_MS.length) return "";
+	const nowMs = parseIsoToMs_(nowIsoRaw) || Date.now();
+	const delayMs = Math.max(0, toNonNegativeInt_(REGULAR_WAR_FINALIZATION_RETRY_DELAYS_MS[delayIndex]));
+	return new Date(nowMs + delayMs).toISOString();
+}
+
+// Return whether a scheduled regular-war finalization attempt is due now.
+function isRegularWarFinalizationDue_(lifecycleRaw, nowIsoRaw) {
+	const lifecycle = sanitizeRegularWarLifecycleState_(lifecycleRaw);
+	const dueMs = parseIsoToMs_(lifecycle.finalizationDueAt);
+	if (!(dueMs > 0)) return false;
+	const nowMs = parseIsoToMs_(nowIsoRaw) || Date.now();
+	return nowMs >= dueMs;
+}
+
+// Return whether the lifecycle still has scheduled authoritative retry budget.
+function hasRegularWarFinalizationRetryBudget_(lifecycleRaw) {
+	const lifecycle = sanitizeRegularWarLifecycleState_(lifecycleRaw);
+	return toNonNegativeInt_(lifecycle.finalizationAttemptCount) < REGULAR_WAR_FINALIZATION_RETRY_DELAYS_MS.length;
+}
+
+// Reset scheduling fields when a new live war is first observed.
+function resetRegularWarFinalizationLifecycleForLiveWar_(lifecycleRaw, liveWarMetaRaw) {
+	const lifecycle = sanitizeRegularWarLifecycleState_(lifecycleRaw);
+	const warMeta = sanitizeRegularWarCurrentWar_(liveWarMetaRaw);
+	lifecycle.activeWarEndTime = warMeta.endTime || "";
+	lifecycle.finalizationStatus = "tracking";
+	lifecycle.finalizationDueAt = buildRegularWarFinalizationInitialDueAt_(warMeta.endTime);
+	lifecycle.finalizationAttemptCount = 0;
+	lifecycle.lastFinalizationAttemptAt = "";
+	lifecycle.lastFinalizationError = "";
+	return lifecycle;
+}
+
+// Advance to the next scheduled finalization retry after a non-authoritative result.
+function recordRegularWarFinalizationRetry_(lifecycleRaw, nowIsoRaw, reasonRaw) {
+	const lifecycle = sanitizeRegularWarLifecycleState_(lifecycleRaw);
+	const nowIso = typeof nowIsoRaw === "string" && nowIsoRaw ? nowIsoRaw : new Date().toISOString();
+	lifecycle.finalizationAttemptCount = toNonNegativeInt_(lifecycle.finalizationAttemptCount) + 1;
+	lifecycle.lastFinalizationAttemptAt = nowIso;
+	lifecycle.lastFinalizationError = String(reasonRaw == null ? "" : reasonRaw).trim();
+	lifecycle.finalizationDueAt = buildRegularWarFinalizationRetryDueAt_(lifecycle.finalizationAttemptCount, nowIso);
+	lifecycle.finalizationStatus = lifecycle.finalizationDueAt ? "retrying" : "exhausted";
+	return lifecycle;
 }
 
 // Sanitize war performance meta.
@@ -1378,6 +1458,7 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	const currentWarMeta = sanitizeRegularWarCurrentWar_(options.currentWarMeta);
 	const previousSnapshot = sanitizeRegularWarSnapshot_(options.previousSnapshot);
 	const finalizationTagSet = buildRegularWarFinalizeTagSet_(warPerformance, previousWarKey, trackedTagSet);
+	const allowProvisionalFallback = options.allowProvisionalFallback !== false;
 
 	if (currentWar && currentWarMeta.warKey === previousWarKey && String(currentWarMeta.state || "").toLowerCase() === "warended" && warHasMemberLevelDataForClan_(currentWar, clanTag)) {
 		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, currentWar, clanTag, finalizationTagSet, nowIso, "currentWarEnded", "directCurrentWarEnded", false);
@@ -1396,6 +1477,12 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, warLogEntry, clanTag, finalizationTagSet, nowIso, "targetedWarLog", "targetedWarLogFallback", false);
 		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "targetedWarLog", "targetedWarLogFallback", false, finalized, nowIso);
 		return { attempted: true, finalized: finalized, source: "targetedWarLog", incomplete: false, reason: finalized ? "targetedWarLogFallback" : "targetedWarLogFallbackSkipped" };
+	}
+
+	if (!allowProvisionalFallback) {
+		const waitingReason = warLogEntry ? "warLogMissingMemberDetail_waitingForFinalData" : warLogLookupFailed ? "warLogLookupFailed_waitingForFinalData" : "waitingForFinalData";
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "awaitingFinalData", waitingReason, false, false, nowIso);
+		return { attempted: true, finalized: false, source: "awaitingFinalData", incomplete: false, reason: waitingReason };
 	}
 
 	if (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey === previousWarKey) {

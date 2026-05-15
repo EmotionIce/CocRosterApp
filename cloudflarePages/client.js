@@ -30,6 +30,7 @@
     let profileUiBound = false;
     let globalLastUpdatedTimerId = 0;
     let globalLastUpdatedTimerValue = "";
+    let warCountdownTimerId = 0;
     let landingRevealObserver = null;
     let landingScrollEffectsBound = false;
     let landingScrollRafId = 0;
@@ -2892,8 +2893,96 @@
     const formatProfileTimestamp = (value) => {
         const text = toStr(value).trim();
         if (!text) return "";
-        const date = new Date(text);
+        const date = new Date(normalizeWarTimestampForDate(text));
         return Number.isNaN(date.getTime()) ? text : date.toLocaleString();
+    };
+
+    // Normalize compact Clash timestamps so browser Date parsing is reliable.
+    const normalizeWarTimestampForDate = (value) => {
+        const text = toStr(value).trim();
+        const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(?:\.(\d{3}))?Z$/.exec(text);
+        if (!match) return text;
+        return match[1] + "-" + match[2] + "-" + match[3] + "T" +
+            match[4] + ":" + match[5] + ":" + match[6] + "." + (match[7] || "000") + "Z";
+    };
+
+    // Parse compact Clash or standard ISO timestamps into milliseconds.
+    const parseWarTimestampMs = (value) => {
+        const text = toStr(value).trim();
+        if (!text) return 0;
+        const ms = new Date(normalizeWarTimestampForDate(text)).getTime();
+        return Number.isFinite(ms) ? ms : 0;
+    };
+
+    // Format a positive remaining duration for roster timer badges.
+    const formatRemainingWarDuration = (diffMsRaw) => {
+        const diffMs = Math.max(0, Number(diffMsRaw) || 0);
+        const totalMinutes = Math.max(0, Math.ceil(diffMs / (60 * 1000)));
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        if (hours > 0) return hours + "h" + (minutes > 0 ? (" " + minutes + "min") : "");
+        return minutes + "min";
+    };
+
+    // Build a countdown descriptor from regular-war metadata.
+    const getRegularWarCountdownDescriptor = (currentWarRaw) => {
+        const currentWar = currentWarRaw && typeof currentWarRaw === "object" ? currentWarRaw : {};
+        const state = toStr(currentWar.state).trim().toLowerCase();
+        if (state === "preparation") {
+            return { kind: "starts", targetAt: toStr(currentWar.startTime).trim() };
+        }
+        if (state === "inwar") {
+            return { kind: "ends", targetAt: toStr(currentWar.endTime).trim() };
+        }
+        return null;
+    };
+
+    // Render one live regular-war countdown badge.
+    const renderWarCountdownNode = (node) => {
+        if (!node) return;
+        const kind = toStr(node.dataset && node.dataset.warCountdownKind).trim();
+        const targetAt = toStr(node.dataset && node.dataset.warCountdownTargetAt).trim();
+        const targetMs = parseWarTimestampMs(targetAt);
+        if (!kind || !(targetMs > 0)) {
+            node.textContent = "";
+            return;
+        }
+        const diffMs = targetMs - Date.now();
+        if (diffMs <= 0) {
+            node.textContent = kind === "starts" ? "War starting" : "War ending";
+            return;
+        }
+        node.textContent = (kind === "starts" ? "War starts in " : "War ends in ") + formatRemainingWarDuration(diffMs);
+        node.title = formatProfileTimestamp(targetAt) || targetAt;
+    };
+
+    // Clear the shared live war-countdown interval.
+    const clearWarCountdownTimer = () => {
+        if (!warCountdownTimerId || typeof window === "undefined" || !window.clearInterval) return;
+        window.clearInterval(warCountdownTimerId);
+        warCountdownTimerId = 0;
+    };
+
+    // Refresh all visible regular-war countdown nodes.
+    const refreshWarCountdownNodes = () => {
+        const nodes = document.querySelectorAll("[data-war-countdown-kind]");
+        for (let i = 0; i < nodes.length; i++) {
+            renderWarCountdownNode(nodes[i]);
+        }
+        return nodes.length;
+    };
+
+    // Keep visible regular-war countdowns current without waiting for a data refresh.
+    const ensureWarCountdownTimer = () => {
+        const nodeCount = refreshWarCountdownNodes();
+        if (nodeCount < 1) {
+            clearWarCountdownTimer();
+            return;
+        }
+        if (warCountdownTimerId || typeof window === "undefined" || !window.setInterval) return;
+        warCountdownTimerId = window.setInterval(() => {
+            refreshWarCountdownNodes();
+        }, 60 * 1000);
     };
 
     // Format global relative timestamp.
@@ -5625,6 +5714,14 @@
         }
         if (trackingMode === "regularWar") {
             meta.appendChild(el("span", "badge", "Missing: " + toStr(roster.badges && roster.badges.missing)));
+            const regularWarCountdown = getRegularWarCountdownDescriptor(regularWarCurrentMeta);
+            if (regularWarCountdown && regularWarCountdown.targetAt) {
+                const countdownBadge = el("span", "badge roster-war-countdown");
+                countdownBadge.dataset.warCountdownKind = regularWarCountdown.kind;
+                countdownBadge.dataset.warCountdownTargetAt = regularWarCountdown.targetAt;
+                renderWarCountdownNode(countdownBadge);
+                meta.appendChild(countdownBadge);
+            }
             if (regularWarLiveUnavailable) {
                 meta.appendChild(el("span", "badge", "Live war refresh unavailable"));
             }
@@ -6805,6 +6902,7 @@
                 matchedRosters: filtered.rosters.length,
             });
         }
+        ensureWarCountdownTimer();
     };
 
     // Render leaderboard view.

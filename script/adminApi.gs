@@ -91,6 +91,7 @@ function getAutoRefreshSettings(password) {
 	scriptLock.waitLock(30000);
 	try {
 		reconcileAutoRefreshTriggerState_();
+		reconcileRegularWarFinalizationTriggerState_();
 		return readAutoRefreshSettings_();
 	} finally {
 		scriptLock.releaseLock();
@@ -108,6 +109,7 @@ function setAutoRefreshEnabled(enabledRaw, password) {
 		if (enabled) props.setProperty(AUTO_REFRESH_ENABLED_PROPERTY, "1");
 		else props.deleteProperty(AUTO_REFRESH_ENABLED_PROPERTY);
 		reconcileAutoRefreshTriggerState_();
+		reconcileRegularWarFinalizationTriggerState_();
 		return readAutoRefreshSettings_();
 	} finally {
 		scriptLock.releaseLock();

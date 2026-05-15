@@ -450,7 +450,26 @@ function getServerMonthKey_(dateRaw) {
 function parseIsoToMs_(isoRaw) {
 	const text = String(isoRaw == null ? "" : isoRaw).trim();
 	if (!text) return 0;
-	const ms = new Date(text).getTime();
+	let normalized = text;
+	const clashTimestampMatch = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(?:\.(\d{3}))?Z$/.exec(text);
+	if (clashTimestampMatch) {
+		normalized =
+			clashTimestampMatch[1] +
+			"-" +
+			clashTimestampMatch[2] +
+			"-" +
+			clashTimestampMatch[3] +
+			"T" +
+			clashTimestampMatch[4] +
+			":" +
+			clashTimestampMatch[5] +
+			":" +
+			clashTimestampMatch[6] +
+			"." +
+			(clashTimestampMatch[7] || "000") +
+			"Z";
+	}
+	const ms = new Date(normalized).getTime();
 	return isFinite(ms) ? ms : 0;
 }
 
