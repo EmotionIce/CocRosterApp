@@ -3364,7 +3364,7 @@
         const leagueName = leagueBadge && leagueBadge.name ? leagueBadge.name : "";
         const roleRaw = formatRole(player.role);
         const roleLabel = roleRaw || "Member";
-        const publicFormScore = buildPlayerPublicFormScore(trackingMode, cwl, regularWar, longTerm);
+        const publicFormScore = buildPlayerPublicFormScore(trackingMode, cwl, longTerm, context && context.warPerformance, tag);
         const liveStatusMeta = buildProfileTopbarLiveStatusMeta(trackingMode, role, regularWar, cwl);
         const placementLabel = buildPlacementLabel(context);
         const hasStoredTh = localPlayer.th !== "" && localPlayer.th != null;
@@ -5235,64 +5235,159 @@
         return banner;
     };
 
-    // Build compact public form score badge meta.
-    const buildPlayerPublicFormScore = (trackingModeRaw, cwlStatsRaw, regularWarStatsRaw, longTermStatsRaw) => {
-        const trackingMode = toStr(trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
-        const cwlStats = cwlStatsRaw && typeof cwlStatsRaw === "object" ? cwlStatsRaw : {};
-        const regularWarStats = regularWarStatsRaw && typeof regularWarStatsRaw === "object" ? regularWarStatsRaw : {};
-        const regularCurrent = regularWarStats.current && typeof regularWarStats.current === "object"
-            ? regularWarStats.current
-            : {};
-        const longTermStats = longTermStatsRaw && typeof longTermStatsRaw === "object" ? longTermStatsRaw : {};
-        const longTermRegular = longTermStats.regular && typeof longTermStats.regular === "object"
-            ? longTermStats.regular
-            : {};
-        const longTermCwl = longTermStats.cwl && typeof longTermStats.cwl === "object"
-            ? longTermStats.cwl
-            : {};
-        const longTermOverall = longTermStats.overall && typeof longTermStats.overall === "object"
-            ? longTermStats.overall
-            : {};
-        const normalizeStarsPerAttack = (valueRaw) => {
-            const value = Number(valueRaw);
-            if (!Number.isFinite(value)) return null;
-            return clamp01(value / 3);
+    // Read one optional non-negative form metric without turning missing values into zero.
+    const readOptionalPlayerFormMetric = (entryRaw, key) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : null;
+        if (!entry || !Object.prototype.hasOwnProperty.call(entry, key)) return null;
+        if (entry[key] == null || entry[key] === "") return null;
+        const value = Number(entry[key]);
+        if (!Number.isFinite(value) || value < 0) return null;
+        return value;
+    };
+
+    // Normalize any raw or future form-specific stats object into the bucket shape scored below.
+    const normalizePlayerFormStatsBucket = (statsRaw) => {
+        const stats = statsRaw && typeof statsRaw === "object" ? statsRaw : {};
+        const countedAttacksRaw = readOptionalPlayerFormMetric(stats, "countedAttacks");
+        const countedAttacks = countedAttacksRaw != null ? Math.floor(countedAttacksRaw) : 0;
+        const missedAttacksRaw = readOptionalPlayerFormMetric(stats, "missedAttacks");
+        const attacksMissedRaw = missedAttacksRaw == null ? readOptionalPlayerFormMetric(stats, "attacksMissed") : null;
+        const missedAttacks = missedAttacksRaw != null
+            ? Math.floor(missedAttacksRaw)
+            : (attacksMissedRaw != null ? Math.floor(attacksMissedRaw) : null);
+        const starsTotal = readOptionalPlayerFormMetric(stats, "starsTotal");
+        const totalDestruction = readOptionalPlayerFormMetric(stats, "totalDestruction");
+        const threeStarCount = readOptionalPlayerFormMetric(stats, "threeStarCount");
+        const explicitStarsSampleSize = readOptionalPlayerFormMetric(stats, "starsSampleSize");
+        const explicitDestructionSampleSize = readOptionalPlayerFormMetric(stats, "destructionSampleSize");
+        const explicitThreeStarSampleSize = readOptionalPlayerFormMetric(stats, "threeStarSampleSize");
+        const starsSampleSize = starsTotal == null
+            ? 0
+            : Math.floor(explicitStarsSampleSize != null ? explicitStarsSampleSize : countedAttacks);
+        const destructionSampleSize = totalDestruction == null
+            ? 0
+            : Math.floor(explicitDestructionSampleSize != null ? explicitDestructionSampleSize : countedAttacks);
+        const threeStarSampleSize = threeStarCount == null
+            ? 0
+            : Math.floor(explicitThreeStarSampleSize != null ? explicitThreeStarSampleSize : countedAttacks);
+        return {
+            countedAttacks: countedAttacks,
+            missedAttacks: missedAttacks,
+            starsTotal: starsTotal,
+            starsSampleSize: Math.max(0, starsSampleSize),
+            totalDestruction: totalDestruction,
+            destructionSampleSize: Math.max(0, destructionSampleSize),
+            threeStarCount: threeStarCount,
+            threeStarSampleSize: Math.max(0, threeStarSampleSize),
         };
-        const normalizeDestruction = (valueRaw) => {
-            const value = Number(valueRaw);
-            if (!Number.isFinite(value)) return null;
-            return clamp01(value / 100);
+    };
+
+    // Merge compatible form buckets while preserving per-signal sample sizes for sparse future data.
+    const mergePlayerFormStatsBuckets = (bucketsRaw) => {
+        const buckets = Array.isArray(bucketsRaw) ? bucketsRaw : [];
+        let countedAttacks = 0;
+        let missedAttacks = 0;
+        let hasMissedAttacks = false;
+        let starsTotal = 0;
+        let starsSampleSize = 0;
+        let totalDestruction = 0;
+        let destructionSampleSize = 0;
+        let threeStarCount = 0;
+        let threeStarSampleSize = 0;
+
+        for (let i = 0; i < buckets.length; i++) {
+            const bucket = normalizePlayerFormStatsBucket(buckets[i]);
+            countedAttacks += bucket.countedAttacks;
+            if (bucket.missedAttacks != null) {
+                missedAttacks += bucket.missedAttacks;
+                hasMissedAttacks = true;
+            }
+            if (bucket.starsSampleSize > 0 && bucket.starsTotal != null) {
+                starsTotal += bucket.starsTotal;
+                starsSampleSize += bucket.starsSampleSize;
+            }
+            if (bucket.destructionSampleSize > 0 && bucket.totalDestruction != null) {
+                totalDestruction += bucket.totalDestruction;
+                destructionSampleSize += bucket.destructionSampleSize;
+            }
+            if (bucket.threeStarSampleSize > 0 && bucket.threeStarCount != null) {
+                threeStarCount += bucket.threeStarCount;
+                threeStarSampleSize += bucket.threeStarSampleSize;
+            }
+        }
+
+        return {
+            countedAttacks: countedAttacks,
+            missedAttacks: hasMissedAttacks ? missedAttacks : null,
+            starsTotal: starsSampleSize > 0 ? starsTotal : null,
+            starsSampleSize: starsSampleSize,
+            totalDestruction: destructionSampleSize > 0 ? totalDestruction : null,
+            destructionSampleSize: destructionSampleSize,
+            threeStarCount: threeStarSampleSize > 0 ? threeStarCount : null,
+            threeStarSampleSize: threeStarSampleSize,
         };
+    };
+
+    // Return the stored finalized regular-war history map.
+    const getRegularWarHistoryByKey = (warPerformanceRaw) =>
+        warPerformanceRaw && typeof warPerformanceRaw === "object" && warPerformanceRaw.regularWarHistoryByKey && typeof warPerformanceRaw.regularWarHistoryByKey === "object"
+            ? warPerformanceRaw.regularWarHistoryByKey
+            : {};
+
+    // Build the recent regular-war form bucket from finalized history only; live wars never enter Form.
+    const getPlayerRecentRegularWarFormBucket = (warPerformanceRaw, tagRaw) => {
+        const tag = normalizeClanTag(tagRaw);
+        if (!tag) return mergePlayerFormStatsBuckets([]);
+        const historyByKey = getRegularWarHistoryByKey(warPerformanceRaw);
+        const keys = Object.keys(historyByKey);
+        const recentEntries = [];
+        for (let i = 0; i < keys.length; i++) {
+            const entry = historyByKey[keys[i]];
+            if (!entry || typeof entry !== "object" || entry.authoritative !== true) continue;
+            const statsByTag = entry.statsByTag && typeof entry.statsByTag === "object" ? entry.statsByTag : {};
+            const playerStats = statsByTag[tag] && typeof statsByTag[tag] === "object" ? statsByTag[tag] : null;
+            if (!playerStats) continue;
+            recentEntries.push({
+                finalizedAt: toStr(entry.finalizedAt).trim(),
+                lastUpdatedAt: toStr(entry.lastUpdatedAt).trim(),
+                warKey: toStr(entry.warKey || keys[i]).trim(),
+                stats: playerStats,
+            });
+        }
+        recentEntries.sort((left, right) => {
+            const leftFinalizedMs = Date.parse(left.finalizedAt || left.lastUpdatedAt);
+            const rightFinalizedMs = Date.parse(right.finalizedAt || right.lastUpdatedAt);
+            const leftTime = Number.isFinite(leftFinalizedMs) ? leftFinalizedMs : 0;
+            const rightTime = Number.isFinite(rightFinalizedMs) ? rightFinalizedMs : 0;
+            if (leftTime !== rightTime) return rightTime - leftTime;
+            return right.warKey.localeCompare(left.warKey);
+        });
+        const recentStats = [];
+        for (let i = 0; i < recentEntries.length && i < 5; i++) {
+            recentStats.push(recentEntries[i].stats);
+        }
+        return mergePlayerFormStatsBuckets(recentStats);
+    };
+
+    // Score one finalized-performance bucket; unavailable metrics are reweighted away, never zero-filled.
+    const scorePlayerFormStatsBucket = (statsRaw) => {
+        const stats = normalizePlayerFormStatsBucket(statsRaw);
+        if (stats.countedAttacks <= 0) {
+            return {
+                value: null,
+                countedAttacks: 0,
+            };
+        }
 
         const components = [];
-        if (trackingMode === "regularWar") {
-            const attacksUsed = toNonNegativeInt(regularCurrent.attacksUsed);
-            const starsTotal = toNonNegativeInt(regularCurrent.starsTotal);
-            const currentStarsEfficiency = attacksUsed > 0
-                ? normalizeStarsPerAttack(starsTotal / attacksUsed)
-                : null;
-            const currentAvgDestruction = normalizeDestruction(regularCurrent.avgDestruction);
-            const preferredLongTermStars = longTermRegular.avgStarsPerAttack != null
-                ? longTermRegular.avgStarsPerAttack
-                : longTermOverall.avgStarsPerAttack;
-            const longTermStarsEfficiency = normalizeStarsPerAttack(preferredLongTermStars);
-            components.push(
-                { weight: 0.55, value: currentStarsEfficiency },
-                { weight: 0.25, value: currentAvgDestruction },
-                { weight: 0.20, value: longTermStarsEfficiency }
-            );
-        } else {
-            const starsPerformance = cwlStats.starsPerf != null ? clamp01(cwlStats.starsPerf) : null;
-            const avgDestruction = normalizeDestruction(cwlStats.avgDestruction);
-            const preferredLongTermStars = longTermCwl.avgStarsPerAttack != null
-                ? longTermCwl.avgStarsPerAttack
-                : longTermOverall.avgStarsPerAttack;
-            const longTermStarsEfficiency = normalizeStarsPerAttack(preferredLongTermStars);
-            components.push(
-                { weight: 0.60, value: starsPerformance },
-                { weight: 0.25, value: avgDestruction },
-                { weight: 0.15, value: longTermStarsEfficiency }
-            );
+        if (stats.starsSampleSize > 0 && stats.starsTotal != null) {
+            components.push({ weight: 0.60, value: clamp01((stats.starsTotal / stats.starsSampleSize) / 3) });
+        }
+        if (stats.destructionSampleSize > 0 && stats.totalDestruction != null) {
+            components.push({ weight: 0.25, value: clamp01((stats.totalDestruction / stats.destructionSampleSize) / 100) });
+        }
+        if (stats.threeStarSampleSize > 0 && stats.threeStarCount != null) {
+            components.push({ weight: 0.15, value: clamp01(stats.threeStarCount / stats.threeStarSampleSize) });
         }
 
         let weightedValue = 0;
@@ -5305,9 +5400,74 @@
             weightedValue += clamp01(value) * weight;
             includedWeight += weight;
         }
+        if (includedWeight <= 0) {
+            return {
+                value: null,
+                countedAttacks: stats.countedAttacks,
+            };
+        }
 
-        // Require enough available signal before showing a score.
-        if (includedWeight < 0.35) {
+        const baseValue = clamp01(weightedValue / includedWeight);
+        const opportunities = stats.missedAttacks != null ? (stats.countedAttacks + stats.missedAttacks) : 0;
+        const missedAttackRate = opportunities > 0 && stats.missedAttacks != null
+            ? clamp01(stats.missedAttacks / opportunities)
+            : 0;
+        const reliabilityPenalty = 0.35 * missedAttackRate;
+        return {
+            value: clamp01(baseValue - reliabilityPenalty),
+            countedAttacks: stats.countedAttacks,
+        };
+    };
+
+    // Ramp recent influence by usable sample size so one isolated attack cannot dominate the badge.
+    const getPlayerFormRecentBlendWeight = (recentCountedAttacksRaw) => {
+        const recentCountedAttacks = Math.max(0, Math.floor(Number(recentCountedAttacksRaw) || 0));
+        return Math.min(0.65, (recentCountedAttacks / 8) * 0.65);
+    };
+
+    // Blend recent and long-term finalized signals while preserving a long-term floor when available.
+    const blendPlayerFormSignals = (recentSignalRaw, longTermSignalRaw) => {
+        const recentSignal = recentSignalRaw && typeof recentSignalRaw === "object" ? recentSignalRaw : {};
+        const longTermSignal = longTermSignalRaw && typeof longTermSignalRaw === "object" ? longTermSignalRaw : {};
+        const recentValue = Number(recentSignal.value);
+        const longTermValue = Number(longTermSignal.value);
+        const hasRecent = recentSignal.value != null && Number.isFinite(recentValue);
+        const hasLongTerm = longTermSignal.value != null && Number.isFinite(longTermValue);
+        if (hasRecent && hasLongTerm) {
+            const recentWeight = getPlayerFormRecentBlendWeight(recentSignal.countedAttacks);
+            const longTermWeight = 1 - recentWeight;
+            return clamp01((recentValue * recentWeight) + (longTermValue * longTermWeight));
+        }
+        if (hasRecent) return clamp01(recentValue);
+        if (hasLongTerm) return clamp01(longTermValue);
+        return null;
+    };
+
+    // Build compact public form score badge meta from finalized or season-aggregate performance only.
+    const buildPlayerPublicFormScore = (trackingModeRaw, cwlStatsRaw, longTermStatsRaw, warPerformanceRaw, tagRaw) => {
+        const trackingMode = toStr(trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+        const cwlStats = cwlStatsRaw && typeof cwlStatsRaw === "object" ? cwlStatsRaw : {};
+        const longTermStats = longTermStatsRaw && typeof longTermStatsRaw === "object" ? longTermStatsRaw : {};
+        const longTermRegular = longTermStats.regular && typeof longTermStats.regular === "object"
+            ? longTermStats.regular
+            : {};
+        const longTermCwl = longTermStats.cwl && typeof longTermStats.cwl === "object"
+            ? longTermStats.cwl
+            : {};
+        const longTermOverall = longTermStats.overall && typeof longTermStats.overall === "object"
+            ? longTermStats.overall
+            : {};
+        const recentBucket = trackingMode === "regularWar"
+            ? getPlayerRecentRegularWarFormBucket(warPerformanceRaw, tagRaw)
+            : normalizePlayerFormStatsBucket(cwlStats);
+        const preferredLongTermBucket = trackingMode === "regularWar" ? longTermRegular : longTermCwl;
+        const recentSignal = scorePlayerFormStatsBucket(recentBucket);
+        const preferredLongTermSignal = scorePlayerFormStatsBucket(preferredLongTermBucket);
+        const longTermSignal = preferredLongTermSignal.value != null
+            ? preferredLongTermSignal
+            : scorePlayerFormStatsBucket(longTermOverall);
+        const blendedValue = blendPlayerFormSignals(recentSignal, longTermSignal);
+        if (blendedValue == null || !Number.isFinite(Number(blendedValue))) {
             return {
                 valueText: "--",
                 score: null,
@@ -5316,7 +5476,7 @@
             };
         }
 
-        const score = Math.round(clamp01(weightedValue / includedWeight) * 100);
+        const score = Math.round(clamp01(blendedValue) * 100);
         let tone = "low";
         if (score >= 80) tone = "strong";
         else if (score >= 65) tone = "good";
@@ -5342,7 +5502,7 @@
         const cwlStats = getPlayerCwlStats(context.cwlStats, playerTag);
         const regularWarStats = getPlayerRegularWarStats(context.regularWarStats, playerTag, context.warPerformance);
         const longTermStats = getPlayerLongTermWarStats(context.warPerformance, playerTag);
-        const publicFormScore = buildPlayerPublicFormScore(trackingMode, cwlStats, regularWarStats, longTermStats);
+        const publicFormScore = buildPlayerPublicFormScore(trackingMode, cwlStats, longTermStats, context.warPerformance, playerTag);
         const playerSuggestion = hideSuggestions || trackingMode !== "cwl"
             ? null
             : getPlayerBenchSuggestion(context.suggestionModel, playerTag);
