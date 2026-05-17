@@ -174,377 +174,6 @@ function mapApiMembersForMetricsSnapshot_(membersRaw) {
 	return out;
 }
 
-// Build player metrics profile snapshot cache key.
-function buildPlayerMetricsProfileSnapshotCacheKey_(tagRaw) {
-	const tag = normalizeTag_(tagRaw);
-	if (!tag) return "";
-	return "playerMetricsProfileSnapshot:" + PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_VERSION + ":" + encodeURIComponent(tag);
-}
-
-// Handle read cached player metrics profile snapshot.
-function readCachedPlayerMetricsProfileSnapshot_(tagRaw) {
-	const tag = normalizeTag_(tagRaw);
-	if (!tag) return null;
-	const cache = getScriptCacheSafe_();
-	const cacheKey = buildPlayerMetricsProfileSnapshotCacheKey_(tag);
-	if (!cacheKey) return null;
-	const raw = readStringFromCache_(cache, cacheKey);
-	if (!raw) return null;
-	try {
-		const parsed = JSON.parse(raw);
-		return sanitizeMetricsSnapshotPayload_(parsed, tag);
-	} catch (err) {
-		return null;
-	}
-}
-
-// Handle write cached player metrics profile snapshot.
-function writeCachedPlayerMetricsProfileSnapshot_(tagRaw, snapshotRaw) {
-	const tag = normalizeTag_(tagRaw);
-	if (!tag) return;
-	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, tag);
-	if (!snapshot) return;
-	const cache = getScriptCacheSafe_();
-	const cacheKey = buildPlayerMetricsProfileSnapshotCacheKey_(tag);
-	if (!cacheKey) return;
-	writeStringToCache_(cache, cacheKey, JSON.stringify(snapshot), PLAYER_METRICS_PROFILE_SNAPSHOT_CACHE_TTL_SECONDS);
-}
-
-// Build metrics snapshot from player profile.
-function buildMetricsSnapshotFromPlayerProfile_(profileRaw, fallbackTagRaw) {
-	const profile = profileRaw && typeof profileRaw === "object" ? profileRaw : {};
-	const tag = normalizeTag_(profile.tag || fallbackTagRaw);
-	if (!tag) return null;
-
-	const clan = profile.clan && typeof profile.clan === "object" ? profile.clan : {};
-	const th = readTownHallLevel_(profile);
-	const snapshot = {
-		tag: tag,
-		name: String(profile.name == null ? "" : profile.name),
-		trophies: toNonNegativeInt_(profile.trophies),
-		donations: toNonNegativeInt_(profile.donations),
-		donationsReceived: toNonNegativeInt_(profile.donationsReceived),
-		capturedAt: new Date().toISOString(),
-		clanTag: normalizeTag_(clan.tag),
-		league: sanitizeMetricsLeagueSnapshot_(profile.league),
-		leagueTier: sanitizeMetricsLeagueSnapshot_(profile.leagueTier),
-		builderBaseLeague: sanitizeMetricsLeagueSnapshot_(profile.builderBaseLeague),
-		playerHouse: sanitizeMetricsPlayerHouseSnapshot_(profile.playerHouse),
-		expLevel: toNonNegativeInt_(profile.expLevel),
-		builderBaseTrophies: toNonNegativeInt_(profile.builderBaseTrophies),
-		clanRank: toNonNegativeInt_(profile.clanRank),
-		previousClanRank: toNonNegativeInt_(profile.previousClanRank),
-	};
-	if (isFinite(th) && th > 0) {
-		snapshot.townHallLevel = Math.floor(th);
-		snapshot.th = Math.floor(th);
-	}
-	return sanitizeMetricsSnapshotPayload_(snapshot, tag);
-}
-
-// Merge metrics snapshot prefer authoritative.
-function mergeMetricsSnapshotPreferAuthoritative_(fallbackRaw, authoritativeRaw) {
-	const fallback = sanitizeMetricsSnapshotPayload_(fallbackRaw, "");
-	const authoritative = sanitizeMetricsSnapshotPayload_(authoritativeRaw, fallback && fallback.tag);
-	if (!fallback) return authoritative;
-	if (!authoritative) return fallback;
-
-	const merged = sanitizeMetricsSnapshotPayload_(authoritative, fallback.tag) || fallback;
-	if ((merged.mapPosition == null || !isFinite(Number(merged.mapPosition))) && fallback.mapPosition != null) {
-		merged.mapPosition = toNonNegativeInt_(fallback.mapPosition);
-	}
-	if (!merged.clanTag && fallback.clanTag) merged.clanTag = fallback.clanTag;
-	if (!merged.capturedAt && fallback.capturedAt) merged.capturedAt = fallback.capturedAt;
-	return merged;
-}
-
-// Return whether metrics snapshot likely incomplete.
-function isMetricsSnapshotLikelyIncomplete_(snapshotRaw) {
-	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, "");
-	if (!snapshot) return true;
-	const trophies = toNonNegativeInt_(snapshot.trophies);
-	const leagueName = String(snapshot && snapshot.league && snapshot.league.name != null ? snapshot.league.name : "").trim();
-	const family = resolveHomeLeagueAssetFamily_(leagueName);
-
-	if (!leagueName) return true;
-	if (trophies <= 0) return true;
-	if (family === "unranked" && trophies >= 400) return true;
-	if (family === "legend" && trophies > 0 && trophies < 4900) return true;
-	return false;
-}
-
-// Return whether enrich metrics members with profiles.
-function shouldEnrichMetricsMembersWithProfiles_(membersRaw) {
-	const members = Array.isArray(membersRaw) ? membersRaw : [];
-	const total = members.length;
-	if (total < PLAYER_METRICS_PROFILE_ENRICH_MIN_MEMBER_COUNT) return false;
-
-	let nonZeroCount = 0;
-	let unrankedCount = 0;
-	let incompleteCount = 0;
-
-	for (let i = 0; i < members.length; i++) {
-		const snapshot = sanitizeMetricsSnapshotPayload_(members[i], "");
-		if (!snapshot) {
-			incompleteCount++;
-			continue;
-		}
-
-		const trophies = toNonNegativeInt_(snapshot.trophies);
-		if (trophies > 0) nonZeroCount++;
-		if (isMetricsSnapshotLikelyIncomplete_(snapshot)) incompleteCount++;
-
-			const leagueName = String(snapshot && snapshot.league && snapshot.league.name != null ? snapshot.league.name : "").trim();
-			const family = resolveHomeLeagueAssetFamily_(leagueName);
-			if (family === "unranked") unrankedCount++;
-			if (family === "unranked" && trophies >= 400) return true;
-			if (family === "legend" && trophies > 0 && trophies < 4900) return true;
-		}
-
-	const nonZeroRatio = total > 0 ? nonZeroCount / total : 0;
-	const unrankedRatio = total > 0 ? unrankedCount / total : 0;
-	const incompleteRatio = total > 0 ? incompleteCount / total : 0;
-	if (incompleteRatio >= 0.6) return true;
-	if (nonZeroRatio <= PLAYER_METRICS_PROFILE_ENRICH_MAX_NONZERO_RATIO && unrankedRatio >= PLAYER_METRICS_PROFILE_ENRICH_MIN_UNRANKED_RATIO) {
-		return true;
-	}
-	return false;
-}
-
-// Ensure canonical player-profile run-state object.
-function ensureMetricsProfileRunState_(runStateRaw) {
-	const runState = runStateRaw && typeof runStateRaw === "object" ? runStateRaw : {};
-	const nested = runState.profileRunState && typeof runState.profileRunState === "object" ? runState.profileRunState : null;
-	const topSnapshotByTag = runState.profileSnapshotByTag && typeof runState.profileSnapshotByTag === "object" ? runState.profileSnapshotByTag : null;
-	const nestedSnapshotByTag = nested && nested.profileSnapshotByTag && typeof nested.profileSnapshotByTag === "object" ? nested.profileSnapshotByTag : null;
-	const topErrorByTag = runState.profileSnapshotErrorByTag && typeof runState.profileSnapshotErrorByTag === "object" ? runState.profileSnapshotErrorByTag : null;
-	const nestedErrorByTag = nested && nested.profileSnapshotErrorByTag && typeof nested.profileSnapshotErrorByTag === "object" ? nested.profileSnapshotErrorByTag : null;
-	let profileSnapshotByTag = topSnapshotByTag || nestedSnapshotByTag || {};
-	let profileSnapshotErrorByTag = topErrorByTag || nestedErrorByTag || {};
-	if (topSnapshotByTag && nestedSnapshotByTag && topSnapshotByTag !== nestedSnapshotByTag) {
-		const nestedKeys = Object.keys(nestedSnapshotByTag);
-		for (let i = 0; i < nestedKeys.length; i++) {
-			const key = nestedKeys[i];
-			if (!Object.prototype.hasOwnProperty.call(topSnapshotByTag, key)) {
-				topSnapshotByTag[key] = nestedSnapshotByTag[key];
-			}
-		}
-		profileSnapshotByTag = topSnapshotByTag;
-	}
-	if (topErrorByTag && nestedErrorByTag && topErrorByTag !== nestedErrorByTag) {
-		const nestedKeys = Object.keys(nestedErrorByTag);
-		for (let i = 0; i < nestedKeys.length; i++) {
-			const key = nestedKeys[i];
-			if (!Object.prototype.hasOwnProperty.call(topErrorByTag, key)) {
-				topErrorByTag[key] = nestedErrorByTag[key];
-			}
-		}
-		profileSnapshotErrorByTag = topErrorByTag;
-	}
-	runState.profileSnapshotByTag = profileSnapshotByTag;
-	runState.profileSnapshotErrorByTag = profileSnapshotErrorByTag;
-	const topBlocked = typeof runState.profileFetchBlocked === "boolean" ? runState.profileFetchBlocked : false;
-	const nestedBlocked = nested && typeof nested.profileFetchBlocked === "boolean" ? nested.profileFetchBlocked : false;
-	runState.profileFetchBlocked = topBlocked || nestedBlocked;
-	if (nested) {
-		nested.profileSnapshotByTag = runState.profileSnapshotByTag;
-		nested.profileSnapshotErrorByTag = runState.profileSnapshotErrorByTag;
-		nested.profileFetchBlocked = runState.profileFetchBlocked;
-	}
-	return runState;
-}
-
-// Prefetch authoritative player metrics snapshots by tag.
-function prefetchAuthoritativePlayerMetricsSnapshotsByTag_(playerTagsRaw, optionsRaw) {
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const runState = ensureMetricsProfileRunState_(options.runState && typeof options.runState === "object" ? options.runState : {});
-	const inputTags = Array.isArray(playerTagsRaw) ? playerTagsRaw : [];
-	const uniqueTags = [];
-	const seenTags = {};
-	for (let i = 0; i < inputTags.length; i++) {
-		const tag = normalizeTag_(inputTags[i]);
-		if (!tag || !isValidPlayerTag_(tag) || seenTags[tag]) continue;
-		seenTags[tag] = true;
-		uniqueTags.push(tag);
-	}
-
-	let runStateHits = 0;
-	let runStateErrors = 0;
-	let cacheHits = 0;
-	let blockedMisses = 0;
-	const misses = [];
-	for (let i = 0; i < uniqueTags.length; i++) {
-		const tag = uniqueTags[i];
-		if (runState.profileSnapshotByTag[tag]) {
-			runStateHits++;
-			continue;
-		}
-		if (runState.profileSnapshotErrorByTag[tag]) {
-			runStateErrors++;
-			continue;
-		}
-		const cached = readCachedPlayerMetricsProfileSnapshot_(tag);
-		if (cached) {
-			runState.profileSnapshotByTag[tag] = cached;
-			cacheHits++;
-			continue;
-		}
-		if (runState.profileFetchBlocked) {
-			blockedMisses++;
-			continue;
-		}
-		misses.push(tag);
-	}
-
-	let liveRequested = 0;
-	let liveSucceeded = 0;
-	let liveFailed = 0;
-	let liveRateLimited = 0;
-	if (misses.length > 0 && !runState.profileFetchBlocked) {
-		const batchSize = Math.max(1, toNonNegativeInt_(options.batchSize) || PLAYER_PROFILE_PREFETCH_BATCH_SIZE);
-		const batchDelayMs = Math.max(0, toNonNegativeInt_(options.batchDelayMs) || PLAYER_PROFILE_PREFETCH_BATCH_DELAY_MS);
-		const entries = [];
-		for (let i = 0; i < misses.length; i++) {
-			const tag = misses[i];
-			entries.push({
-				key: tag,
-				path: "/players/" + encodeTagForPath_(tag),
-			});
-		}
-		liveRequested = entries.length;
-		const fetched = cocFetchAllByPathEntries_(entries, {
-			batchSize: batchSize,
-			batchDelayMs: batchDelayMs,
-		});
-		for (let i = 0; i < misses.length; i++) {
-			const tag = misses[i];
-			if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, tag)) {
-				const snapshot = buildMetricsSnapshotFromPlayerProfile_(fetched.dataByKey[tag], tag);
-				if (snapshot) {
-					writeCachedPlayerMetricsProfileSnapshot_(tag, snapshot);
-					runState.profileSnapshotByTag[tag] = snapshot;
-					liveSucceeded++;
-					continue;
-				}
-				runState.profileSnapshotErrorByTag[tag] = true;
-				liveFailed++;
-				continue;
-			}
-			if (Object.prototype.hasOwnProperty.call(fetched.errorByKey, tag)) {
-				const err = fetched.errorByKey[tag];
-				runState.profileSnapshotErrorByTag[tag] = true;
-				if (err && Number(err.statusCode) === 429) {
-					runState.profileFetchBlocked = true;
-					liveRateLimited++;
-				}
-				liveFailed++;
-				continue;
-			}
-			runState.profileSnapshotErrorByTag[tag] = true;
-			liveFailed++;
-		}
-	}
-
-	return {
-		requestedTagCount: inputTags.length,
-		uniqueTagCount: uniqueTags.length,
-		runStateHits: runStateHits,
-		runStateErrors: runStateErrors,
-		cacheHits: cacheHits,
-		blockedMisses: blockedMisses,
-		liveRequested: liveRequested,
-		liveSucceeded: liveSucceeded,
-		liveFailed: liveFailed,
-		liveRateLimited: liveRateLimited,
-		profileFetchBlocked: runState.profileFetchBlocked === true,
-	};
-}
-
-// Fetch authoritative player metrics snapshot.
-function fetchAuthoritativePlayerMetricsSnapshot_(tagRaw, runStateRaw) {
-	const tag = normalizeTag_(tagRaw);
-	if (!tag) return null;
-	const runState = runStateRaw && typeof runStateRaw === "object" ? ensureMetricsProfileRunState_(runStateRaw) : null;
-	if (runState) {
-		if (runState.profileSnapshotByTag[tag]) return runState.profileSnapshotByTag[tag];
-		if (runState.profileSnapshotErrorByTag[tag]) return null;
-		if (runState.profileFetchBlocked) return null;
-	}
-
-	const cached = readCachedPlayerMetricsProfileSnapshot_(tag);
-	if (cached) {
-		if (runState) runState.profileSnapshotByTag[tag] = cached;
-		return cached;
-	}
-
-	try {
-		const profile = cocFetch_("/players/" + encodeTagForPath_(tag));
-		const snapshot = buildMetricsSnapshotFromPlayerProfile_(profile, tag);
-		if (!snapshot) return null;
-		writeCachedPlayerMetricsProfileSnapshot_(tag, snapshot);
-		if (runState) runState.profileSnapshotByTag[tag] = snapshot;
-		return snapshot;
-	} catch (err) {
-		if (runState) {
-			runState.profileSnapshotErrorByTag[tag] = true;
-			if (err && Number(err.statusCode) === 429) runState.profileFetchBlocked = true;
-		}
-		Logger.log("Unable to fetch authoritative player metrics snapshot for %s: %s", tag, errorMessage_(err));
-		return null;
-	}
-}
-
-// Handle enrich metrics members with profiles.
-function enrichMetricsMembersWithProfiles_(membersRaw, optionsRaw) {
-	const members = Array.isArray(membersRaw) ? membersRaw : [];
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const modeRaw = String(options.mode == null ? "auto" : options.mode)
-		.trim()
-		.toLowerCase();
-	const mode = modeRaw === "always" || modeRaw === "never" ? modeRaw : "auto";
-	if (!members.length || mode === "never") {
-		return { members: members, attempted: 0, enriched: 0, enabled: false };
-	}
-
-	const shouldEnrichAll = mode === "always" ? true : shouldEnrichMetricsMembersWithProfiles_(members);
-
-	const runState = ensureMetricsProfileRunState_(options.runState && typeof options.runState === "object" ? options.runState : {});
-	const out = [];
-	let attempted = 0;
-	let enriched = 0;
-
-	for (let i = 0; i < members.length; i++) {
-		const baseline = sanitizeMetricsSnapshotPayload_(members[i], "");
-		if (!baseline) continue;
-		const tag = normalizeTag_(baseline.tag);
-			if (!tag) {
-				out.push(baseline);
-				continue;
-			}
-			const shouldFetchProfile = shouldEnrichAll || isMetricsSnapshotLikelyIncomplete_(baseline);
-			if (!shouldFetchProfile) {
-				out.push(baseline);
-				continue;
-			}
-			attempted++;
-			const authoritative = fetchAuthoritativePlayerMetricsSnapshot_(tag, runState);
-			if (!authoritative) {
-				out.push(baseline);
-				continue;
-		}
-		const merged = mergeMetricsSnapshotPreferAuthoritative_(baseline, authoritative);
-		out.push(merged || baseline);
-		enriched++;
-	}
-
-	return {
-		members: out.length ? out : members,
-		attempted: attempted,
-		enriched: enriched,
-		enabled: shouldEnrichAll || attempted > 0,
-	};
-}
-
 // Sanitize metrics trophy history point.
 function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
 	const point = pointRaw && typeof pointRaw === "object" ? pointRaw : {};
@@ -932,10 +561,6 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	const continueOnError = options.continueOnError !== false;
 	const deferStoreSanitize = options.deferStoreSanitize === true;
 	const assumeStoreAlreadySanitized = options.assumeStoreAlreadySanitized === true;
-	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
-		.trim()
-		.toLowerCase();
-	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
 	if (!rosterData) {
@@ -947,13 +572,10 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 		? options.runState
 		: { seenClanTags: {} };
 	if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
-	ensureMetricsProfileRunState_(runState);
 	const errors = [];
 	let capturedClans = 0;
 	let recorded = 0;
 	let updated = 0;
-	let profileEnriched = 0;
-	let profileAttempted = 0;
 	const capturedTagSet = {};
 
 	for (let i = 0; i < clanTags.length; i++) {
@@ -963,13 +585,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 			if (hasPrefetchedError) throw prefetchedClanErrorsByTag[clanTag];
 			const hasPrefetchedSnapshot = Object.prototype.hasOwnProperty.call(prefetchedClanSnapshotsByTag, clanTag);
 			const snapshot = hasPrefetchedSnapshot ? prefetchedClanSnapshotsByTag[clanTag] : fetchClanMembersSnapshot_(clanTag);
-			const enriched = enrichMetricsMembersWithProfiles_(snapshot && snapshot.metricsMembers, {
-				mode: metricsProfileMode,
-				runState: runState,
-			});
-			const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : snapshot && snapshot.metricsMembers;
-			profileEnriched += toNonNegativeInt_(enriched && enriched.enriched);
-			profileAttempted += toNonNegativeInt_(enriched && enriched.attempted);
+			const metricsMembers = snapshot && snapshot.metricsMembers;
 			const result = recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
 				capturedAt: snapshot && snapshot.capturedAt,
 				runState: runState,
@@ -1002,186 +618,9 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 		updated: updated,
 		errors: errors,
 		entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
-		profileEnriched: profileEnriched,
-		profileAttempted: profileAttempted,
-		metricsProfileMode: metricsProfileMode,
+		profileEnriched: 0,
+		profileAttempted: 0,
 		capturedTags: Object.keys(capturedTagSet),
-		deferredSanitize: deferStoreSanitize,
-	};
-}
-
-// Normalize list/object inputs into a normalized tag set.
-function toNormalizedTagSet_(valuesRaw) {
-	const out = {};
-	if (Array.isArray(valuesRaw)) {
-		for (let i = 0; i < valuesRaw.length; i++) {
-			const tag = normalizeTag_(valuesRaw[i]);
-			if (!tag) continue;
-			out[tag] = true;
-		}
-		return out;
-	}
-	const values = valuesRaw && typeof valuesRaw === "object" ? valuesRaw : null;
-	if (!values) return out;
-	const keys = Object.keys(values);
-	for (let i = 0; i < keys.length; i++) {
-		const key = keys[i];
-		const normalizedKey = normalizeTag_(key);
-		if (normalizedKey && values[key]) out[normalizedKey] = true;
-		const value = values[key];
-		if (typeof value === "string") {
-			const valueTag = normalizeTag_(value);
-			if (valueTag) out[valueTag] = true;
-		}
-	}
-	return out;
-}
-
-// Find roster by id for metrics capture without validating the full payload.
-function findRosterByIdForMetricsCapture_(rosterDataRaw, rosterIdRaw) {
-	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
-	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
-	if (!rosterData || !rosterId) return null;
-	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-	for (let i = 0; i < rosters.length; i++) {
-		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : null;
-		if (!roster) continue;
-		if (String(roster.id || "").trim() !== rosterId) continue;
-		return {
-			rosterData: rosterData,
-			roster: roster,
-			rosterId: rosterId,
-		};
-	}
-	return null;
-}
-
-// Capture roster pool profile metrics.
-function captureRosterPoolProfileMetrics_(rosterDataRaw, rosterIdRaw, optionsRaw) {
-	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
-	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const deferStoreSanitize = options.deferStoreSanitize === true;
-	const assumeStoreAlreadySanitized = options.assumeStoreAlreadySanitized === true;
-	const skipPlayerTagSet = toNormalizedTagSet_(options.skipPlayerTags);
-	const skipClanTagSet = toNormalizedTagSet_(options.skipClanTags);
-	if (!rosterData || !rosterId) {
-		return {
-			attemptedClans: 0,
-			capturedClans: 0,
-			recorded: 0,
-			updated: 0,
-			errors: [],
-			entryCount: 0,
-			profileAttempted: 0,
-			profileEnriched: 0,
-			metricsProfileMode: "always",
-			usedProfileFallback: true,
-			capturedTags: [],
-			skippedPlayerTags: 0,
-			skippedByClanTag: 0,
-		};
-	}
-
-	const ctx = findRosterByIdForMetricsCapture_(rosterData, rosterId);
-	const roster = ctx && ctx.roster ? ctx.roster : null;
-	if (!roster) {
-		return {
-			attemptedClans: 0,
-			capturedClans: 0,
-			recorded: 0,
-			updated: 0,
-			errors: [],
-			entryCount: 0,
-			profileAttempted: 0,
-			profileEnriched: 0,
-			metricsProfileMode: "always",
-			usedProfileFallback: true,
-			capturedTags: [],
-			skippedPlayerTags: 0,
-			skippedByClanTag: 0,
-		};
-	}
-
-	const connectedClanTag = normalizeTag_(roster.connectedClanTag);
-	const players = collectRosterPoolPlayers_(roster);
-	const profileRunStateSource = options.profileRunState && typeof options.profileRunState === "object" ? options.profileRunState : options.runState;
-	const profileRunState = ensureMetricsProfileRunState_(profileRunStateSource && typeof profileRunStateSource === "object" ? profileRunStateSource : {});
-	const snapshotsByClanTag = {};
-	const seenTags = {};
-	const errors = [];
-	let profileAttempted = 0;
-	let profileEnriched = 0;
-	let skippedPlayerTags = 0;
-	let skippedByClanTag = 0;
-
-	for (let i = 0; i < players.length; i++) {
-		const tag = normalizeTag_(players[i] && players[i].tag);
-		if (!tag || seenTags[tag] || !isValidPlayerTag_(tag)) continue;
-		seenTags[tag] = true;
-		if (skipPlayerTagSet[tag]) {
-			skippedPlayerTags++;
-			continue;
-		}
-		profileAttempted++;
-
-		const snapshot = fetchAuthoritativePlayerMetricsSnapshot_(tag, profileRunState);
-		if (!snapshot) {
-			errors.push({ clanTag: connectedClanTag || "", message: "Unable to fetch player profile snapshot for " + tag + "." });
-			continue;
-		}
-
-		profileEnriched++;
-		const clanTag = normalizeTag_(snapshot.clanTag) || connectedClanTag || "#0";
-		if (skipClanTagSet[clanTag]) {
-			skippedByClanTag++;
-			continue;
-		}
-		const normalizedSnapshot = sanitizeMetricsSnapshotPayload_(Object.assign({}, snapshot, { clanTag: clanTag }), tag);
-		if (!normalizedSnapshot) continue;
-		if (!snapshotsByClanTag[clanTag]) snapshotsByClanTag[clanTag] = [];
-		snapshotsByClanTag[clanTag].push(normalizedSnapshot);
-	}
-
-	let recorded = 0;
-	let updated = 0;
-	const capturedTagSet = {};
-	const clanTags = Object.keys(snapshotsByClanTag);
-	for (let i = 0; i < clanTags.length; i++) {
-		const clanTag = clanTags[i];
-		const snapshots = snapshotsByClanTag[clanTag];
-		if (!Array.isArray(snapshots) || !snapshots.length) continue;
-		const result = recordClanMemberMetricsSnapshot_(ctx.rosterData, clanTag, snapshots, {
-			source: "captureRosterPoolProfileMetrics",
-			deferStoreSanitize: deferStoreSanitize,
-			assumeStoreAlreadySanitized: assumeStoreAlreadySanitized,
-			collectTags: true,
-		});
-		recorded += toNonNegativeInt_(result && result.recorded);
-		updated += toNonNegativeInt_(result && result.updated);
-		const tags = result && Array.isArray(result.tags) ? result.tags : [];
-		for (let j = 0; j < tags.length; j++) {
-			const tag = normalizeTag_(tags[j]);
-			if (!tag) continue;
-			capturedTagSet[tag] = true;
-		}
-	}
-
-	if (!deferStoreSanitize) ensurePlayerMetricsStore_(ctx.rosterData);
-	return {
-		attemptedClans: clanTags.length,
-		capturedClans: clanTags.length,
-		recorded: recorded,
-		updated: updated,
-		errors: errors,
-		entryCount: countPlayerMetricsEntries_(ctx.rosterData.playerMetrics),
-		profileAttempted: profileAttempted,
-		profileEnriched: profileEnriched,
-		metricsProfileMode: "always",
-		usedProfileFallback: true,
-		capturedTags: Object.keys(capturedTagSet),
-		skippedPlayerTags: skippedPlayerTags,
-		skippedByClanTag: skippedByClanTag,
 		deferredSanitize: deferStoreSanitize,
 	};
 }
@@ -1195,13 +634,8 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0 };
 	}
 	const captureStartMs = Date.now();
-	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
-		.trim()
-		.toLowerCase();
-	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
 	const runState = options.runState && typeof options.runState === "object" ? options.runState : {};
 	if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
-	ensureMetricsProfileRunState_(runState);
 	const existingStore = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : null;
 	const looksPreparedStore =
 		!!existingStore &&
@@ -1215,20 +649,10 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	}
 	runState.metricsStorePrepared = true;
 
-	let connectedClanTag = "";
-	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-	for (let i = 0; i < rosters.length; i++) {
-		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-		if (String(roster.id || "").trim() !== rosterId) continue;
-		connectedClanTag = normalizeTag_(roster.connectedClanTag);
-		break;
-	}
-
 	const primaryStartMs = Date.now();
 	const primary = captureConnectedClanMetrics_(rosterData, {
 		rosterId: rosterId,
 		continueOnError: options.continueOnError !== false,
-		metricsProfileMode: metricsProfileMode,
 		runState: runState,
 		prefetchedClanSnapshotsByTag: options.prefetchedClanSnapshotsByTag,
 		prefetchedClanErrorsByTag: options.prefetchedClanErrorsByTag,
@@ -1236,30 +660,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 		assumeStoreAlreadySanitized: true,
 	});
 	const primaryDurationMs = Math.max(0, Date.now() - primaryStartMs);
-	const primaryCapturedTags = primary && Array.isArray(primary.capturedTags) ? primary.capturedTags : [];
 	const finalErrors = [].concat(primary && Array.isArray(primary.errors) ? primary.errors : []);
-
-	let fallback = null;
-	let fallbackDurationMs = 0;
-	if (metricsProfileMode === "always") {
-		const skipFallbackClanTags = [];
-		if (connectedClanTag) {
-			const primaryCapturedConnectedClan = toNonNegativeInt_(primary && primary.capturedClans) > 0;
-			const connectedClanAlreadySeen = runState.seenClanTags[connectedClanTag] === true;
-			if (primaryCapturedConnectedClan || connectedClanAlreadySeen) skipFallbackClanTags.push(connectedClanTag);
-		}
-		const fallbackStartMs = Date.now();
-		// Strict profile mode keeps pool coverage, but skips tags already written by the primary clan snapshot.
-		fallback = captureRosterPoolProfileMetrics_(rosterData, rosterId, {
-			runState: runState,
-			deferStoreSanitize: true,
-			assumeStoreAlreadySanitized: true,
-			skipPlayerTags: primaryCapturedTags,
-			skipClanTags: skipFallbackClanTags,
-		});
-		fallbackDurationMs = Math.max(0, Date.now() - fallbackStartMs);
-		finalErrors.push.apply(finalErrors, fallback && Array.isArray(fallback.errors) ? fallback.errors : []);
-	}
 
 	const finalizeStartMs = Date.now();
 	ensurePlayerMetricsStore_(rosterData);
@@ -1267,53 +668,23 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	const finalizeDurationMs = Math.max(0, Date.now() - finalizeStartMs);
 	const totalDurationMs = Math.max(0, Date.now() - captureStartMs);
 
-	if (metricsProfileMode !== "always") {
-		return {
-			attemptedClans: toNonNegativeInt_(primary && primary.attemptedClans),
-			capturedClans: toNonNegativeInt_(primary && primary.capturedClans),
-			recorded: toNonNegativeInt_(primary && primary.recorded),
-			updated: toNonNegativeInt_(primary && primary.updated),
-			errors: finalErrors,
-			entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
-			profileAttempted: toNonNegativeInt_(primary && primary.profileAttempted),
-			profileEnriched: toNonNegativeInt_(primary && primary.profileEnriched),
-			metricsProfileMode: metricsProfileMode,
-			usedProfileFallback: false,
-			primaryRecorded: toNonNegativeInt_(primary && primary.recorded),
-			fallbackRecorded: 0,
-			fallbackSkippedPlayerTags: 0,
-			fallbackSkippedByClanTag: 0,
-			captureTimingMs: {
-				primary: primaryDurationMs,
-				fallback: 0,
-				finalize: finalizeDurationMs,
-				total: totalDurationMs,
-			},
-		};
-	}
-
-	const fallbackRecorded = toNonNegativeInt_(fallback && fallback.recorded);
-	const fallbackSkippedPlayerTags = toNonNegativeInt_(fallback && fallback.skippedPlayerTags);
-	const fallbackSkippedByClanTag = toNonNegativeInt_(fallback && fallback.skippedByClanTag);
-
 	return {
-		attemptedClans: toNonNegativeInt_(primary && primary.attemptedClans) + toNonNegativeInt_(fallback && fallback.attemptedClans),
-		capturedClans: toNonNegativeInt_(primary && primary.capturedClans) + toNonNegativeInt_(fallback && fallback.capturedClans),
-		recorded: toNonNegativeInt_(primary && primary.recorded) + fallbackRecorded,
-		updated: toNonNegativeInt_(primary && primary.updated) + toNonNegativeInt_(fallback && fallback.updated),
+		attemptedClans: toNonNegativeInt_(primary && primary.attemptedClans),
+		capturedClans: toNonNegativeInt_(primary && primary.capturedClans),
+		recorded: toNonNegativeInt_(primary && primary.recorded),
+		updated: toNonNegativeInt_(primary && primary.updated),
 		errors: finalErrors,
 		entryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
-		profileAttempted: toNonNegativeInt_(primary && primary.profileAttempted) + toNonNegativeInt_(fallback && fallback.profileAttempted),
-		profileEnriched: toNonNegativeInt_(primary && primary.profileEnriched) + toNonNegativeInt_(fallback && fallback.profileEnriched),
-		metricsProfileMode: "always",
-		usedProfileFallback: true,
+		profileAttempted: 0,
+		profileEnriched: 0,
+		usedProfileFallback: false,
 		primaryRecorded: toNonNegativeInt_(primary && primary.recorded),
-		fallbackRecorded: fallbackRecorded,
-		fallbackSkippedPlayerTags: fallbackSkippedPlayerTags,
-		fallbackSkippedByClanTag: fallbackSkippedByClanTag,
+		fallbackRecorded: 0,
+		fallbackSkippedPlayerTags: 0,
+		fallbackSkippedByClanTag: 0,
 		captureTimingMs: {
 			primary: primaryDurationMs,
-			fallback: fallbackDurationMs,
+			fallback: 0,
 			finalize: finalizeDurationMs,
 			total: totalDurationMs,
 		},

@@ -143,13 +143,8 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
 	const snapshotStartedAtIso = new Date().toISOString();
-	const metricsProfileModeRaw = String(options.metricsProfileMode == null ? "auto" : options.metricsProfileMode)
-		.trim()
-		.toLowerCase();
-	const metricsProfileMode = metricsProfileModeRaw === "always" || metricsProfileModeRaw === "never" ? metricsProfileModeRaw : "auto";
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : { seenClanTags: {} };
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
-	const metricsProfileRunState = shouldRecordMetrics ? ensureMetricsProfileRunState_(metricsRunState) : null;
 	let metricsCommittedRosterData = shouldRecordMetrics
 		? { playerMetrics: sanitizePlayerMetricsStore_(rosterData && rosterData.playerMetrics, snapshotStartedAtIso) }
 		: null;
@@ -240,14 +235,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 					const metricsWorkingCopy = {
 						playerMetrics: sanitizePlayerMetricsStore_(metricsCommittedRosterData.playerMetrics, snapshotStartedAtIso),
 					};
-					const enriched = enrichMetricsMembersWithProfiles_(clanSnapshot && clanSnapshot.metricsMembers, {
-						mode: metricsProfileMode,
-						runState: metricsProfileRunState,
-						clanTag: clanTag,
-						sourceRosterId: rosterId,
-						source: "buildLiveRosterOwnershipSnapshot",
-					});
-					const metricsMembers = enriched && Array.isArray(enriched.members) ? enriched.members : clanSnapshot && clanSnapshot.metricsMembers;
+					const metricsMembers = clanSnapshot && clanSnapshot.metricsMembers;
 					const metricsRecord = recordClanMemberMetricsSnapshot_(metricsWorkingCopy, clanTag, metricsMembers, {
 						capturedAt: clanSnapshot && clanSnapshot.capturedAt,
 						runState: metricsRunState,
@@ -266,9 +254,8 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						updated: toNonNegativeInt_(metricsRecord && metricsRecord.updated),
 						errors: [],
 						entryCount: countPlayerMetricsEntries_(metricsCommittedRosterData && metricsCommittedRosterData.playerMetrics),
-						profileEnriched: toNonNegativeInt_(enriched && enriched.enriched),
-						profileAttempted: toNonNegativeInt_(enriched && enriched.attempted),
-						metricsProfileMode: metricsProfileMode,
+						profileEnriched: 0,
+						profileAttempted: 0,
 					};
 					memberTrackingByClanTag[clanTag] = stagedTracking;
 					stagedMemberTrackingByClanTag[clanTag] = stagedTracking;
@@ -286,7 +273,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 						entryCount: countPlayerMetricsEntries_(metricsCommittedRosterData && metricsCommittedRosterData.playerMetrics),
 						profileEnriched: 0,
 						profileAttempted: 0,
-						metricsProfileMode: metricsProfileMode,
 					};
 					memberTrackingByClanTag[clanTag] = stagedTracking;
 					stagedMemberTrackingByClanTag[clanTag] = stagedTracking;
@@ -355,7 +341,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 			entryCount: committedEntryCount,
 			profileEnriched: toNonNegativeInt_(stagedTracking.profileEnriched),
 			profileAttempted: toNonNegativeInt_(stagedTracking.profileAttempted),
-			metricsProfileMode: String(stagedTracking.metricsProfileMode == null ? metricsProfileMode : stagedTracking.metricsProfileMode),
 			committed: committed,
 		};
 	}
@@ -2403,7 +2388,6 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	try {
 		capture = captureMemberTrackingForRoster_(ctx.rosterData, ctx.rosterId, {
 			continueOnError: true,
-			metricsProfileMode: "always",
 			runState: metricsRunState,
 			prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
 			prefetchedClanErrorsByTag: prefetchedClanErrorsByTag,

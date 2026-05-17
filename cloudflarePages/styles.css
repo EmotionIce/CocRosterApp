@@ -2241,6 +2241,7 @@ table.roster{ display:none !important; }
   display:inline-flex;
   align-items:center;
   justify-content:center;
+  position:relative;
   width: 30px;
   height: 30px;
   padding: 0;
@@ -2255,6 +2256,27 @@ table.roster{ display:none !important; }
   height: 22px;
   object-fit: contain;
   display:block;
+}
+
+.league-tier-overlay{
+  position:absolute;
+  inset:0;
+  display:grid;
+  place-items:center;
+  color:#fff;
+  font-weight:900;
+  line-height:1;
+  text-shadow:
+    0 1px 2px rgba(2,6,23,.96),
+    0 0 3px rgba(2,6,23,.9);
+  -webkit-text-stroke: .6px rgba(2,6,23,.82);
+  pointer-events:none;
+  user-select:none;
+}
+
+.player-league__tier-overlay{
+  font-size: 10px;
+  letter-spacing: -.01em;
 }
 
 .player-cwl{
@@ -2484,6 +2506,8 @@ body.profile-modal-open{
 }
 
 .profile-modal{
+  --profile-modal-safe-top: env(safe-area-inset-top, 0px);
+  --profile-modal-safe-bottom: env(safe-area-inset-bottom, 0px);
   position: fixed;
   inset: 0;
   z-index: 1200;
@@ -2583,12 +2607,24 @@ body.profile-modal-open{
   line-height: 0;
 }
 
+.profile-modal__league-token{
+  position:relative;
+  display:inline-grid;
+  place-items:center;
+  line-height:0;
+}
+
 .profile-modal__league-icon{
   width: 52px;
   height: 52px;
   object-fit: contain;
   display:block;
   filter: drop-shadow(0 8px 14px rgba(2,6,23,.48));
+}
+
+.profile-modal__league-tier-overlay{
+  font-size: 18px;
+  letter-spacing: -.01em;
 }
 
 .profile-modal__league-fallback{
@@ -3571,14 +3607,23 @@ body.profile-modal-open{
 
 @media (max-width: 780px){
   .profile-modal{
-    padding: 8px;
+    padding-top: calc(var(--profile-modal-safe-top) + 12px);
+    padding-right: 8px;
+    padding-bottom: calc(var(--profile-modal-safe-bottom) + 8px);
+    padding-left: 8px;
     align-items:flex-end;
   }
 
   .profile-modal__panel{
     width: 100%;
-    max-height: calc(100vh - 8px);
+    max-height: calc(100vh - var(--profile-modal-safe-top) - var(--profile-modal-safe-bottom) - 20px);
     border-radius: 24px 24px 16px 16px;
+  }
+
+  @supports (height: 100dvh){
+    .profile-modal__panel{
+      max-height: calc(100dvh - var(--profile-modal-safe-top) - var(--profile-modal-safe-bottom) - 20px);
+    }
   }
 
   .profile-modal__body{
@@ -4478,6 +4523,10 @@ body.profile-modal-open{
     height: 44px;
   }
 
+  .profile-modal__league-tier-overlay{
+    font-size: 16px;
+  }
+
   .profile-modal__topbar-meta{
     width: 100%;
   }
@@ -4500,6 +4549,10 @@ body.profile-modal-open{
   .profile-modal__league-fallback{
     width: 38px;
     height: 38px;
+  }
+
+  .profile-modal__league-tier-overlay{
+    font-size: 14px;
   }
 
   .profile-modal__status-chip{

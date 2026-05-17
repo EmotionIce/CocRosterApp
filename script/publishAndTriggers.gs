@@ -87,7 +87,6 @@ function writePublishedRosterData_(rosterDataRaw) {
 					try {
 						const capture = captureMemberTrackingForRoster_(validated, rosterId, {
 							continueOnError: true,
-							metricsProfileMode: "always",
 						});
 						if (capture) {
 							capturedClans += toNonNegativeInt_(capture.capturedClans) > 0 ? 1 : 0;

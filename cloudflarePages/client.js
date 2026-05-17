@@ -1407,11 +1407,20 @@
         const textEl = $("#shellLoadingNoticeText");
         if (titleEl) titleEl.textContent = copy.title;
         if (textEl) textEl.textContent = copy.text;
+        if (mode === "refresh") {
+            if (notice) {
+                notice.classList.add("hidden");
+                notice.setAttribute("aria-hidden", "true");
+            }
+            showPublicViewSyncChip(view, mode);
+            return;
+        }
+
+        hideAllPublicViewSyncChips();
         if (notice) {
             notice.classList.remove("hidden");
             notice.setAttribute("aria-hidden", "false");
         }
-        showPublicViewSyncChip(view, mode);
     };
 
     // Handle hide shell loading notice.
@@ -2029,9 +2038,15 @@
         const badge = badgeRaw && typeof badgeRaw === "object" ? badgeRaw : {};
         const src = toStr(badge.src).trim() || getLeagueIconUrlFromFamily("unranked");
         const name = toStr(badge.name).trim() || "Unranked";
+        const tierOverlayText = toStr(badge.tierOverlayText).trim();
         if (src) {
-            return '<img class="profile-modal__league-icon" src="' + escapeAttr(src) + '" alt="' +
-                escapeAttr(name) + '" loading="eager" decoding="async">';
+            return '<span class="profile-modal__league-token"><img class="profile-modal__league-icon" src="' +
+                escapeAttr(src) + '" alt="' + escapeAttr(name) + '" loading="eager" decoding="async">' +
+                (tierOverlayText
+                    ? ('<span class="league-tier-overlay profile-modal__league-tier-overlay" aria-hidden="true">' +
+                        escapeHtml(tierOverlayText) + "</span>")
+                    : "") +
+                "</span>";
         }
         return '<span class="profile-modal__league-fallback" aria-label="' + escapeAttr(name) + '">' +
             escapeHtml(name.slice(0, 3).toUpperCase() || "LG") + "</span>";
@@ -3144,6 +3159,12 @@
         legend: "assets/icons/league-legend.webp",
     };
 
+    const LEGEND_LEAGUE_TIER_OVERLAY_BY_ID = {
+        105000036: "I",
+        105000035: "II",
+        105000034: "III",
+    };
+
     // Get league icon URL from family.
     const getLeagueIconUrlFromFamily = (familyRaw) => {
         const family = normalizeLeagueFamilyKey(familyRaw);
@@ -3151,6 +3172,20 @@
         const assetPath = LEAGUE_ICON_ASSET_BY_FAMILY[family] || "";
         if (!assetPath) return "";
         return buildStaticAssetUrl(assetPath);
+    };
+
+    // Ensure one local/static league icon is available synchronously for a resolved family.
+    const getLocalLeagueIconSource = (familyRaw) => {
+        const key = normalizeLeagueFamilyKey(familyRaw);
+        if (!key) return null;
+        if (!Object.prototype.hasOwnProperty.call(leagueIconCache, key)) {
+            leagueIconCache[key] = { dataUrl: getLeagueIconUrlFromFamily(key) };
+        }
+        const localEntry = leagueIconCache[key] && typeof leagueIconCache[key] === "object" ? leagueIconCache[key] : null;
+        return {
+            key: key,
+            src: localEntry && localEntry.dataUrl ? toStr(localEntry.dataUrl).trim() : "",
+        };
     };
 
     // Handle read league display name.
@@ -3169,6 +3204,27 @@
             if (typeof values[i] === "string" && values[i].trim()) return values[i].trim();
         }
         return "";
+    };
+
+    // Read the first available icon URL from a league icon payload.
+    const readLeagueIconUrlByPriority = (iconUrlsRaw, priorityKeysRaw) => {
+        const iconUrls = iconUrlsRaw && typeof iconUrlsRaw === "object" ? iconUrlsRaw : {};
+        const priorityKeys = Array.isArray(priorityKeysRaw) ? priorityKeysRaw : [];
+        for (let i = 0; i < priorityKeys.length; i++) {
+            const value = toStr(iconUrls[priorityKeys[i]]).trim();
+            if (value) return value;
+        }
+        return "";
+    };
+
+    // Get the confirmed Legend League tier numeral from an explicit API tier id only.
+    const getLegendLeagueTierOverlayText = (playerRaw) => {
+        const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+        const leagueTier = player.leagueTier && typeof player.leagueTier === "object" ? player.leagueTier : null;
+        const tierId = toNonNegativeInt(leagueTier && leagueTier.id);
+        return tierId > 0 && Object.prototype.hasOwnProperty.call(LEGEND_LEAGUE_TIER_OVERLAY_BY_ID, tierId)
+            ? LEGEND_LEAGUE_TIER_OVERLAY_BY_ID[tierId]
+            : "";
     };
 
     // Resolve home league object from player.
@@ -3218,20 +3274,18 @@
 
     // Extract home league badge source.
     const extractHomeLeagueBadgeSource = (playerRaw) => {
-        const league = resolveHomeLeagueObjectFromPlayer(playerRaw);
+        const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+        const legacyLeague = player.league && typeof player.league === "object" ? player.league : null;
+        const league = resolveHomeLeagueObjectFromPlayer(player);
         if (!league) return null;
         const name = readLeagueDisplayName(league);
         if (!name) return null;
-        const hasApiIconUrls = !!(league.iconUrls && typeof league.iconUrls === "object");
-        const iconUrls = hasApiIconUrls ? league.iconUrls : {};
-        const iconSrc = [iconUrls.medium, iconUrls.small, iconUrls.tiny]
-            .map((value) => toStr(value).trim())
-            .find(Boolean) || "";
+        const legacyLeagueIconSrc = readLeagueIconUrlByPriority(legacyLeague && legacyLeague.iconUrls, ["medium", "small", "tiny"]);
         return {
             name: name,
-            hasApiIconUrls: hasApiIconUrls,
-            iconSrc: iconSrc,
+            legacyLeagueIconSrc: legacyLeagueIconSrc,
             fallbackAssetFamily: resolveHomeLeagueAssetFamily(name),
+            tierOverlayText: getLegendLeagueTierOverlayText(player),
         };
     };
 
@@ -3239,16 +3293,14 @@
     const getHomeLeagueBadgeMeta = (playerRaw) => {
         const source = extractHomeLeagueBadgeSource(playerRaw);
         if (!source || !source.name) return null;
-        const key = normalizeLeagueFamilyKey(source.fallbackAssetFamily);
-        const localEntry = key && Object.prototype.hasOwnProperty.call(leagueIconCache, key)
-            ? leagueIconCache[key]
-            : null;
-        const localSrc = localEntry && localEntry.dataUrl ? localEntry.dataUrl : "";
-        if (localSrc) {
+        const localSource = getLocalLeagueIconSource(source.fallbackAssetFamily);
+        const key = localSource && localSource.key ? localSource.key : "";
+        if (localSource && localSource.src) {
             const meta = {
                 name: source.name,
-                src: localSrc,
+                src: localSource.src,
                 key: key,
+                tierOverlayText: source.tierOverlayText,
             };
             if (PROFILE_LEAGUE_DEBUG && typeof console !== "undefined" && console.log) {
                 console.log("[league-badge]", { source: source, chosen: meta, from: "local-cache" });
@@ -3257,40 +3309,49 @@
         }
         const meta = {
             name: source.name,
-            src: source.hasApiIconUrls ? source.iconSrc : "",
+            src: toStr(source.legacyLeagueIconSrc).trim(),
             key: key || "",
+            tierOverlayText: source.tierOverlayText,
         };
         if (PROFILE_LEAGUE_DEBUG && typeof console !== "undefined" && console.log) {
-            console.log("[league-badge]", { source: source, chosen: meta, from: source.hasApiIconUrls ? "api-iconUrls-fallback" : "no-icon" });
+            console.log("[league-badge]", { source: source, chosen: meta, from: meta.src ? "player.league.iconUrls" : "no-icon" });
         }
         return meta;
     };
 
-    // Get roster card league badge meta via local static assets only.
+    // Get roster card league badge meta using local/static league icons plus explicit Legend tier overlays.
     const getRosterCardLeagueBadgeMeta = (playerRaw, dataRaw) => {
         // Resolve local icon for a league name/family pair.
-        const resolveLocalLeagueMeta = (nameRaw, familyRaw) => {
+        const resolveLocalLeagueMeta = (nameRaw, familyRaw, tierOverlayTextRaw) => {
             const name = toStr(nameRaw).trim();
-            const key = normalizeLeagueFamilyKey(familyRaw || resolveHomeLeagueAssetFamily(name));
-            if (!key) return null;
-            if (!Object.prototype.hasOwnProperty.call(leagueIconCache, key)) {
-                leagueIconCache[key] = { dataUrl: getLeagueIconUrlFromFamily(key) };
-            }
-            const localEntry = leagueIconCache[key] && typeof leagueIconCache[key] === "object" ? leagueIconCache[key] : null;
-            const src = localEntry && localEntry.dataUrl ? toStr(localEntry.dataUrl).trim() : "";
-            if (!src) return null;
+            const localSource = getLocalLeagueIconSource(familyRaw || resolveHomeLeagueAssetFamily(name));
+            if (!localSource || !localSource.src) return null;
             return {
                 name: name || "Home league",
-                key: key,
-                src: src,
+                key: localSource.key,
+                src: localSource.src,
+                tierOverlayText: toStr(tierOverlayTextRaw).trim(),
             };
         };
 
-        const directSource = extractHomeLeagueBadgeSource(playerRaw);
-        if (directSource && directSource.name) {
-            const directMeta = resolveLocalLeagueMeta(directSource.name, directSource.fallbackAssetFamily);
-            if (directMeta) return directMeta;
-        }
+        // Resolve one player-like payload, including metrics snapshots with league/leagueTier objects.
+        const resolvePlayerLikeLeagueMeta = (playerLikeRaw) => {
+            const source = extractHomeLeagueBadgeSource(playerLikeRaw);
+            if (!source || !source.name) return null;
+            const localMeta = resolveLocalLeagueMeta(source.name, source.fallbackAssetFamily, source.tierOverlayText);
+            if (localMeta) return localMeta;
+            const legacyLeagueIconSrc = toStr(source.legacyLeagueIconSrc).trim();
+            if (!legacyLeagueIconSrc) return null;
+            return {
+                name: source.name,
+                key: "",
+                src: legacyLeagueIconSrc,
+                tierOverlayText: source.tierOverlayText,
+            };
+        };
+
+        const directMeta = resolvePlayerLikeLeagueMeta(playerRaw);
+        if (directMeta) return directMeta;
 
         const tag = normalizeClanTag(playerRaw && playerRaw.tag);
         if (!tag) return null;
@@ -3298,8 +3359,10 @@
         const metricsEntry = getPlayerMetricsEntry(tag, data);
         const latestSnapshot = readMetricsLatestSnapshot(metricsEntry);
         if (!latestSnapshot || typeof latestSnapshot !== "object") return null;
+        const snapshotMeta = resolvePlayerLikeLeagueMeta(latestSnapshot);
+        if (snapshotMeta) return snapshotMeta;
         const descriptor = resolveLeaderboardLeagueDescriptorFromSnapshot(latestSnapshot);
-        return resolveLocalLeagueMeta(descriptor && descriptor.name, descriptor && descriptor.family);
+        return resolveLocalLeagueMeta(descriptor && descriptor.name, descriptor && descriptor.family, "");
     };
 
     // Swap this generated palette helper for local TH asset mapping later if desired.
@@ -4082,18 +4145,11 @@
             runServerMethodViaHttp(methodName, args).then(resolve).catch(reject);
         });
 
-    // Handle request league icon.
+    // Ensure the local/static league icon cache is warm for this player.
     const requestLeagueIcon = (playerRaw) => {
         const source = extractHomeLeagueBadgeSource(playerRaw);
         if (!source || !source.name) return;
-        const key = normalizeLeagueFamilyKey(source.fallbackAssetFamily);
-        if (!key) return;
-        if (Object.prototype.hasOwnProperty.call(leagueIconCache, key)) return;
-
-        leagueIconCache[key] = { dataUrl: getLeagueIconUrlFromFamily(key) };
-        if (profileState.open && profileState.activeTag && profileCache[profileState.activeTag]) {
-            renderProfileContent(profileState.activeContext, profileCache[profileState.activeTag], "ready");
-        }
+        getLocalLeagueIconSource(source.fallbackAssetFamily);
     };
 
     // Handle request town hall icon.
@@ -5618,6 +5674,12 @@
             leagueIcon.loading = "lazy";
             leagueIcon.decoding = "async";
             leagueBadge.appendChild(leagueIcon);
+            const tierOverlayText = toStr(leagueBadgeMeta && leagueBadgeMeta.tierOverlayText).trim();
+            if (tierOverlayText) {
+                const tierOverlay = el("span", "league-tier-overlay player-league__tier-overlay", tierOverlayText);
+                tierOverlay.setAttribute("aria-hidden", "true");
+                leagueBadge.appendChild(tierOverlay);
+            }
             right.appendChild(leagueBadge);
         }
 

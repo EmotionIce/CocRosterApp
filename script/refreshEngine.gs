@@ -367,42 +367,6 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 	};
 }
 
-// Collect refresh-all player tags to warm authoritative profile snapshots once per run.
-function collectRefreshAllPlayerProfileCandidateTags_(sourceRostersRaw, prefetchBundleRaw) {
-	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
-	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
-	const clanMembersSnapshotByTag =
-		prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {};
-	const tagSet = {};
-
-	// Include all roster pool tags (main/subs/missing) across every roster.
-	for (let i = 0; i < sourceRosters.length; i++) {
-		const roster = sourceRosters[i] && typeof sourceRosters[i] === "object" ? sourceRosters[i] : {};
-		const players = collectRosterPoolPlayers_(roster);
-		for (let j = 0; j < players.length; j++) {
-			const tag = normalizeTag_(players[j] && players[j].tag);
-			if (!tag || !isValidPlayerTag_(tag)) continue;
-			tagSet[tag] = true;
-		}
-	}
-
-	// Add tags from wave-one connected-clan member snapshots.
-	const clanTags = Object.keys(clanMembersSnapshotByTag);
-	for (let i = 0; i < clanTags.length; i++) {
-		const clanTag = clanTags[i];
-		const snapshot = clanMembersSnapshotByTag[clanTag] && typeof clanMembersSnapshotByTag[clanTag] === "object" ? clanMembersSnapshotByTag[clanTag] : {};
-		const metricsMembers = Array.isArray(snapshot.metricsMembers) ? snapshot.metricsMembers : snapshot.members;
-		const members = Array.isArray(metricsMembers) ? metricsMembers : [];
-		for (let j = 0; j < members.length; j++) {
-			const tag = normalizeTag_(members[j] && members[j].tag);
-			if (!tag || !isValidPlayerTag_(tag)) continue;
-			tagSet[tag] = true;
-		}
-	}
-
-	return Object.keys(tagSet).sort();
-}
-
 // Extract the most useful failure text from heterogeneous step result/error shapes.
 function getRefreshPipelineStepFailureMessage_(stepResultRaw, stepLabelRaw) {
 	const stepResult = stepResultRaw && typeof stepResultRaw === "object" ? stepResultRaw : {};
@@ -1106,11 +1070,6 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let ownershipSnapshotDurationMs = 0;
 	let cumulativeRosterPipelineDurationMs = 0;
 	let profileWarmupCandidateCount = 0;
-	let profileWarmupRequestedTagCount = 0;
-	let profileWarmupUniqueTagCount = 0;
-	let profileWarmupRunStateHits = 0;
-	let profileWarmupRunStateErrors = 0;
-	let profileWarmupCacheHits = 0;
 	let profileWarmupBlockedMisses = 0;
 	let profileWarmupLiveRequested = 0;
 	let profileWarmupLiveSucceeded = 0;
@@ -1126,7 +1085,6 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : {};
 	// Ensure mutable run-state containers exist for cross-roster metrics reuse.
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
-	const metricsProfileRunState = ensureMetricsProfileRunState_(metricsRunState);
 	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const rosterIds = [];
 	// Freeze the roster iteration order up front so later mutations do not affect coverage.
@@ -1145,49 +1103,6 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const prefetchStartMs = Date.now();
 	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(sourceRosters);
 	prefetchDurationMs = Math.max(0, Date.now() - prefetchStartMs);
-	const profileWarmupStartMs = Date.now();
-	const refreshAllProfileCandidateTags = collectRefreshAllPlayerProfileCandidateTags_(sourceRosters, refreshAllPrefetch);
-	profileWarmupCandidateCount = refreshAllProfileCandidateTags.length;
-	const profileWarmupSummaryRaw = prefetchAuthoritativePlayerMetricsSnapshotsByTag_(refreshAllProfileCandidateTags, {
-		runState: metricsProfileRunState,
-		batchSize: PLAYER_PROFILE_PREFETCH_BATCH_SIZE,
-		batchDelayMs: PLAYER_PROFILE_PREFETCH_BATCH_DELAY_MS,
-	});
-	const profileWarmupSummary = profileWarmupSummaryRaw && typeof profileWarmupSummaryRaw === "object" ? profileWarmupSummaryRaw : {};
-	profileWarmupRequestedTagCount = toNonNegativeInt_(profileWarmupSummary.requestedTagCount);
-	profileWarmupUniqueTagCount = toNonNegativeInt_(profileWarmupSummary.uniqueTagCount);
-	profileWarmupRunStateHits = toNonNegativeInt_(profileWarmupSummary.runStateHits);
-	profileWarmupRunStateErrors = toNonNegativeInt_(profileWarmupSummary.runStateErrors);
-	profileWarmupCacheHits = toNonNegativeInt_(profileWarmupSummary.cacheHits);
-	profileWarmupBlockedMisses = toNonNegativeInt_(profileWarmupSummary.blockedMisses);
-	profileWarmupLiveRequested = toNonNegativeInt_(profileWarmupSummary.liveRequested);
-	profileWarmupLiveSucceeded = toNonNegativeInt_(profileWarmupSummary.liveSucceeded);
-	profileWarmupLiveFailed = toNonNegativeInt_(profileWarmupSummary.liveFailed);
-	profileWarmupLiveRateLimited = toNonNegativeInt_(profileWarmupSummary.liveRateLimited);
-	profileWarmupProfileFetchBlocked = profileWarmupSummary.profileFetchBlocked === true;
-	profileWarmupDurationMs = Math.max(0, Date.now() - profileWarmupStartMs);
-	Logger.log(
-		"refreshAllRosters profileWarmup requestedTagCount=%s uniqueTagCount=%s runStateHits=%s runStateErrors=%s cacheHits=%s blockedMisses=%s liveRequested=%s liveSucceeded=%s liveFailed=%s liveRateLimited=%s profileFetchBlocked=%s",
-		profileWarmupRequestedTagCount,
-		profileWarmupUniqueTagCount,
-		profileWarmupRunStateHits,
-		profileWarmupRunStateErrors,
-		profileWarmupCacheHits,
-		profileWarmupBlockedMisses,
-		profileWarmupLiveRequested,
-		profileWarmupLiveSucceeded,
-		profileWarmupLiveFailed,
-		profileWarmupLiveRateLimited,
-		profileWarmupProfileFetchBlocked,
-	);
-	if (profileWarmupLiveRateLimited > 0 || profileWarmupBlockedMisses > 0 || profileWarmupProfileFetchBlocked) {
-		Logger.log(
-			"refreshAllRosters profileWarmup throttled blockedMisses=%s liveRateLimited=%s profileFetchBlocked=%s",
-			profileWarmupBlockedMisses,
-			profileWarmupLiveRateLimited,
-			profileWarmupProfileFetchBlocked,
-		);
-	}
 	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
 	const ownershipSnapshotStartMs = Date.now();
 	const ownershipSnapshot = buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
