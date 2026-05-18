@@ -24,7 +24,9 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 		case "syncDiscordUsernameForPlayerTag":
 			return syncDiscordUsernameForPlayerTag(args[0], args[1], args[2]);
 		case "debugFirebaseAuthForDiscordSync":
-			return debugFirebaseAuthForDiscordSync(args[0]);
+			return debugFirebaseAuthForDiscordSync(args[0], args[1]);
+		case "debugFirebasePrivateKeySigning":
+			return debugFirebasePrivateKeySigning(args[0]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}
@@ -114,13 +116,43 @@ function sanitizeDiscordUsername_(discordUsernameRaw) {
 	return sanitized;
 }
 
-// Return safe Firebase auth diagnostics for the Discord-sync transport path.
-function debugFirebaseAuthForDiscordSync(botSecret) {
+// Return safe Firebase private-key signing diagnostics for comparison without exposing secrets.
+function debugFirebasePrivateKeySigning(botSecret) {
 	assertDiscordBotApiSecret_(botSecret);
-	clearFirebaseAccessTokenCache_();
+	const raw = PropertiesService.getScriptProperties().getProperty("FIREBASE_PRIVATE_KEY");
+	const legacyKey = legacyNormalizeFirebasePrivateKey_(raw);
+	let strictKey;
+	let strictDiagnostics = null;
+	try {
+		strictKey = normalizeFirebasePrivateKey_(raw);
+		strictDiagnostics = Object.assign({}, getSafePrivateKeyDiagnostics_("strict", strictKey), {
+			signing: trySignWithPrivateKeyForDiagnostics_(strictKey),
+		});
+	} catch (err) {
+		strictDiagnostics = { normalizerError: errorMessage_(err) };
+	}
+
+	return {
+		ok: true,
+		legacy: Object.assign({}, getSafePrivateKeyDiagnostics_("legacy", legacyKey), {
+			signing: trySignWithPrivateKeyForDiagnostics_(legacyKey),
+		}),
+		strict: strictDiagnostics,
+		sameAsLegacy: legacyKey === strictKey,
+	};
+}
+
+// Return safe Firebase auth diagnostics for the Discord-sync transport path.
+function debugFirebaseAuthForDiscordSync(botSecret, forceRefreshRaw) {
+	assertDiscordBotApiSecret_(botSecret);
+	const forceRefresh = forceRefreshRaw === true;
+	if (forceRefresh) {
+		clearFirebaseAccessTokenCache_();
+	}
 	const config = getFirebaseConfig_();
 	const diagnostics = {
 		ok: true,
+		forceRefresh: forceRefresh,
 		dbUrlPresent: !!config.dbUrl,
 		clientEmailPresent: !!config.clientEmail,
 		tokenUriPresent: !!config.tokenUri,
@@ -129,7 +161,7 @@ function debugFirebaseAuthForDiscordSync(botSecret) {
 		privateKeyNewlineCount: (config.privateKey.match(/\n/g) || []).length,
 		privateKeyLength: config.privateKey.length,
 	};
-	requestFirebaseAccessToken_();
+	getFirebaseAccessToken_(forceRefresh);
 	diagnostics.tokenAcquired = true;
 	return diagnostics;
 }

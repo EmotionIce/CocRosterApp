@@ -16,6 +16,11 @@ function normalizeFirebaseDbUrl_(urlRaw) {
 	return raw.replace(/\/+$/, "");
 }
 
+// Preserve the original production Firebase private-key handling for signing.
+function legacyNormalizeFirebasePrivateKey_(valueRaw) {
+	return String(valueRaw == null ? "" : valueRaw).replace(/\\n/g, "\n");
+}
+
 // Normalize Firebase service-account private keys into canonical PEM text.
 function normalizeFirebasePrivateKey_(valueRaw) {
 	let value = String(valueRaw == null ? "" : valueRaw).trim();
@@ -68,6 +73,41 @@ function normalizeFirebasePrivateKey_(valueRaw) {
 	return value;
 }
 
+// Return safe, non-secret diagnostics about a Firebase private key string.
+function getSafePrivateKeyDiagnostics_(label, keyText) {
+	const text = String(keyText == null ? "" : keyText);
+	const beginMarker = "-----BEGIN PRIVATE KEY-----";
+	const endMarker = "-----END PRIVATE KEY-----";
+	const lines = text.split(/\r\n?|\n/);
+	const firstLineRaw = lines.length ? lines[0] : "";
+	const lastLineRaw = lines.length ? lines[lines.length - 1] : "";
+	const firstLine = firstLineRaw === beginMarker || firstLineRaw === endMarker ? firstLineRaw : "";
+	const lastLine = lastLineRaw === beginMarker || lastLineRaw === endMarker ? lastLineRaw : "";
+
+	return {
+		label: String(label == null ? "" : label),
+		hasBegin: text.indexOf(beginMarker) >= 0,
+		hasEnd: text.indexOf(endMarker) >= 0,
+		newlineCount: (text.match(/\n/g) || []).length,
+		length: text.length,
+		startsWithBegin: text.indexOf(beginMarker) === 0,
+		endsWithEnd: text.slice(-endMarker.length) === endMarker,
+		hasLiteralBackslashN: text.indexOf("\\n") >= 0,
+		firstLine: firstLine,
+		lastLine: lastLine,
+	};
+}
+
+// Attempt a safe diagnostic RSA signature without exposing signature bytes.
+function trySignWithPrivateKeyForDiagnostics_(keyText) {
+	try {
+		Utilities.computeRsaSha256Signature("firebase-key-diagnostic", keyText);
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: errorMessage_(err) };
+	}
+}
+
 // Normalize Firebase path.
 function normalizeFirebasePath_(pathRaw) {
 	return String(pathRaw == null ? "" : pathRaw)
@@ -110,7 +150,7 @@ function getFirebaseConfig_() {
 	const config = {
 		dbUrl: normalizeFirebaseDbUrl_(getRequiredScriptProperty_("FIREBASE_DB_URL")),
 		clientEmail: String(getRequiredScriptProperty_("FIREBASE_CLIENT_EMAIL")).trim(),
-		privateKey: normalizeFirebasePrivateKey_(getRequiredScriptProperty_("FIREBASE_PRIVATE_KEY")),
+		privateKey: legacyNormalizeFirebasePrivateKey_(getRequiredScriptProperty_("FIREBASE_PRIVATE_KEY")),
 		tokenUri: String(getRequiredScriptProperty_("FIREBASE_TOKEN_URI")).trim(),
 	};
 	if (!config.dbUrl) throw new Error("Invalid FIREBASE_DB_URL Script Property.");
@@ -245,7 +285,12 @@ function requestFirebaseAccessToken_() {
 	const encodedHeader = base64UrlEncodeUtf8_(JSON.stringify(header));
 	const encodedClaims = base64UrlEncodeUtf8_(JSON.stringify(claims));
 	const unsignedToken = encodedHeader + "." + encodedClaims;
-	const signatureBytes = Utilities.computeRsaSha256Signature(unsignedToken, config.privateKey);
+	let signatureBytes = null;
+	try {
+		signatureBytes = Utilities.computeRsaSha256Signature(unsignedToken, config.privateKey);
+	} catch (err) {
+		throw new Error("Firebase private key could not be used for RSA signing: " + errorMessage_(err));
+	}
 	const assertion = unsignedToken + "." + base64UrlEncodeBytes_(signatureBytes);
 
 	const response = UrlFetchApp.fetch(config.tokenUri, {
