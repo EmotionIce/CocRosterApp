@@ -178,6 +178,16 @@ function assertAdminPassword_(password) {
 	}
 }
 
+// Handle assert Discord bot API secret.
+function assertDiscordBotApiSecret_(secretRaw) {
+	const props = PropertiesService.getScriptProperties();
+	const configured = props.getProperty("DISCORD_BOT_API_SECRET");
+	const provided = secretRaw == null ? "" : String(secretRaw);
+	if (configured == null || String(configured).length < 1 || provided !== String(configured)) {
+		throw new Error("Authentication failed for Discord bot API.");
+	}
+}
+
 // Handle check publish cooldown.
 function checkPublishCooldown_() {
 	const props = PropertiesService.getScriptProperties();

@@ -39,6 +39,12 @@ const isAdminApiPath = (pathnameRaw) => {
   return pathname === "/api/admin" || pathname === "/api/admin/";
 };
 
+// Return whether Discord bot sync API path.
+const isDiscordBotSyncApiPath = (pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  return pathname === "/api/bot/discord-sync" || pathname === "/api/bot/discord-sync/";
+};
+
 // Return whether admin page path.
 const isAdminPagePath = (pathnameRaw) => {
   const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
@@ -126,6 +132,100 @@ const handleAdminApi = async (request, env) => {
   }
 };
 
+// Read Discord bot secret from supported headers.
+const readDiscordBotSecret = (request) => {
+  const authorization = String(request.headers.get("authorization") || "");
+  const bearerMatch = /^\s*Bearer\s+(.+?)\s*$/i.exec(authorization);
+  if (bearerMatch && bearerMatch[1]) return bearerMatch[1];
+  return String(request.headers.get("x-discord-bot-secret") || "").trim();
+};
+
+// Handle Discord bot username sync API.
+const handleDiscordBotSyncApi = async (request, env) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "authorization, content-type, x-discord-bot-secret",
+        "cache-control": "no-store",
+      },
+    });
+  }
+  if (method !== "POST") {
+    return jsonResponse(405, {
+      ok: false,
+      error: "Method not allowed. Use POST.",
+    });
+  }
+
+  const secret = readDiscordBotSecret(request);
+  if (!secret) {
+    return jsonResponse(401, {
+      ok: false,
+      error: "Missing Discord bot secret.",
+    });
+  }
+
+  let body = null;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return jsonResponse(400, {
+      ok: false,
+      error: "Invalid JSON payload.",
+    });
+  }
+
+  const playerTag = body && typeof body.playerTag === "string" ? body.playerTag : "";
+  const discordUsername = body && typeof body.discordUsername === "string" ? body.discordUsername : "";
+  if (!playerTag.trim() || !discordUsername.trim()) {
+    return jsonResponse(400, {
+      ok: false,
+      error: "playerTag and discordUsername are required.",
+    });
+  }
+
+  const execUrl = resolveAppsScriptExecUrl(env);
+  if (!execUrl) {
+    return jsonResponse(500, {
+      ok: false,
+      error: "Apps Script URL is not configured.",
+    });
+  }
+
+  try {
+    const upstream = await fetch(execUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        method: "syncDiscordUsernameForPlayerTag",
+        args: [playerTag, discordUsername, secret],
+      }),
+    });
+
+    const text = await upstream.text();
+    const contentType =
+      upstream.headers.get("content-type") || "application/json; charset=utf-8";
+
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": contentType,
+        "cache-control": "no-store",
+      },
+    });
+  } catch (err) {
+    return jsonResponse(502, {
+      ok: false,
+      error: err && err.message ? err.message : "Upstream request failed.",
+    });
+  }
+};
+
 // Create an asset request.
 const createAssetRequest = (request, pathnameRaw) => {
   const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
@@ -148,6 +248,9 @@ export default {
     const url = new URL(request.url);
     if (isAdminApiPath(url.pathname)) {
       return handleAdminApi(request, env);
+    }
+    if (isDiscordBotSyncApiPath(url.pathname)) {
+      return handleDiscordBotSyncApi(request, env);
     }
     if (isAdminPageQuery(url)) {
       return serveStaticAsset(createAssetRequest(request, "/console.html"), env, ctx);
