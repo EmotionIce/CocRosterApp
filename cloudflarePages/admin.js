@@ -5137,7 +5137,7 @@
     addLine("Updates: " + (Number.isFinite(Number(summary.matchedWithUpdates)) ? Number(summary.matchedWithUpdates) : 0));
     addLine("New members: " + (Number.isFinite(Number(summary.newAddable)) ? Number(summary.newAddable) : 0));
     addLine("Needs review: " + (Number.isFinite(Number(summary.reviewOnly)) ? Number(summary.reviewOnly) : 0));
-    addLine("Ignored (war out): " + (Number.isFinite(Number(summary.ignoredWarOut)) ? Number(summary.ignoredWarOut) : 0));
+    addLine("Ignored new additions (war out): " + (Number.isFinite(Number(summary.ignoredWarOut)) ? Number(summary.ignoredWarOut) : 0));
     addLine("Ignored (clan not allowed): " + (Number.isFinite(Number(summary.ignoredClanNotAllowed)) ? Number(summary.ignoredClanNotAllowed) : 0));
     addLine("Ignored (missing Discord): " + (Number.isFinite(Number(summary.ignoredMissingDiscord)) ? Number(summary.ignoredMissingDiscord) : 0));
     addLine("Missing Discord in import: " + (Number.isFinite(Number(summary.matchedWithoutImportedDiscord)) ? Number(summary.matchedWithoutImportedDiscord) : 0));

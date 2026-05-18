@@ -115,6 +115,21 @@
     "missing": true,
   };
 
+  // Prefer the username/handle value used by the site when a workbook provides
+  // both a username-style column and a Discord display-name column. Display-name
+  // columns remain supported as fallbacks for older or partial exports.
+  const DISCORD_COLUMN_PREFERENCE = [
+    "Username",
+    "Discord Username",
+    "Discord/Username",
+    "Discord Handle",
+    "Discord User",
+    "Discord",
+    "DISCORD",
+    "Discord Name",
+    "Discord Display Name",
+  ];
+
   // Sanitize name candidate.
   const sanitizeNameCandidate = (raw) => {
     const text = normalizeWhitespace(raw);
@@ -129,6 +144,19 @@
     if (!text) return "";
     const key = text.toLowerCase();
     return DISCORD_PLACEHOLDERS[key] ? "" : text;
+  };
+
+  // Pick the first meaningful Discord candidate while letting placeholder values
+  // such as "n/a" fall through to later alias columns.
+  const pickPreferredDiscordValue = (row) => {
+    let firstPresent;
+    for (const name of DISCORD_COLUMN_PREFERENCE) {
+      const value = pick(row, [name]);
+      if (value === undefined) continue;
+      if (firstPresent === undefined) firstPresent = value;
+      if (sanitizeDiscordCandidate(value)) return value;
+    }
+    return firstPresent;
   };
 
   // Return whether non empty profile value.
@@ -163,7 +191,7 @@
       const thRaw = pickFirstNonEmpty(row, ["Town-Hall", "Town Hall", "TownHall", "Townhall", "TH"]);
       const clanRaw = pickFirstNonEmpty(row, ["CLAN", "Clan"]);
       const warPrefRaw = pickFirstNonEmpty(row, ["War Preference", "WarPref", "War preference"]);
-      const discordRaw = pickFirstNonEmpty(row, ["Username", "Discord Username", "Discord/Username", "Discord", "DISCORD", "Discord Handle", "Discord User"]);
+      const discordRaw = pickPreferredDiscordValue(row);
 
       const name = normalizeWhitespace(nameRaw);
       const tag = normalizeTag(tagRaw);
@@ -541,16 +569,6 @@
       const clanKey = normalizeClanKey(account.clanKey || account.clan);
       const clanLabel = normalizeWhitespace(account.clan);
 
-      if (filters.excludeWarOut && normalizeWarPref(account.warPref) === "out") {
-        ignoredWarOut.push({
-          rowNumber: account.rowNumber,
-          tag,
-          clan: clanLabel,
-          reason: "war preference is out",
-        });
-        continue;
-      }
-
       if (allowedSet && !allowedSet.has(clanKey)) {
         ignoredClanNotAllowed.push({
           rowNumber: account.rowNumber,
@@ -607,6 +625,19 @@
         } else {
           matchedUnchanged.push(entry);
         }
+        continue;
+      }
+
+      // The war-out filter is for deciding whether to add a new member from the
+      // spreadsheet. Existing roster members should still receive safe profile
+      // refreshes such as Discord/name/TH updates.
+      if (filters.excludeWarOut && normalizeWarPref(account.warPref) === "out") {
+        ignoredWarOut.push({
+          rowNumber: account.rowNumber,
+          tag,
+          clan: clanLabel,
+          reason: "war preference is out",
+        });
         continue;
       }
 
