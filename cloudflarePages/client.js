@@ -1545,7 +1545,8 @@
             const projected = projectedRaw && typeof projectedRaw === "object" ? projectedRaw : {};
             const projectedTag = normalizeClanTag(projected.tag);
             if (!projectedTag) return null;
-            const canonicalSeed = canonicalByTag[projectedTag] && typeof canonicalByTag[projectedTag] === "object"
+            const hasCanonicalPlayer = Object.prototype.hasOwnProperty.call(canonicalByTag, projectedTag);
+            const canonicalSeed = hasCanonicalPlayer && canonicalByTag[projectedTag] && typeof canonicalByTag[projectedTag] === "object"
                 ? canonicalByTag[projectedTag]
                 : {};
             const merged = Object.assign({}, canonicalSeed, projected);
@@ -1561,6 +1562,16 @@
             merged.updatedAt = toStr(projected.updatedAt).trim() || projectionUpdatedAt;
             merged.synthetic = projected.synthetic === true || !Object.prototype.hasOwnProperty.call(canonicalByTag, projectedTag);
             merged.slot = null;
+
+            // Public lineup projections are snapshots of live lineup order. For players
+            // that still exist in the canonical roster, keep admin-owned profile
+            // metadata canonical so a stale projection cannot hide later edits.
+            if (hasCanonicalPlayer) {
+                merged.discord = toStr(canonicalSeed.discord);
+                merged.notes = canonicalSeed.notes != null ? canonicalSeed.notes : canonicalSeed.note;
+                merged.excludeAsSwapTarget = toBoolFlag(canonicalSeed.excludeAsSwapTarget);
+                merged.excludeAsSwapSource = toBoolFlag(canonicalSeed.excludeAsSwapSource);
+            }
             return merged;
         };
 
@@ -3164,6 +3175,7 @@
         105000035: "II",
         105000034: "III",
     };
+    const LEAGUE_TIER_ID_BASE = 105000000;
 
     // Get league icon URL from family.
     const getLeagueIconUrlFromFamily = (familyRaw) => {
@@ -3217,14 +3229,16 @@
         return "";
     };
 
-    // Get the confirmed Legend League tier numeral from an explicit API tier id only.
-    const getLegendLeagueTierOverlayText = (playerRaw) => {
+    // Get league tier overlay text from an explicit API leagueTier.id only.
+    const getLeagueTierOverlayText = (playerRaw) => {
         const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
         const leagueTier = player.leagueTier && typeof player.leagueTier === "object" ? player.leagueTier : null;
         const tierId = toNonNegativeInt(leagueTier && leagueTier.id);
-        return tierId > 0 && Object.prototype.hasOwnProperty.call(LEGEND_LEAGUE_TIER_OVERLAY_BY_ID, tierId)
-            ? LEGEND_LEAGUE_TIER_OVERLAY_BY_ID[tierId]
-            : "";
+        if (tierId > 0 && Object.prototype.hasOwnProperty.call(LEGEND_LEAGUE_TIER_OVERLAY_BY_ID, tierId)) {
+            return LEGEND_LEAGUE_TIER_OVERLAY_BY_ID[tierId];
+        }
+        const tierNumber = tierId - LEAGUE_TIER_ID_BASE;
+        return tierNumber >= 1 && tierNumber <= 33 ? String(tierNumber) : "";
     };
 
     // Resolve home league object from player.
@@ -3285,7 +3299,7 @@
             name: name,
             legacyLeagueIconSrc: legacyLeagueIconSrc,
             fallbackAssetFamily: resolveHomeLeagueAssetFamily(name),
-            tierOverlayText: getLegendLeagueTierOverlayText(player),
+            tierOverlayText: getLeagueTierOverlayText(player),
         };
     };
 
@@ -3319,7 +3333,7 @@
         return meta;
     };
 
-    // Get roster card league badge meta using local/static league icons plus explicit Legend tier overlays.
+    // Get roster card league badge meta using local/static league icons plus explicit league tier overlays.
     const getRosterCardLeagueBadgeMeta = (playerRaw, dataRaw) => {
         // Resolve local icon for a league name/family pair.
         const resolveLocalLeagueMeta = (nameRaw, familyRaw, tierOverlayTextRaw) => {
