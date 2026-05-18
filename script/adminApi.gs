@@ -23,6 +23,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getPlayerProfile(args[0], args[1]);
 		case "syncDiscordUsernameForPlayerTag":
 			return syncDiscordUsernameForPlayerTag(args[0], args[1], args[2]);
+		case "debugFirebaseAuthForDiscordSync":
+			return debugFirebaseAuthForDiscordSync(args[0]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}
@@ -112,6 +114,26 @@ function sanitizeDiscordUsername_(discordUsernameRaw) {
 	return sanitized;
 }
 
+// Return safe Firebase auth diagnostics for the Discord-sync transport path.
+function debugFirebaseAuthForDiscordSync(botSecret) {
+	assertDiscordBotApiSecret_(botSecret);
+	clearFirebaseAccessTokenCache_();
+	const config = getFirebaseConfig_();
+	const diagnostics = {
+		ok: true,
+		dbUrlPresent: !!config.dbUrl,
+		clientEmailPresent: !!config.clientEmail,
+		tokenUriPresent: !!config.tokenUri,
+		privateKeyHasBegin: config.privateKey.indexOf("-----BEGIN PRIVATE KEY-----") >= 0,
+		privateKeyHasEnd: config.privateKey.indexOf("-----END PRIVATE KEY-----") >= 0,
+		privateKeyNewlineCount: (config.privateKey.match(/\n/g) || []).length,
+		privateKeyLength: config.privateKey.length,
+	};
+	requestFirebaseAccessToken_();
+	diagnostics.tokenAcquired = true;
+	return diagnostics;
+}
+
 // Set a missing Discord username for matching active-roster player tags.
 function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) {
 	assertDiscordBotApiSecret_(botSecret);
@@ -180,6 +202,7 @@ function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) 
 			const updatedAt = new Date().toISOString();
 			const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
 			replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
+			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
 		}
 
 		return {

@@ -16,6 +16,58 @@ function normalizeFirebaseDbUrl_(urlRaw) {
 	return raw.replace(/\/+$/, "");
 }
 
+// Normalize Firebase service-account private keys into canonical PEM text.
+function normalizeFirebasePrivateKey_(valueRaw) {
+	let value = String(valueRaw == null ? "" : valueRaw).trim();
+
+	// Support values copied as JSON-stringified PEM text.
+	if (value.length >= 2 && value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') {
+		try {
+			const parsedString = JSON.parse(value);
+			if (typeof parsedString === "string") {
+				value = parsedString;
+			}
+		} catch (err) {
+			// Fall through to the wrapping-quote cleanup below for non-JSON quoted text.
+		}
+	}
+
+	// Support pasting the full service-account JSON document into the Script Property.
+	const objectCandidate = String(value == null ? "" : value).trim();
+	if (objectCandidate.charAt(0) === "{" && objectCandidate.charAt(objectCandidate.length - 1) === "}") {
+		try {
+			const parsedObject = JSON.parse(objectCandidate);
+			if (parsedObject && typeof parsedObject === "object" && !Array.isArray(parsedObject) && parsedObject.private_key != null) {
+				value = String(parsedObject.private_key);
+			}
+		} catch (err) {
+			// Validation below emits the safe, actionable error for unsupported formats.
+		}
+	}
+
+	value = String(value == null ? "" : value);
+	value = value
+		.replace(/\\\\r\\\\n/g, "\n")
+		.replace(/\\\\n/g, "\n")
+		.replace(/\\r\\n/g, "\n")
+		.replace(/\\n/g, "\n")
+		.replace(/\r\n?/g, "\n")
+		.trim();
+
+	if (
+		value.length >= 2 &&
+		((value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') ||
+			(value.charAt(0) === "'" && value.charAt(value.length - 1) === "'"))
+	) {
+		value = value.slice(1, -1).trim();
+	}
+
+	if (value.indexOf("-----BEGIN PRIVATE KEY-----") < 0 || value.indexOf("-----END PRIVATE KEY-----") < 0) {
+		throw new Error("Invalid FIREBASE_PRIVATE_KEY format. Expected full PEM private key including BEGIN/END lines.");
+	}
+	return value;
+}
+
 // Normalize Firebase path.
 function normalizeFirebasePath_(pathRaw) {
 	return String(pathRaw == null ? "" : pathRaw)
@@ -58,7 +110,7 @@ function getFirebaseConfig_() {
 	const config = {
 		dbUrl: normalizeFirebaseDbUrl_(getRequiredScriptProperty_("FIREBASE_DB_URL")),
 		clientEmail: String(getRequiredScriptProperty_("FIREBASE_CLIENT_EMAIL")).trim(),
-		privateKey: String(getRequiredScriptProperty_("FIREBASE_PRIVATE_KEY")).replace(/\\n/g, "\n"),
+		privateKey: normalizeFirebasePrivateKey_(getRequiredScriptProperty_("FIREBASE_PRIVATE_KEY")),
 		tokenUri: String(getRequiredScriptProperty_("FIREBASE_TOKEN_URI")).trim(),
 	};
 	if (!config.dbUrl) throw new Error("Invalid FIREBASE_DB_URL Script Property.");
@@ -591,7 +643,9 @@ function markActiveDataWriteSuccess_(timestampRaw, sourceRaw) {
 		.trim()
 		.toLowerCase();
 	const source =
-		sourceText === ACTIVE_DATA_WRITE_SOURCE_PUBLISH || sourceText === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH
+		sourceText === ACTIVE_DATA_WRITE_SOURCE_PUBLISH ||
+		sourceText === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH ||
+		sourceText === ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC
 			? sourceText
 			: ACTIVE_DATA_WRITE_SOURCE_UNKNOWN;
 	const props = PropertiesService.getScriptProperties();
@@ -632,7 +686,12 @@ function getLastSuccessfulActiveWriteSource_() {
 	const source = String(props.getProperty(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_SOURCE_PROPERTY) || "")
 		.trim()
 		.toLowerCase();
-	if (source === ACTIVE_DATA_WRITE_SOURCE_PUBLISH || source === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH) return source;
+	if (
+		source === ACTIVE_DATA_WRITE_SOURCE_PUBLISH ||
+		source === ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH ||
+		source === ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC
+	)
+		return source;
 	return ACTIVE_DATA_WRITE_SOURCE_UNKNOWN;
 }
 
