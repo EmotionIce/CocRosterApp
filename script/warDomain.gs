@@ -786,7 +786,6 @@ function applyRegularWarHistorySummaryToMeta_(warPerformanceRaw, summaryRaw) {
 	meta.lastRegularWarRepairSuccessAt = String(summary.lastRepairSuccessAt || "");
 	meta.regularWarStatusLevel = String(summary.statusLevel || "");
 	meta.regularWarStatusMessage = String(summary.statusMessage || "");
-	meta.lastRegularWarFinalizationIncomplete = meta.unresolvedRegularWarCount > 0;
 	if (summary.latestFinalizedAt) {
 		meta.lastRegularWarFinalizedAt = String(summary.latestFinalizedAt);
 	}
@@ -1424,7 +1423,7 @@ function recordRegularWarFinalizationAttempt_(warPerformance, warKey, source, re
 	meta.lastRegularWarFinalizationWarKey = String(warKey == null ? "" : warKey).trim();
 	meta.lastRegularWarFinalizationSource = String(source == null ? "" : source).trim();
 	meta.lastRegularWarFinalizationReason = String(reason == null ? "" : reason).trim();
-	meta.lastRegularWarFinalizationIncomplete = toNonNegativeInt_(meta.unresolvedRegularWarCount) > 0;
+	meta.lastRegularWarFinalizationIncomplete = !!incomplete;
 	meta.lastRegularWarFinalizationAttemptAt = nowText;
 	meta.lastRegularWarFinalizationStatus = finalized ? "finalized" : "skipped";
 	if (finalized) meta.lastRegularWarFinalizedAt = nowText;
@@ -1717,7 +1716,7 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	const currentWarMeta = sanitizeRegularWarCurrentWar_(options.currentWarMeta);
 	const previousSnapshot = sanitizeRegularWarSnapshot_(options.previousSnapshot);
 	const finalizationTagSet = buildRegularWarFinalizeTagSet_(warPerformance, previousWarKey, trackedTagSet);
-	const allowProvisionalFallback = options.allowProvisionalFallback !== false;
+	const allowProvisionalFallback = options.allowProvisionalFallback === true;
 
 	if (currentWar && currentWarMeta.warKey === previousWarKey && String(currentWarMeta.state || "").toLowerCase() === "warended" && warHasMemberLevelDataForClan_(currentWar, clanTag)) {
 		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, currentWar, clanTag, finalizationTagSet, nowIso, "currentWarEnded", "directCurrentWarEnded", false);
@@ -1740,6 +1739,12 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 
 	if (!allowProvisionalFallback) {
 		const waitingReason = warLogEntry ? "warLogMissingMemberDetail_waitingForFinalData" : warLogLookupFailed ? "warLogLookupFailed_waitingForFinalData" : "waitingForFinalData";
+		Logger.log(
+			"regularWar finalization provisional fallback blocked clanTag=%s warKey=%s reason=%s",
+			clanTag,
+			previousWarKey,
+			waitingReason,
+		);
 		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "awaitingFinalData", waitingReason, false, false, nowIso);
 		return { attempted: true, finalized: false, source: "awaitingFinalData", incomplete: false, reason: waitingReason };
 	}

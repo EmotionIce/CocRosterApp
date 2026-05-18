@@ -422,14 +422,26 @@ function updateActiveRosterDataCaches_(text) {
 	});
 }
 
-// Handle write active roster data to Firebase.
-function writeActiveRosterDataToFirebase_(rosterDataRaw) {
-	const validated = validateRosterData_(rosterDataRaw);
+// PUT an already-validated active roster payload to Firebase without touching caches.
+function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
+	const validated = validatedRosterData && typeof validatedRosterData === "object" ? validatedRosterData : {};
 	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
 	firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "PUT", encodedPayload);
 	const payloadText = JSON.stringify(validated);
-	updateActiveRosterDataCaches_(payloadText);
 	return { rosterData: validated, text: payloadText };
+}
+
+// Handle write already-validated active roster data to Firebase.
+function writeValidatedActiveRosterDataToFirebase_(validatedRosterData) {
+	const writeResult = putValidatedActiveRosterDataToFirebase_(validatedRosterData);
+	updateActiveRosterDataCaches_(writeResult.text);
+	return writeResult;
+}
+
+// Handle write active roster data to Firebase.
+function writeActiveRosterDataToFirebase_(rosterDataRaw) {
+	const validated = validateRosterData_(rosterDataRaw);
+	return writeValidatedActiveRosterDataToFirebase_(validated);
 }
 
 // Get server date string.
@@ -650,7 +662,7 @@ function replaceActiveRosterData_(validatedRosterData, options) {
 			sourceSnapshot = null;
 		}
 	}
-	const writeResult = writeActiveRosterDataToFirebase_(validated);
+	const writeResult = writeValidatedActiveRosterDataToFirebase_(validated);
 
 	return {
 		replacedCount: sourceSnapshot ? 1 : 0,

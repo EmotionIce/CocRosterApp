@@ -1,8 +1,8 @@
 // Refresh-all/pipeline orchestration and related diagnostics.
 
-// Build a stable, validated payload fingerprint for refresh change detection.
-function normalizeActiveRosterForCompare_(rosterDataRaw) {
-	const validated = validateRosterData_(rosterDataRaw);
+// Build a stable payload fingerprint when the caller already holds validated data.
+function normalizeActiveRosterForCompareValidated_(validatedRosterData) {
+	const validated = validatedRosterData && typeof validatedRosterData === "object" ? validatedRosterData : {};
 	// Only compare fields that represent the active roster payload itself.
 	return JSON.stringify({
 		schemaVersion: validated.schemaVersion,
@@ -14,16 +14,26 @@ function normalizeActiveRosterForCompare_(rosterDataRaw) {
 	});
 }
 
+// Build a stable, validated payload fingerprint for refresh change detection.
+function normalizeActiveRosterForCompare_(rosterDataRaw) {
+	return normalizeActiveRosterForCompareValidated_(validateRosterData_(rosterDataRaw));
+}
+
+// Compare payloads when both sides already crossed a validation boundary.
+function hasActiveRosterPayloadChangedValidated_(beforeValidated, afterValidated) {
+	return normalizeActiveRosterForCompareValidated_(beforeValidated) !== normalizeActiveRosterForCompareValidated_(afterValidated);
+}
+
 // Compare normalized payloads so transient fields do not trigger false positives.
 function hasActiveRosterPayloadChanged_(beforeRaw, afterRaw) {
 	return normalizeActiveRosterForCompare_(beforeRaw) !== normalizeActiveRosterForCompare_(afterRaw);
 }
 
-// Stamp `lastUpdatedAt` while preserving the validated roster payload shape.
-function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
+// Stamp `lastUpdatedAt` when the caller already holds a validated roster payload.
+function withValidatedRosterLastUpdatedAt_(validatedRosterData, timestampRaw) {
 	const timestamp = String(timestampRaw == null ? "" : timestampRaw).trim() || new Date().toISOString();
-	const validated = validateRosterData_(rosterDataRaw);
-	// Rebuild the payload explicitly so validation strips anything unsupported.
+	const validated = validatedRosterData && typeof validatedRosterData === "object" ? validatedRosterData : {};
+	// Rebuild explicitly so internal trusted callers still keep the canonical active payload shape.
 	const out = {
 		schemaVersion: validated.schemaVersion,
 		pageTitle: validated.pageTitle,
@@ -33,10 +43,15 @@ function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
 		lastUpdatedAt: timestamp,
 	};
 	if (validated.publicConfig && typeof validated.publicConfig === "object") {
-		// Preserve optional public config when it is part of the validated shape.
 		out.publicConfig = validated.publicConfig;
 	}
-	return validateRosterData_(out);
+	return out;
+}
+
+// Stamp `lastUpdatedAt` while preserving the validated roster payload shape.
+function withRosterLastUpdatedAt_(rosterDataRaw, timestampRaw) {
+	const validated = validateRosterData_(rosterDataRaw);
+	return validateRosterData_(withValidatedRosterLastUpdatedAt_(validated, timestampRaw));
 }
 
 // Normalize issue text into a single line and keep it within a safe UI length.
@@ -75,13 +90,79 @@ function findRosterInDataById_(rosterData, rosterIdRaw) {
 	return null;
 }
 
-// Deep-clone roster payload so a failed step can roll back safely.
-function cloneRosterDataForRefresh_(rosterDataRaw) {
+// Deep-clone a rollback fragment so a failed step can restore only the state it owns.
+function cloneRefreshRollbackFragment_(valueRaw, labelRaw) {
 	try {
-		return JSON.parse(JSON.stringify(rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {}));
+		return JSON.parse(JSON.stringify(valueRaw == null ? null : valueRaw));
 	} catch (err) {
-		throw new Error("Unable to clone roster data for refresh rollback: " + errorMessage_(err));
+		const label = String(labelRaw == null ? "state" : labelRaw).trim() || "state";
+		throw new Error("Unable to clone refresh rollback " + label + ": " + errorMessage_(err));
 	}
+}
+
+// Snapshot the current roster plus the only shared state a step is allowed to mutate.
+function snapshotRefreshStepRollbackState_(rosterDataRaw, rosterIdRaw, includePlayerMetricsRaw, includeAllRostersRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	let rosterIndex = -1;
+	let rosterSnapshot = null;
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		if (String(roster.id || "").trim() !== rosterId) continue;
+		rosterIndex = i;
+		rosterSnapshot = cloneRefreshRollbackFragment_(roster, "roster");
+		break;
+	}
+	return {
+		rosterId: rosterId,
+		rosterIndex: rosterIndex,
+		hadRoster: rosterIndex >= 0,
+		roster: rosterSnapshot,
+		includeAllRosters: includeAllRostersRaw === true,
+		allRosters: includeAllRostersRaw === true ? cloneRefreshRollbackFragment_(rosters, "all rosters") : null,
+		includePlayerMetrics: includePlayerMetricsRaw === true,
+		playerMetrics: includePlayerMetricsRaw === true ? cloneRefreshRollbackFragment_(rosterData.playerMetrics, "playerMetrics") : null,
+	};
+}
+
+// Restore only the fragments owned by the failed step, keeping all other roster work intact.
+function restoreRefreshStepRollbackState_(rosterDataRaw, snapshotRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+	if (!Array.isArray(rosterData.rosters)) rosterData.rosters = [];
+	if (snapshot.includeAllRosters) {
+		rosterData.rosters = cloneRefreshRollbackFragment_(snapshot.allRosters, "all rosters restore") || [];
+		if (snapshot.includePlayerMetrics) {
+			rosterData.playerMetrics = cloneRefreshRollbackFragment_(snapshot.playerMetrics, "playerMetrics restore");
+		}
+		return rosterData;
+	}
+	const rosters = rosterData.rosters;
+	const rosterId = String(snapshot.rosterId == null ? "" : snapshot.rosterId).trim();
+	let currentRosterIndex = -1;
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		if (String(roster.id || "").trim() === rosterId) {
+			currentRosterIndex = i;
+			break;
+		}
+	}
+	if (snapshot.hadRoster) {
+		const restoredRoster = cloneRefreshRollbackFragment_(snapshot.roster, "roster restore");
+		if (currentRosterIndex >= 0) {
+			rosters[currentRosterIndex] = restoredRoster;
+		} else {
+			const preferredIndex = Math.max(0, Math.min(toNonNegativeInt_(snapshot.rosterIndex), rosters.length));
+			rosters.splice(preferredIndex, 0, restoredRoster);
+		}
+	} else if (currentRosterIndex >= 0) {
+		rosters.splice(currentRosterIndex, 1);
+	}
+	if (snapshot.includePlayerMetrics) {
+		rosterData.playerMetrics = cloneRefreshRollbackFragment_(snapshot.playerMetrics, "playerMetrics restore");
+	}
+	return rosterData;
 }
 
 // Collect player tags that appear more than once across all roster sections.
@@ -736,6 +817,9 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		prefetchedCwlWarRawByTag: options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {},
 		prefetchedCwlWarErrorByTag: options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {},
 		metricsRunState: options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null,
+		allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
+		allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
+		statsOnlyRegularWarFinalization: options.statsOnlyRegularWarFinalization === true,
 	};
 
 	// Step status payload returned to callers and surfaced in refresh-all diagnostics.
@@ -820,7 +904,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const runStepWithRollback = (stepKey, stepLabelRaw, stepFn) => {
 		const step = steps[stepKey];
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
-		const beforeStep = cloneRosterDataForRefresh_(rosterData);
+		const rollbackSnapshot = snapshotRefreshStepRollbackState_(rosterData, rosterId, stepKey === "stats", stepKey === "pool");
 		const stepStartMs = Date.now();
 		try {
 			touchPipelineLockLease();
@@ -837,7 +921,11 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 						failureRosterValidationErr = validationErr;
 					}
 				}
-				rosterData = failureRosterData || beforeStep;
+				if (failureRosterData) {
+					rosterData = failureRosterData;
+				} else {
+					rosterData = restoreRefreshStepRollbackState_(rosterData, rollbackSnapshot);
+				}
 				const failureMessage = failureRosterValidationErr
 					? stepLabel + " failed and returned invalid rosterData: " + errorMessage_(failureRosterValidationErr)
 					: getRefreshPipelineStepFailureMessage_(stepResult, stepLabel);
@@ -857,8 +945,8 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			}
 
 			if (stepResult && stepResult.rosterData) {
-				// Success paths can still return mutated roster data that must be revalidated.
-				rosterData = validateRosterData_(stepResult.rosterData);
+				// Refresh-all already crossed the validation boundary; standalone callers stay defensive.
+				rosterData = skipInitialValidation ? stepResult.rosterData : validateRosterData_(stepResult.rosterData);
 			}
 			touchPipelineLockLease();
 			step.ok = true;
@@ -869,9 +957,9 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			stepDurationMs[stepKey] = Math.max(0, Date.now() - stepStartMs);
 			return true;
 		} catch (err) {
-			// Unexpected exceptions always roll back to the pre-step snapshot.
+			// Unexpected exceptions always roll back the fragments this step owns.
 			const detailedMessage = appendDuplicateRosterTagDetailsToError_(stepLabel, err, rosterData);
-			rosterData = beforeStep;
+			rosterData = restoreRefreshStepRollbackState_(rosterData, rollbackSnapshot);
 			step.ok = false;
 			step.skipped = false;
 			step.message = detailedMessage;
@@ -882,8 +970,31 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		}
 	};
 
-	// Branch once on roster existence, then execute pipeline in dependency order.
-	if (!initialRoster) {
+	// Finalization-only runs keep the full payload loaded but only touch regular-war stats/history.
+	if (pipelinePrefetchOptions.statsOnlyRegularWarFinalization) {
+		if (!initialRoster) {
+			const notFoundMessage = "Roster not found in current refresh payload.";
+			steps.pool.message = notFoundMessage;
+			addIssue("pipeline", notFoundMessage);
+			markIntentionalSkip("modeTransition", "finalization-only mode skipped: roster not found");
+			markSkippedAfterFailedStep("lineup", initialLineupStepLabel, "finalization-only roster lookup");
+			markSkippedAfterFailedStep("stats", initialStatsStepLabel, "finalization-only roster lookup");
+			markSkippedAfterFailedStep("bench", benchStepLabel, "finalization-only roster lookup");
+		} else if (initialTrackingMode !== "regularWar") {
+			markIntentionalSkip("pool", "finalization-only mode skipped pool sync");
+			markIntentionalSkip("modeTransition", "finalization-only mode skipped tracking-mode detection");
+			markIntentionalSkip("lineup", "finalization-only mode skipped lineup sync");
+			markIntentionalSkip("stats", "finalization-only mode skipped: roster is not in regular-war mode");
+			markIntentionalSkip("bench", "finalization-only mode skipped bench planning");
+		} else {
+			markIntentionalSkip("pool", "finalization-only mode skipped pool sync");
+			markIntentionalSkip("modeTransition", "finalization-only mode skipped tracking-mode detection");
+			markIntentionalSkip("lineup", "finalization-only mode skipped lineup sync");
+			runStepWithRollback("stats", "refresh tracking stats", () => refreshTrackingStatsCore_(rosterData, rosterId, pipelinePrefetchOptions));
+			markIntentionalSkip("bench", "finalization-only mode skipped bench planning");
+		}
+	} else if (!initialRoster) {
+		// Branch once on roster existence, then execute the normal pipeline in dependency order.
 		const notFoundMessage = "Roster not found in current refresh payload.";
 		steps.pool.message = notFoundMessage;
 		addIssue("pipeline", notFoundMessage);
@@ -935,7 +1046,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		} else {
 			if (!lineupStepOk && allowStatsWithoutLineup) {
 				Logger.log(
-					"refreshRosterPipeline: roster '%s' running regular-war stats/repair despite lineup sync issue so history repair can proceed.",
+					"refreshRosterPipeline: roster '%s' running regular-war stats despite lineup sync issue so finalization/repair work can proceed when needed.",
 					rosterId,
 				);
 			}
@@ -961,13 +1072,15 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		}
 	}
 
-	// Final validation guarantees the caller always receives schema-safe roster data.
-	let validatedRosterData = null;
-	try {
-		touchPipelineLockLease();
-		validatedRosterData = validateRosterData_(rosterData);
-	} catch (err) {
-		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh pipeline payload", err, rosterData));
+	// Refresh-all keeps the payload trusted between roster pipelines and validates once at final output.
+	let validatedRosterData = rosterData;
+	if (!skipInitialValidation) {
+		try {
+			touchPipelineLockLease();
+			validatedRosterData = validateRosterData_(rosterData);
+		} catch (err) {
+			throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh pipeline payload", err, rosterData));
+		}
 	}
 	const finalRoster = findRosterInDataById_(validatedRosterData, rosterId);
 	// Use the final roster state in case a step changed the tracking mode.
@@ -1086,12 +1199,24 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	// Ensure mutable run-state containers exist for cross-roster metrics reuse.
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
 	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const statsOnlyRegularWarFinalization = options.statsOnlyRegularWarFinalization === true;
+	const requestedRosterIdSet = {};
+	const requestedRosterIdsRaw = Array.isArray(options.rosterIds) ? options.rosterIds : [];
+	for (let i = 0; i < requestedRosterIdsRaw.length; i++) {
+		const requestedRosterId = String(requestedRosterIdsRaw[i] == null ? "" : requestedRosterIdsRaw[i]).trim();
+		if (!requestedRosterId) continue;
+		requestedRosterIdSet[requestedRosterId] = true;
+	}
+	const hasRequestedRosterFilter = Object.keys(requestedRosterIdSet).length > 0;
 	const rosterIds = [];
+	const targetedSourceRosters = [];
 	// Freeze the roster iteration order up front so later mutations do not affect coverage.
 	for (let i = 0; i < sourceRosters.length; i++) {
 		const rosterId = String((sourceRosters[i] && sourceRosters[i].id) || "").trim();
 		if (!rosterId) continue;
+		if (hasRequestedRosterFilter && !requestedRosterIdSet[rosterId]) continue;
 		rosterIds.push(rosterId);
+		targetedSourceRosters.push(sourceRosters[i]);
 	}
 
 	const issues = [];
@@ -1101,13 +1226,15 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	// Prefetch once for all rosters to reduce API calls and keep data temporally aligned.
 	touchActiveRosterLockLease_("refresh all prefetch");
 	const prefetchStartMs = Date.now();
-	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(sourceRosters);
+	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(hasRequestedRosterFilter ? targetedSourceRosters : sourceRosters);
 	prefetchDurationMs = Math.max(0, Date.now() - prefetchStartMs);
 	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
 	const ownershipSnapshotStartMs = Date.now();
-	const ownershipSnapshot = buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
-		metricsRunState: metricsRunState,
-	});
+	const ownershipSnapshot = statsOnlyRegularWarFinalization
+		? null
+		: buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
+				metricsRunState: metricsRunState,
+			});
 	ownershipSnapshotDurationMs = Math.max(0, Date.now() - ownershipSnapshotStartMs);
 
 	// Execute the same single-roster pipeline for each id and aggregate diagnostics.
@@ -1132,6 +1259,9 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 						ownershipSnapshot: ownershipSnapshot,
 						skipInitialValidation: true,
 						metricsRunState: metricsRunState,
+						allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
+						allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
+						statsOnlyRegularWarFinalization: statsOnlyRegularWarFinalization,
 					},
 					pipelinePrefetchOptions,
 				),
@@ -1220,13 +1350,14 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(
-		"refreshAllRosters timing totalMs=%s prefetchMs=%s profileWarmupMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s profileCandidates=%s profileLiveRequested=%s profileLiveSucceeded=%s profileLiveFailed=%s profileLiveRateLimited=%s profileBlockedMisses=%s profileFetchBlocked=%s",
+		"refreshAllRosters timing totalMs=%s prefetchMs=%s profileWarmupMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s targeted=%s profileCandidates=%s profileLiveRequested=%s profileLiveSucceeded=%s profileLiveFailed=%s profileLiveRateLimited=%s profileBlockedMisses=%s profileFetchBlocked=%s",
 		totalDurationMs,
 		prefetchDurationMs,
 		profileWarmupDurationMs,
 		ownershipSnapshotDurationMs,
 		cumulativeRosterPipelineDurationMs,
 		processedRosters,
+		hasRequestedRosterFilter,
 		profileWarmupCandidateCount,
 		profileWarmupLiveRequested,
 		profileWarmupLiveSucceeded,

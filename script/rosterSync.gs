@@ -2116,6 +2116,21 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	const previousActiveWarKey = String((lifecycle && lifecycle.activeWarKey) || (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey) || "").trim();
 	const sameTrackedLiveWar = !!(previousActiveWarKey && currentLiveWarKey && previousActiveWarKey === currentLiveWarKey);
 	const finalizationDueNow = isRegularWarFinalizationDue_(lifecycle, nowIso);
+	const allowRegularWarProvisionalFallback = options.allowRegularWarProvisionalFallback === true;
+	const retryBudgetExhaustedWithoutDueAt =
+		String(lifecycle.finalizationStatus || "") === "exhausted" && !String(lifecycle.finalizationDueAt || "").trim();
+	const allowRetryAfterExhausted = options.allowRegularWarHistoryRepair === true;
+	const skipAutomaticRetryAfterExhausted = retryBudgetExhaustedWithoutDueAt && !allowRetryAfterExhausted;
+	if (skipAutomaticRetryAfterExhausted) {
+		Logger.log(
+			"regularWar finalization exhausted retry skipped rosterId=%s clanTag=%s previousActiveWarKey=%s finalizationStatus=%s reason=%s",
+			ctx.rosterId,
+			ctx.clanTag,
+			previousActiveWarKey || "",
+			String(lifecycle.finalizationStatus || ""),
+			"retryBudgetExhaustedNoDueAt",
+		);
+	}
 	if (isCurrentWarPrivate) {
 		Logger.log(
 			"refreshRegularWarStatsCore private-war-log rosterId=%s clanTag=%s previousActiveWarKey=%s",
@@ -2126,7 +2141,8 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 
 	let finalization = { attempted: false, finalized: false, source: "", incomplete: false, reason: "" };
-	const shouldFinalizePrevious = !isCurrentWarPrivate && shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentLiveWarKey || currentWarMeta.warKey, currentWarState);
+	const shouldFinalizePreviousBase = !isCurrentWarPrivate && shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentLiveWarKey || currentWarMeta.warKey, currentWarState);
+	const shouldFinalizePrevious = shouldFinalizePreviousBase && !skipAutomaticRetryAfterExhausted;
 	if (shouldFinalizePrevious) {
 		const shouldDeferProvisionalFallback = sameTrackedLiveWar && currentWarState === "warended" && hasRegularWarFinalizationRetryBudget_(lifecycle);
 		finalization = tryFinalizePreviousRegularWar_({
@@ -2138,7 +2154,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			clanTag: ctx.clanTag,
 			trackedTagSet: trackedHistoryTagSet,
 			nowIso: nowIso,
-			allowProvisionalFallback: !shouldDeferProvisionalFallback,
+			allowProvisionalFallback: allowRegularWarProvisionalFallback && !shouldDeferProvisionalFallback,
 		});
 	}
 
@@ -2152,28 +2168,57 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			clanTag: ctx.clanTag,
 			trackedTagSet: trackedHistoryTagSet,
 			nowIso: nowIso,
+			allowProvisionalFallback: allowRegularWarProvisionalFallback,
 		});
 	}
-	const repairResult = attemptRepairIncompleteRegularWarHistory_({
-		warPerformance: warPerformance,
-		clanTag: ctx.clanTag,
-		trackedTagSet: trackedHistoryTagSet,
-		nowIso: nowIso,
-	});
+	const shouldAttemptRepair = options.allowRegularWarHistoryRepair !== false;
+	const repairResult = shouldAttemptRepair
+		? attemptRepairIncompleteRegularWarHistory_({
+				warPerformance: warPerformance,
+				clanTag: ctx.clanTag,
+				trackedTagSet: trackedHistoryTagSet,
+				nowIso: nowIso,
+			})
+		: {
+				attemptedWarCount: 0,
+				repairedWarCount: 0,
+				warLogAvailable: false,
+				warLogUnavailableReason: "",
+				errorCount: 0,
+				summary: summarizeRegularWarHistoryState_(warPerformance, nowIso),
+			};
 
 	const nextLifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
-	const keepPendingPreviousWar =
-		!isCurrentWarPrivate &&
-		!!previousActiveWarKey &&
-		!!shouldFinalizePrevious &&
-		!!(finalization && finalization.attempted) &&
-		!(finalization && finalization.finalized) &&
-		(!liveSnapshot || sameTrackedLiveWar);
+	const pendingFinalizationWarKey =
+		finalization && finalization.attempted && !finalization.finalized ? previousActiveWarKey || currentLiveWarKey : "";
+	const keepPendingFinalization = !!pendingFinalizationWarKey;
+	const hasNewLiveWar =
+		!!(liveSnapshot && currentWarState !== "warended" && currentLiveWarKey && currentLiveWarKey !== previousActiveWarKey);
+	const keepExhaustedPendingFinalization = skipAutomaticRetryAfterExhausted && !!previousActiveWarKey && !hasNewLiveWar;
 	const repairAttemptedWarCount = toNonNegativeInt_(repairResult && repairResult.attemptedWarCount);
 	const repairedWarCount = toNonNegativeInt_(repairResult && repairResult.repairedWarCount);
-	if ((finalization && finalization.attempted) || repairAttemptedWarCount > 0 || repairedWarCount > 0 || keepPendingPreviousWar) {
+	if (finalization && finalization.attempted) {
 		Logger.log(
-			"refreshRegularWarStatsCore repair-path rosterId=%s clanTag=%s currentWarState=%s finalizationAttempted=%s finalized=%s finalizationSource=%s finalizationReason=%s finalizationIncomplete=%s repairAttemptedWarCount=%s repairedWarCount=%s keepPendingPreviousWar=%s",
+			"regularWar finalization rosterId=%s attempted=%s finalized=%s source=%s reason=%s incomplete=%s",
+			ctx.rosterId,
+			!!finalization.attempted,
+			!!finalization.finalized,
+			String(finalization.source || ""),
+			String(finalization.reason || ""),
+			!!finalization.incomplete,
+		);
+	}
+	if (finalization && finalization.finalized && !finalization.incomplete) {
+		Logger.log(
+			"regularWar finalization authoritative success rosterId=%s warKey=%s source=%s",
+			ctx.rosterId,
+			previousActiveWarKey || currentLiveWarKey || "",
+			String(finalization.source || ""),
+		);
+	}
+	if ((finalization && finalization.attempted) || repairAttemptedWarCount > 0 || repairedWarCount > 0 || keepPendingFinalization) {
+		Logger.log(
+			"refreshRegularWarStatsCore repair-path rosterId=%s clanTag=%s currentWarState=%s finalizationAttempted=%s finalized=%s finalizationSource=%s finalizationReason=%s finalizationIncomplete=%s repairAttemptedWarCount=%s repairedWarCount=%s keepPendingFinalization=%s",
 			ctx.rosterId,
 			ctx.clanTag,
 			currentWarState,
@@ -2184,10 +2229,36 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			!!(finalization && finalization.incomplete),
 			repairAttemptedWarCount,
 			repairedWarCount,
-			keepPendingPreviousWar,
+			keepPendingFinalization,
 		);
 	}
-	if (isCurrentWarPrivate) {
+	if (keepPendingFinalization) {
+		nextLifecycle.activeWarKey = pendingFinalizationWarKey;
+		nextLifecycle.activeWarState = "pendingfinalization";
+		nextLifecycle.activeWarLastSeenAt = nowIso;
+		if (liveSnapshot) {
+			warPerformance.lastRegularWarSnapshot = liveSnapshot;
+			nextLifecycle.activeWarEndTime = String(liveSnapshot.warMeta && liveSnapshot.warMeta.endTime ? liveSnapshot.warMeta.endTime : nextLifecycle.activeWarEndTime || "");
+		}
+		if (finalizationDueNow || !nextLifecycle.finalizationDueAt) {
+			const retryLifecycle = recordRegularWarFinalizationRetry_(nextLifecycle, nowIso, finalization.reason || "awaitingFinalData");
+			nextLifecycle.finalizationStatus = retryLifecycle.finalizationStatus;
+			nextLifecycle.finalizationDueAt = retryLifecycle.finalizationDueAt;
+			nextLifecycle.finalizationAttemptCount = retryLifecycle.finalizationAttemptCount;
+			nextLifecycle.lastFinalizationAttemptAt = retryLifecycle.lastFinalizationAttemptAt;
+			nextLifecycle.lastFinalizationError = retryLifecycle.lastFinalizationError;
+			Logger.log(
+				"regularWar finalization retry scheduled rosterId=%s warKey=%s dueAt=%s reason=%s",
+				ctx.rosterId,
+				pendingFinalizationWarKey,
+				String(nextLifecycle.finalizationDueAt || ""),
+				String(finalization.reason || "awaitingFinalData"),
+			);
+			if (!nextLifecycle.finalizationDueAt) {
+				Logger.log("regularWar finalization retry budget exhausted rosterId=%s warKey=%s", ctx.rosterId, pendingFinalizationWarKey);
+			}
+		}
+	} else if (isCurrentWarPrivate) {
 		nextLifecycle.activeWarKey = previousActiveWarKey || nextLifecycle.activeWarKey;
 		nextLifecycle.activeWarState = nextLifecycle.activeWarState || "notinwar";
 		nextLifecycle.activeWarLastSeenAt = nextLifecycle.activeWarLastSeenAt || nowIso;
@@ -2217,22 +2288,10 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			nextLifecycle.lastFinalizationError = retryLifecycle.lastFinalizationError;
 		}
 		warPerformance.lastRegularWarSnapshot = liveSnapshot;
-	} else if (keepPendingPreviousWar) {
+	} else if (keepExhaustedPendingFinalization) {
 		nextLifecycle.activeWarKey = previousActiveWarKey;
 		nextLifecycle.activeWarState = "pendingfinalization";
-		nextLifecycle.activeWarLastSeenAt = nowIso;
-		if (liveSnapshot) {
-			warPerformance.lastRegularWarSnapshot = liveSnapshot;
-			nextLifecycle.activeWarEndTime = String(liveSnapshot.warMeta && liveSnapshot.warMeta.endTime ? liveSnapshot.warMeta.endTime : nextLifecycle.activeWarEndTime || "");
-		}
-		if (finalization && finalization.attempted && !finalization.finalized && (finalizationDueNow || !nextLifecycle.finalizationDueAt)) {
-			const retryLifecycle = recordRegularWarFinalizationRetry_(nextLifecycle, nowIso, finalization.reason || "awaitingFinalData");
-			nextLifecycle.finalizationStatus = retryLifecycle.finalizationStatus;
-			nextLifecycle.finalizationDueAt = retryLifecycle.finalizationDueAt;
-			nextLifecycle.finalizationAttemptCount = retryLifecycle.finalizationAttemptCount;
-			nextLifecycle.lastFinalizationAttemptAt = retryLifecycle.lastFinalizationAttemptAt;
-			nextLifecycle.lastFinalizationError = retryLifecycle.lastFinalizationError;
-		}
+		nextLifecycle.activeWarLastSeenAt = nextLifecycle.activeWarLastSeenAt || nowIso;
 	} else {
 		nextLifecycle.activeWarKey = "";
 		nextLifecycle.activeWarState = currentWarState || "notinwar";
