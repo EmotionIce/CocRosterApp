@@ -221,12 +221,39 @@ function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) 
 		}
 
 		if (!locations.length) {
+			const firstRoster = rosterData.rosters[0];
+			if (!firstRoster || typeof firstRoster !== "object") {
+				throw new Error("Cannot add missing player because the first roster is unavailable.");
+			}
+			if (!Array.isArray(firstRoster.missing)) firstRoster.missing = [];
+			firstRoster.missing.push({ tag: normalizedTag, discord: sanitizedDiscordUsername });
+			const insertedIndex = firstRoster.missing.length - 1;
+			const updatedAt = new Date().toISOString();
+			const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
+			replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
+			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
 			return {
 				ok: true,
 				found: false,
-				updated: false,
-				reason: "player-not-found",
+				created: true,
+				updated: true,
+				reason: "player-created-in-missing",
 				tag: normalizedTag,
+				discordUsername: sanitizedDiscordUsername,
+				updatedCount: 0,
+				skippedExistingCount: 0,
+				addedCount: 1,
+				locations: [
+					{
+						rosterId: typeof firstRoster.id === "string" ? firstRoster.id : "",
+						rosterTitle: typeof firstRoster.title === "string" ? firstRoster.title : "",
+						role: "missing",
+						index: insertedIndex,
+						previousDiscord: "",
+						updated: true,
+						created: true,
+					},
+				],
 			};
 		}
 
