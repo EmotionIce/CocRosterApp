@@ -13,7 +13,6 @@
     const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
     const FIREBASE_ACTIVE_PATH = "active";
     const FIREBASE_PUBLIC_SOURCE = "firebase-public";
-    const FIREBASE_PUBLIC_LEGACY_SOURCE = "firebase-public-legacy-root";
     const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
@@ -2269,16 +2268,10 @@
     const getLocalTrophyHistoryForTag = (tagRaw, dataRaw) => {
         const entry = getPlayerMetricsEntry(tagRaw, dataRaw);
         if (!entry) return [];
-        const history = Array.isArray(entry.trophyHistoryDaily)
-            ? entry.trophyHistoryDaily
-            : (Array.isArray(entry.trophyHistory)
-                ? entry.trophyHistory
-                : (Array.isArray(entry.history && entry.history.trophyHistoryDaily)
-                    ? entry.history.trophyHistoryDaily
-                    : []));
+        const history = Array.isArray(entry.trophyHistoryDaily) ? entry.trophyHistoryDaily : [];
         const latestSnapshot = entry.latestSnapshot && typeof entry.latestSnapshot === "object"
             ? entry.latestSnapshot
-            : (entry.snapshot && typeof entry.snapshot === "object" ? entry.snapshot : null);
+            : null;
         return normalizeLocalHistoryPoints(history, latestSnapshot);
     };
 
@@ -4856,7 +4849,6 @@
     const readMetricsLatestSnapshot = (entryRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         if (entry.latestSnapshot && typeof entry.latestSnapshot === "object") return entry.latestSnapshot;
-        if (entry.snapshot && typeof entry.snapshot === "object") return entry.snapshot;
         return null;
     };
 
@@ -7632,56 +7624,13 @@
         return assertValidRosterPayload(decodedPayload, sourceLabel);
     };
 
-    // Return whether try legacy root fallback for active payload.
-    const shouldTryLegacyRootFallbackForActivePayload = (encodedPayloadRaw) => {
-        if (encodedPayloadRaw == null) return true;
-        if (encodedPayloadRaw === "") return true;
-        if (
-            encodedPayloadRaw &&
-            typeof encodedPayloadRaw === "object" &&
-            !Array.isArray(encodedPayloadRaw) &&
-            Object.keys(encodedPayloadRaw).length === 0
-        ) {
-            return true;
-        }
-        return false;
-    };
-
     // Load roster data via Firebase public.
     const loadRosterDataViaFirebasePublic = async () => {
         const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
-        if (!shouldTryLegacyRootFallbackForActivePayload(activePayload)) {
-            return {
-                source: FIREBASE_PUBLIC_SOURCE,
-                data: decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active"),
-            };
-        }
-
-        if (typeof console !== "undefined" && console && typeof console.debug === "function") {
-            console.debug("[RosterBoot] firebase-public /active missing, trying legacy-root compatibility fallback.");
-        }
-
-        let legacyPayload = null;
-        try {
-            legacyPayload = await fetchFirebaseJsonPublic("");
-        } catch (err) {
-            throw new Error(
-                "Missing active roster payload at /active and no valid legacy root payload fallback was found: " +
-                ((err && err.message) ? err.message : String(err))
-            );
-        }
-
-        try {
-            return {
-                source: FIREBASE_PUBLIC_LEGACY_SOURCE,
-                data: decodeAndValidateActiveRosterPayloadFromFirebasePublic(legacyPayload, "Firebase public / (legacy-root)"),
-            };
-        } catch (err) {
-            throw new Error(
-                "Missing active roster payload at /active and no valid legacy root payload fallback was found: " +
-                ((err && err.message) ? err.message : String(err))
-            );
-        }
+        return {
+            source: FIREBASE_PUBLIC_SOURCE,
+            data: decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active"),
+        };
     };
 
     // Normalize static asset base URL.

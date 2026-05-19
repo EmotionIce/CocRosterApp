@@ -115,3 +115,65 @@ test("updates existing war-out roster members while still excluding new war-out 
   assert.equal(comparison.buckets.matchedWithUpdates[0].updates.discord, "phuuni");
   assert.equal(comparison.buckets.ignored.warOut[0].tag, "#NEW123");
 });
+
+test("applying import updates preserves existing player metrics store", () => {
+  const generator = loadGenerator();
+  const playerMetrics = {
+    schemaVersion: 1,
+    updatedAt: "2026-05-19T00:00:00.000Z",
+    byTag: {
+      "#28VYJ9URP": {
+        identity: { tag: "#28VYJ9URP", name: "Phuni #2" },
+        latestSnapshot: {
+          tag: "#28VYJ9URP",
+          trophies: 5000,
+          donations: 10,
+          donationsReceived: 4,
+        },
+        trophyHistoryDaily: [],
+        donationMonths: {},
+      },
+    },
+  };
+  const rosterData = {
+    playerMetrics,
+    rosters: [
+      {
+        id: "turtle",
+        title: "TURTLE",
+        main: [
+          {
+            name: "Phuni #2",
+            discord: "",
+            th: 17,
+            tag: "#28VYJ9URP",
+          },
+        ],
+        subs: [],
+        missing: [],
+      },
+    ],
+  };
+  const accounts = generator.parseXlsxRowsTolerant([
+    {
+      NAME: "Phuni #2",
+      TAG: "#28VYJ9URP",
+      Username: "phuuni",
+      CLAN: "TURTLE",
+      "War Preference": "in",
+      "Town-Hall": 17,
+    },
+  ]).accounts;
+  const comparison = generator.buildImportComparison({
+    rosterData,
+    accounts,
+    importedClanValues: generator.extractImportedClanValues(accounts),
+    mapping: { TURTLE: "turtle" },
+    filters: {},
+  });
+
+  const applied = generator.applyImportComparison({ rosterData, comparison });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(applied.rosterData.playerMetrics)), playerMetrics);
+  assert.equal(applied.rosterData.rosters[0].main[0].discord, "phuuni");
+});

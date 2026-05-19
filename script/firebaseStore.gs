@@ -432,11 +432,7 @@ function readActiveRosterSnapshotFromFirebase_() {
 	if (encodedPayload != null) {
 		return decodeAndValidateActiveRosterPayload_(encodedPayload, "firebase:/active");
 	}
-	const legacySnapshot = readLegacyRootActiveRosterSnapshotOrNull_();
-	if (legacySnapshot) {
-		return legacySnapshot;
-	}
-	throw new Error("Missing active roster payload at /active and no valid legacy root payload fallback was found.");
+	throw new Error("Missing active roster payload at /active. Run migrateLegacyFirebaseRootToNamespacedLayout_() if this database still uses the old root layout.");
 }
 
 // Handle read active roster snapshot.
@@ -444,14 +440,13 @@ function readActiveRosterSnapshot_() {
 	return readActiveRosterSnapshotFromFirebase_();
 }
 
-// Legacy wrapper kept to avoid breaking any indirect references.
-
+// Convenience wrapper used by active-write freshness and legacy compatibility shims.
 function readActiveRosterData_() {
 	return readActiveRosterSnapshot_().rosterData;
 }
 
-// Legacy wrapper kept to avoid breaking any indirect references.
-
+// Manual Apps Script migration entrypoint for databases that still have the old
+// root-level active payload. Current reads and writes use /active.
 function migrateLegacyFirebaseRootToNamespacedLayout_() {
 	const activeNode = firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "GET");
 	if (activeNode != null) {
@@ -505,6 +500,199 @@ function migrateLegacyFirebaseRootToNamespacedLayout_() {
 	};
 }
 
+// Public Apps Script run-menu wrapper for the one-time legacy root -> /active
+// migration. Keep the private helper for internal callers; Apps Script hides
+// trailing-underscore names from the run dropdown.
+function runFirebaseLayoutMigrationOnce() {
+	return migrateLegacyFirebaseRootToNamespacedLayout_();
+}
+
+// Public Apps Script run-menu wrapper for a one-time canonical /active rewrite.
+// Use after taking a Firebase backup. This validates and rewrites the current
+// active payload through the same boundary used by production writes.
+function cleanupActiveFirebaseSchemaOnce() {
+	const snapshot = readActiveRosterSnapshotFromFirebase_();
+	const cleanupAt = new Date().toISOString();
+	const result = replaceActiveRosterData_(snapshot.rosterData, { sourceSnapshot: snapshot });
+	const rosterData = result && result.validatedRosterData ? result.validatedRosterData : {};
+	const counts = countRosterPayload_(rosterData);
+	const metricEntryCount = countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics);
+	firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+		layoutVersion: FIREBASE_LAYOUT_VERSION,
+		manualSchemaCleanupAt: cleanupAt,
+		manualSchemaCleanupMetricEntryCount: metricEntryCount,
+	});
+	return {
+		ok: true,
+		cleanedAt: cleanupAt,
+		activeLastUpdatedAt: String((rosterData && rosterData.lastUpdatedAt) || "").trim(),
+		rosterCount: Array.isArray(rosterData.rosters) ? rosterData.rosters.length : 0,
+		playerCount: counts.playerCount,
+		noteCount: counts.noteCount,
+		metricEntryCount: metricEntryCount,
+	};
+}
+
+// Build one canonical roster player from older active payload shapes.
+function buildManualCleanupRosterPlayer_(playerRaw, statsRaw) {
+	const player = playerRaw && typeof playerRaw === "object" && !Array.isArray(playerRaw) ? playerRaw : {};
+	const stats = statsRaw && typeof statsRaw === "object" ? statsRaw : {};
+	const allowed = buildExactKeySet_(ACTIVE_ROSTER_PLAYER_FIELD_NAMES);
+	const keys = Object.keys(player);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		if (allowed[key]) continue;
+		if (key === "note" && !Object.prototype.hasOwnProperty.call(player, "notes")) {
+			stats.convertedNoteFields = toNonNegativeInt_(stats.convertedNoteFields) + 1;
+			continue;
+		}
+		stats.droppedPlayerFields = toNonNegativeInt_(stats.droppedPlayerFields) + 1;
+	}
+	const thNumber = Number(player.th);
+	return {
+		slot: player.slot == null ? null : Number(player.slot),
+		name: typeof player.name === "string" ? player.name : "",
+		discord: typeof player.discord === "string" ? player.discord : "",
+		th: isFinite(thNumber) ? thNumber : 0,
+		tag: normalizeTag_(player.tag),
+		notes: sanitizeNotes_(Object.prototype.hasOwnProperty.call(player, "notes") ? player.notes : player.note),
+		excludeAsSwapTarget: toBooleanFlag_(player.excludeAsSwapTarget),
+		excludeAsSwapSource: toBooleanFlag_(player.excludeAsSwapSource),
+	};
+}
+
+// Build canonical roster player arrays from older active payload shapes.
+function buildManualCleanupRosterPlayers_(playersRaw, statsRaw) {
+	const players = Array.isArray(playersRaw) ? playersRaw : [];
+	const out = [];
+	for (let i = 0; i < players.length; i++) {
+		out.push(buildManualCleanupRosterPlayer_(players[i], statsRaw));
+	}
+	return out;
+}
+
+// Convert a decoded active payload into the current strict active schema before
+// validation. This is intentionally only used by manual one-time cleanup.
+function buildManualCleanupActivePayload_(payloadRaw) {
+	const data = payloadRaw && typeof payloadRaw === "object" && !Array.isArray(payloadRaw) ? payloadRaw : {};
+	const stats = {
+		convertedNoteFields: 0,
+		droppedPlayerFields: 0,
+		droppedRosterMetricStores: 0,
+		migratedRootMetrics: false,
+	};
+	const out = {
+		schemaVersion: typeof data.schemaVersion === "number" && isFinite(data.schemaVersion) ? data.schemaVersion : 1,
+		pageTitle: typeof data.pageTitle === "string" ? data.pageTitle : "",
+		rosterOrder: Array.isArray(data.rosterOrder) ? data.rosterOrder.slice() : [],
+		rosters: [],
+	};
+	if (typeof data.lastUpdatedAt === "string" && data.lastUpdatedAt.trim()) out.lastUpdatedAt = data.lastUpdatedAt.trim();
+	if (data.publicConfig && typeof data.publicConfig === "object" && !Array.isArray(data.publicConfig)) out.publicConfig = data.publicConfig;
+
+	const metricsSource =
+		data.playerMetrics && typeof data.playerMetrics === "object" && !Array.isArray(data.playerMetrics)
+			? data.playerMetrics
+			: data.metrics && typeof data.metrics === "object" && !Array.isArray(data.metrics)
+				? data.metrics
+				: null;
+	stats.migratedRootMetrics = !data.playerMetrics && !!metricsSource;
+	out.playerMetrics = sanitizePlayerMetricsStore_(metricsSource, out.lastUpdatedAt || new Date().toISOString());
+
+	const rosters = Array.isArray(data.rosters) ? data.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" && !Array.isArray(rosters[i]) ? rosters[i] : {};
+		if (roster.metrics && typeof roster.metrics === "object") stats.droppedRosterMetricStores++;
+		if (roster.playerMetrics && typeof roster.playerMetrics === "object") stats.droppedRosterMetricStores++;
+		const nextRoster = {
+			id: typeof roster.id === "string" ? roster.id.trim() : "",
+			title: typeof roster.title === "string" ? roster.title : "",
+			connectedClanTag: normalizeTag_(roster.connectedClanTag),
+			trackingMode: getRosterTrackingMode_(roster),
+			main: buildManualCleanupRosterPlayers_(roster.main, stats),
+			subs: buildManualCleanupRosterPlayers_(roster.subs, stats),
+			missing: buildManualCleanupRosterPlayers_(roster.missing, stats),
+		};
+		if (roster.cwlStats && typeof roster.cwlStats === "object") nextRoster.cwlStats = roster.cwlStats;
+		if (roster.regularWar && typeof roster.regularWar === "object") nextRoster.regularWar = roster.regularWar;
+		if (roster.warPerformance && typeof roster.warPerformance === "object") nextRoster.warPerformance = roster.warPerformance;
+		if (roster.publicLineupProjection && typeof roster.publicLineupProjection === "object") nextRoster.publicLineupProjection = roster.publicLineupProjection;
+		if (roster.cwlPreparation && typeof roster.cwlPreparation === "object") nextRoster.cwlPreparation = roster.cwlPreparation;
+		if (roster.benchSuggestions && typeof roster.benchSuggestions === "object") nextRoster.benchSuggestions = roster.benchSuggestions;
+		out.rosters.push(nextRoster);
+	}
+
+	return {
+		rosterData: validateRosterData_(out),
+		stats: stats,
+	};
+}
+
+// Public Apps Script run-menu wrapper for repairing old active data that cannot
+// pass the strict validator yet. It reads raw Firebase data, converts only known
+// legacy active schema leftovers, validates, then writes the canonical layout.
+function repairActiveFirebaseSchemaFromRawOnce() {
+	const cleanupAt = new Date().toISOString();
+	const activeNode = firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "GET");
+	let decodedPayload = null;
+	let source = "firebase:/active";
+	if (activeNode != null) {
+		decodedPayload = decodeFirebaseObjectKeysRecursive_(activeNode);
+	} else {
+		const rootNode = firebaseRootRequestJson_("GET");
+		if (!rootNode || typeof rootNode !== "object" || Array.isArray(rootNode)) {
+			throw new Error("No /active payload or legacy root active payload was found.");
+		}
+		decodedPayload = decodeFirebaseObjectKeysRecursive_(rootNode);
+		source = "firebase:/ (legacy-root)";
+	}
+
+	const repaired = buildManualCleanupActivePayload_(decodedPayload);
+	const rosterData = repaired.rosterData;
+	const metricEntryCount = countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics);
+
+	if (source === "firebase:/ (legacy-root)") {
+		firebaseRootRequestJson_("PUT", {
+			active: encodeFirebaseObjectKeysRecursive_(rosterData),
+			archive: {
+				publish: {},
+				autorefreshDaily: {},
+			},
+			meta: {
+				layoutVersion: FIREBASE_LAYOUT_VERSION,
+				manualSchemaCleanupAt: cleanupAt,
+				manualSchemaCleanupSource: source,
+				manualSchemaCleanupMetricEntryCount: metricEntryCount,
+			},
+		});
+		updateActiveRosterDataCaches_(JSON.stringify(rosterData));
+	} else {
+		writeValidatedActiveRosterDataToFirebase_(rosterData);
+		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+			layoutVersion: FIREBASE_LAYOUT_VERSION,
+			manualSchemaCleanupAt: cleanupAt,
+			manualSchemaCleanupSource: source,
+			manualSchemaCleanupMetricEntryCount: metricEntryCount,
+		});
+	}
+
+	const counts = countRosterPayload_(rosterData);
+	return {
+		ok: true,
+		cleanedAt: cleanupAt,
+		source: source,
+		activeLastUpdatedAt: String((rosterData && rosterData.lastUpdatedAt) || "").trim(),
+		rosterCount: Array.isArray(rosterData.rosters) ? rosterData.rosters.length : 0,
+		playerCount: counts.playerCount,
+		noteCount: counts.noteCount,
+		metricEntryCount: metricEntryCount,
+		convertedNoteFields: toNonNegativeInt_(repaired.stats && repaired.stats.convertedNoteFields),
+		droppedPlayerFields: toNonNegativeInt_(repaired.stats && repaired.stats.droppedPlayerFields),
+		droppedRosterMetricStores: toNonNegativeInt_(repaired.stats && repaired.stats.droppedRosterMetricStores),
+		migratedRootMetrics: !!(repaired.stats && repaired.stats.migratedRootMetrics),
+	};
+}
+
 // Called from client.js via google.script.run (no CORS, short cache with Firebase backend)
 
 function updateActiveRosterDataCaches_(text) {
@@ -519,9 +707,11 @@ function updateActiveRosterDataCaches_(text) {
 	});
 }
 
-// PUT an already-validated active roster payload to Firebase without touching caches.
+// PUT an active roster payload to Firebase without touching caches.
+// This is the final active write boundary, so it re-validates the contract even
+// when callers believe they already hold validated data.
 function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
-	const validated = validatedRosterData && typeof validatedRosterData === "object" ? validatedRosterData : {};
+	const validated = validateRosterData_(validatedRosterData);
 	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
 	firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "PUT", encodedPayload);
 	const payloadText = JSON.stringify(validated);
@@ -533,12 +723,6 @@ function writeValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 	const writeResult = putValidatedActiveRosterDataToFirebase_(validatedRosterData);
 	updateActiveRosterDataCaches_(writeResult.text);
 	return writeResult;
-}
-
-// Handle write active roster data to Firebase.
-function writeActiveRosterDataToFirebase_(rosterDataRaw) {
-	const validated = validateRosterData_(rosterDataRaw);
-	return writeValidatedActiveRosterDataToFirebase_(validated);
 }
 
 // Get server date string.
@@ -774,5 +958,3 @@ function replaceActiveRosterData_(validatedRosterData, options) {
 		text: writeResult.text,
 	};
 }
-
-// Legacy wrapper kept to avoid breaking any indirect references.

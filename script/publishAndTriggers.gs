@@ -133,8 +133,6 @@ function writePublishedRosterData_(rosterDataRaw) {
 				let capturedClans = 0;
 				let recorded = 0;
 				let updated = 0;
-				let profileAttempted = 0;
-				let profileEnriched = 0;
 				const errors = [];
 
 				for (let i = 0; i < rosterCaptureQueue.length; i++) {
@@ -151,8 +149,6 @@ function writePublishedRosterData_(rosterDataRaw) {
 							capturedClans += toNonNegativeInt_(capture.capturedClans) > 0 ? 1 : 0;
 							recorded += toNonNegativeInt_(capture.recorded);
 							updated += toNonNegativeInt_(capture.updated);
-							profileAttempted += toNonNegativeInt_(capture.profileAttempted);
-							profileEnriched += toNonNegativeInt_(capture.profileEnriched);
 							if (Array.isArray(capture.errors) && capture.errors.length) {
 								for (let j = 0; j < capture.errors.length; j++) {
 									errors.push(capture.errors[j]);
@@ -168,14 +164,12 @@ function writePublishedRosterData_(rosterDataRaw) {
 				validated = validateRosterData_(validated);
 				duplicateDiagnosticsRosterData = validated;
 				Logger.log(
-					"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s profileAttempted=%s profileEnriched=%s errors=%s repairedRosters=%s",
+					"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s errors=%s repairedRosters=%s",
 					attemptedClans,
 					capturedClans,
 					recorded,
 					updated,
 					countPlayerMetricsEntries_(validated && validated.playerMetrics),
-					profileAttempted,
-					profileEnriched,
 					errors.length,
 					lowCoverageRosters.length,
 				);

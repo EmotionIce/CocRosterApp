@@ -1,5 +1,98 @@
 // Roster schema sanitization and validation boundary.
 
+// Active Firebase database contract.
+//
+// Canonical layout:
+// - /active: the current validated active roster payload.
+// - /active/playerMetrics/byTag[normalizedPlayerTag]: the only long-lived global
+//   player metrics store.
+// - /archive/publish: publish backups.
+// - /archive/autorefreshDaily: daily auto-refresh backups.
+// - /meta: operational metadata.
+//
+// Roster player objects in roster.main, roster.subs, and roster.missing may only
+// contain: slot, name, discord, th, tag, notes, excludeAsSwapTarget,
+// excludeAsSwapSource. Discord identity belongs on these roster player objects.
+//
+// Roster-scoped war state is allowed only for active war/CWL behavior:
+// cwlStats, regularWar, warPerformance, publicLineupProjection, cwlPreparation,
+// and benchSuggestions.
+//
+// Forbidden duplicate metric locations include metric-like fields on roster
+// players and any roster-scoped playerMetrics/metrics store. Global Clash/player
+// metrics must be stored only under /active/playerMetrics/byTag.
+const ACTIVE_ROSTER_PLAYER_FIELD_NAMES = [
+	"slot",
+	"name",
+	"discord",
+	"th",
+	"tag",
+	"notes",
+	"excludeAsSwapTarget",
+	"excludeAsSwapSource",
+];
+const ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_NAMES = [
+	"metrics",
+	"playerMetrics",
+	"latestSnapshot",
+	"trophyHistoryDaily",
+	"donationMonths",
+	"donationsHistory",
+	"trophyHistory",
+	"trophiesHistory",
+	"lastSeen",
+	"latestProfileSnapshot",
+];
+const ACTIVE_ROSTER_FORBIDDEN_ROOT_METRIC_FIELD_NAMES = ["metrics"];
+const ACTIVE_ROSTER_FORBIDDEN_ROSTER_METRIC_FIELD_NAMES = ["metrics", "playerMetrics"];
+const ACTIVE_ROSTER_ALLOWED_ROSTER_WAR_STATE_FIELD_NAMES = [
+	"cwlStats",
+	"regularWar",
+	"warPerformance",
+	"publicLineupProjection",
+	"cwlPreparation",
+	"benchSuggestions",
+];
+
+// Build exact-key set.
+function buildExactKeySet_(keysRaw) {
+	const keys = Array.isArray(keysRaw) ? keysRaw : [];
+	const out = {};
+	for (let i = 0; i < keys.length; i++) {
+		const key = String(keys[i] == null ? "" : keys[i]).trim();
+		if (key) out[key] = true;
+	}
+	return out;
+}
+
+const ACTIVE_ROSTER_PLAYER_FIELD_SET = buildExactKeySet_(ACTIVE_ROSTER_PLAYER_FIELD_NAMES);
+const ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_SET = buildExactKeySet_(ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_NAMES);
+const ACTIVE_ROSTER_FORBIDDEN_ROOT_METRIC_FIELD_SET = buildExactKeySet_(ACTIVE_ROSTER_FORBIDDEN_ROOT_METRIC_FIELD_NAMES);
+const ACTIVE_ROSTER_FORBIDDEN_ROSTER_METRIC_FIELD_SET = buildExactKeySet_(ACTIVE_ROSTER_FORBIDDEN_ROSTER_METRIC_FIELD_NAMES);
+
+// Return the active roster database contract for diagnostics and manual review.
+function getActiveRosterDatabaseContract_() {
+	return {
+		firebaseLayout: {
+			active: FIREBASE_ACTIVE_PATH,
+			canonicalMetrics: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]",
+			publishArchive: FIREBASE_ARCHIVE_PUBLISH_PATH,
+			autoRefreshDailyArchive: FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH,
+			meta: FIREBASE_META_PATH,
+		},
+		rosterPlayerFields: ACTIVE_ROSTER_PLAYER_FIELD_NAMES.slice(),
+		canonicalMetricsLocation: "playerMetrics.byTag",
+		rosterScopedWarState: ACTIVE_ROSTER_ALLOWED_ROSTER_WAR_STATE_FIELD_NAMES.slice(),
+		forbiddenRosterPlayerMetricFields: ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_NAMES.slice(),
+		forbiddenDuplicateMetricLocations: [
+			"rosters[].playerMetrics",
+			"rosters[].metrics",
+			"rosters[].main|subs|missing[].metrics-like-fields",
+			"root.metrics",
+		],
+	};
+}
+
 // Sanitize notes.
 function sanitizeNotes_(raw) {
 	const arr = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
@@ -16,6 +109,132 @@ function sanitizePublicConfigUrl_(valueRaw) {
 // Return whether plain object.
 function isPlainObject_(valueRaw) {
 	return !!(valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw));
+}
+
+// Assert root-level forbidden duplicate metric stores are absent.
+function assertNoForbiddenRootMetricLocations_(dataRaw) {
+	const data = dataRaw && typeof dataRaw === "object" && !Array.isArray(dataRaw) ? dataRaw : {};
+	const keys = Object.keys(ACTIVE_ROSTER_FORBIDDEN_ROOT_METRIC_FIELD_SET);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		if (!Object.prototype.hasOwnProperty.call(data, key)) continue;
+		throw new Error("Invalid active payload: root field '" + key + "' is not allowed. Global player metrics belong at playerMetrics.byTag.");
+	}
+}
+
+// Assert a roster does not contain duplicate metric stores.
+function assertNoForbiddenRosterMetricLocations_(rosterRaw, rosterIdRaw, rosterIndexRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" && !Array.isArray(rosterRaw) ? rosterRaw : {};
+	const rosterLabel = String(rosterIdRaw == null ? "" : rosterIdRaw).trim() || "index " + rosterIndexRaw;
+	const keys = Object.keys(ACTIVE_ROSTER_FORBIDDEN_ROSTER_METRIC_FIELD_SET);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		if (!Object.prototype.hasOwnProperty.call(roster, key)) continue;
+		throw new Error("Invalid roster '" + rosterLabel + "': field '" + key + "' is not allowed. Global player metrics belong at playerMetrics.byTag.");
+	}
+
+	// `playerMetrics` must never appear below a roster object, even nested under
+	// an intermediate migration wrapper.
+	const scan = (valueRaw, pathRaw) => {
+		const value = valueRaw && typeof valueRaw === "object" ? valueRaw : null;
+		if (!value) return;
+		const scanKeys = Object.keys(value);
+		for (let i = 0; i < scanKeys.length; i++) {
+			const key = scanKeys[i];
+			const path = pathRaw ? pathRaw + "." + key : key;
+			if (key === "playerMetrics") {
+				throw new Error("Invalid roster '" + rosterLabel + "': nested playerMetrics at '" + path + "' is not allowed. Global player metrics belong at playerMetrics.byTag.");
+			}
+			const child = value[key];
+			if (child && typeof child === "object") scan(child, path);
+		}
+	};
+	scan(roster, "roster");
+}
+
+// Assert one canonical roster player has no duplicate metrics or unsupported fields.
+function assertRosterPlayerFieldsAllowed_(playerRaw, rosterIdRaw, roleRaw, playerIndexRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim() || "(unknown roster)";
+	const role = String(roleRaw == null ? "" : roleRaw).trim() || "players";
+	const playerIndex = Math.max(0, toNonNegativeInt_(playerIndexRaw));
+	if (!playerRaw || typeof playerRaw !== "object" || Array.isArray(playerRaw)) {
+		throw new Error("Invalid player in roster '" + rosterId + "' " + role + "[" + playerIndex + "]: expected an object.");
+	}
+
+	const keys = Object.keys(playerRaw);
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		if (ACTIVE_ROSTER_PLAYER_FIELD_SET[key]) continue;
+		const tag = normalizeTag_(playerRaw.tag);
+		const playerLabel = tag || role + "[" + playerIndex + "]";
+		if (ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_SET[key]) {
+			throw new Error(
+				"Invalid player '" +
+					playerLabel +
+					"' in roster '" +
+					rosterId +
+					"': metric-like field '" +
+					key +
+					"' is not allowed on roster players. Use playerMetrics.byTag for global metrics.",
+			);
+		}
+		throw new Error(
+			"Invalid player '" +
+				playerLabel +
+				"' in roster '" +
+				rosterId +
+				"': unsupported field '" +
+				key +
+				"'. Allowed player fields: " +
+				ACTIVE_ROSTER_PLAYER_FIELD_NAMES.join(", ") +
+				".",
+		);
+	}
+}
+
+// Assert player metrics byTag keys match their entry identity/snapshot tags.
+function assertPlayerMetricsByTagKeysMatchIdentities_(storeRaw, sourceLabelRaw) {
+	const sourceLabel = String(sourceLabelRaw == null ? "playerMetrics" : sourceLabelRaw).trim() || "playerMetrics";
+	const store = storeRaw && typeof storeRaw === "object" && !Array.isArray(storeRaw) ? storeRaw : {};
+	const byTag = store.byTag && typeof store.byTag === "object" && !Array.isArray(store.byTag) ? store.byTag : {};
+	const keys = Object.keys(byTag);
+	for (let i = 0; i < keys.length; i++) {
+		const rawKey = keys[i];
+		const normalizedKey = normalizeTag_(rawKey);
+		if (!normalizedKey) continue;
+		const entry = byTag[rawKey] && typeof byTag[rawKey] === "object" && !Array.isArray(byTag[rawKey]) ? byTag[rawKey] : {};
+		const identity = entry.identity && typeof entry.identity === "object" && !Array.isArray(entry.identity) ? entry.identity : {};
+		const identityTag = normalizeTag_(identity.tag);
+		if (identityTag && identityTag !== normalizedKey) {
+			throw new Error(
+				"Invalid " +
+					sourceLabel +
+					": byTag key '" +
+					rawKey +
+					"' does not match entry.identity.tag '" +
+					identity.tag +
+					"'.",
+			);
+		}
+		const latestSnapshot = entry.latestSnapshot && typeof entry.latestSnapshot === "object" && !Array.isArray(entry.latestSnapshot) ? entry.latestSnapshot : {};
+		const snapshotTag = normalizeTag_(latestSnapshot.tag);
+		if (snapshotTag && snapshotTag !== normalizedKey) {
+			throw new Error(
+				"Invalid " +
+					sourceLabel +
+					": byTag key '" +
+					rawKey +
+					"' does not match entry.latestSnapshot.tag '" +
+					latestSnapshot.tag +
+					"'.",
+			);
+		}
+	}
+}
+
+// Assert the active metrics store has the canonical byTag identity invariant.
+function assertCanonicalPlayerMetricsStore_(storeRaw, sourceLabelRaw) {
+	assertPlayerMetricsByTagKeysMatchIdentities_(storeRaw, sourceLabelRaw);
 }
 
 // Return whether safe profile object key.
@@ -209,6 +428,8 @@ function countRosterPayload_(rosterData) {
 // Validate roster data.
 function validateRosterData_(data) {
 	if (!data || typeof data !== "object") throw new Error("Invalid roster data: expected an object.");
+	assertNoForbiddenRootMetricLocations_(data);
+	assertCanonicalPlayerMetricsStore_(data.playerMetrics, "playerMetrics");
 
 	const out = {
 		schemaVersion: typeof data.schemaVersion === "number" && isFinite(data.schemaVersion) ? data.schemaVersion : 1,
@@ -234,6 +455,7 @@ function validateRosterData_(data) {
 		const title = typeof r.title === "string" ? r.title : "";
 		const connectedClanTag = normalizeTag_(r.connectedClanTag);
 		const trackingMode = getRosterTrackingMode_(r);
+		assertNoForbiddenRosterMetricLocations_(r, id, i);
 
 		if (!id) throw new Error("Invalid roster: missing 'id' at index " + i + ".");
 		if (seenRosterIds[id]) throw new Error("Invalid roster: duplicate 'id' value '" + id + "'.");
@@ -245,7 +467,8 @@ function validateRosterData_(data) {
 		const missing = Array.isArray(r.missing) ? r.missing : [];
 
 		// Sanitize player.
-		const sanitizePlayer = (p, role) => {
+		const sanitizePlayer = (p, role, playerIndex) => {
+			assertRosterPlayerFieldsAllowed_(p, id, role, playerIndex);
 			const obj = p && typeof p === "object" ? p : {};
 			const rawTag = typeof obj.tag === "string" ? obj.tag : "";
 			const tag = normalizeTag_(rawTag);
@@ -274,9 +497,9 @@ function validateRosterData_(data) {
 			};
 		};
 
-		const outMain = main.map((p) => sanitizePlayer(p, "main"));
-		const outSubs = subs.map((p) => sanitizePlayer(p, "subs"));
-		const outMissing = missing.map((p) => sanitizePlayer(p, "missing"));
+		const outMain = main.map((p, playerIndex) => sanitizePlayer(p, "main", playerIndex));
+		const outSubs = subs.map((p, playerIndex) => sanitizePlayer(p, "subs", playerIndex));
+		const outMissing = missing.map((p, playerIndex) => sanitizePlayer(p, "missing", playerIndex));
 		const rosterPoolTagSet = {};
 		const rosterPool = outMain.concat(outSubs).concat(outMissing);
 		for (let j = 0; j < rosterPool.length; j++) {
@@ -386,6 +609,7 @@ function validateRosterData_(data) {
 	}
 	out.rosterOrder = normalizedRosterOrder;
 	out.playerMetrics = sanitizePlayerMetricsStore_(data.playerMetrics, out.lastUpdatedAt || new Date().toISOString());
+	assertCanonicalPlayerMetricsStore_(out.playerMetrics, "playerMetrics");
 
 	return out;
 }

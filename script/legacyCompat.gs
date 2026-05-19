@@ -1,11 +1,14 @@
-// Legacy compatibility wrappers retained from current monolith.
+// Legacy Apps Script compatibility wrappers.
+// These names may still be referenced by deployed Apps Script triggers, menus,
+// or older admin clients, so keep them as thin delegates into the Firebase
+// active-data boundary.
 
-// Handle read active roster snapshot from drive.
+// Backwards-compatible Drive-era name for the active Firebase snapshot.
 function readActiveRosterSnapshotFromDrive_() {
 	return readActiveRosterSnapshot_();
 }
 
-// Handle read active roster data from drive.
+// Backwards-compatible Drive-era name for active Firebase roster data.
 function readActiveRosterDataFromDrive_() {
 	return readActiveRosterData_();
 }
@@ -20,7 +23,7 @@ function findFileByNameRecursivelyCaseInsensitive_(filenameRaw) {
 	return null;
 }
 
-// Handle replace active roster data file.
+// Backwards-compatible Drive-era name for replacing active Firebase roster data.
 function replaceActiveRosterDataFile_(validatedRosterData, options) {
 	return replaceActiveRosterData_(validatedRosterData, options);
 }

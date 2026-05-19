@@ -226,7 +226,16 @@ function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) 
 				throw new Error("Cannot add missing player because the first roster is unavailable.");
 			}
 			if (!Array.isArray(firstRoster.missing)) firstRoster.missing = [];
-			firstRoster.missing.push({ tag: normalizedTag, discord: sanitizedDiscordUsername });
+			firstRoster.missing.push({
+				slot: null,
+				name: "",
+				discord: sanitizedDiscordUsername,
+				th: 0,
+				tag: normalizedTag,
+				notes: [],
+				excludeAsSwapTarget: false,
+				excludeAsSwapSource: false,
+			});
 			const insertedIndex = firstRoster.missing.length - 1;
 			const updatedAt = new Date().toISOString();
 			const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);

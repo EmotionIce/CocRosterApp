@@ -1144,14 +1144,11 @@ function buildRefreshAllPipelinePrefetchOptions_(prefetchBundleRaw) {
 }
 
 // Build a shared ownership snapshot once so pool sync can avoid redundant lookups.
-function buildRefreshAllOwnershipSnapshot_(rosterData, prefetchBundleRaw, optionsRaw) {
+function buildRefreshAllOwnershipSnapshot_(rosterData, prefetchBundleRaw) {
 	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null;
 	// This snapshot is read-only input for pool sync, not a metrics-writing pass.
 	return buildLiveRosterOwnershipSnapshot_(rosterData, {
 		recordMetrics: false,
-		metricsRunState: metricsRunState,
 		prefetchedClanSnapshotsByTag: prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {},
 		prefetchedClanErrorsByTag: prefetch.clanMembersErrorByTag && typeof prefetch.clanMembersErrorByTag === "object" ? prefetch.clanMembersErrorByTag : {},
 	});
@@ -1179,16 +1176,8 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let rosterData = null;
 	const totalStartMs = Date.now();
 	let prefetchDurationMs = 0;
-	let profileWarmupDurationMs = 0;
 	let ownershipSnapshotDurationMs = 0;
 	let cumulativeRosterPipelineDurationMs = 0;
-	let profileWarmupCandidateCount = 0;
-	let profileWarmupBlockedMisses = 0;
-	let profileWarmupLiveRequested = 0;
-	let profileWarmupLiveSucceeded = 0;
-	let profileWarmupLiveFailed = 0;
-	let profileWarmupLiveRateLimited = 0;
-	let profileWarmupProfileFetchBlocked = false;
 	try {
 		rosterData = validateRosterData_(rosterDataRaw);
 	} catch (err) {
@@ -1232,9 +1221,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const ownershipSnapshotStartMs = Date.now();
 	const ownershipSnapshot = statsOnlyRegularWarFinalization
 		? null
-		: buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch, {
-				metricsRunState: metricsRunState,
-			});
+		: buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch);
 	ownershipSnapshotDurationMs = Math.max(0, Date.now() - ownershipSnapshotStartMs);
 
 	// Execute the same single-roster pipeline for each id and aggregate diagnostics.
@@ -1350,21 +1337,13 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(
-		"refreshAllRosters timing totalMs=%s prefetchMs=%s profileWarmupMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s targeted=%s profileCandidates=%s profileLiveRequested=%s profileLiveSucceeded=%s profileLiveFailed=%s profileLiveRateLimited=%s profileBlockedMisses=%s profileFetchBlocked=%s",
+		"refreshAllRosters timing totalMs=%s prefetchMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s targeted=%s",
 		totalDurationMs,
 		prefetchDurationMs,
-		profileWarmupDurationMs,
 		ownershipSnapshotDurationMs,
 		cumulativeRosterPipelineDurationMs,
 		processedRosters,
 		hasRequestedRosterFilter,
-		profileWarmupCandidateCount,
-		profileWarmupLiveRequested,
-		profileWarmupLiveSucceeded,
-		profileWarmupLiveFailed,
-		profileWarmupLiveRateLimited,
-		profileWarmupBlockedMisses,
-		profileWarmupProfileFetchBlocked,
 	);
 
 	return {

@@ -9,7 +9,9 @@ function listFirebaseDataDebugInfo_() {
 		const activeSnapshot = readActiveRosterSnapshotFromFirebase_();
 		activeExists = !!(activeSnapshot && activeSnapshot.rosterData);
 		activeLastUpdatedAt = String((activeSnapshot && activeSnapshot.rosterData && activeSnapshot.rosterData.lastUpdatedAt) || "").trim();
-		hasLegacyRootPayload = activeSnapshot && activeSnapshot.source === "firebase:/ (legacy-root)";
+	} catch (err) {}
+	try {
+		hasLegacyRootPayload = !!readLegacyRootActiveRosterSnapshotOrNull_();
 	} catch (err) {}
 	return {
 		activePath: FIREBASE_ACTIVE_PATH,

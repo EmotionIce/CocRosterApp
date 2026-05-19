@@ -24,11 +24,7 @@ function resolveRosterPoolSource_(clanTagRaw, rosterIdRaw, ownershipSnapshotRaw)
 	const snapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : null;
 	if (snapshot && clanTag) {
 		const poolSyncErrorByTag = snapshot.poolSyncErrorByTag && typeof snapshot.poolSyncErrorByTag === "object" ? snapshot.poolSyncErrorByTag : {};
-		const legacyClanErrorByTag = snapshot.clanErrorByTag && typeof snapshot.clanErrorByTag === "object" ? snapshot.clanErrorByTag : {};
-		let clanError = poolSyncErrorByTag[clanTag] && typeof poolSyncErrorByTag[clanTag] === "object" ? poolSyncErrorByTag[clanTag] : null;
-		if (!clanError) {
-			clanError = legacyClanErrorByTag[clanTag] && typeof legacyClanErrorByTag[clanTag] === "object" ? legacyClanErrorByTag[clanTag] : null;
-		}
+		const clanError = poolSyncErrorByTag[clanTag] && typeof poolSyncErrorByTag[clanTag] === "object" ? poolSyncErrorByTag[clanTag] : null;
 		if (clanError) {
 			const step = String(clanError.step == null ? "" : clanError.step).trim() || "build shared ownership snapshot";
 			const message = String(clanError.message == null ? "" : clanError.message).trim() || "unknown error";
@@ -139,15 +135,11 @@ function getActiveCwlPreparationExcludedTagSet_(rosterRaw) {
 // Build live roster ownership snapshot.
 function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const shouldRecordMetrics = options.recordMetrics !== false;
+	if (options.recordMetrics === true) {
+		Logger.log("buildLiveRosterOwnershipSnapshot_: recordMetrics=true ignored; ownership snapshots are read-only for playerMetrics.");
+	}
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
-	const snapshotStartedAtIso = new Date().toISOString();
-	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : { seenClanTags: {} };
-	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
-	let metricsCommittedRosterData = shouldRecordMetrics
-		? { playerMetrics: sanitizePlayerMetricsStore_(rosterData && rosterData.playerMetrics, snapshotStartedAtIso) }
-		: null;
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const membersByRosterId = {};
 	const memberTagSetByRosterId = {};
@@ -156,12 +148,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const connectedClanTagByRosterId = {};
 	const connectedRosterIds = [];
 	const membersByClanTag = {};
-	const memberTrackingByRosterId = {};
-	const memberTrackingByClanTag = {};
-	const stagedMemberTrackingByClanTag = {};
-	const committedMetricsByClanTag = {};
 	const poolSyncErrorByTag = {};
-	const metricsErrorByTag = {};
 
 	// Register snapshot clan error.
 	const registerSnapshotClanError = (targetMapRaw, errorTypeRaw, clanTagRaw, stepRaw, errRaw, rosterIdRaw) => {
@@ -194,9 +181,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	// Register pool sync error.
 	const registerPoolSyncError = (clanTagRaw, stepRaw, errRaw, rosterIdRaw) =>
 		registerSnapshotClanError(poolSyncErrorByTag, "pool-sync", clanTagRaw, stepRaw, errRaw, rosterIdRaw);
-	// Register metrics error.
-	const registerMetricsError = (clanTagRaw, stepRaw, errRaw, rosterIdRaw) =>
-		registerSnapshotClanError(metricsErrorByTag, "metrics", clanTagRaw, stepRaw, errRaw, rosterIdRaw);
 
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
@@ -211,7 +195,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 
 		let members = membersByClanTag[clanTag];
 		if (!members && !poolSyncErrorByTag[clanTag]) {
-			let clanSnapshot = null;
 			const hasPrefetchedError = Object.prototype.hasOwnProperty.call(prefetchedClanErrorsByTag, clanTag);
 			const hasPrefetchedSnapshot = Object.prototype.hasOwnProperty.call(prefetchedClanSnapshotsByTag, clanTag);
 			if (hasPrefetchedError) {
@@ -220,62 +203,13 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 				members = membersByClanTag[clanTag];
 			} else {
 				try {
-					clanSnapshot = hasPrefetchedSnapshot ? prefetchedClanSnapshotsByTag[clanTag] : fetchClanMembersSnapshot_(clanTag);
+					const clanSnapshot = hasPrefetchedSnapshot ? prefetchedClanSnapshotsByTag[clanTag] : fetchClanMembersSnapshot_(clanTag);
 					members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
 					membersByClanTag[clanTag] = members;
 				} catch (err) {
 					registerPoolSyncError(clanTag, "fetch clan members", err, rosterId);
 					membersByClanTag[clanTag] = [];
 					members = membersByClanTag[clanTag];
-				}
-			}
-
-			if (!poolSyncErrorByTag[clanTag] && shouldRecordMetrics && metricsCommittedRosterData) {
-				try {
-					const metricsWorkingCopy = {
-						playerMetrics: sanitizePlayerMetricsStore_(metricsCommittedRosterData.playerMetrics, snapshotStartedAtIso),
-					};
-					const metricsMembers = clanSnapshot && clanSnapshot.metricsMembers;
-					const metricsRecord = recordClanMemberMetricsSnapshot_(metricsWorkingCopy, clanTag, metricsMembers, {
-						capturedAt: clanSnapshot && clanSnapshot.capturedAt,
-						runState: metricsRunState,
-						sourceRosterId: rosterId,
-						source: "buildLiveRosterOwnershipSnapshot",
-					});
-					metricsCommittedRosterData = metricsWorkingCopy;
-					committedMetricsByClanTag[clanTag] = true;
-					const stagedTracking = {
-						clanTag: clanTag,
-						rosterId: rosterId,
-						capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
-						attemptedClans: 1,
-						capturedClans: 1,
-						recorded: toNonNegativeInt_(metricsRecord && metricsRecord.recorded),
-						updated: toNonNegativeInt_(metricsRecord && metricsRecord.updated),
-						errors: [],
-						entryCount: countPlayerMetricsEntries_(metricsCommittedRosterData && metricsCommittedRosterData.playerMetrics),
-						profileEnriched: 0,
-						profileAttempted: 0,
-					};
-					memberTrackingByClanTag[clanTag] = stagedTracking;
-					stagedMemberTrackingByClanTag[clanTag] = stagedTracking;
-				} catch (err) {
-					registerMetricsError(clanTag, "record clan metrics", err, rosterId);
-					const stagedTracking = {
-						clanTag: clanTag,
-						rosterId: rosterId,
-						capturedAt: clanSnapshot && clanSnapshot.capturedAt ? clanSnapshot.capturedAt : "",
-						attemptedClans: 1,
-						capturedClans: 0,
-						recorded: 0,
-						updated: 0,
-						errors: [{ clanTag: clanTag, message: errorMessage_(err) }],
-						entryCount: countPlayerMetricsEntries_(metricsCommittedRosterData && metricsCommittedRosterData.playerMetrics),
-						profileEnriched: 0,
-						profileAttempted: 0,
-					};
-					memberTrackingByClanTag[clanTag] = stagedTracking;
-					stagedMemberTrackingByClanTag[clanTag] = stagedTracking;
 				}
 			}
 		}
@@ -319,40 +253,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		ownerRosterIdByTag[tag] = rosterId;
 	}
 
-	if (shouldRecordMetrics && metricsCommittedRosterData) {
-		rosterData.playerMetrics = sanitizePlayerMetricsStore_(metricsCommittedRosterData.playerMetrics, new Date().toISOString());
-	}
-	const committedEntryCount = countPlayerMetricsEntries_(rosterData && rosterData.playerMetrics);
-	const trackedClanTags = Object.keys(stagedMemberTrackingByClanTag);
-	for (let i = 0; i < trackedClanTags.length; i++) {
-		const clanTag = trackedClanTags[i];
-		const stagedTracking = stagedMemberTrackingByClanTag[clanTag] && typeof stagedMemberTrackingByClanTag[clanTag] === "object" ? stagedMemberTrackingByClanTag[clanTag] : {};
-		const committed = !!committedMetricsByClanTag[clanTag];
-		const errors = Array.isArray(stagedTracking.errors) ? stagedTracking.errors.slice() : [];
-
-		memberTrackingByClanTag[clanTag] = {
-			clanTag: clanTag,
-			capturedAt: String(stagedTracking.capturedAt == null ? "" : stagedTracking.capturedAt),
-			attemptedClans: toNonNegativeInt_(stagedTracking.attemptedClans),
-			capturedClans: committed ? toNonNegativeInt_(stagedTracking.capturedClans) : 0,
-			recorded: committed ? toNonNegativeInt_(stagedTracking.recorded) : 0,
-			updated: committed ? toNonNegativeInt_(stagedTracking.updated) : 0,
-			errors: errors,
-			entryCount: committedEntryCount,
-			profileEnriched: toNonNegativeInt_(stagedTracking.profileEnriched),
-			profileAttempted: toNonNegativeInt_(stagedTracking.profileAttempted),
-			committed: committed,
-		};
-	}
-	const connectedTrackingRosterIds = Object.keys(connectedClanTagByRosterId);
-	for (let i = 0; i < connectedTrackingRosterIds.length; i++) {
-		const rosterId = connectedTrackingRosterIds[i];
-		const clanTag = normalizeTag_(connectedClanTagByRosterId[rosterId]);
-		const tracking = clanTag && memberTrackingByClanTag[clanTag] && typeof memberTrackingByClanTag[clanTag] === "object" ? memberTrackingByClanTag[clanTag] : null;
-		if (tracking) memberTrackingByRosterId[rosterId] = tracking;
-		else delete memberTrackingByRosterId[rosterId];
-	}
-
 	return {
 		membersByRosterId: membersByRosterId,
 		memberTagSetByRosterId: memberTagSetByRosterId,
@@ -362,10 +262,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		liveMemberByTag: liveMemberByTag,
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
 		connectedRosterIds: connectedRosterIds,
-		memberTrackingByRosterId: memberTrackingByRosterId,
 		poolSyncErrorByTag: poolSyncErrorByTag,
-		metricsErrorByTag: metricsErrorByTag,
-		clanErrorByTag: poolSyncErrorByTag,
 		seedPlayerByTag: buildRosterPlayerSeedByTag_(rosterData),
 	};
 }
@@ -1577,7 +1474,6 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 		options.ownershipSnapshot && typeof options.ownershipSnapshot === "object"
 			? options.ownershipSnapshot
 			: buildLiveRosterOwnershipSnapshot_(ctx.rosterData, { recordMetrics: false });
-	const memberTrackingByRosterId = ownershipSnapshot && ownershipSnapshot.memberTrackingByRosterId && typeof ownershipSnapshot.memberTrackingByRosterId === "object" ? ownershipSnapshot.memberTrackingByRosterId : {};
 	const nowIso = new Date().toISOString();
 	let result = null;
 	const source = resolveRosterPoolSource_(ctx.clanTag, ctx.rosterId, ownershipSnapshot);
@@ -1585,9 +1481,6 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 		result = applyRegularWarRosterPoolSync_(ctx.rosterData, ctx.roster, source.members, nowIso, ownershipSnapshot);
 	} else {
 		result = applyRosterPoolSync_(ctx.rosterData, ctx.roster, source.members, source.sourceUsed, ownershipSnapshot, nowIso);
-	}
-	if (result && typeof result === "object") {
-		result.memberTracking = memberTrackingByRosterId[ctx.rosterId] && typeof memberTrackingByRosterId[ctx.rosterId] === "object" ? memberTrackingByRosterId[ctx.rosterId] : null;
 	}
 	if (ctx.trackingMode === "cwl" && isCwlPreparationActive_(ctx.roster)) {
 		const lockedOutNewJoiners = result && typeof result === "object" ? lockNewCwlPreparationJoinersAsSubs_(ctx.roster, result.addedTags) : 0;
@@ -2466,16 +2359,12 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	const captureTiming = capture && capture.captureTimingMs && typeof capture.captureTimingMs === "object" ? capture.captureTimingMs : null;
 	if (captureTiming) {
 		Logger.log(
-			"refreshTrackingStatsCore capture-breakdown rosterId=%s primaryMs=%s fallbackMs=%s finalizeMs=%s totalMs=%s primaryRecorded=%s fallbackRecorded=%s fallbackSkippedPlayerTags=%s fallbackSkippedByClanTag=%s",
+			"refreshTrackingStatsCore capture-breakdown rosterId=%s primaryMs=%s finalizeMs=%s totalMs=%s recorded=%s",
 			ctx.rosterId,
 			toNonNegativeInt_(captureTiming.primary),
-			toNonNegativeInt_(captureTiming.fallback),
 			toNonNegativeInt_(captureTiming.finalize),
 			toNonNegativeInt_(captureTiming.total),
-			toNonNegativeInt_(capture && capture.primaryRecorded),
-			toNonNegativeInt_(capture && capture.fallbackRecorded),
-			toNonNegativeInt_(capture && capture.fallbackSkippedPlayerTags),
-			toNonNegativeInt_(capture && capture.fallbackSkippedByClanTag),
+			toNonNegativeInt_(capture && capture.recorded),
 		);
 	}
 	if (capture) {
