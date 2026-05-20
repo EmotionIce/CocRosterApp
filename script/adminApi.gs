@@ -21,6 +21,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return publishRosterData(args[0], args[1]);
 		case "getPlayerProfile":
 			return getPlayerProfile(args[0], args[1]);
+		case "syncDiscordIdentityForPlayerTag":
+			return syncDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordUsernameForPlayerTag":
 			return syncDiscordUsernameForPlayerTag(args[0], args[1], args[2]);
 		case "debugFirebaseAuthForDiscordSync":
@@ -106,10 +108,7 @@ function normalizeDiscordSyncPlayerTag_(playerTagRaw) {
 
 // Sanitize a plain Discord username without imposing mention formatting.
 function sanitizeDiscordUsername_(discordUsernameRaw) {
-	const sanitized = String(discordUsernameRaw == null ? "" : discordUsernameRaw)
-		.replace(/[\u0000-\u001F\u007F]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+	const sanitized = sanitizeDiscordUsernameValue_(discordUsernameRaw);
 	if (!sanitized) {
 		throw new Error("Discord username is required.");
 	}
@@ -166,124 +165,69 @@ function debugFirebaseAuthForDiscordSync(botSecret, forceRefreshRaw) {
 	return diagnostics;
 }
 
-// Set a missing Discord username for matching active-roster player tags.
-function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) {
-	assertDiscordBotApiSecret_(botSecret);
-	const normalizedTag = normalizeDiscordSyncPlayerTag_(playerTag);
-	const sanitizedDiscordUsername = sanitizeDiscordUsername_(discordUsername);
+// Parse old and new Discord bot sync argument shapes.
+function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3) {
+	if (arg0 && typeof arg0 === "object" && !Array.isArray(arg0)) {
+		const payload = arg0;
+		return {
+			playerTag: payload.playerTag || payload.tag,
+			discordId: payload.discordId,
+			discordUsername: payload.discordUsername != null ? payload.discordUsername : payload.username,
+			botSecret: payload.botSecret != null ? payload.botSecret : arg1,
+		};
+	}
+	if (arg3 != null) {
+		return {
+			playerTag: arg0,
+			discordId: arg1,
+			discordUsername: arg2,
+			botSecret: arg3,
+		};
+	}
+	return {
+		playerTag: arg0,
+		discordId: "",
+		discordUsername: arg1,
+		botSecret: arg2,
+	};
+}
+
+// Sync canonical Discord identity for a player tag.
+function syncDiscordIdentityForPlayerTag(arg0, arg1, arg2, arg3) {
+	const parsed = parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3);
+	assertDiscordBotApiSecret_(parsed.botSecret);
+	const normalizedTag = normalizeDiscordSyncPlayerTag_(parsed.playerTag);
+	const discordId = sanitizeDiscordIdValue_(parsed.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(parsed.discordUsername);
+	if (!discordId && !discordUsername) {
+		throw new Error("Discord username or Discord ID is required.");
+	}
 
 	return withActiveRosterJobLock_("discord-sync", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
-		const sourceSnapshot = readActiveRosterSnapshot_();
-		const rosterData = sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
-		if (!rosterData || !Array.isArray(rosterData.rosters)) {
-			throw new Error("Active roster data is unavailable.");
-		}
-
-		const locations = [];
-		let updatedCount = 0;
-		let skippedExistingCount = 0;
-		const roles = ["main", "subs", "missing"];
-
-		for (let i = 0; i < rosterData.rosters.length; i++) {
-			const roster = rosterData.rosters[i] && typeof rosterData.rosters[i] === "object" ? rosterData.rosters[i] : {};
-			for (let roleIndex = 0; roleIndex < roles.length; roleIndex++) {
-				const role = roles[roleIndex];
-				const players = Array.isArray(roster[role]) ? roster[role] : [];
-				for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
-					const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
-					let storedTag = "";
-					try {
-						storedTag = normalizeDiscordSyncPlayerTag_(player.tag);
-					} catch (err) {
-						continue;
-					}
-					if (storedTag !== normalizedTag) continue;
-
-					const previousDiscord = typeof player.discord === "string" ? player.discord : "";
-					const hasExistingDiscord = previousDiscord.trim().length > 0;
-					const updated = !hasExistingDiscord;
-					if (updated) {
-						player.discord = sanitizedDiscordUsername;
-						updatedCount++;
-					} else {
-						skippedExistingCount++;
-					}
-					locations.push({
-						rosterId: typeof roster.id === "string" ? roster.id : "",
-						rosterTitle: typeof roster.title === "string" ? roster.title : "",
-						role: role,
-						index: playerIndex,
-						previousDiscord: previousDiscord,
-						updated: updated,
-					});
-				}
-			}
-		}
-
-		if (!locations.length) {
-			const firstRoster = rosterData.rosters[0];
-			if (!firstRoster || typeof firstRoster !== "object") {
-				throw new Error("Cannot add missing player because the first roster is unavailable.");
-			}
-			if (!Array.isArray(firstRoster.missing)) firstRoster.missing = [];
-			firstRoster.missing.push({
-				slot: null,
-				name: "",
-				discord: sanitizedDiscordUsername,
-				th: 0,
-				tag: normalizedTag,
-				notes: [],
-				excludeAsSwapTarget: false,
-				excludeAsSwapSource: false,
-			});
-			const insertedIndex = firstRoster.missing.length - 1;
-			const updatedAt = new Date().toISOString();
-			const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
-			replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
-			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
-			return {
-				ok: true,
-				found: false,
-				created: true,
-				updated: true,
-				reason: "player-created-in-missing",
-				tag: normalizedTag,
-				discordUsername: sanitizedDiscordUsername,
-				updatedCount: 0,
-				skippedExistingCount: 0,
-				addedCount: 1,
-				locations: [
-					{
-						rosterId: typeof firstRoster.id === "string" ? firstRoster.id : "",
-						rosterTitle: typeof firstRoster.title === "string" ? firstRoster.title : "",
-						role: "missing",
-						index: insertedIndex,
-						previousDiscord: "",
-						updated: true,
-						created: true,
-					},
-				],
-			};
-		}
-
-		if (updatedCount > 0) {
-			const updatedAt = new Date().toISOString();
-			const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
-			replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
+		const updatedAt = new Date().toISOString();
+		const result = syncDiscordIdentityIntoActiveRoster_(
+			{
+				playerTag: normalizedTag,
+				discordId: discordId,
+				discordUsername: discordUsername,
+				discordSource: ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC,
+			},
+			{
+				updatedAt: updatedAt,
+				source: ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC,
+				createMissing: true,
+			},
+		);
+		if (result && result.updated) {
 			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
 		}
-
-		return {
-			ok: true,
-			found: true,
-			updated: updatedCount > 0,
-			tag: normalizedTag,
-			discordUsername: sanitizedDiscordUsername,
-			updatedCount: updatedCount,
-			skippedExistingCount: skippedExistingCount,
-			locations: locations,
-		};
+		return result;
 	});
+}
+
+// Backwards-compatible username-only wrapper.
+function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) {
+	return syncDiscordIdentityForPlayerTag(playerTag, "", discordUsername, botSecret);
 }
 
 // Get auto refresh settings.

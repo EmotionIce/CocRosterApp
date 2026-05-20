@@ -2209,6 +2209,18 @@
         return null;
     };
 
+    // Resolve display Discord from canonical metrics identity, falling back to roster cache.
+    const getDisplayDiscordUsernameForPlayer = (playerRaw, dataRaw) => {
+        const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+        const tag = normalizeClanTag(player.tag);
+        const metricsEntry = tag ? getPlayerMetricsEntry(tag, dataRaw) : null;
+        const identity = metricsEntry && metricsEntry.identity && typeof metricsEntry.identity === "object"
+            ? metricsEntry.identity
+            : null;
+        const canonicalUsername = toStr(identity && identity.discordUsername).trim();
+        return canonicalUsername || toStr(player.discord).trim();
+    };
+
     // Normalize local history points.
     const normalizeLocalHistoryPoints = (historyRaw, latestSnapshotRaw) => {
         const pointsByDay = Object.create(null);
@@ -3445,7 +3457,7 @@
         const placementLabel = buildPlacementLabel(context);
         const hasStoredTh = localPlayer.th !== "" && localPlayer.th != null;
         const localStoredThLabel = hasStoredTh ? ("TH" + localPlayer.th) : "Not set";
-        const discordLabel = toStr(localPlayer.discord).trim() || "Not set";
+        const discordLabel = getDisplayDiscordUsernameForPlayer(localPlayer, lastRenderedData) || "Not set";
         const localNotes = context && Array.isArray(localPlayer.notes) ? localPlayer.notes : [];
         const suggestion = trackingMode === "cwl"
             ? (context && context.suggestion ? context.suggestion : getPlayerBenchSuggestion(context && context.suggestionModel, tag))
@@ -5717,7 +5729,7 @@
 
         const metaRow = el("div", "player-meta-row");
         const discordLine = el("div", "player-discord-line");
-        const discordHandle = toStr(player.discord).trim();
+        const discordHandle = getDisplayDiscordUsernameForPlayer(player, context.data);
         const discordIconUrl = discordHandle ? getDiscordIconUrl() : getNoDiscordIconUrl();
         if (discordIconUrl) {
             const discordIcon = document.createElement("img");

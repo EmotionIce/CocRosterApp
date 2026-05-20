@@ -12,7 +12,9 @@
 //
 // Roster player objects in roster.main, roster.subs, and roster.missing may only
 // contain: slot, name, discord, th, tag, notes, excludeAsSwapTarget,
-// excludeAsSwapSource. Discord identity belongs on these roster player objects.
+// excludeAsSwapSource. player.discord is allowed only as a compatibility/display
+// cache; canonical Discord identity belongs at
+// /active/playerMetrics/byTag[normalizedPlayerTag]/identity.
 //
 // Roster-scoped war state is allowed only for active war/CWL behavior:
 // cwlStats, regularWar, warPerformance, publicLineupProjection, cwlPreparation,
@@ -20,7 +22,10 @@
 //
 // Forbidden duplicate metric locations include metric-like fields on roster
 // players and any roster-scoped playerMetrics/metrics store. Global Clash/player
-// metrics must be stored only under /active/playerMetrics/byTag.
+// metrics and Discord identity must be stored only under
+// /active/playerMetrics/byTag. Discord identity must not be stored in
+// latestSnapshot, donation history, trophy history, regularWar, cwlStats, or
+// warPerformance.
 const ACTIVE_ROSTER_PLAYER_FIELD_NAMES = [
 	"slot",
 	"name",
@@ -76,12 +81,16 @@ function getActiveRosterDatabaseContract_() {
 		firebaseLayout: {
 			active: FIREBASE_ACTIVE_PATH,
 			canonicalMetrics: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]",
+			canonicalDiscordIdentity: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]/identity",
 			publishArchive: FIREBASE_ARCHIVE_PUBLISH_PATH,
 			autoRefreshDailyArchive: FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH,
 			meta: FIREBASE_META_PATH,
 		},
 		rosterPlayerFields: ACTIVE_ROSTER_PLAYER_FIELD_NAMES.slice(),
+		rosterPlayerDiscordField: "player.discord is compatibility/display cache only",
 		canonicalMetricsLocation: "playerMetrics.byTag",
+		canonicalDiscordIdentityLocation: "playerMetrics.byTag[normalizedPlayerTag].identity",
+		canonicalDiscordIdentityFields: ["tag", "name", "discordId", "discordUsername", "discordLinkedAt", "discordUpdatedAt", "discordSource"],
 		rosterScopedWarState: ACTIVE_ROSTER_ALLOWED_ROSTER_WAR_STATE_FIELD_NAMES.slice(),
 		forbiddenRosterPlayerMetricFields: ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_NAMES.slice(),
 		forbiddenDuplicateMetricLocations: [

@@ -1,54 +1,5 @@
 // Publish flow and auto-refresh trigger orchestration.
 
-// Preserve existing Discord values from active data when a full incoming payload omits them.
-function preserveExistingDiscordValuesByTag_(incomingRosterData, currentActiveRosterData) {
-	const incoming = incomingRosterData && typeof incomingRosterData === "object" ? incomingRosterData : null;
-	const current = currentActiveRosterData && typeof currentActiveRosterData === "object" ? currentActiveRosterData : null;
-	if (!incoming || !current) {
-		return { rosterData: incomingRosterData, preservedCount: 0 };
-	}
-
-	const discordByTag = {};
-	const roles = ["main", "subs", "missing"];
-	const currentRosters = Array.isArray(current.rosters) ? current.rosters : [];
-	for (let i = 0; i < currentRosters.length; i++) {
-		const roster = currentRosters[i] && typeof currentRosters[i] === "object" ? currentRosters[i] : {};
-		for (let roleIndex = 0; roleIndex < roles.length; roleIndex++) {
-			const players = Array.isArray(roster[roles[roleIndex]]) ? roster[roles[roleIndex]] : [];
-			for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
-				const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
-				const tag = normalizeTag_(player.tag);
-				const discord = typeof player.discord === "string" ? player.discord : "";
-				if (!tag || !discord.trim() || Object.prototype.hasOwnProperty.call(discordByTag, tag)) continue;
-				discordByTag[tag] = discord;
-			}
-		}
-	}
-
-	let preservedCount = 0;
-	const incomingRosters = Array.isArray(incoming.rosters) ? incoming.rosters : [];
-	for (let i = 0; i < incomingRosters.length; i++) {
-		const roster = incomingRosters[i] && typeof incomingRosters[i] === "object" ? incomingRosters[i] : {};
-		for (let roleIndex = 0; roleIndex < roles.length; roleIndex++) {
-			const players = Array.isArray(roster[roles[roleIndex]]) ? roster[roles[roleIndex]] : [];
-			for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
-				const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
-				const incomingDiscord = typeof player.discord === "string" ? player.discord : "";
-				if (incomingDiscord.trim()) continue;
-				const tag = normalizeTag_(player.tag);
-				if (!tag || !Object.prototype.hasOwnProperty.call(discordByTag, tag)) continue;
-				player.discord = discordByTag[tag];
-				preservedCount++;
-			}
-		}
-	}
-
-	return {
-		rosterData: incoming,
-		preservedCount: preservedCount,
-	};
-}
-
 // Handle write published roster data.
 function writePublishedRosterData_(rosterDataRaw) {
 	const publishedAt = new Date().toISOString();
@@ -70,34 +21,25 @@ function writePublishedRosterData_(rosterDataRaw) {
 			Logger.log("publishRosterData: unable to read current active roster snapshot from Firebase: %s", errorMessage_(err));
 		}
 
-		if (activeData) {
-			const preservedDiscord = preserveExistingDiscordValuesByTag_(validated, activeData);
-			if (preservedDiscord.preservedCount > 0) {
-				validationStepLabel = "validate payload after Discord preservation";
-				validated = validateRosterData_(preservedDiscord.rosterData);
-				duplicateDiagnosticsRosterData = validated;
-				Logger.log("publishRosterData: preserved existing Discord values (count=%s).", preservedDiscord.preservedCount);
-			}
-		}
-
-		// Protect against accidental metric loss when preview payload has no metrics.
-		const incomingMetricCount = countPlayerMetricsEntries_(validated && validated.playerMetrics);
-		if (incomingMetricCount < 1) {
+		// Protect against accidental metric loss when preview payload has no real Clash metrics.
+		const incomingMetricDataCount = countPlayerMetricDataEntries_(validated && validated.playerMetrics);
+		if (incomingMetricDataCount < 1) {
 			try {
-				const activeMetricCount = countPlayerMetricsEntries_(activeData && activeData.playerMetrics);
-				if (activeMetricCount > 0) {
+				const activeMetricDataCount = countPlayerMetricDataEntries_(activeData && activeData.playerMetrics);
+				if (activeMetricDataCount > 0) {
 					validated.playerMetrics = sanitizePlayerMetricsStore_(activeData.playerMetrics, publishedAt);
 					validationStepLabel = "validate payload after metrics preservation";
 					validated = validateRosterData_(validated);
 					duplicateDiagnosticsRosterData = validated;
-					Logger.log("publishRosterData: preserved existing playerMetrics (entries=%s) because incoming payload had none.", activeMetricCount);
+					Logger.log("publishRosterData: preserved existing playerMetrics (metricDataEntries=%s) because incoming payload had no real metric data.", activeMetricDataCount);
 				}
 			} catch (err) {
 				Logger.log("publishRosterData: unable to preserve existing playerMetrics fallback: %s", errorMessage_(err));
 			}
 		}
 
-		const lowCoverageRosters = incomingMetricCount > 0 ? listRostersNeedingMetricsCoverageRepair_(validated, PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH) : [];
+		const effectiveMetricDataCount = countPlayerMetricDataEntries_(validated && validated.playerMetrics);
+		const lowCoverageRosters = effectiveMetricDataCount > 0 ? listRostersNeedingMetricsCoverageRepair_(validated, PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH) : [];
 		if (lowCoverageRosters.length > 0) {
 			Logger.log(
 				"publishRosterData: detected %s roster(s) below metrics coverage threshold %.2f; running targeted recapture.",
@@ -106,13 +48,13 @@ function writePublishedRosterData_(rosterDataRaw) {
 			);
 		}
 
-		// Do publish-time capture when payload has no metrics, or when one/more rosters have low metrics coverage.
-		const shouldRunPublishMetricsCapture = incomingMetricCount < 1 || lowCoverageRosters.length > 0;
+		// Do publish-time capture when payload has no metric data, or when one/more rosters have low metrics coverage.
+		const shouldRunPublishMetricsCapture = effectiveMetricDataCount < 1 || lowCoverageRosters.length > 0;
 		if (shouldRunPublishMetricsCapture) {
 			try {
 				const rosters = Array.isArray(validated && validated.rosters) ? validated.rosters : [];
 				const rosterCaptureQueue = [];
-				if (incomingMetricCount < 1) {
+				if (effectiveMetricDataCount < 1) {
 					for (let i = 0; i < rosters.length; i++) {
 						const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 						const rosterId = String(roster.id == null ? "" : roster.id).trim();
@@ -164,12 +106,13 @@ function writePublishedRosterData_(rosterDataRaw) {
 				validated = validateRosterData_(validated);
 				duplicateDiagnosticsRosterData = validated;
 				Logger.log(
-					"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s errors=%s repairedRosters=%s",
+					"publishRosterData metrics capture attempted=%s captured=%s recorded=%s updated=%s entries=%s metricDataEntries=%s errors=%s repairedRosters=%s",
 					attemptedClans,
 					capturedClans,
 					recorded,
 					updated,
 					countPlayerMetricsEntries_(validated && validated.playerMetrics),
+					countPlayerMetricDataEntries_(validated && validated.playerMetrics),
 					errors.length,
 					lowCoverageRosters.length,
 				);
@@ -177,7 +120,25 @@ function writePublishedRosterData_(rosterDataRaw) {
 				Logger.log("publishRosterData: fallback metrics capture failed: %s", errorMessage_(err));
 			}
 		} else {
-			Logger.log("publishRosterData: skipped live metrics capture because incoming payload already has %s metric entries.", incomingMetricCount);
+			Logger.log("publishRosterData: skipped live metrics capture because incoming payload already has %s metric data entries.", effectiveMetricDataCount);
+		}
+
+		const discordCanonicalized = canonicalizeDiscordIdentityForRosterData_(validated, {
+			sourceRosterData: activeData,
+			updatedAt: publishedAt,
+			source: ACTIVE_DATA_WRITE_SOURCE_PUBLISH,
+			allowRosterCacheUsernameUpdates: true,
+		});
+		if (discordCanonicalized && (discordCanonicalized.updatedCanonical || discordCanonicalized.updatedRosterCache)) {
+			validationStepLabel = "validate payload after Discord identity canonicalization";
+			validated = validateRosterData_(discordCanonicalized.rosterData);
+			duplicateDiagnosticsRosterData = validated;
+			Logger.log(
+				"publishRosterData: canonicalized Discord identity preserved=%s migrated=%s hydrated=%s.",
+				toNonNegativeInt_(discordCanonicalized.preservedFromSource),
+				toNonNegativeInt_(discordCanonicalized.migratedFromRosterCache),
+				toNonNegativeInt_(discordCanonicalized.hydratedRosterCache),
+			);
 		}
 
 		const publishBackup = createPublishArchiveBackupFromSnapshot_(activeSourceSnapshot, publishedAt);
@@ -301,10 +262,20 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 	if (!sourceData || !refreshedData) {
 		throw new Error("Auto-refresh write requires validated source and refreshed roster payloads.");
 	}
-	const preservedDiscord = preserveExistingDiscordValuesByTag_(refreshedData, sourceData);
-	if (preservedDiscord.preservedCount > 0) {
-		refreshedData = validateRosterData_(preservedDiscord.rosterData);
-		Logger.log("autoRefresh write preserved existing Discord values count=%s", preservedDiscord.preservedCount);
+	const discordCanonicalized = canonicalizeDiscordIdentityForRosterData_(refreshedData, {
+		sourceRosterData: sourceData,
+		updatedAt: String(refreshedData.lastUpdatedAt || sourceData.lastUpdatedAt || new Date().toISOString()),
+		source: ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH,
+		allowRosterCacheUsernameUpdates: false,
+	});
+	if (discordCanonicalized && (discordCanonicalized.updatedCanonical || discordCanonicalized.updatedRosterCache)) {
+		refreshedData = validateRosterData_(discordCanonicalized.rosterData);
+		Logger.log(
+			"autoRefresh write canonicalized Discord identity preserved=%s migrated=%s hydrated=%s",
+			toNonNegativeInt_(discordCanonicalized.preservedFromSource),
+			toNonNegativeInt_(discordCanonicalized.migratedFromRosterCache),
+			toNonNegativeInt_(discordCanonicalized.hydratedRosterCache),
+		);
 	}
 	const compareStartMs = Date.now();
 	Logger.log("autoRefresh write compare start");

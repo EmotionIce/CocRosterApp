@@ -41,6 +41,67 @@ function sanitizeMetricsIconUrls_(iconUrlsRaw) {
 	return Object.keys(out).length ? out : null;
 }
 
+// Sanitize a Discord username for canonical identity storage.
+function sanitizeDiscordUsernameValue_(discordUsernameRaw) {
+	return String(discordUsernameRaw == null ? "" : discordUsernameRaw)
+		.replace(/[\u0000-\u001F\u007F]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+// Sanitize a Discord account id for canonical identity storage.
+function sanitizeDiscordIdValue_(discordIdRaw) {
+	return String(discordIdRaw == null ? "" : discordIdRaw)
+		.replace(/[\u0000-\u001F\u007F\s]+/g, "")
+		.trim();
+}
+
+// Sanitize an optional Discord identity timestamp.
+function sanitizeDiscordIdentityTimestamp_(timestampRaw) {
+	const timestampMs = parseIsoToMs_(timestampRaw);
+	return timestampMs > 0 ? new Date(timestampMs).toISOString() : "";
+}
+
+// Sanitize an optional Discord identity source label.
+function sanitizeDiscordIdentitySource_(sourceRaw) {
+	return String(sourceRaw == null ? "" : sourceRaw)
+		.replace(/[\u0000-\u001F\u007F]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 80);
+}
+
+// Sanitize the metrics identity block, including canonical Discord identity fields.
+function sanitizePlayerMetricsIdentity_(identityRaw, tagRaw, nameRaw) {
+	const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+	const tag = normalizeTag_(tagRaw || identity.tag);
+	if (!tag) return null;
+
+	const name = String(nameRaw != null ? nameRaw : identity.name == null ? "" : identity.name).trim();
+	const discordId = sanitizeDiscordIdValue_(identity.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
+	const discordLinkedAt = sanitizeDiscordIdentityTimestamp_(identity.discordLinkedAt);
+	const discordUpdatedAt = sanitizeDiscordIdentityTimestamp_(identity.discordUpdatedAt);
+	const discordSource = sanitizeDiscordIdentitySource_(identity.discordSource);
+
+	const out = {
+		tag: tag,
+		name: name,
+	};
+	if (discordId) out.discordId = discordId;
+	if (discordUsername) out.discordUsername = discordUsername;
+	if (discordLinkedAt) out.discordLinkedAt = discordLinkedAt;
+	if (discordUpdatedAt) out.discordUpdatedAt = discordUpdatedAt;
+	if (discordSource) out.discordSource = discordSource;
+	return out;
+}
+
+// Return whether a metrics identity has meaningful canonical Discord data.
+function hasCanonicalDiscordIdentity_(identityRaw) {
+	const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+	return !!(sanitizeDiscordIdValue_(identity.discordId) || sanitizeDiscordUsernameValue_(identity.discordUsername));
+}
+
 // Sanitize metrics league snapshot.
 function sanitizeMetricsLeagueSnapshot_(leagueRaw) {
 	const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
@@ -128,6 +189,34 @@ function sanitizeMetricsSnapshotPayload_(snapshotRaw, fallbackTagRaw) {
 	if (playerHouse) out.playerHouse = playerHouse;
 
 	return out;
+}
+
+// Return whether a snapshot-like input has real metric evidence beyond tag/name.
+function hasMetricsSnapshotEvidence_(snapshotRaw) {
+	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : null;
+	if (!snapshot) return false;
+	const evidenceFields = [
+		"trophies",
+		"donations",
+		"donationsReceived",
+		"townHallLevel",
+		"th",
+		"expLevel",
+		"builderBaseTrophies",
+		"clanRank",
+		"previousClanRank",
+		"mapPosition",
+		"clanTag",
+		"capturedAt",
+		"league",
+		"leagueTier",
+		"builderBaseLeague",
+		"playerHouse",
+	];
+	for (let i = 0; i < evidenceFields.length; i++) {
+		if (Object.prototype.hasOwnProperty.call(snapshot, evidenceFields[i])) return true;
+	}
+	return false;
 }
 
 // Map API members for metrics snapshot.
@@ -237,7 +326,7 @@ function createEmptyPlayerMetricsStore_() {
 function createEmptyPlayerMetricsEntry_(tagRaw, nameRaw) {
 	const tag = normalizeTag_(tagRaw);
 	return {
-		identity: {
+		identity: sanitizePlayerMetricsIdentity_({}, tag, nameRaw) || {
 			tag: tag,
 			name: String(nameRaw == null ? "" : nameRaw).trim(),
 		},
@@ -365,6 +454,35 @@ function getPlayerMetricsEntryEvidenceMs_(entryRaw) {
 	return best;
 }
 
+// Return whether a player metrics entry has real Clash metrics data, not identity-only data.
+function hasPlayerMetricsDataEvidence_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+
+	const latestSnapshot = entry.latestSnapshot && typeof entry.latestSnapshot === "object" ? entry.latestSnapshot : null;
+	if (latestSnapshot && hasMetricsSnapshotEvidence_(latestSnapshot)) {
+		const sanitizedSnapshot = sanitizeMetricsSnapshotPayload_(latestSnapshot, sanitizeEntryTag_(entry));
+		if (sanitizedSnapshot) return true;
+	}
+
+	const history = Array.isArray(entry.trophyHistoryDaily) ? entry.trophyHistoryDaily : [];
+	for (let i = 0; i < history.length; i++) {
+		if (sanitizeMetricsTrophyHistoryPoint_(history[i])) return true;
+	}
+
+	const donationMonths = entry.donationMonths && typeof entry.donationMonths === "object" ? entry.donationMonths : {};
+	const donationKeys = Object.keys(donationMonths);
+	for (let i = 0; i < donationKeys.length; i++) {
+		if (sanitizeMetricsDonationMonthLedger_(donationMonths[donationKeys[i]], donationKeys[i])) return true;
+	}
+
+	const lastSeen = entry.lastSeen && typeof entry.lastSeen === "object" ? entry.lastSeen : {};
+	if (parseIsoToMs_(lastSeen.at) > 0) return true;
+	if (sanitizeMetricsDayKey_(lastSeen.dayKey) && normalizeTag_(lastSeen.clanTag)) return true;
+	if (sanitizeDonationMonthKey_(lastSeen.monthKey) && normalizeTag_(lastSeen.clanTag)) return true;
+
+	return false;
+}
+
 // Sanitize player metrics entry.
 function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
@@ -375,7 +493,8 @@ function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 	const nowMs = isFinite(Number(nowMsRaw)) ? Number(nowMsRaw) : Date.now();
 	const nowDate = nowDateRaw instanceof Date ? nowDateRaw : new Date(nowMs);
 
-	const latestSnapshot = sanitizeMetricsSnapshotPayload_(entry.latestSnapshot, tag);
+	const latestSnapshotRaw = entry.latestSnapshot && typeof entry.latestSnapshot === "object" && hasMetricsSnapshotEvidence_(entry.latestSnapshot) ? entry.latestSnapshot : null;
+	const latestSnapshot = latestSnapshotRaw ? sanitizeMetricsSnapshotPayload_(latestSnapshotRaw, tag) : null;
 	const nameCandidate = String(identity.name == null ? "" : identity.name).trim() || String(entry.name == null ? "" : entry.name).trim() || (latestSnapshot && latestSnapshot.name ? latestSnapshot.name : "");
 
 	const lastSeenRaw = entry.lastSeen && typeof entry.lastSeen === "object" ? entry.lastSeen : {};
@@ -393,9 +512,10 @@ function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 
 	const trophyHistoryDaily = pruneTrophyHistoryDaily_(entry.trophyHistoryDaily, nowDate);
 	const donationMonths = pruneDonationMonths_(entry.donationMonths);
+	const sanitizedIdentity = sanitizePlayerMetricsIdentity_(identity, tag, nameCandidate);
 
 	const out = {
-		identity: {
+		identity: sanitizedIdentity || {
 			tag: tag,
 			name: nameCandidate,
 		},
@@ -405,12 +525,13 @@ function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 	if (latestSnapshot) out.latestSnapshot = latestSnapshot;
 	if (Object.keys(lastSeen).length) out.lastSeen = lastSeen;
 
-	const hasAnyData = !!out.latestSnapshot || out.trophyHistoryDaily.length > 0 || Object.keys(out.donationMonths).length > 0;
-	if (!hasAnyData) return null;
+	const hasAnyData = hasPlayerMetricsDataEvidence_(out);
+	const hasDiscordIdentity = hasCanonicalDiscordIdentity_(out.identity);
+	if (!hasAnyData && !hasDiscordIdentity) return null;
 
 	const retentionMs = PLAYER_METRICS_ENTRY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 	const evidenceMs = getPlayerMetricsEntryEvidenceMs_(out);
-	if (evidenceMs > 0 && nowMs - evidenceMs > retentionMs) {
+	if (!hasDiscordIdentity && evidenceMs > 0 && nowMs - evidenceMs > retentionMs) {
 		return null;
 	}
 
@@ -472,6 +593,102 @@ function ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterDataRaw) {
 	return out;
 }
 
+// Read canonical Discord identity for a normalized player tag.
+function readDiscordIdentityForPlayerTag_(rosterDataRaw, playerTagRaw) {
+	const tag = normalizeTag_(playerTagRaw);
+	if (!tag) return null;
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const store = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : {};
+	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	const entry = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : null;
+	if (!entry) return null;
+	const identity = sanitizePlayerMetricsIdentity_(entry.identity, tag, entry.identity && entry.identity.name);
+	if (!identity || !hasCanonicalDiscordIdentity_(identity)) return null;
+	return identity;
+}
+
+// Upsert canonical Discord identity for a normalized player tag.
+function upsertDiscordIdentityForPlayerTag_(rosterDataRaw, playerTagRaw, identityRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const tag = normalizeTag_(playerTagRaw || (identityRaw && identityRaw.tag));
+	if (!rosterData || !tag) {
+		return { changed: false, tag: tag, identity: null };
+	}
+
+	const incoming = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const nowDate = new Date(nowMs);
+	const source = sanitizeDiscordIdentitySource_(options.source || incoming.discordSource);
+	const incomingDiscordId = sanitizeDiscordIdValue_(incoming.discordId);
+	const incomingDiscordUsername = sanitizeDiscordUsernameValue_(incoming.discordUsername);
+	const onlyFillMissing = options.onlyFillMissing === true;
+	const hasIncomingDiscordIdentity = !!(incomingDiscordId || incomingDiscordUsername);
+	if (!hasIncomingDiscordIdentity) {
+		const existingIdentity = readDiscordIdentityForPlayerTag_(rosterData, tag);
+		return { changed: false, tag: tag, identity: existingIdentity };
+	}
+
+	const store = ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterData);
+	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	store.byTag = byTag;
+
+	const existingEntry = sanitizePlayerMetricsEntry_(tag, byTag[tag], nowMs, nowDate) || createEmptyPlayerMetricsEntry_(tag, incoming.name || "");
+	const existingIdentity = sanitizePlayerMetricsIdentity_(existingEntry.identity, tag, existingEntry.identity && existingEntry.identity.name) || {
+		tag: tag,
+		name: "",
+	};
+	const nextIdentity = Object.assign({}, existingIdentity);
+	nextIdentity.tag = tag;
+	const incomingName = String(incoming.name == null ? "" : incoming.name).trim();
+	if (incomingName && !nextIdentity.name) nextIdentity.name = incomingName;
+
+	if (incomingDiscordId && (!onlyFillMissing || !sanitizeDiscordIdValue_(nextIdentity.discordId))) {
+		nextIdentity.discordId = incomingDiscordId;
+	}
+	if (incomingDiscordUsername && (!onlyFillMissing || !sanitizeDiscordUsernameValue_(nextIdentity.discordUsername))) {
+		nextIdentity.discordUsername = incomingDiscordUsername;
+	}
+
+	const hasNextDiscordIdentity = hasCanonicalDiscordIdentity_(nextIdentity);
+	if (hasNextDiscordIdentity) {
+		const identityCoreChanged =
+			sanitizeDiscordIdValue_(existingIdentity.discordId) !== sanitizeDiscordIdValue_(nextIdentity.discordId) ||
+			sanitizeDiscordUsernameValue_(existingIdentity.discordUsername) !== sanitizeDiscordUsernameValue_(nextIdentity.discordUsername);
+		const existingLinkedAt = sanitizeDiscordIdentityTimestamp_(nextIdentity.discordLinkedAt);
+		const incomingLinkedAt = sanitizeDiscordIdentityTimestamp_(incoming.discordLinkedAt);
+		nextIdentity.discordLinkedAt = existingLinkedAt || incomingLinkedAt || nowIso;
+		const existingUpdatedAt = sanitizeDiscordIdentityTimestamp_(nextIdentity.discordUpdatedAt);
+		if (identityCoreChanged || !existingUpdatedAt || options.touchUpdatedAt === true) {
+			const incomingUpdatedAt = sanitizeDiscordIdentityTimestamp_(incoming.discordUpdatedAt);
+			nextIdentity.discordUpdatedAt = incomingUpdatedAt || nowIso;
+		}
+		if (source && (!onlyFillMissing || !sanitizeDiscordIdentitySource_(nextIdentity.discordSource))) {
+			nextIdentity.discordSource = source;
+		}
+	}
+
+	const sanitizedNextIdentity = sanitizePlayerMetricsIdentity_(nextIdentity, tag, nextIdentity.name) || {
+		tag: tag,
+		name: String(nextIdentity.name == null ? "" : nextIdentity.name).trim(),
+	};
+	const previousIdentityText = JSON.stringify(sanitizePlayerMetricsIdentity_(existingIdentity, tag, existingIdentity.name));
+	const nextIdentityText = JSON.stringify(sanitizedNextIdentity);
+	const changed = previousIdentityText !== nextIdentityText;
+
+	existingEntry.identity = sanitizedNextIdentity;
+	byTag[tag] = existingEntry;
+	if (changed || !store.updatedAt) store.updatedAt = nowIso;
+	rosterData.playerMetrics = store;
+
+	return {
+		changed: changed,
+		tag: tag,
+		identity: sanitizedNextIdentity,
+	};
+}
+
 // Handle count player metrics entries.
 function countPlayerMetricsEntries_(storeRaw) {
 	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};
@@ -480,6 +697,21 @@ function countPlayerMetricsEntries_(storeRaw) {
 	let count = 0;
 	for (let i = 0; i < keys.length; i++) {
 		if (normalizeTag_(keys[i])) count++;
+	}
+	return count;
+}
+
+// Count only entries with real Clash metrics data, excluding Discord-only identity rows.
+function countPlayerMetricDataEntries_(storeRaw) {
+	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};
+	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	const keys = Object.keys(byTag);
+	let count = 0;
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag) continue;
+		const entry = byTag[keys[i]] && typeof byTag[keys[i]] === "object" ? byTag[keys[i]] : null;
+		if (entry && hasPlayerMetricsDataEvidence_(entry)) count++;
 	}
 	return count;
 }
@@ -515,7 +747,7 @@ function listRostersNeedingMetricsCoverageRepair_(rosterDataRaw, minCoverageRaw)
 			if (!tag || seen[tag]) continue;
 			seen[tag] = true;
 			total++;
-			if (byTag[tag] && typeof byTag[tag] === "object") matched++;
+			if (byTag[tag] && typeof byTag[tag] === "object" && hasPlayerMetricsDataEvidence_(byTag[tag])) matched++;
 		}
 
 		if (total < 1) continue;
@@ -809,7 +1041,7 @@ function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw
 	const identity = entryObj.identity && typeof entryObj.identity === "object" ? entryObj.identity : {};
 	const currentName = String(identity.name == null ? "" : identity.name).trim();
 	const nextName = String(snapshot.name == null ? "" : snapshot.name).trim() || currentName;
-	entryObj.identity = {
+	entryObj.identity = sanitizePlayerMetricsIdentity_(identity, tag, nextName) || {
 		tag: tag,
 		name: nextName,
 	};

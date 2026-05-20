@@ -5,12 +5,43 @@ import vm from "node:vm";
 
 const generatorPath = new URL("../cloudflarePages/generator.js", import.meta.url);
 const generatorCode = fs.readFileSync(generatorPath, "utf8");
+const backendFiles = [
+  "script/config.gs",
+  "script/cocApi.gs",
+  "script/rosterDomain.gs",
+  "script/warDomain.gs",
+  "script/firebaseStore.gs",
+  "script/metricsTracking.gs",
+  "script/rosterSchema.gs",
+];
 
 const loadGenerator = () => {
   const context = { window: {} };
   vm.createContext(context);
   vm.runInContext(generatorCode, context);
   return context.window.RosterGenerator;
+};
+
+const loadBackend = () => {
+  const code = backendFiles
+    .map((file) => fs.readFileSync(new URL("../" + file, import.meta.url), "utf8"))
+    .join("\n");
+  const context = {
+    Logger: { log() {} },
+    Session: { getScriptTimeZone: () => "Etc/UTC" },
+    Utilities: {
+      formatDate(dateRaw, _timezone, format) {
+        const date = dateRaw instanceof Date ? dateRaw : new Date(dateRaw);
+        const iso = date.toISOString();
+        if (format === "yyyy-MM-dd") return iso.slice(0, 10);
+        if (format === "yyyy-MM") return iso.slice(0, 7);
+        return iso;
+      },
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(code, context);
+  return context;
 };
 
 test("prefers Username over Discord display name when both are present", () => {
@@ -123,7 +154,15 @@ test("applying import updates preserves existing player metrics store", () => {
     updatedAt: "2026-05-19T00:00:00.000Z",
     byTag: {
       "#28VYJ9URP": {
-        identity: { tag: "#28VYJ9URP", name: "Phuni #2" },
+        identity: {
+          tag: "#28VYJ9URP",
+          name: "Phuni #2",
+          discordId: "123456789012345678",
+          discordUsername: "old-phuni",
+          discordLinkedAt: "2026-05-19T00:00:00.000Z",
+          discordUpdatedAt: "2026-05-19T00:00:00.000Z",
+          discordSource: "discord-sync",
+        },
         latestSnapshot: {
           tag: "#28VYJ9URP",
           trophies: 5000,
@@ -176,4 +215,15 @@ test("applying import updates preserves existing player metrics store", () => {
 
   assert.deepEqual(JSON.parse(JSON.stringify(applied.rosterData.playerMetrics)), playerMetrics);
   assert.equal(applied.rosterData.rosters[0].main[0].discord, "phuuni");
+
+  const backend = loadBackend();
+  const publishReady = backend.canonicalizeDiscordIdentityForRosterData_(applied.rosterData, {
+    sourceRosterData: rosterData,
+    updatedAt: "2026-05-19T03:00:00.000Z",
+    source: "publish",
+    allowRosterCacheUsernameUpdates: true,
+  }).rosterData;
+  const identity = publishReady.playerMetrics.byTag["#28VYJ9URP"].identity;
+  assert.equal(identity.discordId, "123456789012345678");
+  assert.equal(identity.discordUsername, "phuuni");
 });

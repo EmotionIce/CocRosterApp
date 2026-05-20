@@ -179,11 +179,12 @@ const handleDiscordBotSyncApi = async (request, env) => {
   }
 
   const playerTag = body && typeof body.playerTag === "string" ? body.playerTag : "";
+  const discordId = body && typeof body.discordId === "string" ? body.discordId : "";
   const discordUsername = body && typeof body.discordUsername === "string" ? body.discordUsername : "";
-  if (!playerTag.trim() || !discordUsername.trim()) {
+  if (!playerTag.trim() || (!discordId.trim() && !discordUsername.trim())) {
     return jsonResponse(400, {
       ok: false,
-      error: "playerTag and discordUsername are required.",
+      error: "playerTag and discordUsername or discordId are required.",
     });
   }
 
@@ -202,8 +203,8 @@ const handleDiscordBotSyncApi = async (request, env) => {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        method: "syncDiscordUsernameForPlayerTag",
-        args: [playerTag, discordUsername, secret],
+        method: "syncDiscordIdentityForPlayerTag",
+        args: [playerTag, discordId, discordUsername, secret],
       }),
     });
 

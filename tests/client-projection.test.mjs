@@ -14,6 +14,7 @@ const loadClientInternals = () => {
     [
       "    window.__ROSTER_CLIENT_TEST_INTERNALS__ = {",
       "        buildRosterPublicDisplayModel,",
+      "        getDisplayDiscordUsernameForPlayer,",
       "    };",
       "    return;",
       bootMarker,
@@ -108,4 +109,24 @@ test("lets canonical Discord clearing win over a stale projected Discord value",
 
   assert.equal(model.main[0].discord, "");
   assert.equal(model.main[0].mapPosition, 4);
+});
+
+test("prefers canonical metrics Discord username for display", () => {
+  const { getDisplayDiscordUsernameForPlayer } = loadClientInternals();
+  const player = { tag: "#2LUCULPQ2", discord: "row-cache" };
+  const data = {
+    playerMetrics: {
+      byTag: {
+        "#2LUCULPQ2": {
+          identity: {
+            tag: "#2LUCULPQ2",
+            discordUsername: "canonical-user",
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(getDisplayDiscordUsernameForPlayer(player, data), "canonical-user");
+  assert.equal(getDisplayDiscordUsernameForPlayer(player, {}), "row-cache");
 });

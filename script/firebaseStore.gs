@@ -571,6 +571,373 @@ function buildManualCleanupRosterPlayers_(playersRaw, statsRaw) {
 	return out;
 }
 
+// Collect canonical Discord identity candidates from playerMetrics and roster cache rows.
+function collectDiscordIdentityCandidatesByTag_(rosterDataRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const out = {};
+	const store = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : {};
+	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	const metricTags = Object.keys(byTag);
+	for (let i = 0; i < metricTags.length; i++) {
+		const rawKey = metricTags[i];
+		const tag = normalizeTag_(rawKey);
+		if (!tag) continue;
+		const entry = byTag[rawKey] && typeof byTag[rawKey] === "object" ? byTag[rawKey] : {};
+		const identity = sanitizePlayerMetricsIdentity_(entry.identity, tag, entry.identity && entry.identity.name);
+		if (identity && hasCanonicalDiscordIdentity_(identity)) out[tag] = identity;
+	}
+
+	const roles = ["main", "subs", "missing"];
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		for (let roleIndex = 0; roleIndex < roles.length; roleIndex++) {
+			const role = roles[roleIndex];
+			const players = Array.isArray(roster[role]) ? roster[role] : [];
+			for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
+				const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
+				const tag = normalizeTag_(player.tag);
+				const discordUsername = sanitizeDiscordUsernameValue_(player.discord);
+				if (!tag || !discordUsername) continue;
+				const existing = out[tag] && typeof out[tag] === "object" ? out[tag] : { tag: tag, name: "" };
+				if (!existing.name && typeof player.name === "string" && player.name.trim()) existing.name = player.name.trim();
+				if (!sanitizeDiscordUsernameValue_(existing.discordUsername)) existing.discordUsername = discordUsername;
+				out[tag] = sanitizePlayerMetricsIdentity_(existing, tag, existing.name) || existing;
+			}
+		}
+	}
+	return out;
+}
+
+// Collect roster-row Discord cache values by player tag.
+function collectRosterDiscordCacheByTag_(rosterDataRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const out = {};
+	const roles = ["main", "subs", "missing"];
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		for (let roleIndex = 0; roleIndex < roles.length; roleIndex++) {
+			const players = Array.isArray(roster[roles[roleIndex]]) ? roster[roles[roleIndex]] : [];
+			for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
+				const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
+				const tag = normalizeTag_(player.tag);
+				const discordUsername = sanitizeDiscordUsernameValue_(player.discord);
+				if (!tag || !discordUsername || Object.prototype.hasOwnProperty.call(out, tag)) continue;
+				out[tag] = discordUsername;
+			}
+		}
+	}
+	return out;
+}
+
+// Collect roster player locations for a player tag.
+function collectRosterPlayerLocationsByTag_(rosterDataRaw, playerTagRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const wantedTag = normalizeTag_(playerTagRaw);
+	const locations = [];
+	const roles = ["main", "subs", "missing"];
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		for (let roleIndex = 0; roleIndex < roles.length; roleIndex++) {
+			const role = roles[roleIndex];
+			const players = Array.isArray(roster[role]) ? roster[role] : [];
+			for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
+				const player = players[playerIndex] && typeof players[playerIndex] === "object" ? players[playerIndex] : {};
+				const tag = normalizeTag_(player.tag);
+				if (!tag || (wantedTag && tag !== wantedTag)) continue;
+				locations.push({
+					roster: roster,
+					player: player,
+					rosterId: typeof roster.id === "string" ? roster.id : "",
+					rosterTitle: typeof roster.title === "string" ? roster.title : "",
+					role: role,
+					index: playerIndex,
+					tag: tag,
+					previousDiscord: typeof player.discord === "string" ? player.discord : "",
+				});
+			}
+		}
+	}
+	return locations;
+}
+
+// Normalize explicit Discord identity upserts passed to canonicalization helpers.
+function normalizeDiscordIdentityUpsertsByTag_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const out = {};
+	const addIdentity = (tagRaw, identityRaw) => {
+		const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+		const tag = normalizeTag_(tagRaw || identity.tag || identity.playerTag);
+		if (!tag) return;
+		const normalized = sanitizePlayerMetricsIdentity_(
+			{
+				tag: tag,
+				name: identity.name,
+				discordId: identity.discordId,
+				discordUsername: identity.discordUsername != null ? identity.discordUsername : identity.username,
+				discordLinkedAt: identity.discordLinkedAt,
+				discordUpdatedAt: identity.discordUpdatedAt,
+				discordSource: identity.discordSource || options.source,
+			},
+			tag,
+			identity.name,
+		);
+		if (normalized && hasCanonicalDiscordIdentity_(normalized)) out[tag] = normalized;
+	};
+
+	if (options.identity && typeof options.identity === "object") {
+		addIdentity(options.identity.tag || options.identity.playerTag || options.playerTag, options.identity);
+	}
+	const identityByTag = options.identityByTag && typeof options.identityByTag === "object" ? options.identityByTag : {};
+	const identityTags = Object.keys(identityByTag);
+	for (let i = 0; i < identityTags.length; i++) {
+		addIdentity(identityTags[i], identityByTag[identityTags[i]]);
+	}
+	const identities = Array.isArray(options.identities) ? options.identities : [];
+	for (let i = 0; i < identities.length; i++) {
+		addIdentity(identities[i] && (identities[i].tag || identities[i].playerTag), identities[i]);
+	}
+	return out;
+}
+
+// Canonicalize Discord identity into playerMetrics and hydrate roster-row cache values.
+function canonicalizeDiscordIdentityForRosterData_(rosterDataRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	if (!rosterData) {
+		return {
+			rosterData: rosterDataRaw,
+			updatedCanonical: false,
+			updatedRosterCache: false,
+			migratedFromRosterCache: 0,
+			preservedFromSource: 0,
+			explicitUpserts: 0,
+			hydratedRosterCache: 0,
+			tags: [],
+		};
+	}
+
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
+	const source = sanitizeDiscordIdentitySource_(options.source || "canonicalize");
+	const sourceRosterData = options.sourceRosterData && typeof options.sourceRosterData === "object"
+		? options.sourceRosterData
+		: options.currentActiveRosterData && typeof options.currentActiveRosterData === "object"
+			? options.currentActiveRosterData
+			: null;
+	const allowRosterCacheUsernameUpdates = options.allowRosterCacheUsernameUpdates === true;
+	const changedTags = {};
+	let preservedFromSource = 0;
+	let migratedFromRosterCache = 0;
+	let explicitUpserts = 0;
+	let hydratedRosterCache = 0;
+
+	const sourceCandidates = collectDiscordIdentityCandidatesByTag_(sourceRosterData);
+	const sourceTags = Object.keys(sourceCandidates);
+	for (let i = 0; i < sourceTags.length; i++) {
+		const tag = sourceTags[i];
+		const result = upsertDiscordIdentityForPlayerTag_(rosterData, tag, sourceCandidates[tag], {
+			updatedAt: nowIso,
+			source: sourceCandidates[tag].discordSource || source || "active-preserve",
+			onlyFillMissing: true,
+		});
+		if (result && result.changed) {
+			preservedFromSource++;
+			changedTags[tag] = true;
+		}
+	}
+
+	const sourceRosterCacheByTag = collectRosterDiscordCacheByTag_(sourceRosterData);
+	const targetRosterCacheByTag = collectRosterDiscordCacheByTag_(rosterData);
+	const targetCacheTags = Object.keys(targetRosterCacheByTag);
+	for (let i = 0; i < targetCacheTags.length; i++) {
+		const tag = targetCacheTags[i];
+		const discordUsername = sanitizeDiscordUsernameValue_(targetRosterCacheByTag[tag]);
+		if (!discordUsername) continue;
+		const existingIdentity = readDiscordIdentityForPlayerTag_(rosterData, tag);
+		const existingUsername = sanitizeDiscordUsernameValue_(existingIdentity && existingIdentity.discordUsername);
+		const sourceRosterUsername = sanitizeDiscordUsernameValue_(sourceRosterCacheByTag[tag]);
+		const shouldUpdateFromRosterCache =
+			!existingUsername ||
+			(allowRosterCacheUsernameUpdates && (!sourceRosterData || discordUsername !== sourceRosterUsername));
+		if (!shouldUpdateFromRosterCache) continue;
+		const result = upsertDiscordIdentityForPlayerTag_(
+			rosterData,
+			tag,
+			{
+				tag: tag,
+				discordUsername: discordUsername,
+				discordSource: source || "roster-cache",
+			},
+			{
+				updatedAt: nowIso,
+				source: source || "roster-cache",
+			},
+		);
+		if (result && result.changed) {
+			migratedFromRosterCache++;
+			changedTags[tag] = true;
+		}
+	}
+
+	const explicitByTag = normalizeDiscordIdentityUpsertsByTag_(options);
+	const explicitTags = Object.keys(explicitByTag);
+	for (let i = 0; i < explicitTags.length; i++) {
+		const tag = explicitTags[i];
+		const result = upsertDiscordIdentityForPlayerTag_(rosterData, tag, explicitByTag[tag], {
+			updatedAt: nowIso,
+			source: explicitByTag[tag].discordSource || source || "discord-sync",
+			touchUpdatedAt: options.touchUpdatedAt === true,
+		});
+		if (result && result.changed) {
+			explicitUpserts++;
+			changedTags[tag] = true;
+		}
+	}
+
+	const allLocations = collectRosterPlayerLocationsByTag_(rosterData, "");
+	for (let i = 0; i < allLocations.length; i++) {
+		const location = allLocations[i];
+		const tag = normalizeTag_(location && location.tag);
+		if (!tag || !location.player) continue;
+		const identity = readDiscordIdentityForPlayerTag_(rosterData, tag);
+		if (!identity || !hasCanonicalDiscordIdentity_(identity)) continue;
+		const canonicalUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
+		const previousDiscord = typeof location.player.discord === "string" ? location.player.discord : "";
+		if (previousDiscord === canonicalUsername) continue;
+		location.player.discord = canonicalUsername;
+		hydratedRosterCache++;
+		changedTags[tag] = true;
+	}
+
+	rosterData.playerMetrics = sanitizePlayerMetricsStore_(rosterData.playerMetrics, nowIso);
+	return {
+		rosterData: rosterData,
+		updatedCanonical: preservedFromSource > 0 || migratedFromRosterCache > 0 || explicitUpserts > 0,
+		updatedRosterCache: hydratedRosterCache > 0,
+		migratedFromRosterCache: migratedFromRosterCache,
+		preservedFromSource: preservedFromSource,
+		explicitUpserts: explicitUpserts,
+		hydratedRosterCache: hydratedRosterCache,
+		tags: Object.keys(changedTags),
+	};
+}
+
+// Write one Discord identity update through the active Firebase write boundary.
+function syncDiscordIdentityIntoActiveRoster_(payloadRaw, optionsRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const normalizedTag = normalizeTag_(payload.playerTag || payload.tag);
+	if (!normalizedTag || !isValidPlayerTag_(normalizedTag)) {
+		throw new Error("Invalid player tag.");
+	}
+	const discordId = sanitizeDiscordIdValue_(payload.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(payload.discordUsername != null ? payload.discordUsername : payload.username);
+	if (!discordId && !discordUsername) {
+		throw new Error("Discord username or Discord ID is required.");
+	}
+
+	const sourceSnapshot = options.sourceSnapshot && typeof options.sourceSnapshot === "object" ? options.sourceSnapshot : readActiveRosterSnapshot_();
+	const rosterData = sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
+	if (!rosterData || !Array.isArray(rosterData.rosters)) {
+		throw new Error("Active roster data is unavailable.");
+	}
+
+	const beforeLocations = collectRosterPlayerLocationsByTag_(rosterData, normalizedTag);
+	let created = false;
+	let insertedIndex = -1;
+	if (!beforeLocations.length && options.createMissing !== false) {
+		const firstRoster = rosterData.rosters[0];
+		if (!firstRoster || typeof firstRoster !== "object") {
+			throw new Error("Cannot add missing player because the first roster is unavailable.");
+		}
+		if (!Array.isArray(firstRoster.missing)) firstRoster.missing = [];
+		firstRoster.missing.push({
+			slot: null,
+			name: "",
+			discord: "",
+			th: 0,
+			tag: normalizedTag,
+			notes: [],
+			excludeAsSwapTarget: false,
+			excludeAsSwapSource: false,
+		});
+		created = true;
+		insertedIndex = firstRoster.missing.length - 1;
+	}
+
+	const updatedAt = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
+	const canonicalizeResult = canonicalizeDiscordIdentityForRosterData_(rosterData, {
+		sourceRosterData: sourceSnapshot.rosterData,
+		updatedAt: updatedAt,
+		source: options.source || payload.discordSource || ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC,
+		identity: {
+			tag: normalizedTag,
+			name: payload.name,
+			discordId: discordId,
+			discordUsername: discordUsername,
+			discordSource: options.source || payload.discordSource || ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC,
+		},
+	});
+	const afterLocations = collectRosterPlayerLocationsByTag_(rosterData, normalizedTag);
+	const locations = [];
+	let updatedLocationCount = 0;
+	let skippedExistingCount = 0;
+	for (let i = 0; i < afterLocations.length; i++) {
+		const after = afterLocations[i];
+		let previousDiscord = "";
+		for (let j = 0; j < beforeLocations.length; j++) {
+			const before = beforeLocations[j];
+			if (before.rosterId === after.rosterId && before.role === after.role && before.index === after.index) {
+				previousDiscord = before.previousDiscord;
+				break;
+			}
+		}
+		const currentDiscord = typeof after.player.discord === "string" ? after.player.discord : "";
+		const updatedRosterCacheForLocation = previousDiscord !== currentDiscord;
+		if (updatedRosterCacheForLocation) updatedLocationCount++;
+		else if (!(created && after.role === "missing" && after.index === insertedIndex)) skippedExistingCount++;
+		locations.push({
+			rosterId: after.rosterId,
+			rosterTitle: after.rosterTitle,
+			role: after.role,
+			index: after.index,
+			previousDiscord: previousDiscord,
+			discord: currentDiscord,
+			updatedRosterCache: updatedRosterCacheForLocation,
+			updated: updatedRosterCacheForLocation,
+			created: created && after.role === "missing" && after.index === insertedIndex,
+		});
+	}
+
+	const finalIdentity = readDiscordIdentityForPlayerTag_(rosterData, normalizedTag) || {};
+	const updatedCanonical = !!(canonicalizeResult && canonicalizeResult.updatedCanonical);
+	const updatedRosterCache = !!(canonicalizeResult && canonicalizeResult.updatedRosterCache);
+	const updated = created || updatedCanonical || updatedRosterCache;
+	if (updated) {
+		const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
+		replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
+	}
+
+	return {
+		ok: true,
+		found: beforeLocations.length > 0,
+		created: created,
+		updated: updated,
+		tag: normalizedTag,
+		discordId: sanitizeDiscordIdValue_(finalIdentity.discordId),
+		discordUsername: sanitizeDiscordUsernameValue_(finalIdentity.discordUsername),
+		updatedCanonical: updatedCanonical,
+		updatedRosterCache: updatedRosterCache,
+		reason: created ? "player-created-in-missing" : "",
+		updatedCount: updatedLocationCount,
+		skippedExistingCount: skippedExistingCount,
+		addedCount: created ? 1 : 0,
+		locations: locations,
+	};
+}
+
 // Convert a decoded active payload into the current strict active schema before
 // validation. This is intentionally only used by manual one-time cleanup.
 function buildManualCleanupActivePayload_(payloadRaw) {
@@ -621,6 +988,14 @@ function buildManualCleanupActivePayload_(payloadRaw) {
 		if (roster.benchSuggestions && typeof roster.benchSuggestions === "object") nextRoster.benchSuggestions = roster.benchSuggestions;
 		out.rosters.push(nextRoster);
 	}
+
+	const canonicalized = canonicalizeDiscordIdentityForRosterData_(out, {
+		updatedAt: out.lastUpdatedAt || new Date().toISOString(),
+		source: "manual-cleanup",
+		allowRosterCacheUsernameUpdates: true,
+	});
+	stats.migratedDiscordIdentityFromRosterCache = toNonNegativeInt_(canonicalized && canonicalized.migratedFromRosterCache);
+	stats.hydratedDiscordRosterCache = toNonNegativeInt_(canonicalized && canonicalized.hydratedRosterCache);
 
 	return {
 		rosterData: validateRosterData_(out),
@@ -941,7 +1316,7 @@ function isRecentSuccessfulActiveWrite_(optionsRaw) {
 // Handle replace active roster data.
 function replaceActiveRosterData_(validatedRosterData, options) {
 	const opts = options && typeof options === "object" ? options : {};
-	const validated = validateRosterData_(validatedRosterData);
+	let validated = validateRosterData_(validatedRosterData);
 	let sourceSnapshot = opts.sourceSnapshot && typeof opts.sourceSnapshot === "object" ? opts.sourceSnapshot : null;
 	if (!sourceSnapshot) {
 		try {
@@ -949,6 +1324,15 @@ function replaceActiveRosterData_(validatedRosterData, options) {
 		} catch (err) {
 			sourceSnapshot = null;
 		}
+	}
+	const canonicalized = canonicalizeDiscordIdentityForRosterData_(validated, {
+		sourceRosterData: sourceSnapshot && sourceSnapshot.rosterData,
+		updatedAt: validated.lastUpdatedAt || new Date().toISOString(),
+		source: opts.discordSource || "active-write",
+		allowRosterCacheUsernameUpdates: opts.allowRosterCacheUsernameUpdates === true,
+	});
+	if (canonicalized && (canonicalized.updatedCanonical || canonicalized.updatedRosterCache)) {
+		validated = validateRosterData_(canonicalized.rosterData);
 	}
 	const writeResult = writeValidatedActiveRosterDataToFirebase_(validated);
 
