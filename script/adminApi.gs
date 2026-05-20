@@ -25,6 +25,24 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return syncDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordUsernameForPlayerTag":
 			return syncDiscordUsernameForPlayerTag(args[0], args[1], args[2]);
+		case "reconcileCurrentSeasonEvents":
+			return reconcileCurrentSeasonEvents(args[0], args[1]);
+		case "getCurrentSeasonEvents":
+			return getCurrentSeasonEvents(args[0], args[1]);
+		case "getSeasonEvent":
+			return getSeasonEvent(args[0], args[1]);
+		case "getSeasonEventLeaderboard":
+			return getSeasonEventLeaderboard(args[0], args[1]);
+		case "getCurrentSeasonEventLeaderboards":
+			return getCurrentSeasonEventLeaderboards(args[0], args[1]);
+		case "updateSeasonEvent":
+			return updateSeasonEvent(args[0], args[1]);
+		case "registerSeasonEventSignup":
+			return registerSeasonEventSignup(args[0], args[1]);
+		case "updateSeasonEventParticipantAccounts":
+			return updateSeasonEventParticipantAccounts(args[0], args[1]);
+		case "cancelSeasonEventSignup":
+			return cancelSeasonEventSignup(args[0], args[1]);
 		case "debugFirebaseAuthForDiscordSync":
 			return debugFirebaseAuthForDiscordSync(args[0], args[1]);
 		case "debugFirebasePrivateKeySigning":

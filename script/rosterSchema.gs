@@ -41,7 +41,7 @@ const ACTIVE_ROSTER_FORBIDDEN_PLAYER_METRIC_FIELD_NAMES = [
 	"playerMetrics",
 	"latestSnapshot",
 	"trophyHistoryDaily",
-	"donationMonths",
+	"donationCycles",
 	"donationsHistory",
 	"trophyHistory",
 	"trophiesHistory",

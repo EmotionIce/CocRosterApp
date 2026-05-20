@@ -6,25 +6,22 @@ function sanitizeMetricsDayKey_(value) {
 	return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
 }
 
-// Sanitize donation month key.
-function sanitizeDonationMonthKey_(value) {
+// Sanitize a donation cycle key.
+function sanitizeDonationCycleKey_(value) {
 	const text = String(value == null ? "" : value).trim();
-	const match = /^(\d{4})-(\d{2})$/.exec(text);
-	if (!match) return "";
-	const month = Number(match[2]);
-	if (!isFinite(month) || month < 1 || month > 12) return "";
-	return match[1] + "-" + match[2];
+	return /^[A-Za-z0-9_-]{1,120}$/.test(text) ? text : "";
 }
 
-// Get donation month sort value.
-function getDonationMonthSortValue_(value) {
-	const key = sanitizeDonationMonthKey_(value);
-	if (!key) return -1;
-	const parts = key.split("-");
-	const year = Number(parts[0]);
-	const month = Number(parts[1]);
-	if (!isFinite(year) || !isFinite(month)) return -1;
-	return year * 12 + (month - 1);
+// Get donation cycle sort value.
+function getDonationCycleSortValue_(ledgerRaw, fallbackKeyRaw) {
+	const ledger = ledgerRaw && typeof ledgerRaw === "object" ? ledgerRaw : {};
+	const startsAtMs = parseIsoToMs_(ledger.startsAt);
+	if (startsAtMs > 0) return startsAtMs;
+	const key = sanitizeDonationCycleKey_(fallbackKeyRaw || ledger.seasonId);
+	const match = /^ranked-legend-i-(\d{4}-\d{2}-\d{2})$/.exec(key);
+	if (!match) return -1;
+	const ms = new Date(match[1] + "T00:00:00.000Z").getTime();
+	return isFinite(ms) ? ms : -1;
 }
 
 // Sanitize metrics icon URLs.
@@ -286,23 +283,33 @@ function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
 	return out;
 }
 
-// Sanitize metrics donation month ledger.
-function sanitizeMetricsDonationMonthLedger_(ledgerRaw, monthKeyRaw) {
+// Sanitize metrics donation cycle ledger.
+function sanitizeMetricsDonationCycleLedger_(ledgerRaw, seasonIdRaw) {
 	const ledger = ledgerRaw && typeof ledgerRaw === "object" ? ledgerRaw : {};
-	const monthKey = sanitizeDonationMonthKey_(monthKeyRaw || ledger.monthKey);
-	if (!monthKey) return null;
+	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw || ledger.seasonId);
+	if (!seasonId) return null;
+
+	const startsAtMs = parseIsoToMs_(ledger.startsAt);
+	const endsAtMs = parseIsoToMs_(ledger.endsAt);
+	if (startsAtMs <= 0 || endsAtMs <= startsAtMs) return null;
 
 	const out = {
-		monthKey: monthKey,
+		seasonId: seasonId,
+		startsAt: new Date(startsAtMs).toISOString(),
+		endsAt: new Date(endsAtMs).toISOString(),
 		rawDonationsLastSeen: toNonNegativeInt_(ledger.rawDonationsLastSeen),
 		rawDonationsReceivedLastSeen: toNonNegativeInt_(ledger.rawDonationsReceivedLastSeen),
-		monthlyTotalDonations: toNonNegativeInt_(ledger.monthlyTotalDonations),
-		monthlyTotalDonationsReceived: toNonNegativeInt_(ledger.monthlyTotalDonationsReceived),
+		cycleTotalDonations: toNonNegativeInt_(ledger.cycleTotalDonations),
+		cycleTotalDonationsReceived: toNonNegativeInt_(ledger.cycleTotalDonationsReceived),
+		firstSeenAt: "",
 		lastSeenAt: "",
 		lastClanTag: "",
 		resetCount: toNonNegativeInt_(ledger.resetCount),
 		receivedResetCount: toNonNegativeInt_(ledger.receivedResetCount),
 	};
+
+	const firstSeenMs = parseIsoToMs_(ledger.firstSeenAt);
+	if (firstSeenMs > 0) out.firstSeenAt = new Date(firstSeenMs).toISOString();
 
 	const lastSeenMs = parseIsoToMs_(ledger.lastSeenAt);
 	if (lastSeenMs > 0) out.lastSeenAt = new Date(lastSeenMs).toISOString();
@@ -332,7 +339,7 @@ function createEmptyPlayerMetricsEntry_(tagRaw, nameRaw) {
 		},
 		lastSeen: {},
 		trophyHistoryDaily: [],
-		donationMonths: {},
+		donationCycles: {},
 	};
 }
 
@@ -392,19 +399,20 @@ function pruneTrophyHistoryDaily_(historyRaw, nowDateRaw) {
 	return pruned;
 }
 
-// Prune donation months.
-function pruneDonationMonths_(donationMonthsRaw) {
-	const donationMonths = donationMonthsRaw && typeof donationMonthsRaw === "object" ? donationMonthsRaw : {};
-	const keys = Object.keys(donationMonths)
-		.map((key) => sanitizeDonationMonthKey_(key))
+// Prune donation cycles.
+function pruneDonationCycles_(donationCyclesRaw) {
+	const donationCycles = donationCyclesRaw && typeof donationCyclesRaw === "object" ? donationCyclesRaw : {};
+	const keys = Object.keys(donationCycles)
+		.map((key) => sanitizeDonationCycleKey_(key))
 		.filter((key) => key)
-		.sort((left, right) => getDonationMonthSortValue_(left) - getDonationMonthSortValue_(right));
+		.sort((left, right) => getDonationCycleSortValue_(donationCycles[left], left) - getDonationCycleSortValue_(donationCycles[right], right));
 
-	const limitedKeys = keys.length > PLAYER_METRICS_DONATION_MONTHS_MAX ? keys.slice(keys.length - PLAYER_METRICS_DONATION_MONTHS_MAX) : keys;
+	const maxCycles = Math.max(1, toNonNegativeInt_(PLAYER_METRICS_DONATION_CYCLES_MAX) || 16);
+	const limitedKeys = keys.length > maxCycles ? keys.slice(keys.length - maxCycles) : keys;
 	const out = {};
 	for (let i = 0; i < limitedKeys.length; i++) {
 		const key = limitedKeys[i];
-		const ledger = sanitizeMetricsDonationMonthLedger_(donationMonths[key], key);
+		const ledger = sanitizeMetricsDonationCycleLedger_(donationCycles[key], key);
 		if (!ledger) continue;
 		out[key] = ledger;
 	}
@@ -438,17 +446,14 @@ function getPlayerMetricsEntryEvidenceMs_(entryRaw) {
 		}
 	}
 
-	const donationMonths = entry.donationMonths && typeof entry.donationMonths === "object" ? entry.donationMonths : {};
-	const donationKeys = Object.keys(donationMonths);
-	for (let i = 0; i < donationKeys.length; i++) {
-		const key = donationKeys[i];
-		const ledger = donationMonths[key] && typeof donationMonths[key] === "object" ? donationMonths[key] : {};
+	const donationCycles = entry.donationCycles && typeof entry.donationCycles === "object" ? entry.donationCycles : {};
+	const donationCycleKeys = Object.keys(donationCycles);
+	for (let i = 0; i < donationCycleKeys.length; i++) {
+		const key = donationCycleKeys[i];
+		const ledger = donationCycles[key] && typeof donationCycles[key] === "object" ? donationCycles[key] : {};
 		keepBest(ledger.lastSeenAt);
-		const monthKey = sanitizeDonationMonthKey_(key);
-		if (monthKey) {
-			const monthMs = new Date(monthKey + "-01T00:00:00Z").getTime();
-			if (isFinite(monthMs) && monthMs > best) best = monthMs;
-		}
+		keepBest(ledger.startsAt);
+		keepBest(ledger.endsAt);
 	}
 
 	return best;
@@ -469,16 +474,16 @@ function hasPlayerMetricsDataEvidence_(entryRaw) {
 		if (sanitizeMetricsTrophyHistoryPoint_(history[i])) return true;
 	}
 
-	const donationMonths = entry.donationMonths && typeof entry.donationMonths === "object" ? entry.donationMonths : {};
-	const donationKeys = Object.keys(donationMonths);
-	for (let i = 0; i < donationKeys.length; i++) {
-		if (sanitizeMetricsDonationMonthLedger_(donationMonths[donationKeys[i]], donationKeys[i])) return true;
+	const donationCycles = entry.donationCycles && typeof entry.donationCycles === "object" ? entry.donationCycles : {};
+	const donationCycleKeys = Object.keys(donationCycles);
+	for (let i = 0; i < donationCycleKeys.length; i++) {
+		if (sanitizeMetricsDonationCycleLedger_(donationCycles[donationCycleKeys[i]], donationCycleKeys[i])) return true;
 	}
 
 	const lastSeen = entry.lastSeen && typeof entry.lastSeen === "object" ? entry.lastSeen : {};
 	if (parseIsoToMs_(lastSeen.at) > 0) return true;
 	if (sanitizeMetricsDayKey_(lastSeen.dayKey) && normalizeTag_(lastSeen.clanTag)) return true;
-	if (sanitizeDonationMonthKey_(lastSeen.monthKey) && normalizeTag_(lastSeen.clanTag)) return true;
+	if (sanitizeDonationCycleKey_(lastSeen.donationCycleKey) && normalizeTag_(lastSeen.clanTag)) return true;
 
 	return false;
 }
@@ -505,13 +510,13 @@ function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 	}
 	const dayKey = sanitizeMetricsDayKey_(lastSeenRaw.dayKey || entry.lastSeenDayKey) || (lastSeen.at ? getServerDateString_(new Date(lastSeen.at)) : "");
 	if (dayKey) lastSeen.dayKey = dayKey;
-	const monthKey = sanitizeDonationMonthKey_(lastSeenRaw.monthKey || entry.lastSeenMonthKey) || (lastSeen.at ? getServerMonthKey_(new Date(lastSeen.at)) : dayKey ? dayKey.slice(0, 7) : "");
-	if (monthKey) lastSeen.monthKey = monthKey;
+	const donationCycleKey = sanitizeDonationCycleKey_(lastSeenRaw.donationCycleKey || entry.lastSeenDonationCycleKey);
+	if (donationCycleKey) lastSeen.donationCycleKey = donationCycleKey;
 	const lastSeenClanTag = normalizeTag_(lastSeenRaw.clanTag || entry.lastClanTag || (latestSnapshot && latestSnapshot.clanTag));
 	if (lastSeenClanTag) lastSeen.clanTag = lastSeenClanTag;
 
 	const trophyHistoryDaily = pruneTrophyHistoryDaily_(entry.trophyHistoryDaily, nowDate);
-	const donationMonths = pruneDonationMonths_(entry.donationMonths);
+	const donationCycles = pruneDonationCycles_(entry.donationCycles);
 	const sanitizedIdentity = sanitizePlayerMetricsIdentity_(identity, tag, nameCandidate);
 
 	const out = {
@@ -520,7 +525,7 @@ function sanitizePlayerMetricsEntry_(tagRaw, entryRaw, nowMsRaw, nowDateRaw) {
 			name: nameCandidate,
 		},
 		trophyHistoryDaily: trophyHistoryDaily,
-		donationMonths: donationMonths,
+		donationCycles: donationCycles,
 	};
 	if (latestSnapshot) out.latestSnapshot = latestSnapshot;
 	if (Object.keys(lastSeen).length) out.lastSeen = lastSeen;
@@ -922,7 +927,32 @@ function buildMetricsCaptureContext_(capturedAtRaw) {
 		capturedAt: capturedAt,
 		capturedDate: capturedDate,
 		dayKey: getServerDateString_(capturedDate),
-		monthKey: getServerMonthKey_(capturedDate),
+	};
+}
+
+// Resolve the donation cycle used for metrics capture.
+function resolveDonationCycleForMetricsCapture_(captureCtxRaw) {
+	const context = captureCtxRaw && typeof captureCtxRaw === "object" ? captureCtxRaw : buildMetricsCaptureContext_("");
+	const capturedMs = parseIsoToMs_(context.capturedAt) || Date.now();
+	if (typeof resolveLegendIRankedSeasonCycle_ === "function") {
+		return resolveLegendIRankedSeasonCycle_(capturedMs);
+	}
+
+	const anchorIso =
+		typeof SEASON_EVENT_RANKED_LEGEND_ANCHOR_ISO !== "undefined" ? SEASON_EVENT_RANKED_LEGEND_ANCHOR_ISO : "2026-05-18T05:00:00.000Z";
+	const cycleMs =
+		typeof SEASON_EVENT_RANKED_LEGEND_CYCLE_MS !== "undefined" ? SEASON_EVENT_RANKED_LEGEND_CYCLE_MS : 28 * 24 * 60 * 60 * 1000;
+	const anchorMs = parseIsoToMs_(anchorIso);
+	if (anchorMs <= 0) throw new Error("Invalid donation cycle anchor.");
+	const cycleIndex = Math.floor((capturedMs - anchorMs) / cycleMs);
+	const startMs = anchorMs + cycleIndex * cycleMs;
+	const endMs = startMs + cycleMs;
+	const start = new Date(startMs);
+	return {
+		seasonId: "ranked-legend-i-" + Utilities.formatDate(start, "Etc/UTC", "yyyy-MM-dd"),
+		startsAt: start.toISOString(),
+		endsAt: new Date(endMs).toISOString(),
+		source: "legend-cycle",
 	};
 }
 
@@ -987,31 +1017,47 @@ function updateDonationLedgerValue_(ledger, rawValue, rawFieldName, totalFieldNa
 	};
 }
 
-// Update monthly donation ledger for snapshot.
-function updateMonthlyDonationLedgerForSnapshot_(entry, snapshotRaw, captureCtx) {
+// Update 28-day donation cycle ledger for snapshot.
+function updateDonationCycleLedgerForSnapshot_(entry, snapshotRaw, captureCtx) {
 	const entryObj = entry && typeof entry === "object" ? entry : {};
 	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, "");
 	const context = captureCtx && typeof captureCtx === "object" ? captureCtx : buildMetricsCaptureContext_("");
 	if (!snapshot) return false;
-	const monthKey = sanitizeDonationMonthKey_(context.monthKey);
-	if (!monthKey) return false;
 
-	const donationMonths = entryObj.donationMonths && typeof entryObj.donationMonths === "object" ? entryObj.donationMonths : {};
-	const before = JSON.stringify(pruneDonationMonths_(donationMonths));
-	const currentLedger = sanitizeMetricsDonationMonthLedger_(donationMonths[monthKey], monthKey) || {
-		monthKey: monthKey,
+	const cycle = resolveDonationCycleForMetricsCapture_(context);
+	const seasonId = sanitizeDonationCycleKey_(cycle && cycle.seasonId);
+	if (!seasonId) return false;
+
+	const donationCycles = entryObj.donationCycles && typeof entryObj.donationCycles === "object" ? entryObj.donationCycles : {};
+	const before = JSON.stringify(pruneDonationCycles_(donationCycles));
+	const currentLedger = sanitizeMetricsDonationCycleLedger_(donationCycles[seasonId], seasonId) || {
+		seasonId: seasonId,
+		startsAt: cycle.startsAt,
+		endsAt: cycle.endsAt,
 		rawDonationsLastSeen: 0,
 		rawDonationsReceivedLastSeen: 0,
-		monthlyTotalDonations: 0,
-		monthlyTotalDonationsReceived: 0,
+		cycleTotalDonations: 0,
+		cycleTotalDonationsReceived: 0,
+		firstSeenAt: "",
 		lastSeenAt: "",
 		lastClanTag: "",
 		resetCount: 0,
 		receivedResetCount: 0,
 	};
 
-	const donationResult = updateDonationLedgerValue_(currentLedger, snapshot.donations, "rawDonationsLastSeen", "monthlyTotalDonations", "resetCount");
-	const receivedResult = updateDonationLedgerValue_(currentLedger, snapshot.donationsReceived, "rawDonationsReceivedLastSeen", "monthlyTotalDonationsReceived", "receivedResetCount");
+	currentLedger.seasonId = seasonId;
+	currentLedger.startsAt = cycle.startsAt;
+	currentLedger.endsAt = cycle.endsAt;
+	if (!currentLedger.firstSeenAt) currentLedger.firstSeenAt = context.capturedAt;
+
+	const donationResult = updateDonationLedgerValue_(currentLedger, snapshot.donations, "rawDonationsLastSeen", "cycleTotalDonations", "resetCount");
+	const receivedResult = updateDonationLedgerValue_(
+		currentLedger,
+		snapshot.donationsReceived,
+		"rawDonationsReceivedLastSeen",
+		"cycleTotalDonationsReceived",
+		"receivedResetCount",
+	);
 
 	if (donationResult.delta > 0 || receivedResult.delta > 0 || donationResult.resetDetected || receivedResult.resetDetected || !currentLedger.lastSeenAt) {
 		currentLedger.lastSeenAt = context.capturedAt;
@@ -1019,9 +1065,9 @@ function updateMonthlyDonationLedgerForSnapshot_(entry, snapshotRaw, captureCtx)
 	const clanTag = normalizeTag_(snapshot.clanTag);
 	if (clanTag) currentLedger.lastClanTag = clanTag;
 
-	donationMonths[monthKey] = currentLedger;
-	entryObj.donationMonths = pruneDonationMonths_(donationMonths);
-	const after = JSON.stringify(entryObj.donationMonths);
+	donationCycles[seasonId] = currentLedger;
+	entryObj.donationCycles = pruneDonationCycles_(donationCycles);
+	const after = JSON.stringify(entryObj.donationCycles);
 	return before !== after;
 }
 
@@ -1065,24 +1111,25 @@ function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw
 		league: sanitizeMetricsLeagueSnapshot_(snapshot.league),
 	};
 	const trophyChanged = upsertDailyTrophyHistoryPoint_(entryObj, point, captureCtx.capturedDate);
-	const donationChanged = updateMonthlyDonationLedgerForSnapshot_(entryObj, snapshot, captureCtx);
+	const donationCycleChanged = updateDonationCycleLedgerForSnapshot_(entryObj, snapshot, captureCtx);
+	const donationCycle = resolveDonationCycleForMetricsCapture_(captureCtx);
 
 	const lastSeen = entryObj.lastSeen && typeof entryObj.lastSeen === "object" ? entryObj.lastSeen : {};
 	const lastSeenDayKey = sanitizeMetricsDayKey_(lastSeen.dayKey);
-	const shouldUpdateLastSeen = lastSeenDayKey !== captureCtx.dayKey || latestChanged || trophyChanged || donationChanged || !lastSeen.dayKey;
+	const shouldUpdateLastSeen = lastSeenDayKey !== captureCtx.dayKey || latestChanged || trophyChanged || donationCycleChanged || !lastSeen.dayKey;
 	if (shouldUpdateLastSeen) {
 		entryObj.lastSeen = {
 			at: captureCtx.capturedAt,
 			dayKey: captureCtx.dayKey,
-			monthKey: captureCtx.monthKey,
+			donationCycleKey: sanitizeDonationCycleKey_(donationCycle && donationCycle.seasonId),
 			clanTag: normalizeTag_(snapshot.clanTag) || "",
 		};
 	}
 
 	if (!Array.isArray(entryObj.trophyHistoryDaily)) entryObj.trophyHistoryDaily = [];
-	if (!entryObj.donationMonths || typeof entryObj.donationMonths !== "object") entryObj.donationMonths = {};
+	if (!entryObj.donationCycles || typeof entryObj.donationCycles !== "object") entryObj.donationCycles = {};
 
-	return latestChanged || trophyChanged || donationChanged || shouldUpdateLastSeen;
+	return latestChanged || trophyChanged || donationCycleChanged || shouldUpdateLastSeen;
 }
 
 // Record clan member metrics snapshot.

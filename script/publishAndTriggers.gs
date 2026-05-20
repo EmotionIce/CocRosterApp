@@ -809,6 +809,9 @@ function autoRefreshActiveRosterTick() {
 			tryReconcileRegularWarFinalizationTriggerState_();
 		}
 		Logger.log("autoRefresh write finalization trigger reconcile done durationMs=%s", Math.max(0, Date.now() - reconcileStartMs));
+		const seasonEventReconcileStartMs = Date.now();
+		tryReconcileCurrentSeasonEventsForAutoRefresh_();
+		Logger.log("autoRefresh season event reconcile done durationMs=%s", Math.max(0, Date.now() - seasonEventReconcileStartMs));
 		Logger.log("autoRefreshActiveRosterTick ok: %s", summary);
 		return {
 			ok: true,

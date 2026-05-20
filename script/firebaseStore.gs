@@ -1107,13 +1107,6 @@ function getServerDateString_(dateRaw) {
 	return Utilities.formatDate(date, timezone, "yyyy-MM-dd");
 }
 
-// Get server month key.
-function getServerMonthKey_(dateRaw) {
-	const date = dateRaw instanceof Date ? dateRaw : new Date();
-	const timezone = Session.getScriptTimeZone ? Session.getScriptTimeZone() : "Etc/UTC";
-	return Utilities.formatDate(date, timezone, "yyyy-MM");
-}
-
 // Parse iso to ms.
 function parseIsoToMs_(isoRaw) {
 	const text = String(isoRaw == null ? "" : isoRaw).trim();

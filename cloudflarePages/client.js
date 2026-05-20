@@ -221,7 +221,9 @@
         donationsReceived: "donationsReceived",
         townHall: "townHall",
     };
-    const LEADERBOARD_MONTH_MODE_VALUES = {
+    const LEADERBOARD_RANKED_SEASON_ANCHOR_ISO = "2026-05-18T05:00:00.000Z";
+    const LEADERBOARD_RANKED_SEASON_CYCLE_MS = 28 * 24 * 60 * 60 * 1000;
+    const LEADERBOARD_CYCLE_MODE_VALUES = {
         current: "current",
         last: "last",
     };
@@ -714,7 +716,7 @@
         leaderboard: {
             rosterFilter: "all",
             sortMode: LEADERBOARD_SORT_MODE_VALUES.trophiesLeague,
-            monthMode: LEADERBOARD_MONTH_MODE_VALUES.current,
+            cycleMode: LEADERBOARD_CYCLE_MODE_VALUES.current,
         },
     });
 
@@ -739,11 +741,11 @@
         return LEADERBOARD_SORT_MODE_VALUES.trophiesLeague;
     };
 
-    // Sanitize leaderboard month mode.
-    const sanitizeLeaderboardMonthMode = (valueRaw) => {
+    // Sanitize leaderboard cycle mode.
+    const sanitizeLeaderboardCycleMode = (valueRaw) => {
         const value = toStr(valueRaw).trim();
-        if (value === LEADERBOARD_MONTH_MODE_VALUES.last) return LEADERBOARD_MONTH_MODE_VALUES.last;
-        return LEADERBOARD_MONTH_MODE_VALUES.current;
+        if (value === LEADERBOARD_CYCLE_MODE_VALUES.last) return LEADERBOARD_CYCLE_MODE_VALUES.last;
+        return LEADERBOARD_CYCLE_MODE_VALUES.current;
     };
 
     // Sanitize leaderboard roster filter.
@@ -762,7 +764,7 @@
             leaderboard: {
                 rosterFilter: sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter || defaults.leaderboard.rosterFilter),
                 sortMode: sanitizeLeaderboardSortMode(leaderboard.sortMode || defaults.leaderboard.sortMode),
-                monthMode: sanitizeLeaderboardMonthMode(leaderboard.monthMode || defaults.leaderboard.monthMode),
+                cycleMode: sanitizeLeaderboardCycleMode(leaderboard.cycleMode || defaults.leaderboard.cycleMode),
             },
         };
     };
@@ -845,19 +847,25 @@
         return sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived;
     };
 
-    // Get current month key.
-    const getCurrentMonthKey = (dateRaw) => {
-        const date = dateRaw instanceof Date ? dateRaw : new Date();
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, "0");
-        return String(year) + "-" + month;
+    // Resolve deterministic Legend I ranked season cycle.
+    const resolveLeaderboardRankedSeasonCycle = (dateRaw) => {
+        const anchorMs = new Date(LEADERBOARD_RANKED_SEASON_ANCHOR_ISO).getTime();
+        const nowMsRaw = dateRaw instanceof Date ? dateRaw.getTime() : new Date(dateRaw || Date.now()).getTime();
+        const nowMs = Number.isFinite(nowMsRaw) ? nowMsRaw : Date.now();
+        const cycleIndex = Math.floor((nowMs - anchorMs) / LEADERBOARD_RANKED_SEASON_CYCLE_MS);
+        const startMs = anchorMs + cycleIndex * LEADERBOARD_RANKED_SEASON_CYCLE_MS;
+        const endMs = startMs + LEADERBOARD_RANKED_SEASON_CYCLE_MS;
+        return {
+            seasonId: "ranked-legend-i-" + new Date(startMs).toISOString().slice(0, 10),
+            startsAt: new Date(startMs).toISOString(),
+            endsAt: new Date(endMs).toISOString(),
+        };
     };
 
-    // Get previous month key.
-    const getPreviousMonthKey = (dateRaw) => {
-        const date = dateRaw instanceof Date ? dateRaw : new Date();
-        const previous = new Date(date.getFullYear(), date.getMonth() - 1, 1);
-        return getCurrentMonthKey(previous);
+    // Resolve previous deterministic Legend I ranked season cycle.
+    const resolvePreviousLeaderboardRankedSeasonCycle = (dateRaw) => {
+        const current = resolveLeaderboardRankedSeasonCycle(dateRaw);
+        return resolveLeaderboardRankedSeasonCycle(new Date(new Date(current.startsAt).getTime() - 1));
     };
 
     // Get public view buttons.
@@ -4864,26 +4872,29 @@
         return null;
     };
 
-    // Handle read monthly donation ledger.
-    const readMonthlyDonationLedger = (entryRaw, monthKeyRaw) => {
+    // Handle read ranked-season donation ledger.
+    const readDonationCycleLedger = (entryRaw, cycleRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-        const monthKey = toStr(monthKeyRaw).trim();
-        if (!monthKey) return null;
-        const donationMonths = entry.donationMonths && typeof entry.donationMonths === "object" ? entry.donationMonths : null;
-        if (!donationMonths) return null;
-        if (donationMonths[monthKey] && typeof donationMonths[monthKey] === "object") return donationMonths[monthKey];
-        const keys = Object.keys(donationMonths);
+        const cycle = cycleRaw && typeof cycleRaw === "object" ? cycleRaw : {};
+        const seasonId = toStr(cycle.seasonId).trim();
+        if (!seasonId) return null;
+        const donationCycles = entry.donationCycles && typeof entry.donationCycles === "object" ? entry.donationCycles : null;
+        if (!donationCycles) return null;
+        if (donationCycles[seasonId] && typeof donationCycles[seasonId] === "object") return donationCycles[seasonId];
+        const keys = Object.keys(donationCycles);
         for (let i = 0; i < keys.length; i++) {
-            if (toStr(keys[i]).trim() !== monthKey) continue;
-            const candidate = donationMonths[keys[i]];
-            if (candidate && typeof candidate === "object") return candidate;
+            const candidate = donationCycles[keys[i]];
+            if (!candidate || typeof candidate !== "object") continue;
+            if (toStr(keys[i]).trim() === seasonId) return candidate;
+            if (toStr(candidate.seasonId).trim() === seasonId) return candidate;
+            if (toStr(candidate.startsAt).trim() === toStr(cycle.startsAt).trim() && toStr(candidate.endsAt).trim() === toStr(cycle.endsAt).trim()) return candidate;
         }
         return null;
     };
 
-    // Handle read monthly donation totals.
-    const readMonthlyDonationTotals = (entryRaw, monthKeyRaw) => {
-        const ledger = readMonthlyDonationLedger(entryRaw, monthKeyRaw);
+    // Handle read ranked-season donation totals.
+    const readDonationCycleTotals = (entryRaw, cycleRaw) => {
+        const ledger = readDonationCycleLedger(entryRaw, cycleRaw);
         if (!ledger) {
             return {
                 hasData: false,
@@ -4893,8 +4904,8 @@
         }
         return {
             hasData: true,
-            donations: toNonNegativeInt(ledger.monthlyTotalDonations),
-            donationsReceived: toNonNegativeInt(ledger.monthlyTotalDonationsReceived),
+            donations: toNonNegativeInt(ledger.cycleTotalDonations),
+            donationsReceived: toNonNegativeInt(ledger.cycleTotalDonationsReceived),
         };
     };
 
@@ -4951,9 +4962,9 @@
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const rosters = getOrderedRostersFromData(data);
         const entryByTag = Object.create(null);
-        const currentMonthKey = getCurrentMonthKey(new Date());
-        const lastMonthKey = getPreviousMonthKey(new Date());
-        let hasLastMonthData = false;
+        const currentCycle = resolveLeaderboardRankedSeasonCycle(new Date());
+        const lastCycle = resolvePreviousLeaderboardRankedSeasonCycle(new Date());
+        let hasLastCycleData = false;
 
         // Handle upsert affiliation.
         const upsertAffiliation = (entry, roster, rosterIndex, roleRaw) => {
@@ -5028,9 +5039,9 @@
             }
             const leagueSource = resolveLeaderboardLeagueDescriptorFromSnapshot(latestSnapshot);
             const leagueSort = parseLeaderboardLeagueSortKey(leagueSource);
-            const currentMonthTotals = readMonthlyDonationTotals(metricsEntry, currentMonthKey);
-            const lastMonthTotals = readMonthlyDonationTotals(metricsEntry, lastMonthKey);
-            if (lastMonthTotals.hasData) hasLastMonthData = true;
+            const currentCycleTotals = readDonationCycleTotals(metricsEntry, currentCycle);
+            const lastCycleTotals = readDonationCycleTotals(metricsEntry, lastCycle);
+            if (lastCycleTotals.hasData) hasLastCycleData = true;
 
             entries.push({
                 tag: tag,
@@ -5045,9 +5056,9 @@
                     : "No roster",
                 affiliations: affiliations,
                 rosterIdSet: base.rosterIdSet,
-                donationTotals: {
-                    current: currentMonthTotals,
-                    last: lastMonthTotals,
+                donationCycleTotals: {
+                    current: currentCycleTotals,
+                    last: lastCycleTotals,
                 },
             });
         }
@@ -5055,9 +5066,9 @@
         return {
             entries: entries,
             rosters: rosters,
-            currentMonthKey: currentMonthKey,
-            lastMonthKey: lastMonthKey,
-            hasLastMonthData: hasLastMonthData,
+            currentCycle: currentCycle,
+            lastCycle: lastCycle,
+            hasLastCycleData: hasLastCycleData,
         };
     };
 
@@ -5107,11 +5118,11 @@
     };
 
     // Sort leaderboard entries.
-    const sortLeaderboardEntries = (entriesRaw, sortModeRaw, monthModeRaw) => {
+    const sortLeaderboardEntries = (entriesRaw, sortModeRaw, cycleModeRaw) => {
         const entries = Array.isArray(entriesRaw) ? entriesRaw.slice() : [];
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        const monthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
-        const monthKey = monthMode === LEADERBOARD_MONTH_MODE_VALUES.last ? "last" : "current";
+        const cycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
+        const cycleKey = cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last ? "last" : "current";
 
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.trophiesLeague) {
             entries.sort((left, right) => {
@@ -5125,14 +5136,14 @@
 
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
             entries.sort((left, right) => {
-                const leftMonth = left && left.donationTotals && left.donationTotals[monthKey] ? left.donationTotals[monthKey] : {};
-                const rightMonth = right && right.donationTotals && right.donationTotals[monthKey] ? right.donationTotals[monthKey] : {};
+                const leftCycle = left && left.donationCycleTotals && left.donationCycleTotals[cycleKey] ? left.donationCycleTotals[cycleKey] : {};
+                const rightCycle = right && right.donationCycleTotals && right.donationCycleTotals[cycleKey] ? right.donationCycleTotals[cycleKey] : {};
                 const leftValue = sortMode === LEADERBOARD_SORT_MODE_VALUES.donations
-                    ? toNonNegativeInt(leftMonth.donations)
-                    : toNonNegativeInt(leftMonth.donationsReceived);
+                    ? toNonNegativeInt(leftCycle.donations)
+                    : toNonNegativeInt(leftCycle.donationsReceived);
                 const rightValue = sortMode === LEADERBOARD_SORT_MODE_VALUES.donations
-                    ? toNonNegativeInt(rightMonth.donations)
-                    : toNonNegativeInt(rightMonth.donationsReceived);
+                    ? toNonNegativeInt(rightCycle.donations)
+                    : toNonNegativeInt(rightCycle.donationsReceived);
                 if (rightValue !== leftValue) return rightValue - leftValue;
                 return compareLeaderboardFallback(left, right);
             });
@@ -5149,17 +5160,17 @@
     };
 
     // Build leaderboard primary metric label.
-    const buildLeaderboardPrimaryMetricLabel = (entryRaw, sortModeRaw, monthModeRaw) => {
+    const buildLeaderboardPrimaryMetricLabel = (entryRaw, sortModeRaw, cycleModeRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        const monthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
-        const monthKey = monthMode === LEADERBOARD_MONTH_MODE_VALUES.last ? "last" : "current";
-        const monthTotals = entry.donationTotals && entry.donationTotals[monthKey] ? entry.donationTotals[monthKey] : {};
+        const cycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
+        const cycleKey = cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last ? "last" : "current";
+        const cycleTotals = entry.donationCycleTotals && entry.donationCycleTotals[cycleKey] ? entry.donationCycleTotals[cycleKey] : {};
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations) {
-            return formatNumber(monthTotals.donations) + " donations";
+            return formatNumber(cycleTotals.donations) + " donations";
         }
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
-            return formatNumber(monthTotals.donationsReceived) + " received";
+            return formatNumber(cycleTotals.donationsReceived) + " received";
         }
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.townHall) {
             return "TH " + (toNonNegativeInt(entry.th) > 0 ? toStr(toNonNegativeInt(entry.th)) : "-");
@@ -5168,18 +5179,18 @@
     };
 
     // Build leaderboard secondary metric label.
-    const buildLeaderboardSecondaryMetricLabel = (entryRaw, sortModeRaw, monthModeRaw) => {
+    const buildLeaderboardSecondaryMetricLabel = (entryRaw, sortModeRaw, cycleModeRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        const monthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
-        const monthKey = monthMode === LEADERBOARD_MONTH_MODE_VALUES.last ? "last" : "current";
-        const monthTotals = entry.donationTotals && entry.donationTotals[monthKey] ? entry.donationTotals[monthKey] : {};
+        const cycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
+        const cycleKey = cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last ? "last" : "current";
+        const cycleTotals = entry.donationCycleTotals && entry.donationCycleTotals[cycleKey] ? entry.donationCycleTotals[cycleKey] : {};
         const leagueLabel = toStr(entry.leagueSort && entry.leagueSort.tierLabel).trim() || toStr(entry.leagueName).trim() || "Unranked";
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations) {
-            return "Received: " + formatNumber(monthTotals.donationsReceived);
+            return "Received: " + formatNumber(cycleTotals.donationsReceived);
         }
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
-            return "Donations: " + formatNumber(monthTotals.donations);
+            return "Donations: " + formatNumber(cycleTotals.donations);
         }
         if (sortMode === LEADERBOARD_SORT_MODE_VALUES.townHall) {
             return formatNumber(entry.trophies) + " trophies • " + leagueLabel;
@@ -5192,7 +5203,7 @@
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const sortMode = sanitizeLeaderboardSortMode(options.sortMode);
-        const monthMode = sanitizeLeaderboardMonthMode(options.monthMode);
+        const cycleMode = sanitizeLeaderboardCycleMode(options.cycleMode);
         const rosterFilter = sanitizeLeaderboardRosterFilter(options.rosterFilter);
         const displayAffiliation = resolveLeaderboardCardAffiliation(entry, rosterFilter);
         const wrap = el("div", "player leaderboard-player");
@@ -5215,8 +5226,8 @@
         right.appendChild(el("span", "player-th", "TH " + (toNonNegativeInt(entry.th) > 0 ? toStr(toNonNegativeInt(entry.th)) : "-")));
         top.appendChild(right);
 
-        const metric = el("div", "leaderboard-player__metric", buildLeaderboardPrimaryMetricLabel(entry, sortMode, monthMode));
-        const secondary = el("div", "leaderboard-player__secondary", buildLeaderboardSecondaryMetricLabel(entry, sortMode, monthMode));
+        const metric = el("div", "leaderboard-player__metric", buildLeaderboardPrimaryMetricLabel(entry, sortMode, cycleMode));
+        const secondary = el("div", "leaderboard-player__secondary", buildLeaderboardSecondaryMetricLabel(entry, sortMode, cycleMode));
         const bottom = el("div", "player-bottom");
         bottom.appendChild(el("span", "player-tag", toStr(entry.tag)));
         if (Array.isArray(entry.affiliations) && entry.affiliations.length > 1) {
@@ -5266,12 +5277,13 @@
             leaderboard.rosterFilter = "all";
             changed = true;
         }
-        if (leaderboard.monthMode === LEADERBOARD_MONTH_MODE_VALUES.last && !model.hasLastMonthData) {
-            leaderboard.monthMode = LEADERBOARD_MONTH_MODE_VALUES.current;
+        leaderboard.cycleMode = sanitizeLeaderboardCycleMode(leaderboard.cycleMode);
+        if (leaderboard.cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last && !model.hasLastCycleData) {
+            leaderboard.cycleMode = LEADERBOARD_CYCLE_MODE_VALUES.current;
             changed = true;
         }
         leaderboard.sortMode = sanitizeLeaderboardSortMode(leaderboard.sortMode);
-        leaderboard.monthMode = sanitizeLeaderboardMonthMode(leaderboard.monthMode);
+        leaderboard.cycleMode = sanitizeLeaderboardCycleMode(leaderboard.cycleMode);
         leaderboard.rosterFilter = sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter);
         publicViewState.leaderboard = leaderboard;
         if (changed) persistPublicViewState();
@@ -7133,15 +7145,15 @@
         if (lastRenderedData) render(lastRenderedData);
     };
 
-    // Set leaderboard month mode.
-    const setLeaderboardMonthMode = (monthModeRaw) => {
-        const nextMonthMode = sanitizeLeaderboardMonthMode(monthModeRaw);
+    // Set leaderboard cycle mode.
+    const setLeaderboardCycleMode = (cycleModeRaw) => {
+        const nextCycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
         if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
             publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
         }
-        if (publicViewState.leaderboard.monthMode === nextMonthMode) return;
-        publicViewState.leaderboard.monthMode = nextMonthMode;
+        if (publicViewState.leaderboard.cycleMode === nextCycleMode) return;
+        publicViewState.leaderboard.cycleMode = nextCycleMode;
         persistPublicViewState();
         if (lastRenderedData) render(lastRenderedData);
     };
@@ -7210,12 +7222,12 @@
         const rosterFilter = sanitizeLeaderboardRosterFilter(leaderboardState.rosterFilter);
         const sortMode = sanitizeLeaderboardSortMode(leaderboardState.sortMode);
         const isDonationSort = isDonationSortMode(sortMode);
-        const monthMode = isDonationSort
-            ? sanitizeLeaderboardMonthMode(leaderboardState.monthMode)
-            : LEADERBOARD_MONTH_MODE_VALUES.current;
+        const cycleMode = isDonationSort
+            ? sanitizeLeaderboardCycleMode(leaderboardState.cycleMode)
+            : LEADERBOARD_CYCLE_MODE_VALUES.current;
 
         const filteredEntries = filterLeaderboardEntriesByRoster(model.entries, rosterFilter);
-        const sortedEntries = sortLeaderboardEntries(filteredEntries, sortMode, monthMode);
+        const sortedEntries = sortLeaderboardEntries(filteredEntries, sortMode, cycleMode);
 
         target.textContent = "";
         const controlsCard = el("div", "card leaderboard-controls");
@@ -7251,22 +7263,22 @@
         controlsCard.appendChild(sortRow);
 
         if (isDonationSort) {
-            const monthRow = el("div", "leaderboard-controls__row");
-            monthRow.appendChild(el("div", "leaderboard-controls__label", "Month"));
-            const monthChipRow = el("div", "chip-scroll");
-            monthChipRow.appendChild(createChipButton(
-                "Current month",
-                monthMode === LEADERBOARD_MONTH_MODE_VALUES.current,
-                () => setLeaderboardMonthMode(LEADERBOARD_MONTH_MODE_VALUES.current),
+            const cycleRow = el("div", "leaderboard-controls__row");
+            cycleRow.appendChild(el("div", "leaderboard-controls__label", "Season"));
+            const cycleChipRow = el("div", "chip-scroll");
+            cycleChipRow.appendChild(createChipButton(
+                "Current season",
+                cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.current,
+                () => setLeaderboardCycleMode(LEADERBOARD_CYCLE_MODE_VALUES.current),
             ));
-            monthChipRow.appendChild(createChipButton(
-                "Show last month",
-                monthMode === LEADERBOARD_MONTH_MODE_VALUES.last,
-                () => setLeaderboardMonthMode(LEADERBOARD_MONTH_MODE_VALUES.last),
-                !model.hasLastMonthData,
+            cycleChipRow.appendChild(createChipButton(
+                "Show last season",
+                cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last,
+                () => setLeaderboardCycleMode(LEADERBOARD_CYCLE_MODE_VALUES.last),
+                !model.hasLastCycleData,
             ));
-            monthRow.appendChild(monthChipRow);
-            controlsCard.appendChild(monthRow);
+            cycleRow.appendChild(cycleChipRow);
+            controlsCard.appendChild(cycleRow);
         }
 
         target.appendChild(controlsCard);
@@ -7282,7 +7294,7 @@
         for (let i = 0; i < sortedEntries.length; i++) {
             list.appendChild(renderLeaderboardCard(sortedEntries[i], {
                 sortMode: sortMode,
-                monthMode: monthMode,
+                cycleMode: cycleMode,
                 rosterFilter: rosterFilter,
             }));
         }

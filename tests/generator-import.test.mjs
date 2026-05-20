@@ -170,7 +170,7 @@ test("applying import updates preserves existing player metrics store", () => {
           donationsReceived: 4,
         },
         trophyHistoryDaily: [],
-        donationMonths: {},
+        donationCycles: {},
       },
     },
   };
