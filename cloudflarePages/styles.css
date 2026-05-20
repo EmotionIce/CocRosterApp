@@ -1517,6 +1517,239 @@ h1{
   }
 }
 
+.season-events-section{
+  display:grid;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
+.season-events-section__header{
+  display:flex;
+  align-items:end;
+  justify-content:space-between;
+  gap: 12px;
+}
+
+.season-events-section__copy{
+  min-width:0;
+}
+
+.season-events-section__eyebrow,
+.season-event-card__eyebrow{
+  color: #f5d67d;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.season-events-section__title{
+  margin: 2px 0 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.season-events-section__status{
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(250,204,21,.28);
+  background: rgba(250,204,21,.08);
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.season-events-grid{
+  display:grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 880px){
+  .season-events-grid{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.card.season-event-card{
+  display:grid;
+  gap: 12px;
+  min-width:0;
+  margin: 0;
+}
+
+.card.season-event-card--push{
+  border-color: rgba(56,189,248,.26);
+}
+
+.card.season-event-card--donation{
+  border-color: rgba(34,197,94,.28);
+}
+
+.season-event-card__header{
+  display:flex;
+  align-items:start;
+  justify-content:space-between;
+  gap: 12px;
+}
+
+.season-event-card__title-wrap{
+  min-width:0;
+}
+
+.season-event-card__title{
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  text-transform: none;
+  overflow-wrap:anywhere;
+}
+
+.season-event-card__status{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap: 6px;
+}
+
+.season-event-chip{
+  min-height: 24px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.badge.season-event-chip--status{
+  color: #e0f2fe;
+  border-color: rgba(56,189,248,.28);
+  background: rgba(14,165,233,.12);
+}
+
+.badge.season-event-chip--open{
+  color: #bbf7d0;
+  border-color: rgba(34,197,94,.30);
+  background: rgba(22,163,74,.12);
+}
+
+.badge.season-event-chip--muted{
+  color: #cbd5e1;
+}
+
+.season-event-card__meta{
+  display:flex;
+  flex-wrap:wrap;
+  gap: 7px;
+}
+
+.badge.season-event-card__meta-item{
+  background: rgba(255,255,255,.05);
+  color: #cbd5e1;
+  font-weight: 700;
+}
+
+.season-event-card__note{
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.season-event-card__empty{
+  display:flex;
+  align-items:center;
+  min-height: 68px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px dashed rgba(148,163,184,.28);
+  background: rgba(15,23,42,.42);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.season-event-card__rows{
+  display:grid;
+  gap: 8px;
+}
+
+.season-event-row{
+  display:grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items:center;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(2,6,23,.28);
+  border: 1px solid rgba(148,163,184,.14);
+}
+
+.season-event-row__rank{
+  min-width: 34px;
+  color: #bae6fd;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.season-event-row__body{
+  min-width:0;
+}
+
+.season-event-row__name{
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.25;
+  overflow-wrap:anywhere;
+}
+
+.season-event-row__accounts{
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap:anywhere;
+}
+
+.season-event-row__score{
+  text-align:right;
+  min-width: 86px;
+}
+
+.season-event-row__score-value{
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.season-event-row__score-sub{
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+@media (max-width: 560px){
+  .season-events-section__header,
+  .season-event-card__header{
+    align-items:start;
+    flex-direction:column;
+  }
+
+  .season-event-card__status{
+    justify-content:flex-start;
+  }
+
+  .season-event-row{
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .season-event-row__score{
+    grid-column: 2;
+    text-align:left;
+    min-width:0;
+  }
+}
+
 .leaderboard-controls{
   display:grid;
   gap: 12px;

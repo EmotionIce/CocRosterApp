@@ -7,7 +7,7 @@ const clientPath = new URL("../cloudflarePages/client.js", import.meta.url);
 const clientCode = fs.readFileSync(clientPath, "utf8");
 const bootMarker = '    markBootTiming("shell-boot-start");';
 
-const loadClientInternals = () => {
+const loadClientInternals = (overrides = {}) => {
   assert.ok(clientCode.includes(bootMarker), "expected client boot marker to exist");
   const instrumentedCode = clientCode.replace(
     bootMarker,
@@ -15,6 +15,11 @@ const loadClientInternals = () => {
       "    window.__ROSTER_CLIENT_TEST_INTERNALS__ = {",
       "        buildRosterPublicDisplayModel,",
       "        getDisplayDiscordUsernameForPlayer,",
+      "        buildLeaderboardEntriesModel,",
+      "        buildSeasonEventLeaderboardModel,",
+      "        buildSeasonEventsPublicModel,",
+      "        loadCurrentSeasonEventsViaFirebasePublic,",
+      "        resolveLeaderboardRankedSeasonCycle,",
       "    };",
       "    return;",
       bootMarker,
@@ -25,7 +30,13 @@ const loadClientInternals = () => {
     window: {
       ROSTER_CLIENT_DISABLE_AUTOLOAD: true,
     },
+    atob: (value) => Buffer.from(String(value), "base64").toString("binary"),
+    btoa: (value) => Buffer.from(String(value), "binary").toString("base64"),
+    TextEncoder,
+    TextDecoder,
   };
+  Object.assign(context, overrides.context || {});
+  Object.assign(context.window, overrides.window || {});
   vm.createContext(context);
   vm.runInContext(instrumentedCode, context);
   return context.window.__ROSTER_CLIENT_TEST_INTERNALS__;
@@ -129,4 +140,316 @@ test("prefers canonical metrics Discord username for display", () => {
 
   assert.equal(getDisplayDiscordUsernameForPlayer(player, data), "canonical-user");
   assert.equal(getDisplayDiscordUsernameForPlayer(player, {}), "row-cache");
+});
+
+test("loads current season event payloads from public Firebase and decodes keys", async () => {
+  const pushId = "push-ranked-legend-i-2026-05-18";
+  const donationId = "donation-ranked-legend-i-2026-05-18";
+  const encodedTagKey = "__FB64__" + Buffer.from("#2LUCULP", "utf8").toString("base64url");
+  const responses = new Map([
+    ["https://firebase.test/events/seasonEvents/current.json", {
+      push: { eventId: pushId, seasonId: "ranked-legend-i-2026-05-18" },
+      donation: { eventId: donationId, seasonId: "ranked-legend-i-2026-05-18" },
+    }],
+    ["https://firebase.test/events/seasonEvents/seasonState/current.json", {
+      seasonId: "ranked-legend-i-2026-05-18",
+      startsAt: "2026-05-18T05:00:00.000Z",
+      endsAt: "2026-06-15T05:00:00.000Z",
+    }],
+    ["https://firebase.test/events/seasonEvents/byId/" + pushId + ".json", {
+      eventId: pushId,
+      type: "push",
+      seasonId: "ranked-legend-i-2026-05-18",
+      participantsByTag: {
+        [encodedTagKey]: { tag: "#2LUCULP" },
+      },
+    }],
+    ["https://firebase.test/events/seasonEvents/byId/" + donationId + ".json", {
+      eventId: donationId,
+      type: "donation",
+      seasonId: "ranked-legend-i-2026-05-18",
+    }],
+  ]);
+  const { loadCurrentSeasonEventsViaFirebasePublic } = loadClientInternals({
+    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    context: {
+      fetch: async (url) => ({
+        ok: responses.has(url),
+        status: responses.has(url) ? 200 : 404,
+        text: async () => JSON.stringify(responses.get(url)),
+      }),
+    },
+  });
+
+  const loaded = await loadCurrentSeasonEventsViaFirebasePublic();
+
+  assert.equal(loaded.current.push.eventId, pushId);
+  assert.equal(loaded.byId[pushId].participantsByTag["#2LUCULP"].tag, "#2LUCULP");
+  assert.equal(loaded.loadErrors.length, 0);
+});
+
+test("season events model renders unavailable and empty states safely", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const empty = buildSeasonEventsPublicModel({});
+
+  assert.equal(empty.cards.length, 2);
+  assert.equal(empty.cards[0].unavailable, true);
+  assert.equal(empty.cards[0].rows.length, 0);
+
+  const data = {
+    seasonEvents: {
+      current: {
+        push: { eventId: "push-ranked-legend-i-2026-05-18", seasonId: "ranked-legend-i-2026-05-18" },
+        donation: { eventId: "donation-ranked-legend-i-2026-05-18", seasonId: "ranked-legend-i-2026-05-18" },
+      },
+      seasonState: { seasonId: "ranked-legend-i-2026-05-18" },
+      byId: {
+        "push-ranked-legend-i-2026-05-18": {
+          eventId: "push-ranked-legend-i-2026-05-18",
+          type: "push",
+          seasonId: "ranked-legend-i-2026-05-18",
+          title: "Push Event",
+          status: "open",
+          signupsOpen: true,
+          startsAt: "2026-05-18T05:00:00.000Z",
+          endsAt: "2026-06-15T05:00:00.000Z",
+          participantsByDiscordId: {},
+        },
+        "donation-ranked-legend-i-2026-05-18": {
+          eventId: "donation-ranked-legend-i-2026-05-18",
+          type: "donation",
+          seasonId: "ranked-legend-i-2026-05-18",
+          title: "Donation Event",
+          status: "open",
+          signupsOpen: true,
+          startsAt: "2026-05-18T05:00:00.000Z",
+          endsAt: "2026-06-15T05:00:00.000Z",
+          participantsByDiscordId: {},
+        },
+      },
+    },
+    playerMetrics: { byTag: {} },
+  };
+  const model = buildSeasonEventsPublicModel(data);
+
+  assert.equal(model.cards[0].unavailable, false);
+  assert.equal(model.cards[0].activeParticipantCount, 0);
+  assert.equal(model.cards[1].activeParticipantCount, 0);
+});
+
+test("season event leaderboards include signed-up participants and exclude cancelled or removed", () => {
+  const { buildSeasonEventLeaderboardModel } = loadClientInternals();
+  const event = {
+    eventId: "donation-ranked-legend-i-2026-05-18",
+    type: "donation",
+    seasonId: "ranked-legend-i-2026-05-18",
+    startsAt: "2026-05-18T05:00:00.000Z",
+    endsAt: "2026-06-15T05:00:00.000Z",
+    participantsByDiscordId: {
+      "111": {
+        discordDisplayName: "Alpha",
+        discordUsername: "alpha",
+        status: "signed_up",
+        accounts: [{ tag: "#AAA", name: "Alpha" }],
+      },
+      "222": {
+        discordDisplayName: "Cancelled",
+        status: "cancelled",
+        accounts: [{ tag: "#BBB", name: "Bravo" }],
+      },
+      "333": {
+        discordDisplayName: "Removed",
+        status: "removed",
+        accounts: [{ tag: "#CCC", name: "Charlie" }],
+      },
+      "444": {
+        discordDisplayName: "Invalid",
+        status: "signed_up",
+        accounts: [],
+      },
+      "555": {
+        discordDisplayName: "Dash",
+        status: "signed-up",
+        accounts: [{ tag: "#DDD", name: "Delta" }],
+      },
+    },
+  };
+  const data = {
+    playerMetrics: {
+      byTag: {
+        "#AAA": {
+          identity: { tag: "#AAA", name: "Alpha" },
+          donationCycles: {
+            "ranked-legend-i-2026-05-18": {
+              seasonId: "ranked-legend-i-2026-05-18",
+              startsAt: "2026-05-18T05:00:00.000Z",
+              endsAt: "2026-06-15T05:00:00.000Z",
+              cycleTotalDonations: 42,
+              cycleTotalDonationsReceived: 5,
+            },
+          },
+        },
+        "#DDD": {
+          identity: { tag: "#DDD", name: "Delta" },
+          donationCycles: {
+            "ranked-legend-i-2026-05-18": {
+              seasonId: "ranked-legend-i-2026-05-18",
+              startsAt: "2026-05-18T05:00:00.000Z",
+              endsAt: "2026-06-15T05:00:00.000Z",
+              cycleTotalDonations: 7,
+              cycleTotalDonationsReceived: 1,
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventLeaderboardModel(event, data);
+
+  assert.equal(model.rows.length, 2);
+  assert.equal(model.rows[0].displayName, "Alpha");
+  assert.equal(model.rows[0].score, 42);
+  assert.equal(model.rows[1].displayName, "Dash");
+  assert.equal(model.rows[1].score, 7);
+});
+
+test("donation event leaderboard sums two registered accounts from event season cycle", () => {
+  const { buildSeasonEventLeaderboardModel } = loadClientInternals();
+  const event = {
+    eventId: "donation-ranked-legend-i-2026-05-18",
+    type: "donation",
+    seasonId: "ranked-legend-i-2026-05-18",
+    startsAt: "2026-05-18T05:00:00.000Z",
+    endsAt: "2026-06-15T05:00:00.000Z",
+    participantsByDiscordId: {
+      "111": {
+        discordDisplayName: "Bravo",
+        status: "signed_up",
+        accounts: [{ tag: "#AAA", name: "A" }, { tag: "#BBB", name: "B" }, { tag: "#CCC", name: "C" }],
+      },
+    },
+  };
+  const data = {
+    playerMetrics: {
+      byTag: {
+        "#AAA": { donationCycles: { "ranked-legend-i-2026-05-18": { cycleTotalDonations: 100, startsAt: event.startsAt, endsAt: event.endsAt } } },
+        "#BBB": { donationCycles: { "ranked-legend-i-2026-05-18": { cycleTotalDonations: 175, startsAt: event.startsAt, endsAt: event.endsAt } } },
+        "#CCC": { donationCycles: { "ranked-legend-i-2026-05-18": { cycleTotalDonations: 999, startsAt: event.startsAt, endsAt: event.endsAt } } },
+      },
+    },
+  };
+
+  const model = buildSeasonEventLeaderboardModel(event, data);
+
+  assert.equal(model.rows[0].score, 275);
+  assert.equal(model.rows[0].accounts.length, 2);
+});
+
+test("archived donation event uses its own seasonId instead of current season", () => {
+  const { buildSeasonEventLeaderboardModel } = loadClientInternals();
+  const event = {
+    eventId: "donation-ranked-legend-i-2026-05-18",
+    type: "donation",
+    seasonId: "ranked-legend-i-2026-05-18",
+    startsAt: "2026-05-18T05:00:00.000Z",
+    endsAt: "2026-06-15T05:00:00.000Z",
+    participantsByDiscordId: {
+      "111": { discordDisplayName: "Alpha", status: "signed_up", accounts: [{ tag: "#AAA", name: "A" }] },
+    },
+  };
+  const data = {
+    seasonEvents: {
+      current: { donation: { seasonId: "ranked-legend-i-2026-06-15" } },
+      seasonState: { seasonId: "ranked-legend-i-2026-06-15" },
+    },
+    playerMetrics: {
+      byTag: {
+        "#AAA": {
+          donationCycles: {
+            "ranked-legend-i-2026-05-18": { cycleTotalDonations: 75, startsAt: event.startsAt, endsAt: event.endsAt },
+            "ranked-legend-i-2026-06-15": { cycleTotalDonations: 999, startsAt: "2026-06-15T05:00:00.000Z", endsAt: "2026-07-13T05:00:00.000Z" },
+          },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventLeaderboardModel(event, data);
+
+  assert.equal(model.seasonId, "ranked-legend-i-2026-05-18");
+  assert.equal(model.rows[0].score, 75);
+});
+
+test("push event leaderboard calculates trophy delta from event window", () => {
+  const { buildSeasonEventLeaderboardModel } = loadClientInternals();
+  const event = {
+    eventId: "push-ranked-legend-i-2026-05-18",
+    type: "push",
+    seasonId: "ranked-legend-i-2026-05-18",
+    startsAt: "2026-05-18T05:00:00.000Z",
+    endsAt: "2026-06-15T05:00:00.000Z",
+    participantsByDiscordId: {
+      "111": { discordDisplayName: "Alpha", status: "signed_up", accounts: [{ tag: "#AAA", name: "Alpha" }] },
+    },
+  };
+  const data = {
+    playerMetrics: {
+      byTag: {
+        "#AAA": {
+          identity: { tag: "#AAA", name: "Alpha" },
+          trophyHistoryDaily: [
+            { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5000 },
+            { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5200 },
+          ],
+          latestSnapshot: { tag: "#AAA", name: "Alpha", trophies: 5200, capturedAt: "2026-05-20T15:00:00.000Z" },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventLeaderboardModel(event, data, { nowMs: Date.parse("2026-05-20T15:00:00.000Z") });
+
+  assert.equal(model.rows[0].score, 200);
+  assert.equal(model.rows[0].scoreLabel, "+200 trophies");
+});
+
+test("general leaderboard still uses donationCycles for current cycle totals", () => {
+  const { buildLeaderboardEntriesModel, resolveLeaderboardRankedSeasonCycle } = loadClientInternals();
+  const cycle = resolveLeaderboardRankedSeasonCycle(new Date());
+  const model = buildLeaderboardEntriesModel({
+    rosters: [
+      {
+        id: "main",
+        title: "Main",
+        main: [{ name: "Alpha", tag: "#AAA", th: 16 }],
+        subs: [],
+        missing: [],
+      },
+    ],
+    playerMetrics: {
+      byTag: {
+        "#AAA": {
+          latestSnapshot: { tag: "#AAA", name: "Alpha", trophies: 5000 },
+          donationCycles: {
+            [cycle.seasonId]: {
+              seasonId: cycle.seasonId,
+              startsAt: cycle.startsAt,
+              endsAt: cycle.endsAt,
+              cycleTotalDonations: 64,
+              cycleTotalDonationsReceived: 12,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(model.entries[0].donationCycleTotals.current.donations, 64);
+  assert.equal(model.entries[0].donationCycleTotals.current.donationsReceived, 12);
+});
+
+test("public client does not use month donation ledgers or protected event leaderboard methods", () => {
+  assert.equal(/donationMonths|monthlyTotalDonations|LEADERBOARD_MONTH|monthMode/.test(clientCode), false);
+  assert.equal(/getSeasonEventLeaderboard|getCurrentSeasonEventLeaderboards/.test(clientCode), false);
 });

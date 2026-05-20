@@ -12,6 +12,10 @@
     const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
     const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
     const FIREBASE_ACTIVE_PATH = "active";
+    const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
+    const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
+    const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
+    const SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/seasonState/current";
     const FIREBASE_PUBLIC_SOURCE = "firebase-public";
     const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
@@ -5241,6 +5245,517 @@
         return wrap;
     };
 
+    // Normalize season event type for public display.
+    const normalizeSeasonEventType = (typeRaw) => {
+        const type = toStr(typeRaw).trim().toLowerCase();
+        return type === "push" || type === "donation" ? type : "";
+    };
+
+    // Return season events bundle from render data.
+    const getSeasonEventsBundle = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        return {
+            current: seasonEvents.current && typeof seasonEvents.current === "object" ? seasonEvents.current : {},
+            seasonState: seasonEvents.seasonState && typeof seasonEvents.seasonState === "object" ? seasonEvents.seasonState : {},
+            byId: seasonEvents.byId && typeof seasonEvents.byId === "object" ? seasonEvents.byId : {},
+            loadErrors: Array.isArray(seasonEvents.loadErrors) ? seasonEvents.loadErrors : [],
+        };
+    };
+
+    // Build an empty season events bundle.
+    const buildEmptySeasonEventsBundle = (loadErrorsRaw) => ({
+        current: {},
+        seasonState: {},
+        byId: {},
+        loadErrors: Array.isArray(loadErrorsRaw) ? loadErrorsRaw : [],
+        loadedAt: new Date().toISOString(),
+    });
+
+    // Resolve current event object for an event type.
+    const getCurrentSeasonEventForType = (dataRaw, eventTypeRaw) => {
+        const eventType = normalizeSeasonEventType(eventTypeRaw);
+        if (!eventType) return null;
+        const bundle = getSeasonEventsBundle(dataRaw);
+        const pointer = bundle.current[eventType] && typeof bundle.current[eventType] === "object" ? bundle.current[eventType] : {};
+        const eventId = toStr(pointer.eventId).trim();
+        const event = eventId && bundle.byId[eventId] && typeof bundle.byId[eventId] === "object" ? bundle.byId[eventId] : null;
+        if (event) {
+            return Object.assign({
+                eventId: eventId,
+                type: eventType,
+                seasonId: toStr(pointer.seasonId).trim(),
+                startsAt: toStr(pointer.startsAt).trim(),
+                endsAt: toStr(pointer.endsAt).trim(),
+            }, event, {
+                eventId: toStr(event.eventId).trim() || eventId,
+                type: normalizeSeasonEventType(event.type) || eventType,
+            });
+        }
+        if (!eventId) return null;
+        return {
+            eventId: eventId,
+            type: eventType,
+            seasonId: toStr(pointer.seasonId).trim(),
+            startsAt: toStr(pointer.startsAt).trim(),
+            endsAt: toStr(pointer.endsAt).trim(),
+            status: "",
+            signupsOpen: false,
+            participantsByDiscordId: {},
+        };
+    };
+
+    // Resolve season id used for event scoring.
+    const resolveSeasonEventScoringSeasonId = (eventRaw, dataRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const direct = toStr(event.seasonId).trim();
+        if (direct) return direct;
+        const eventType = normalizeSeasonEventType(event.type);
+        const bundle = getSeasonEventsBundle(dataRaw);
+        const pointer = eventType && bundle.current[eventType] && typeof bundle.current[eventType] === "object" ? bundle.current[eventType] : {};
+        const pointerSeasonId = toStr(pointer.seasonId).trim();
+        if (pointerSeasonId) return pointerSeasonId;
+        const stateSeasonId = toStr(bundle.seasonState.seasonId).trim();
+        if (stateSeasonId) return stateSeasonId;
+        return resolveLeaderboardRankedSeasonCycle(new Date()).seasonId;
+    };
+
+    // Format season event date range.
+    const formatSeasonEventDateRange = (eventRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const startsMs = parseTimeMs(event.startsAt);
+        const endsMs = parseTimeMs(event.endsAt);
+        if (startsMs > 0 && endsMs > 0) {
+            const start = new Date(startsMs);
+            const end = new Date(endsMs);
+            return start.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+                " - " +
+                end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+        }
+        if (startsMs > 0) return "Starts " + new Date(startsMs).toLocaleDateString();
+        if (endsMs > 0) return "Ends " + new Date(endsMs).toLocaleDateString();
+        return "Season window unavailable";
+    };
+
+    // Build public-safe participant display name.
+    const getSeasonEventParticipantDisplayName = (participantRaw) => {
+        const participant = participantRaw && typeof participantRaw === "object" ? participantRaw : {};
+        const accounts = Array.isArray(participant.accounts) ? participant.accounts : [];
+        const account = accounts.length && accounts[0] && typeof accounts[0] === "object" ? accounts[0] : {};
+        return toStr(participant.discordDisplayName).trim()
+            || toStr(participant.discordGlobalName).trim()
+            || toStr(participant.discordUsername).trim()
+            || toStr(account.name).trim()
+            || toStr(account.tag).trim()
+            || "Unknown player";
+    };
+
+    // Normalize participant status using the backend's stored values.
+    const normalizeSeasonEventParticipantStatus = (statusRaw) => {
+        const status = toStr(statusRaw).trim().toLowerCase().replace(/-/g, "_");
+        if (status === "cancelled" || status === "canceled") return "cancelled";
+        if (status === "removed") return "removed";
+        if (!status || status === "signed_up" || status === "signedup" || status === "registered" || status === "active") return "signed_up";
+        return status;
+    };
+
+    // Resolve event account limit.
+    const getSeasonEventMaxAccountsPerParticipant = (eventRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const settings = event.settings && typeof event.settings === "object" ? event.settings : {};
+        const configured = toNonNegativeInt(settings.maxAccountsPerParticipant);
+        if (configured > 0) return configured;
+        return normalizeSeasonEventType(event.type) === "donation" ? 2 : 1;
+    };
+
+    // Normalize registered event accounts for public scoring.
+    const normalizeSeasonEventParticipantAccounts = (accountsRaw, maxAccountsRaw) => {
+        const accounts = Array.isArray(accountsRaw) ? accountsRaw : [];
+        const maxAccounts = Math.max(1, toNonNegativeInt(maxAccountsRaw) || 1);
+        const out = [];
+        const seen = Object.create(null);
+        for (let i = 0; i < accounts.length; i++) {
+            const account = accounts[i] && typeof accounts[i] === "object" ? accounts[i] : {};
+            const tag = normalizeClanTag(account.tag);
+            if (!tag || seen[tag]) continue;
+            seen[tag] = true;
+            out.push(Object.assign({}, account, { tag: tag }));
+            if (out.length >= maxAccounts) break;
+        }
+        return out;
+    };
+
+    // Return signed-up participants only.
+    const listSeasonEventSignedUpParticipants = (eventRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const byDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
+        const keys = Object.keys(byDiscordId).sort();
+        const maxAccounts = getSeasonEventMaxAccountsPerParticipant(event);
+        const out = [];
+        for (let i = 0; i < keys.length; i++) {
+            const participant = byDiscordId[keys[i]] && typeof byDiscordId[keys[i]] === "object" ? byDiscordId[keys[i]] : null;
+            if (!participant || normalizeSeasonEventParticipantStatus(participant.status) !== "signed_up") continue;
+            const accounts = normalizeSeasonEventParticipantAccounts(participant.accounts, maxAccounts);
+            if (!accounts.length) continue;
+            out.push(Object.assign({}, participant, { accounts: accounts }));
+        }
+        return out;
+    };
+
+    // Get event account display name.
+    const getSeasonEventAccountDisplayName = (accountRaw, metricsEntryRaw) => {
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
+        const identity = metricsEntry.identity && typeof metricsEntry.identity === "object" ? metricsEntry.identity : {};
+        const latest = readMetricsLatestSnapshot(metricsEntry) || {};
+        return toStr(identity.name).trim() || toStr(latest.name).trim() || toStr(account.name).trim() || normalizeClanTag(account.tag);
+    };
+
+    // Get event account town hall.
+    const getSeasonEventAccountTownHall = (accountRaw, metricsEntryRaw) => {
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        const latest = readMetricsLatestSnapshot(metricsEntryRaw) || {};
+        return readSnapshotTownHallLevel(latest) || toNonNegativeInt(account.townHallLevel != null ? account.townHallLevel : account.th);
+    };
+
+    // Get event account league name.
+    const getSeasonEventAccountLeagueName = (accountRaw, metricsEntryRaw) => {
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        const latest = readMetricsLatestSnapshot(metricsEntryRaw) || {};
+        const descriptor = resolveLeaderboardLeagueDescriptorFromSnapshot(latest);
+        return toStr(descriptor.name).trim() || toStr(account.leagueName).trim();
+    };
+
+    // Add unique event warning.
+    const addSeasonEventWarning = (warnings, warningRaw) => {
+        const warning = toStr(warningRaw).trim();
+        if (!warning || warnings.indexOf(warning) >= 0) return;
+        warnings.push(warning);
+    };
+
+    // Collect push trophy points from metrics.
+    const collectSeasonEventPushTrophyPoints = (metricsEntryRaw) => {
+        const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
+        const points = [];
+        const pushPoint = (pointRaw, sourceRaw) => {
+            const point = pointRaw && typeof pointRaw === "object" ? pointRaw : {};
+            const trophies = toNonNegativeInt(point.trophies != null ? point.trophies : point.trophyCount);
+            let capturedMs = parseTimeMs(point.capturedAt || point.at || point.timestamp);
+            const dayKey = toStr(point.dayKey || point.day || point.date).trim();
+            if (!(capturedMs > 0) && isValidDayKey(dayKey)) capturedMs = parseDayKeyMs(dayKey);
+            if (!(capturedMs > 0)) return;
+            points.push({
+                capturedMs: capturedMs,
+                trophies: trophies,
+                source: toStr(sourceRaw).trim(),
+            });
+        };
+        const history = Array.isArray(metricsEntry.trophyHistoryDaily) ? metricsEntry.trophyHistoryDaily : [];
+        for (let i = 0; i < history.length; i++) pushPoint(history[i], "history");
+        const latest = readMetricsLatestSnapshot(metricsEntry);
+        if (latest && latest.trophies != null) pushPoint(latest, "latest");
+        points.sort((left, right) => {
+            if (left.capturedMs !== right.capturedMs) return left.capturedMs - right.capturedMs;
+            if (left.trophies !== right.trophies) return left.trophies - right.trophies;
+            return left.source.localeCompare(right.source);
+        });
+        return points;
+    };
+
+    // Calculate push event account score.
+    const calculatePushSeasonEventAccountScore = (eventRaw, metricsEntryRaw, nowMsRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : null;
+        if (!metricsEntry) {
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-player-metrics"], currentTrophies: 0, bestTrophies: 0 };
+        }
+        const startsMs = parseTimeMs(event.startsAt);
+        const endsMs = parseTimeMs(event.endsAt);
+        const nowMs = Number.isFinite(Number(nowMsRaw)) ? Number(nowMsRaw) : Date.now();
+        const effectiveEndMs = endsMs > 0 ? Math.min(nowMs, endsMs) : nowMs;
+        const points = collectSeasonEventPushTrophyPoints(metricsEntry);
+        if (!points.length || !(startsMs > 0) || !(effectiveEndMs >= startsMs)) {
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-trophy-history"], currentTrophies: 0, bestTrophies: 0 };
+        }
+        let baseline = null;
+        let firstInWindow = null;
+        let current = null;
+        let bestTrophies = 0;
+        for (let i = 0; i < points.length; i++) {
+            const point = points[i];
+            if (point.capturedMs <= effectiveEndMs && point.trophies > bestTrophies) bestTrophies = point.trophies;
+            if (point.capturedMs <= startsMs) baseline = point;
+            if (!firstInWindow && point.capturedMs > startsMs && point.capturedMs <= effectiveEndMs) firstInWindow = point;
+            if (point.capturedMs <= effectiveEndMs) current = point;
+        }
+        const warnings = [];
+        let coverage = "full";
+        if (!baseline) {
+            baseline = firstInWindow;
+            coverage = "missing-baseline";
+            addSeasonEventWarning(warnings, "missing-baseline");
+        }
+        if (!current || !baseline || current.capturedMs < baseline.capturedMs) {
+            addSeasonEventWarning(warnings, "missing-current");
+            return { score: 0, startValue: baseline ? baseline.trophies : 0, currentValue: 0, coverage: "missing-current", warnings: warnings, currentTrophies: 0, bestTrophies: bestTrophies };
+        }
+        const delta = current.trophies - baseline.trophies;
+        return {
+            score: delta,
+            startValue: baseline.trophies,
+            currentValue: current.trophies,
+            coverage: coverage,
+            warnings: warnings,
+            currentTrophies: current.trophies,
+            bestTrophies: bestTrophies,
+        };
+    };
+
+    // Read donation cycle ledger for event scoring.
+    const readDonationCycleLedgerForSeasonEvent = (eventRaw, dataRaw, metricsEntryRaw) => {
+        const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
+        const donationCycles = metricsEntry.donationCycles && typeof metricsEntry.donationCycles === "object" ? metricsEntry.donationCycles : {};
+        const seasonId = resolveSeasonEventScoringSeasonId(eventRaw, dataRaw);
+        if (seasonId && donationCycles[seasonId] && typeof donationCycles[seasonId] === "object") return donationCycles[seasonId];
+        return null;
+    };
+
+    // Calculate donation event account score.
+    const calculateDonationSeasonEventAccountScore = (eventRaw, dataRaw, metricsEntryRaw) => {
+        const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : null;
+        if (!metricsEntry) {
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-cycle-ledger", warnings: ["missing-player-metrics", "missing-donation-cycle-ledger"] };
+        }
+        const ledger = readDonationCycleLedgerForSeasonEvent(eventRaw, dataRaw, metricsEntry);
+        if (!ledger) {
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-cycle-ledger", warnings: ["missing-donation-cycle-ledger"] };
+        }
+        const score = toNonNegativeInt(ledger.cycleTotalDonations);
+        return { score: score, startValue: 0, currentValue: score, coverage: "full", warnings: [] };
+    };
+
+    // Calculate one event account row.
+    const calculateSeasonEventAccountBreakdown = (eventRaw, dataRaw, accountRaw, nowMsRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        const tag = normalizeClanTag(account.tag);
+        const metricsEntry = tag ? getPlayerMetricsEntry(tag, dataRaw) : null;
+        const type = normalizeSeasonEventType(event.type);
+        const score = type === "push"
+            ? calculatePushSeasonEventAccountScore(event, metricsEntry, nowMsRaw)
+            : calculateDonationSeasonEventAccountScore(event, dataRaw, metricsEntry);
+        return {
+            tag: tag,
+            name: getSeasonEventAccountDisplayName(account, metricsEntry),
+            townHallLevel: getSeasonEventAccountTownHall(account, metricsEntry),
+            leagueName: getSeasonEventAccountLeagueName(account, metricsEntry),
+            startValue: toNonNegativeInt(score.startValue),
+            currentValue: toNonNegativeInt(score.currentValue),
+            delta: Number(score.score) || 0,
+            score: Number(score.score) || 0,
+            coverage: toStr(score.coverage).trim() || "partial",
+            warnings: Array.isArray(score.warnings) ? score.warnings.slice() : [],
+            currentTrophies: toNonNegativeInt(score.currentTrophies),
+            bestTrophies: toNonNegativeInt(score.bestTrophies),
+        };
+    };
+
+    // Build one season event leaderboard model.
+    const buildSeasonEventLeaderboardModel = (eventRaw, dataRaw, optionsRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+        if (!event) return { event: null, rows: [], activeParticipantCount: 0 };
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+        const type = normalizeSeasonEventType(event.type);
+        const participants = listSeasonEventSignedUpParticipants(event);
+        const rows = [];
+        for (let i = 0; i < participants.length; i++) {
+            const participant = participants[i];
+            const accountsRaw = Array.isArray(participant.accounts) ? participant.accounts : [];
+            const accounts = [];
+            const warnings = [];
+            let score = 0;
+            let currentTrophies = 0;
+            let bestTrophies = 0;
+            for (let j = 0; j < accountsRaw.length; j++) {
+                const account = calculateSeasonEventAccountBreakdown(event, data, accountsRaw[j], nowMs);
+                if (!account.tag) continue;
+                accounts.push(account);
+                score += account.score;
+                if (account.currentTrophies > currentTrophies) currentTrophies = account.currentTrophies;
+                if (account.bestTrophies > bestTrophies) bestTrophies = account.bestTrophies;
+                for (let k = 0; k < account.warnings.length; k++) addSeasonEventWarning(warnings, account.warnings[k]);
+            }
+            const displayName = getSeasonEventParticipantDisplayName(participant);
+            const firstTag = accounts.length ? accounts[0].tag : "";
+            rows.push({
+                rank: 0,
+                displayName: displayName,
+                discordUsername: toStr(participant.discordUsername).trim(),
+                accounts: accounts,
+                score: score,
+                scoreLabel: type === "push" ? (formatSignedNumber(score) + " trophies") : (formatNumber(score) + " donations"),
+                metric: type === "push" ? "trophyDelta" : "donations",
+                coverage: accounts.some((account) => account.coverage !== "full") ? "partial" : "full",
+                warnings: warnings,
+                _sort: {
+                    accountCount: accounts.length,
+                    currentTrophies: currentTrophies,
+                    bestTrophies: bestTrophies,
+                    displayName: displayName.toLowerCase(),
+                    firstTag: firstTag,
+                },
+            });
+        }
+        rows.sort((left, right) => {
+            if (left.score !== right.score) return right.score - left.score;
+            if (type === "push") {
+                if (left._sort.currentTrophies !== right._sort.currentTrophies) return right._sort.currentTrophies - left._sort.currentTrophies;
+                if (left._sort.bestTrophies !== right._sort.bestTrophies) return right._sort.bestTrophies - left._sort.bestTrophies;
+            } else if (left._sort.accountCount !== right._sort.accountCount) {
+                return right._sort.accountCount - left._sort.accountCount;
+            }
+            if (left._sort.displayName !== right._sort.displayName) return left._sort.displayName.localeCompare(right._sort.displayName);
+            return left._sort.firstTag.localeCompare(right._sort.firstTag);
+        });
+        for (let i = 0; i < rows.length; i++) {
+            rows[i].rank = i + 1;
+            delete rows[i]._sort;
+        }
+        return {
+            event: event,
+            rows: rows,
+            activeParticipantCount: participants.length,
+            seasonId: resolveSeasonEventScoringSeasonId(event, data),
+        };
+    };
+
+    // Build public model for current push and donation events.
+    const buildSeasonEventsPublicModel = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const bundle = getSeasonEventsBundle(data);
+        const cards = ["push", "donation"].map((type) => {
+            const event = getCurrentSeasonEventForType(data, type);
+            const leaderboard = buildSeasonEventLeaderboardModel(event, data);
+            return {
+                type: type,
+                event: event,
+                title: toStr(event && event.title).trim() || (type === "push" ? "Push Event" : "Donation Event"),
+                status: toStr(event && event.status).trim() || "unavailable",
+                signupsOpen: event && event.signupsOpen === true,
+                dateRange: event ? formatSeasonEventDateRange(event) : "Season window unavailable",
+                activeParticipantCount: leaderboard.activeParticipantCount,
+                rows: leaderboard.rows,
+                seasonId: leaderboard.seasonId || "",
+                unavailable: !event || !toStr(event.eventId).trim() || !bundle.byId[toStr(event.eventId).trim()],
+            };
+        });
+        return {
+            cards: cards,
+            loadErrors: bundle.loadErrors,
+            unavailable: cards.every((card) => card.unavailable),
+        };
+    };
+
+    // Format event type label.
+    const formatSeasonEventTypeLabel = (typeRaw) => {
+        const type = normalizeSeasonEventType(typeRaw);
+        return type === "push" ? "Push Event" : type === "donation" ? "Donation Event" : "Season Event";
+    };
+
+    // Format event status label.
+    const formatSeasonEventStatusLabel = (statusRaw) => {
+        const status = toStr(statusRaw).trim().toLowerCase();
+        if (status === "open") return "Open";
+        if (status === "closed") return "Closed";
+        if (status === "archived") return "Archived";
+        if (status === "draft") return "Draft";
+        return "Unavailable";
+    };
+
+    // Render one season event leaderboard row.
+    const renderSeasonEventLeaderboardRow = (rowRaw, eventTypeRaw) => {
+        const row = rowRaw && typeof rowRaw === "object" ? rowRaw : {};
+        const eventType = normalizeSeasonEventType(eventTypeRaw);
+        const wrap = el("div", "season-event-row");
+        const rank = el("div", "season-event-row__rank", "#" + toNonNegativeInt(row.rank));
+        const body = el("div", "season-event-row__body");
+        body.appendChild(el("div", "season-event-row__name", toStr(row.displayName).trim() || "Unknown player"));
+        const accounts = Array.isArray(row.accounts) ? row.accounts : [];
+        const accountLabels = accounts.map((account) => {
+            const name = toStr(account && account.name).trim() || toStr(account && account.tag).trim();
+            const tag = toStr(account && account.tag).trim();
+            return name && tag && name !== tag ? (name + " " + tag) : (name || tag);
+        }).filter((label) => label);
+        body.appendChild(el("div", "season-event-row__accounts", accountLabels.length ? accountLabels.join(" + ") : "No registered account"));
+        const score = el("div", "season-event-row__score");
+        score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreLabel).trim() || (eventType === "push" ? "+0 trophies" : "0 donations")));
+        if (eventType === "push" && accounts.length) {
+            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(accounts[0].currentValue) + " current"));
+        } else {
+            score.appendChild(el("div", "season-event-row__score-sub", accounts.length + " " + pluralize(accounts.length, "account", "accounts")));
+        }
+        wrap.appendChild(rank);
+        wrap.appendChild(body);
+        wrap.appendChild(score);
+        return wrap;
+    };
+
+    // Render one season event card.
+    const renderSeasonEventCard = (cardRaw) => {
+        const card = cardRaw && typeof cardRaw === "object" ? cardRaw : {};
+        const eventType = normalizeSeasonEventType(card.type);
+        const wrap = el("article", "card season-event-card season-event-card--" + (eventType || "unknown"));
+        const header = el("div", "season-event-card__header");
+        const titleWrap = el("div", "season-event-card__title-wrap");
+        titleWrap.appendChild(el("div", "season-event-card__eyebrow", formatSeasonEventTypeLabel(eventType)));
+        titleWrap.appendChild(el("h3", "season-event-card__title", toStr(card.title).trim() || formatSeasonEventTypeLabel(eventType)));
+        header.appendChild(titleWrap);
+        const status = el("div", "season-event-card__status");
+        status.appendChild(el("span", "badge season-event-chip season-event-chip--status", formatSeasonEventStatusLabel(card.status)));
+        status.appendChild(el("span", "badge season-event-chip " + (card.signupsOpen ? "season-event-chip--open" : "season-event-chip--muted"), card.signupsOpen ? "Signups open" : "Signups closed"));
+        header.appendChild(status);
+        wrap.appendChild(header);
+
+        const meta = el("div", "season-event-card__meta");
+        meta.appendChild(el("span", "badge season-event-card__meta-item", toStr(card.dateRange).trim() || "Season window unavailable"));
+        meta.appendChild(el("span", "badge season-event-card__meta-item", formatNumber(card.activeParticipantCount) + " signed up"));
+        wrap.appendChild(meta);
+        wrap.appendChild(el("div", "season-event-card__note", "Signups are handled through Discord."));
+
+        const rows = Array.isArray(card.rows) ? card.rows : [];
+        if (card.unavailable) {
+            wrap.appendChild(el("div", "season-event-card__empty", "Event data is currently unavailable."));
+        } else if (!rows.length) {
+            wrap.appendChild(el("div", "season-event-card__empty", "No signed-up players yet."));
+        } else {
+            const list = el("div", "season-event-card__rows");
+            for (let i = 0; i < rows.length; i++) list.appendChild(renderSeasonEventLeaderboardRow(rows[i], eventType));
+            wrap.appendChild(list);
+        }
+        return wrap;
+    };
+
+    // Render current season events section.
+    const renderSeasonEventsSection = (dataRaw) => {
+        const model = buildSeasonEventsPublicModel(dataRaw);
+        const section = el("section", "season-events-section");
+        const header = el("div", "season-events-section__header");
+        const copy = el("div", "season-events-section__copy");
+        copy.appendChild(el("div", "season-events-section__eyebrow", "Current season events"));
+        copy.appendChild(el("h2", "season-events-section__title", "Push and donation events"));
+        header.appendChild(copy);
+        if (model.loadErrors.length) {
+            header.appendChild(el("div", "season-events-section__status", "Event data unavailable"));
+        }
+        section.appendChild(header);
+        const grid = el("div", "season-events-grid");
+        for (let i = 0; i < model.cards.length; i++) grid.appendChild(renderSeasonEventCard(model.cards[i]));
+        section.appendChild(grid);
+        return section;
+    };
+
     // Create a chip button.
     const createChipButton = (labelRaw, active, onClick, disabled) => {
         const button = document.createElement("button");
@@ -7230,6 +7745,8 @@
         const sortedEntries = sortLeaderboardEntries(filteredEntries, sortMode, cycleMode);
 
         target.textContent = "";
+        target.appendChild(renderSeasonEventsSection(data));
+
         const controlsCard = el("div", "card leaderboard-controls");
 
         const filterRow = el("div", "leaderboard-controls__row");
@@ -7440,8 +7957,18 @@
     const getRosterPayloadFreshnessKey = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const lastUpdatedAt = toStr(data.lastUpdatedAt).trim();
-        if (lastUpdatedAt) return "lastUpdatedAt:" + lastUpdatedAt;
-        return "";
+        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        const current = seasonEvents.current && typeof seasonEvents.current === "object" ? seasonEvents.current : {};
+        const byId = seasonEvents.byId && typeof seasonEvents.byId === "object" ? seasonEvents.byId : {};
+        const pushId = toStr(current.push && current.push.eventId).trim();
+        const donationId = toStr(current.donation && current.donation.eventId).trim();
+        const pushUpdatedAt = toStr(byId[pushId] && byId[pushId].updatedAt).trim();
+        const donationUpdatedAt = toStr(byId[donationId] && byId[donationId].updatedAt).trim();
+        const parts = [];
+        if (lastUpdatedAt) parts.push("lastUpdatedAt:" + lastUpdatedAt);
+        if (pushId) parts.push("push:" + pushId + "@" + pushUpdatedAt);
+        if (donationId) parts.push("donation:" + donationId + "@" + donationUpdatedAt);
+        return parts.join("|");
     };
 
     // Handle read cached roster snapshot.
@@ -7604,6 +8131,38 @@
         }
     };
 
+    // Handle utf8 to base64 URL encode.
+    const base64UrlEncodeUtf8 = (valueRaw) => {
+        const value = toStr(valueRaw);
+        if (!value) return "";
+        let binary = "";
+        if (typeof TextEncoder === "function") {
+            const bytes = new TextEncoder().encode(value);
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        } else {
+            binary = unescape(encodeURIComponent(value));
+        }
+        if (typeof btoa !== "function") throw new Error("Base64 encoder is unavailable in this browser.");
+        return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    };
+
+    // Return whether a Firebase object key needs encoding.
+    const needsFirebaseKeyEncoding = (keyRaw) => {
+        const key = toStr(keyRaw);
+        if (!key) return true;
+        if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) === 0) return true;
+        if (/[.$#[\]\/]/.test(key)) return true;
+        if (/[\u0000-\u001F\u007F]/.test(key)) return true;
+        return false;
+    };
+
+    // Encode Firebase object key.
+    const encodeFirebaseObjectKey = (keyRaw) => {
+        const key = toStr(keyRaw);
+        if (!needsFirebaseKeyEncoding(key)) return key;
+        return FIREBASE_KEY_ENCODING_PREFIX + base64UrlEncodeUtf8(key);
+    };
+
     // Decode Firebase object key.
     const decodeFirebaseObjectKey = (keyRaw) => {
         const key = toStr(keyRaw);
@@ -7648,12 +8207,90 @@
         return assertValidRosterPayload(decodedPayload, sourceLabel);
     };
 
+    // Return public Firebase event path by event id.
+    const buildSeasonEventByIdPublicPath = (eventIdRaw) => {
+        const eventId = toStr(eventIdRaw).trim();
+        if (!eventId) return "";
+        return SEASON_EVENTS_BY_ID_PATH + "/" + encodeFirebaseObjectKey(eventId);
+    };
+
+    // Fetch optional decoded Firebase public JSON without failing roster hydration.
+    const fetchOptionalDecodedFirebaseJsonPublic = async (pathRaw, loadErrors) => {
+        const path = normalizeFirebasePath(pathRaw);
+        if (!path) return null;
+        try {
+            const payload = await fetchFirebaseJsonPublic(path);
+            if (payload == null) return null;
+            return decodeFirebaseObjectKeysRecursive(payload);
+        } catch (err) {
+            const errors = Array.isArray(loadErrors) ? loadErrors : null;
+            if (errors) {
+                errors.push({
+                    path: "/" + path,
+                    message: err && err.message ? err.message : toStr(err),
+                });
+            }
+            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                console.warn("[SeasonEvents] Public Firebase load failed for /" + path, err);
+            }
+            return null;
+        }
+    };
+
+    // Load current season event data from public Firebase.
+    const loadCurrentSeasonEventsViaFirebasePublic = async () => {
+        const loadErrors = [];
+        const current = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_PATH, loadErrors);
+        const seasonState = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
+        const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+        const eventIds = [];
+        const seen = Object.create(null);
+        const collectEventId = (pointerRaw) => {
+            const pointer = pointerRaw && typeof pointerRaw === "object" ? pointerRaw : {};
+            const eventId = toStr(pointer.eventId).trim();
+            if (!eventId || seen[eventId]) return;
+            seen[eventId] = true;
+            eventIds.push(eventId);
+        };
+        collectEventId(currentObj.push);
+        collectEventId(currentObj.donation);
+
+        const byId = {};
+        await Promise.all(eventIds.map(async (eventId) => {
+            const path = buildSeasonEventByIdPublicPath(eventId);
+            const event = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+            if (event && typeof event === "object" && !Array.isArray(event)) {
+                byId[eventId] = event;
+            }
+        }));
+
+        return {
+            current: currentObj,
+            seasonState: seasonState && typeof seasonState === "object" && !Array.isArray(seasonState) ? seasonState : {},
+            byId: byId,
+            loadErrors: loadErrors,
+            loadedAt: new Date().toISOString(),
+        };
+    };
+
     // Load roster data via Firebase public.
     const loadRosterDataViaFirebasePublic = async () => {
         const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
+        const data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active");
+        try {
+            data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
+        } catch (err) {
+            data.seasonEvents = buildEmptySeasonEventsBundle([{
+                path: "/" + SEASON_EVENTS_BASE_PATH,
+                message: err && err.message ? err.message : toStr(err),
+            }]);
+            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                console.warn("[SeasonEvents] Public Firebase event hydration failed; continuing with /active only.", err);
+            }
+        }
         return {
             source: FIREBASE_PUBLIC_SOURCE,
-            data: decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active"),
+            data: data,
         };
     };
 
