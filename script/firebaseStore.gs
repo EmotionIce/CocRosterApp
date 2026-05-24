@@ -533,6 +533,70 @@ function cleanupActiveFirebaseSchemaOnce() {
 	};
 }
 
+// One-time admin API wrapper for copying legacy roster-row Discord names into
+// canonical /active/playerMetrics/byTag identities.
+function backfillDiscordIdentitiesFromRosterCacheOnce(password) {
+	assertAdminPassword_(password);
+	return backfillDiscordIdentitiesFromRosterCacheOnce_();
+}
+
+// Public Apps Script run-menu wrapper for the same one-time backfill. Use this
+// from the Apps Script editor when calling the HTTP admin API is inconvenient.
+function runDiscordIdentityRosterBackfillOnce() {
+	return backfillDiscordIdentitiesFromRosterCacheOnce_();
+}
+
+// Backfill canonical Discord identity from roster player.discord cache values.
+function backfillDiscordIdentitiesFromRosterCacheOnce_() {
+	const snapshot = readActiveRosterSnapshot_();
+	const sourceRosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : null;
+	if (!sourceRosterData || !Array.isArray(sourceRosterData.rosters)) {
+		throw new Error("Active roster data is unavailable.");
+	}
+
+	const backfilledAt = new Date().toISOString();
+	const rosterCacheByTag = collectRosterDiscordCacheByTag_(sourceRosterData);
+	const rosterCacheTags = Object.keys(rosterCacheByTag).sort();
+	const beforeMetricEntryCount = countPlayerMetricsEntries_(sourceRosterData && sourceRosterData.playerMetrics);
+	const workingRosterData = validateRosterData_(sourceRosterData);
+	const canonicalized = canonicalizeDiscordIdentityForRosterData_(workingRosterData, {
+		updatedAt: backfilledAt,
+		source: "roster-cache-backfill",
+		allowRosterCacheUsernameUpdates: false,
+	});
+	const canonicalizedRosterData = canonicalized && canonicalized.rosterData ? canonicalized.rosterData : workingRosterData;
+	const changed = !!(canonicalized && (canonicalized.updatedCanonical || canonicalized.updatedRosterCache));
+	let finalRosterData = validateRosterData_(canonicalizedRosterData);
+
+	if (changed) {
+		const stamped = withRosterLastUpdatedAt_(finalRosterData, backfilledAt);
+		const writeResult = replaceActiveRosterData_(stamped, {
+			sourceSnapshot: snapshot,
+			discordSource: "roster-cache-backfill",
+		});
+		finalRosterData = writeResult && writeResult.validatedRosterData ? writeResult.validatedRosterData : stamped;
+		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+			discordIdentityRosterBackfillAt: backfilledAt,
+			discordIdentityRosterBackfillRosterCacheTagCount: rosterCacheTags.length,
+			discordIdentityRosterBackfillMigratedCount: toNonNegativeInt_(canonicalized.migratedFromRosterCache),
+			discordIdentityRosterBackfillHydratedRosterCacheCount: toNonNegativeInt_(canonicalized.hydratedRosterCache),
+		});
+	}
+
+	return {
+		ok: true,
+		changed: changed,
+		backfilledAt: backfilledAt,
+		rosterCacheTagCount: rosterCacheTags.length,
+		metricEntryCountBefore: beforeMetricEntryCount,
+		metricEntryCountAfter: countPlayerMetricsEntries_(finalRosterData && finalRosterData.playerMetrics),
+		migratedFromRosterCache: toNonNegativeInt_(canonicalized && canonicalized.migratedFromRosterCache),
+		hydratedRosterCache: toNonNegativeInt_(canonicalized && canonicalized.hydratedRosterCache),
+		tags: canonicalized && Array.isArray(canonicalized.tags) ? canonicalized.tags.slice().sort() : [],
+		sampleRosterCacheTags: rosterCacheTags.slice(0, 20),
+	};
+}
+
 // Build one canonical roster player from older active payload shapes.
 function buildManualCleanupRosterPlayer_(playerRaw, statsRaw) {
 	const player = playerRaw && typeof playerRaw === "object" && !Array.isArray(playerRaw) ? playerRaw : {};

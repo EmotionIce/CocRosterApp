@@ -279,6 +279,8 @@ function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
 
 	const league = sanitizeMetricsLeagueSnapshot_(point.league);
 	if (league) out.league = league;
+	const leagueTier = sanitizeMetricsLeagueSnapshot_(point.leagueTier);
+	if (leagueTier) out.leagueTier = leagueTier;
 
 	return out;
 }
@@ -360,7 +362,7 @@ function areMetricsTrophyPointsEquivalent_(leftRaw, rightRaw) {
 	const left = sanitizeMetricsTrophyHistoryPoint_(leftRaw);
 	const right = sanitizeMetricsTrophyHistoryPoint_(rightRaw);
 	if (!left || !right) return !left && !right;
-	return left.dayKey === right.dayKey && left.trophies === right.trophies && normalizeTag_(left.clanTag) === normalizeTag_(right.clanTag) && JSON.stringify(left.league || null) === JSON.stringify(right.league || null);
+	return left.dayKey === right.dayKey && left.trophies === right.trophies && normalizeTag_(left.clanTag) === normalizeTag_(right.clanTag) && JSON.stringify(left.league || null) === JSON.stringify(right.league || null) && JSON.stringify(left.leagueTier || null) === JSON.stringify(right.leagueTier || null);
 }
 
 // Prune trophy history daily.
@@ -1109,6 +1111,7 @@ function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw
 		trophies: toNonNegativeInt_(snapshot.trophies),
 		clanTag: normalizeTag_(snapshot.clanTag),
 		league: sanitizeMetricsLeagueSnapshot_(snapshot.league),
+		leagueTier: sanitizeMetricsLeagueSnapshot_(snapshot.leagueTier),
 	};
 	const trophyChanged = upsertDailyTrophyHistoryPoint_(entryObj, point, captureCtx.capturedDate);
 	const donationCycleChanged = updateDonationCycleLedgerForSnapshot_(entryObj, snapshot, captureCtx);

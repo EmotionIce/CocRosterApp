@@ -231,6 +231,7 @@
         current: "current",
         last: "last",
     };
+    const LEADERBOARD_LEAGUE_FALLBACK_RANK = 999;
     const LEADERBOARD_SORT_MODE_OPTIONS = [
         { key: LEADERBOARD_SORT_MODE_VALUES.trophiesLeague, label: "Trophies / League" },
         { key: LEADERBOARD_SORT_MODE_VALUES.donations, label: "Donations" },
@@ -243,7 +244,9 @@
         missing: 2,
     };
     const LEADERBOARD_EXACT_LEAGUE_ORDER = [
-        "Legend League",
+        "Legends I",
+        "Legends II",
+        "Legends III",
         "Electro 33",
         "Electro 32",
         "Electro 31",
@@ -4620,11 +4623,94 @@
         return Number.isFinite(value) ? Math.floor(value) : 0;
     };
 
+    // Parse a roman league division value.
+    const parseLeaderboardLeagueRomanTier = (leagueNameRaw) => {
+        const text = normalizeLeaderboardLeagueText(leagueNameRaw);
+        const matches = text.match(/\b(i|ii|iii)\b/g);
+        if (!matches || !matches.length) return 0;
+        const value = matches[matches.length - 1];
+        if (value === "i") return 1;
+        if (value === "ii") return 2;
+        if (value === "iii") return 3;
+        return 0;
+    };
+
+    // Format a human label for the Legend tier values returned by the Clash API.
+    const formatLeaderboardLegendTierLabel = (tierValueRaw) => {
+        const tierValue = toNonNegativeInt(tierValueRaw);
+        if (tierValue === 36) return "Legends I";
+        if (tierValue === 35) return "Legends II";
+        if (tierValue === 34) return "Legends III";
+        return "Legends";
+    };
+
+    // Resolve a Clash API league tier suffix into the app's ranking family.
+    const resolveLeaderboardLeagueTierFromRankValue = (tierValueRaw) => {
+        const tierValue = toNonNegativeInt(tierValueRaw);
+        let family = "";
+        let labelPrefix = "";
+        if (tierValue >= 34 && tierValue <= 36) {
+            return { family: "legend", tierValue: tierValue, label: formatLeaderboardLegendTierLabel(tierValue) };
+        }
+        if (tierValue >= 31 && tierValue <= 33) {
+            family = "electro";
+            labelPrefix = "Electro";
+        } else if (tierValue >= 28 && tierValue <= 30) {
+            family = "dragon";
+            labelPrefix = "Dragon";
+        } else if (tierValue >= 25 && tierValue <= 27) {
+            family = "titan";
+            labelPrefix = "Titan";
+        } else if (tierValue >= 22 && tierValue <= 24) {
+            family = "pekka";
+            labelPrefix = "P.E.K.K.A";
+        } else if (tierValue >= 19 && tierValue <= 21) {
+            family = "golem";
+            labelPrefix = "Golem";
+        } else if (tierValue >= 16 && tierValue <= 18) {
+            family = "witch";
+            labelPrefix = "Witch";
+        } else if (tierValue >= 13 && tierValue <= 15) {
+            family = "valkyrie";
+            labelPrefix = "Valkyrie";
+        } else if (tierValue >= 10 && tierValue <= 12) {
+            family = "wizard";
+            labelPrefix = "Wizard";
+        } else if (tierValue >= 7 && tierValue <= 9) {
+            family = "archer";
+            labelPrefix = "Archer";
+        } else if (tierValue >= 4 && tierValue <= 6) {
+            family = "barbarian";
+            labelPrefix = "Barbarian";
+        } else if (tierValue >= 1 && tierValue <= 3) {
+            family = "skeleton";
+            labelPrefix = "Skeleton";
+        }
+        if (!family) return null;
+        return { family: family, tierValue: tierValue, label: labelPrefix + " " + tierValue };
+    };
+
+    // Resolve known Clash API league ids into this app's rank tiers.
+    const resolveLeaderboardLeagueTierFromOfficialId = (leagueIdRaw) => {
+        const leagueId = toNonNegativeInt(leagueIdRaw);
+        const suffixTier = leagueId % 100;
+        return resolveLeaderboardLeagueTierFromRankValue(suffixTier);
+    };
+
+    // Resolve a family-specific roman division into this app's rank tiers.
+    const resolveLeaderboardLeagueTierFromRomanDivision = (familyRaw, divisionRaw) => {
+        const family = toStr(familyRaw).trim().toLowerCase();
+        const division = toNonNegativeInt(divisionRaw);
+        if (family === "legend" && division >= 1 && division <= 3) return 37 - division;
+        if (family === "titan" && division >= 1 && division <= 3) return 28 - division;
+        return 0;
+    };
+
     // Build leaderboard league rank key.
     const buildLeaderboardLeagueRankKey = (familyRaw, tierRaw) => {
         const family = toStr(familyRaw).trim().toLowerCase();
         if (!family) return "";
-        if (family === "legend" || family === "unranked") return family;
+        if (family === "unranked") return family;
         const tier = toNonNegativeInt(tierRaw);
         if (tier < 1) return "";
         return family + ":" + tier;
@@ -4636,9 +4722,9 @@
         if (!label) return null;
         const family = getLeaderboardLeagueFamilyByName(label);
         if (!family) return null;
-        if (family === "legend") return { family: "legend", tierValue: 34, label: label };
         if (family === "unranked") return { family: "unranked", tierValue: 0, label: label };
-        const tierValue = parseLeaderboardLeagueTierNumber(label);
+        let tierValue = parseLeaderboardLeagueTierNumber(label) || resolveLeaderboardLeagueTierFromRomanDivision(family, parseLeaderboardLeagueRomanTier(label));
+        if (family === "legend" && tierValue < 1) tierValue = 34;
         if (tierValue < 1) return null;
         return { family: family, tierValue: tierValue, label: label };
     };
@@ -4658,7 +4744,7 @@
             if (!key) continue;
             rankByKey[key] = i;
             labelByKey[key] = parsed.label;
-            if (parsed.family !== "legend" && parsed.family !== "unranked") {
+            if (parsed.family !== "unranked") {
                 if (!validTiersByFamily[parsed.family]) validTiersByFamily[parsed.family] = Object.create(null);
                 validTiersByFamily[parsed.family][String(parsed.tierValue)] = true;
             }
@@ -4717,6 +4803,12 @@
     const readStructuredLeagueTierValue = (leagueRaw) => {
         const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
         if (!league) return 0;
+        const official = resolveLeaderboardLeagueTierFromOfficialId(league.id);
+        const leagueName = getLeaderboardLeagueDisplayName(league);
+        const family = readStructuredLeagueFamily(league);
+        if (official && (!family || official.family === family)) return official.tierValue;
+        const romanTier = resolveLeaderboardLeagueTierFromRomanDivision(family, parseLeaderboardLeagueRomanTier(leagueName));
+        if (romanTier > 0) return romanTier;
         const keys = [
             "tier",
             "tierNumber",
@@ -4737,7 +4829,7 @@
             const out = readStructuredTierFromValue(league[keys[i]], 0);
             if (out == null) continue;
             if (out === 0) return 0;
-            if (out >= 1 && out <= 33) return out;
+            if (out >= 1 && out <= 36) return out;
         }
         return 0;
     };
@@ -4774,9 +4866,12 @@
     const readLeaderboardLeagueDescriptorFromSource = (leagueRaw, sourceLabelRaw) => {
         const league = leagueRaw && typeof leagueRaw === "object" ? leagueRaw : null;
         if (!league) return null;
-        const name = getLeaderboardLeagueDisplayName(league);
-        const family = readStructuredLeagueFamily(league);
-        const tierValue = readStructuredLeagueTierValue(league);
+        const official = resolveLeaderboardLeagueTierFromOfficialId(league.id);
+        const name = getLeaderboardLeagueDisplayName(league) || (official && official.label) || "";
+        const nameFamily = getLeaderboardLeagueFamilyByName(name) || readStructuredLeagueFamily(league);
+        const useOfficial = !!(official && (!nameFamily || official.family === nameFamily));
+        const family = (useOfficial && official.family) || nameFamily || (official && official.family) || "";
+        const tierValue = (useOfficial && official.tierValue) || readStructuredLeagueTierValue(league);
         if (!name && !family && tierValue < 1) return null;
         return {
             source: toStr(sourceLabelRaw).trim(),
@@ -4799,9 +4894,10 @@
         let mergedTierValue =
             toNonNegativeInt(fromLeagueTier && fromLeagueTier.tierValue)
             || toNonNegativeInt(fromLeague && fromLeague.tierValue);
-        if (!mergedTierValue && mergedFamily !== "legend" && mergedFamily !== "unranked") {
-            mergedTierValue = parseLeaderboardLeagueTierNumber(mergedName);
+        if (!mergedTierValue && mergedFamily !== "unranked") {
+            mergedTierValue = parseLeaderboardLeagueTierNumber(mergedName) || resolveLeaderboardLeagueTierFromRomanDivision(mergedFamily, parseLeaderboardLeagueRomanTier(mergedName));
         }
+        if (!mergedTierValue && mergedFamily === "legend") mergedTierValue = 34;
         return {
             source: (fromLeagueTier && fromLeagueTier.source) || (fromLeague && fromLeague.source) || (fallbackName ? "string" : ""),
             name: mergedName,
@@ -4821,16 +4917,17 @@
         let tierValue = toNonNegativeInt(leagueInput.tierValue);
 
         if (!family) family = getLeaderboardLeagueFamilyByName(leagueName);
-        if (!tierValue && family !== "legend" && family !== "unranked") {
-            tierValue = parseLeaderboardLeagueTierNumber(leagueName);
+        if (!tierValue && family !== "unranked") {
+            tierValue = parseLeaderboardLeagueTierNumber(leagueName) || resolveLeaderboardLeagueTierFromRomanDivision(family, parseLeaderboardLeagueRomanTier(leagueName));
         }
 
         if (family === "legend") {
-            const key = "legend";
+            if (!tierValue) tierValue = 34;
+            const key = buildLeaderboardLeagueRankKey("legend", tierValue);
             return {
                 rank: Object.prototype.hasOwnProperty.call(config.rankByKey, key) ? config.rankByKey[key] : 0,
-                tierLabel: config.labelByKey[key] || "Legend League",
-                tierValue: 34,
+                tierLabel: config.labelByKey[key] || leagueName || formatLeaderboardLegendTierLabel(tierValue),
+                tierValue: tierValue,
                 family: "legend",
                 parsed: true,
             };
@@ -5437,6 +5534,8 @@
     const collectSeasonEventPushTrophyPoints = (metricsEntryRaw) => {
         const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
         const points = [];
+        const latest = readMetricsLatestSnapshot(metricsEntry);
+        const latestLeagueDescriptor = latest ? resolveLeaderboardLeagueDescriptorFromSnapshot(latest) : null;
         const pushPoint = (pointRaw, sourceRaw) => {
             const point = pointRaw && typeof pointRaw === "object" ? pointRaw : {};
             const trophies = toNonNegativeInt(point.trophies != null ? point.trophies : point.trophyCount);
@@ -5444,15 +5543,23 @@
             const dayKey = toStr(point.dayKey || point.day || point.date).trim();
             if (!(capturedMs > 0) && isValidDayKey(dayKey)) capturedMs = parseDayKeyMs(dayKey);
             if (!(capturedMs > 0)) return;
+            const leagueSource = resolveLeaderboardLeagueDescriptorFromSnapshot(point);
+            if (!leagueSource.name && latestLeagueDescriptor && latestLeagueDescriptor.name) {
+                leagueSource.name = latestLeagueDescriptor.name;
+                leagueSource.family = latestLeagueDescriptor.family;
+                leagueSource.tierValue = latestLeagueDescriptor.tierValue;
+            }
+            const leagueSort = parseLeaderboardLeagueSortKey(leagueSource);
             points.push({
                 capturedMs: capturedMs,
                 trophies: trophies,
+                leagueName: toStr(leagueSource.name).trim(),
+                leagueSort: leagueSort,
                 source: toStr(sourceRaw).trim(),
             });
         };
         const history = Array.isArray(metricsEntry.trophyHistoryDaily) ? metricsEntry.trophyHistoryDaily : [];
         for (let i = 0; i < history.length; i++) pushPoint(history[i], "history");
-        const latest = readMetricsLatestSnapshot(metricsEntry);
         if (latest && latest.trophies != null) pushPoint(latest, "latest");
         points.sort((left, right) => {
             if (left.capturedMs !== right.capturedMs) return left.capturedMs - right.capturedMs;
@@ -5462,12 +5569,42 @@
         return points;
     };
 
+    // Return whether left is a better push rank point than right.
+    const isBetterSeasonEventPushRankPoint = (leftRaw, rightRaw) => {
+        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : null;
+        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : null;
+        if (!left) return false;
+        if (!right) return true;
+        const leftSort = left.leagueSort && typeof left.leagueSort === "object" ? left.leagueSort : {};
+        const rightSort = right.leagueSort && typeof right.leagueSort === "object" ? right.leagueSort : {};
+        const leftRank = Number.isFinite(Number(leftSort.rank)) ? Number(leftSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
+        const rightRank = Number.isFinite(Number(rightSort.rank)) ? Number(rightSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
+        if (leftRank !== rightRank) return leftRank < rightRank;
+        const leftTrophies = toNonNegativeInt(left.trophies);
+        const rightTrophies = toNonNegativeInt(right.trophies);
+        if (leftTrophies !== rightTrophies) return leftTrophies > rightTrophies;
+        return toNonNegativeInt(left.capturedMs) > toNonNegativeInt(right.capturedMs);
+    };
+
+    // Format push event score label.
+    const buildSeasonEventPushScoreLabel = (trophiesRaw, leagueSortRaw, leagueNameRaw) => {
+        const trophies = toNonNegativeInt(trophiesRaw);
+        const leagueName = toStr(leagueNameRaw).trim();
+        if (trophies <= 0 && !leagueName) return "0 trophies";
+        const leagueSort = leagueSortRaw && typeof leagueSortRaw === "object" ? leagueSortRaw : {};
+        const leagueLabel = leagueName || toStr(leagueSort.tierLabel).trim();
+        const trophyLabel = formatNumber(trophies) + " trophies";
+        return leagueLabel ? (leagueLabel + " - " + trophyLabel) : trophyLabel;
+    };
+
     // Calculate push event account score.
-    const calculatePushSeasonEventAccountScore = (eventRaw, metricsEntryRaw, nowMsRaw) => {
+    const calculatePushSeasonEventAccountScore = (eventRaw, metricsEntryRaw, nowMsRaw, accountRaw) => {
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
         const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : null;
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
         if (!metricsEntry) {
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-player-metrics"], currentTrophies: 0, bestTrophies: 0 };
+            const fallbackLeagueSort = parseLeaderboardLeagueSortKey(account.leagueName);
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-player-metrics"], currentTrophies: 0, bestTrophies: 0, bestLeagueName: toStr(account.leagueName).trim(), bestLeagueSort: fallbackLeagueSort, hasPushRank: false };
         }
         const startsMs = parseTimeMs(event.startsAt);
         const endsMs = parseTimeMs(event.endsAt);
@@ -5475,39 +5612,36 @@
         const effectiveEndMs = endsMs > 0 ? Math.min(nowMs, endsMs) : nowMs;
         const points = collectSeasonEventPushTrophyPoints(metricsEntry);
         if (!points.length || !(startsMs > 0) || !(effectiveEndMs >= startsMs)) {
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-trophy-history"], currentTrophies: 0, bestTrophies: 0 };
+            const latest = readMetricsLatestSnapshot(metricsEntry) || {};
+            const fallbackDescriptor = resolveLeaderboardLeagueDescriptorFromSnapshot(latest);
+            if (!fallbackDescriptor.name && account.leagueName) fallbackDescriptor.name = toStr(account.leagueName).trim();
+            const fallbackLeagueSort = parseLeaderboardLeagueSortKey(fallbackDescriptor);
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-trophy-history"], currentTrophies: 0, bestTrophies: 0, bestLeagueName: toStr(fallbackDescriptor.name).trim(), bestLeagueSort: fallbackLeagueSort, hasPushRank: false };
         }
-        let baseline = null;
-        let firstInWindow = null;
         let current = null;
-        let bestTrophies = 0;
+        let bestPoint = null;
         for (let i = 0; i < points.length; i++) {
             const point = points[i];
-            if (point.capturedMs <= effectiveEndMs && point.trophies > bestTrophies) bestTrophies = point.trophies;
-            if (point.capturedMs <= startsMs) baseline = point;
-            if (!firstInWindow && point.capturedMs > startsMs && point.capturedMs <= effectiveEndMs) firstInWindow = point;
+            if (point.capturedMs >= startsMs && point.capturedMs <= effectiveEndMs && isBetterSeasonEventPushRankPoint(point, bestPoint)) bestPoint = point;
             if (point.capturedMs <= effectiveEndMs) current = point;
         }
         const warnings = [];
-        let coverage = "full";
-        if (!baseline) {
-            baseline = firstInWindow;
-            coverage = "missing-baseline";
-            addSeasonEventWarning(warnings, "missing-baseline");
-        }
-        if (!current || !baseline || current.capturedMs < baseline.capturedMs) {
+        if (!bestPoint) {
             addSeasonEventWarning(warnings, "missing-current");
-            return { score: 0, startValue: baseline ? baseline.trophies : 0, currentValue: 0, coverage: "missing-current", warnings: warnings, currentTrophies: 0, bestTrophies: bestTrophies };
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-current", warnings: warnings, currentTrophies: 0, bestTrophies: 0, bestLeagueName: "", bestLeagueSort: parseLeaderboardLeagueSortKey(""), hasPushRank: false };
         }
-        const delta = current.trophies - baseline.trophies;
         return {
-            score: delta,
-            startValue: baseline.trophies,
-            currentValue: current.trophies,
-            coverage: coverage,
+            score: bestPoint.trophies,
+            startValue: 0,
+            currentValue: bestPoint.trophies,
+            coverage: "full",
             warnings: warnings,
-            currentTrophies: current.trophies,
-            bestTrophies: bestTrophies,
+            currentTrophies: current ? current.trophies : 0,
+            bestTrophies: bestPoint.trophies,
+            bestLeagueName: toStr(bestPoint.leagueName).trim(),
+            bestLeagueSort: bestPoint.leagueSort && typeof bestPoint.leagueSort === "object" ? bestPoint.leagueSort : parseLeaderboardLeagueSortKey(""),
+            bestCapturedAt: bestPoint.capturedMs > 0 ? new Date(bestPoint.capturedMs).toISOString() : "",
+            hasPushRank: true,
         };
     };
 
@@ -5542,9 +5676,9 @@
         const metricsEntry = tag ? getPlayerMetricsEntry(tag, dataRaw) : null;
         const type = normalizeSeasonEventType(event.type);
         const score = type === "push"
-            ? calculatePushSeasonEventAccountScore(event, metricsEntry, nowMsRaw)
+            ? calculatePushSeasonEventAccountScore(event, metricsEntry, nowMsRaw, account)
             : calculateDonationSeasonEventAccountScore(event, dataRaw, metricsEntry);
-        return {
+        const out = {
             tag: tag,
             name: getSeasonEventAccountDisplayName(account, metricsEntry),
             townHallLevel: getSeasonEventAccountTownHall(account, metricsEntry),
@@ -5558,6 +5692,15 @@
             currentTrophies: toNonNegativeInt(score.currentTrophies),
             bestTrophies: toNonNegativeInt(score.bestTrophies),
         };
+        if (type === "push") {
+            out.bestLeagueName = toStr(score.bestLeagueName).trim();
+            out.bestLeagueRank = Number.isFinite(Number(score.bestLeagueSort && score.bestLeagueSort.rank)) ? Number(score.bestLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
+            out.bestLeagueLabel = toStr((score.bestLeagueSort && score.bestLeagueSort.tierLabel) || score.bestLeagueName).trim();
+            out.bestCapturedAt = toStr(score.bestCapturedAt).trim();
+            out.hasPushRank = score.hasPushRank === true;
+            out.bestLeagueSort = score.bestLeagueSort && typeof score.bestLeagueSort === "object" ? score.bestLeagueSort : parseLeaderboardLeagueSortKey("");
+        }
+        return out;
     };
 
     // Build one season event leaderboard model.
@@ -5578,43 +5721,77 @@
             let score = 0;
             let currentTrophies = 0;
             let bestTrophies = 0;
+            let bestLeagueName = "";
+            let bestLeagueSort = parseLeaderboardLeagueSortKey("");
+            let hasPushRank = false;
             for (let j = 0; j < accountsRaw.length; j++) {
                 const account = calculateSeasonEventAccountBreakdown(event, data, accountsRaw[j], nowMs);
                 if (!account.tag) continue;
                 accounts.push(account);
-                score += account.score;
-                if (account.currentTrophies > currentTrophies) currentTrophies = account.currentTrophies;
-                if (account.bestTrophies > bestTrophies) bestTrophies = account.bestTrophies;
+                if (type === "push") {
+                    const candidate = {
+                        trophies: account.bestTrophies,
+                        leagueSort: account.bestLeagueSort,
+                        capturedMs: parseTimeMs(account.bestCapturedAt),
+                    };
+                    const currentBest = hasPushRank ? { trophies: bestTrophies, leagueSort: bestLeagueSort, capturedMs: 0 } : null;
+                    if (account.hasPushRank && isBetterSeasonEventPushRankPoint(candidate, currentBest)) {
+                        score = account.score;
+                        currentTrophies = account.currentTrophies;
+                        bestTrophies = account.bestTrophies;
+                        bestLeagueName = account.bestLeagueName;
+                        bestLeagueSort = account.bestLeagueSort;
+                        hasPushRank = true;
+                    }
+                } else {
+                    score += account.score;
+                    if (account.currentTrophies > currentTrophies) currentTrophies = account.currentTrophies;
+                    if (account.bestTrophies > bestTrophies) bestTrophies = account.bestTrophies;
+                }
                 for (let k = 0; k < account.warnings.length; k++) addSeasonEventWarning(warnings, account.warnings[k]);
             }
             const displayName = getSeasonEventParticipantDisplayName(participant);
             const firstTag = accounts.length ? accounts[0].tag : "";
-            rows.push({
+            const row = {
                 rank: 0,
                 displayName: displayName,
                 discordUsername: toStr(participant.discordUsername).trim(),
                 accounts: accounts,
                 score: score,
-                scoreLabel: type === "push" ? (formatSignedNumber(score) + " trophies") : (formatNumber(score) + " donations"),
-                metric: type === "push" ? "trophyDelta" : "donations",
+                scoreLabel: type === "push" ? buildSeasonEventPushScoreLabel(score, bestLeagueSort, bestLeagueName) : (formatNumber(score) + " donations"),
+                metric: type === "push" ? "leagueTrophies" : "donations",
                 coverage: accounts.some((account) => account.coverage !== "full") ? "partial" : "full",
                 warnings: warnings,
                 _sort: {
                     accountCount: accounts.length,
                     currentTrophies: currentTrophies,
                     bestTrophies: bestTrophies,
+                    hasPushRank: hasPushRank,
+                    leagueRank: Number.isFinite(Number(bestLeagueSort && bestLeagueSort.rank)) ? Number(bestLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK,
+                    leagueLabel: toStr((bestLeagueSort && bestLeagueSort.tierLabel) || bestLeagueName).trim().toLowerCase(),
                     displayName: displayName.toLowerCase(),
                     firstTag: firstTag,
                 },
-            });
+            };
+            if (type === "push") {
+                row.currentTrophies = currentTrophies;
+                row.bestTrophies = bestTrophies;
+                row.bestLeagueName = bestLeagueName;
+                row.bestLeagueRank = Number.isFinite(Number(bestLeagueSort && bestLeagueSort.rank)) ? Number(bestLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
+                row.bestLeagueLabel = toStr((bestLeagueSort && bestLeagueSort.tierLabel) || bestLeagueName).trim();
+                row.hasPushRank = hasPushRank;
+            }
+            rows.push(row);
         }
         rows.sort((left, right) => {
-            if (left.score !== right.score) return right.score - left.score;
             if (type === "push") {
-                if (left._sort.currentTrophies !== right._sort.currentTrophies) return right._sort.currentTrophies - left._sort.currentTrophies;
+                if (left._sort.hasPushRank !== right._sort.hasPushRank) return left._sort.hasPushRank ? -1 : 1;
+                if (left._sort.leagueRank !== right._sort.leagueRank) return left._sort.leagueRank - right._sort.leagueRank;
                 if (left._sort.bestTrophies !== right._sort.bestTrophies) return right._sort.bestTrophies - left._sort.bestTrophies;
-            } else if (left._sort.accountCount !== right._sort.accountCount) {
-                return right._sort.accountCount - left._sort.accountCount;
+                if (left._sort.currentTrophies !== right._sort.currentTrophies) return right._sort.currentTrophies - left._sort.currentTrophies;
+            } else {
+                if (left.score !== right.score) return right.score - left.score;
+                if (left._sort.accountCount !== right._sort.accountCount) return right._sort.accountCount - left._sort.accountCount;
             }
             if (left._sort.displayName !== right._sort.displayName) return left._sort.displayName.localeCompare(right._sort.displayName);
             return left._sort.firstTag.localeCompare(right._sort.firstTag);
@@ -5690,9 +5867,10 @@
         }).filter((label) => label);
         body.appendChild(el("div", "season-event-row__accounts", accountLabels.length ? accountLabels.join(" + ") : "No registered account"));
         const score = el("div", "season-event-row__score");
-        score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreLabel).trim() || (eventType === "push" ? "+0 trophies" : "0 donations")));
+        score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreLabel).trim() || (eventType === "push" ? "0 trophies" : "0 donations")));
         if (eventType === "push" && accounts.length) {
-            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(accounts[0].currentValue) + " current"));
+            const rankedAccount = accounts.find((account) => account && account.hasPushRank) || accounts[0];
+            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(rankedAccount && rankedAccount.currentTrophies) + " current"));
         } else {
             score.appendChild(el("div", "season-event-row__score-sub", accounts.length + " " + pluralize(accounts.length, "account", "accounts")));
         }

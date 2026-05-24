@@ -52,6 +52,7 @@ test("prefers Username over Discord display name when both are present", () => {
       TAG: "#2LUCULPQ2",
       Discord: "Phuni",
       Username: "phuuni",
+      ID: "123456789012345678",
       CLAN: "TURTLE",
       "War Preference": "in",
       "Town-Hall": 18,
@@ -59,6 +60,7 @@ test("prefers Username over Discord display name when both are present", () => {
   ]);
 
   assert.equal(parsed.accounts[0].discord, "phuuni");
+  assert.equal(parsed.accounts[0].discordId, "123456789012345678");
 });
 
 test("falls back to Discord display name when Username is blank or a placeholder", () => {
@@ -226,4 +228,121 @@ test("applying import updates preserves existing player metrics store", () => {
   const identity = publishReady.playerMetrics.byTag["#28VYJ9URP"].identity;
   assert.equal(identity.discordId, "123456789012345678");
   assert.equal(identity.discordUsername, "phuuni");
+});
+
+test("applying import fills missing playerMetrics Discord IDs", () => {
+  const generator = loadGenerator();
+  const rosterData = {
+    playerMetrics: { schemaVersion: 1, updatedAt: "", byTag: {} },
+    rosters: [
+      {
+        id: "turtle",
+        title: "TURTLE",
+        main: [
+          {
+            name: "Phuni #2",
+            discord: "phuuni",
+            th: 17,
+            tag: "#28VYJ9URP",
+          },
+        ],
+        subs: [],
+        missing: [],
+      },
+    ],
+  };
+  const accounts = generator.parseXlsxRowsTolerant([
+    {
+      NAME: "Phuni #2",
+      TAG: "#28VYJ9URP",
+      Username: "phuuni",
+      ID: "123456789012345678",
+      CLAN: "TURTLE",
+      "War Preference": "in",
+      "Town-Hall": 17,
+    },
+  ]).accounts;
+  const comparison = generator.buildImportComparison({
+    rosterData,
+    accounts,
+    importedClanValues: generator.extractImportedClanValues(accounts),
+    mapping: { TURTLE: "turtle" },
+    filters: {},
+  });
+
+  assert.equal(comparison.summary.matchedWithUpdates, 1);
+  assert.equal(comparison.summary.actionableTotal, 1);
+  assert.equal(comparison.summary.importedDiscordIdCount, 1);
+  assert.equal(comparison.summary.matchedMissingPlayerMetricsDiscordId, 1);
+  assert.equal(comparison.buckets.matchedWithUpdates[0].updates.discordId, "123456789012345678");
+
+  const applied = generator.applyImportComparison({ rosterData, comparison });
+  const identity = applied.rosterData.playerMetrics.byTag["#28VYJ9URP"].identity;
+
+  assert.equal(applied.applied.identityUpdateCount, 1);
+  assert.equal(identity.discordId, "123456789012345678");
+  assert.equal(identity.discordUsername, "phuuni");
+  assert.equal(identity.discordSource, "xlsx-import");
+});
+
+test("applying import does not overwrite existing playerMetrics Discord IDs", () => {
+  const generator = loadGenerator();
+  const rosterData = {
+    playerMetrics: {
+      schemaVersion: 1,
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      byTag: {
+        "#28VYJ9URP": {
+          identity: {
+            tag: "#28VYJ9URP",
+            name: "Phuni #2",
+            discordId: "111111111111111111",
+            discordUsername: "phuuni",
+            discordSource: "discord-sync",
+          },
+          trophyHistoryDaily: [],
+          donationCycles: {},
+        },
+      },
+    },
+    rosters: [
+      {
+        id: "turtle",
+        title: "TURTLE",
+        main: [
+          {
+            name: "Phuni #2",
+            discord: "phuuni",
+            th: 17,
+            tag: "#28VYJ9URP",
+          },
+        ],
+        subs: [],
+        missing: [],
+      },
+    ],
+  };
+  const accounts = generator.parseXlsxRowsTolerant([
+    {
+      NAME: "Phuni #2",
+      TAG: "#28VYJ9URP",
+      Username: "phuuni",
+      ID: "222222222222222222",
+      CLAN: "TURTLE",
+      "War Preference": "in",
+      "Town-Hall": 17,
+    },
+  ]).accounts;
+  const comparison = generator.buildImportComparison({
+    rosterData,
+    accounts,
+    importedClanValues: generator.extractImportedClanValues(accounts),
+    mapping: { TURTLE: "turtle" },
+    filters: {},
+  });
+
+  assert.equal(comparison.summary.matchedWithUpdates, 0);
+  assert.equal(comparison.summary.matchedDiscordIdConflicts, 1);
+  assert.equal(comparison.buckets.matchedDiscordIdConflicts[0].currentDiscordId, "111111111111111111");
+  assert.equal(comparison.buckets.matchedDiscordIdConflicts[0].importedDiscordId, "222222222222222222");
 });

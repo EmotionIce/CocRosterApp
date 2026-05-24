@@ -5142,6 +5142,11 @@
     addLine("Ignored (missing Discord): " + (Number.isFinite(Number(summary.ignoredMissingDiscord)) ? Number(summary.ignoredMissingDiscord) : 0));
     addLine("Missing Discord in import: " + (Number.isFinite(Number(summary.matchedWithoutImportedDiscord)) ? Number(summary.matchedWithoutImportedDiscord) : 0));
     addLine("Missing Discord in both import and rosters: " + (Number.isFinite(Number(summary.matchedWithoutAnyDiscord)) ? Number(summary.matchedWithoutAnyDiscord) : 0));
+    addLine("Imported Discord IDs: " + (Number.isFinite(Number(summary.importedDiscordIdCount)) ? Number(summary.importedDiscordIdCount) : 0));
+    addLine("Missing Discord ID in import: " + (Number.isFinite(Number(summary.matchedWithoutImportedDiscordId)) ? Number(summary.matchedWithoutImportedDiscordId) : 0));
+    addLine("Missing Discord ID in playerMetrics: " + (Number.isFinite(Number(summary.matchedMissingPlayerMetricsDiscordId)) ? Number(summary.matchedMissingPlayerMetricsDiscordId) : 0));
+    addLine("Missing Discord ID in both import and playerMetrics: " + (Number.isFinite(Number(summary.matchedWithoutAnyDiscordId)) ? Number(summary.matchedWithoutAnyDiscordId) : 0));
+    addLine("Discord ID conflicts: " + (Number.isFinite(Number(summary.matchedDiscordIdConflicts)) ? Number(summary.matchedDiscordIdConflicts) : 0));
     addLine("Invalid rows: " + (Number.isFinite(Number(summary.invalidRows)) ? Number(summary.invalidRows) : 0));
     addLine("Ready to apply: " + (Number.isFinite(Number(summary.actionableTotal)) ? Number(summary.actionableTotal) : 0));
 
@@ -5438,9 +5443,12 @@
         const missingBoth = summary && Number.isFinite(Number(summary.matchedWithoutAnyDiscord))
           ? Number(summary.matchedWithoutAnyDiscord)
           : 0;
+        const missingIds = summary && Number.isFinite(Number(summary.matchedMissingPlayerMetricsDiscordId))
+          ? Number(summary.matchedMissingPlayerMetricsDiscordId)
+          : 0;
         const suffix = missingBoth > 0
           ? (" " + missingBoth + " matched member(s) have no Discord in both import and rosters.")
-          : "";
+          : (missingIds > 0 ? (" " + missingIds + " Discord ID(s) can be filled into playerMetrics.") : "");
         setImportActionStatus("Comparison complete: " + actionable + " actionable change(s)." + suffix, false);
       }
     } finally {
@@ -5496,7 +5504,8 @@
       const appliedSummary = applied.applied && typeof applied.applied === "object" ? applied.applied : {};
       const updatedCount = Number.isFinite(Number(appliedSummary.updatedCount)) ? Number(appliedSummary.updatedCount) : 0;
       const addedCount = Number.isFinite(Number(appliedSummary.addedCount)) ? Number(appliedSummary.addedCount) : 0;
-      setImportActionStatus("Applied updates: " + updatedCount + " updated, " + addedCount + " added.", false);
+      const identityUpdateCount = Number.isFinite(Number(appliedSummary.identityUpdateCount)) ? Number(appliedSummary.identityUpdateCount) : 0;
+      setImportActionStatus("Applied updates: " + updatedCount + " updated, " + addedCount + " added, " + identityUpdateCount + " Discord ID filled.", false);
       setStatus("Import updates applied.");
 
       await runImportComparison();

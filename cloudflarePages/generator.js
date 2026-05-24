@@ -129,6 +129,17 @@
     "Discord Name",
     "Discord Display Name",
   ];
+  const DISCORD_ID_COLUMN_PREFERENCE = [
+    "ID",
+    "Discord ID",
+    "DiscordID",
+    "Discord Id",
+    "Discord User ID",
+    "Discord UserId",
+    "Discord User Id",
+    "User ID",
+    "UserId",
+  ];
 
   // Sanitize name candidate.
   const sanitizeNameCandidate = (raw) => {
@@ -141,6 +152,34 @@
   // Sanitize discord candidate.
   const sanitizeDiscordCandidate = (raw) => {
     const text = normalizeWhitespace(raw);
+    if (!text) return "";
+    const key = text.toLowerCase();
+    return DISCORD_PLACEHOLDERS[key] ? "" : text;
+  };
+
+  // Sanitize Discord snowflake ID candidate.
+  const sanitizeDiscordIdCandidate = (raw) => {
+    if (typeof raw === "number") {
+      if (!Number.isFinite(raw) || Math.floor(raw) !== raw || !Number.isSafeInteger(raw)) return "";
+      raw = String(raw);
+    }
+    let text = toStr(raw)
+      .replace(/[\u0000-\u001F\u007F\s]+/g, "")
+      .trim();
+    if (!text) return "";
+    const key = text.toLowerCase();
+    if (DISCORD_PLACEHOLDERS[key]) return "";
+    if (/^\d+\.0+$/.test(text)) text = text.slice(0, text.indexOf("."));
+    return /^\d{15,25}$/.test(text) ? text : "";
+  };
+
+  // Sanitize already-stored Discord IDs permissively so import never treats an
+  // existing bot/API identity as missing just because older tests or fixtures
+  // used shortened IDs.
+  const sanitizeStoredDiscordIdCandidate = (raw) => {
+    const text = toStr(raw)
+      .replace(/[\u0000-\u001F\u007F\s]+/g, "")
+      .trim();
     if (!text) return "";
     const key = text.toLowerCase();
     return DISCORD_PLACEHOLDERS[key] ? "" : text;
@@ -192,12 +231,14 @@
       const clanRaw = pickFirstNonEmpty(row, ["CLAN", "Clan"]);
       const warPrefRaw = pickFirstNonEmpty(row, ["War Preference", "WarPref", "War preference"]);
       const discordRaw = pickPreferredDiscordValue(row);
+      const discordIdRaw = pickFirstNonEmpty(row, DISCORD_ID_COLUMN_PREFERENCE);
 
       const name = normalizeWhitespace(nameRaw);
       const tag = normalizeTag(tagRaw);
       const clan = normalizeWhitespace(clanRaw);
       const clanKey = normalizeClanKey(clan);
       const discord = normalizeWhitespace(discordRaw);
+      const discordId = sanitizeDiscordIdCandidate(discordIdRaw);
       const warPref = normalizeWarPref(warPrefRaw);
       const th = parseIntStrict(thRaw);
 
@@ -207,14 +248,15 @@
         isNonEmptyProfileValue(thRaw) ||
         isNonEmptyProfileValue(clanRaw) ||
         isNonEmptyProfileValue(warPrefRaw) ||
-        isNonEmptyProfileValue(discordRaw);
+        isNonEmptyProfileValue(discordRaw) ||
+        isNonEmptyProfileValue(discordIdRaw);
 
       if (!tag) {
         if (hasAnyData) {
           invalidRows.push({
             rowNumber,
             reason: "missing TAG",
-            row: { name, tag: "", clan, discord, thRaw: toStr(thRaw), warPref },
+            row: { name, tag: "", clan, discord, discordId, thRaw: toStr(thRaw), warPref },
           });
         } else {
           ignoredRows.push({ rowNumber, reason: "blank row" });
@@ -226,7 +268,7 @@
         invalidRows.push({
           rowNumber,
           reason: "duplicate TAG in import",
-          row: { name, tag, clan, discord, thRaw: toStr(thRaw), warPref },
+          row: { name, tag, clan, discord, discordId, thRaw: toStr(thRaw), warPref },
         });
         continue;
       }
@@ -236,7 +278,7 @@
         invalidRows.push({
           rowNumber,
           reason: "invalid TH",
-          row: { name, tag, clan, discord, thRaw: toStr(thRaw), warPref },
+          row: { name, tag, clan, discord, discordId, thRaw: toStr(thRaw), warPref },
         });
         continue;
       }
@@ -246,6 +288,7 @@
         tag,
         name,
         discord,
+        discordId,
         th,
         clan,
         clanKey,
@@ -502,20 +545,102 @@
     return { byTag, duplicates };
   };
 
+  // Read the canonical playerMetrics identity for a tag.
+  const readPlayerMetricsIdentityByTag = (rosterDataRaw, tagRaw) => {
+    const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+    const tag = normalizeTag(tagRaw);
+    if (!tag) return {};
+    const store = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : {};
+    const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+    const entry = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : {};
+    return entry.identity && typeof entry.identity === "object" ? entry.identity : {};
+  };
+
+  // Ensure mutable playerMetrics.byTag for import identity fills.
+  const ensureImportPlayerMetricsByTag = (rosterDataRaw) => {
+    const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+    const store = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object"
+      ? rosterData.playerMetrics
+      : {};
+    const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+    store.schemaVersion = Number.isFinite(Number(store.schemaVersion)) ? Number(store.schemaVersion) : 1;
+    store.updatedAt = normalizeWhitespace(store.updatedAt);
+    store.byTag = byTag;
+    rosterData.playerMetrics = store;
+    return byTag;
+  };
+
+  // Fill a missing canonical Discord ID from an imported account without
+  // overwriting a bot-linked ID already present in playerMetrics.
+  const upsertImportedDiscordIdentity = (rosterDataRaw, accountRaw, optionsRaw) => {
+    const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+    const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const tag = normalizeTag(account.tag);
+    const importedDiscordId = sanitizeDiscordIdCandidate(account.discordId);
+    if (!rosterData || !tag || !importedDiscordId) return false;
+
+    const byTag = ensureImportPlayerMetricsByTag(rosterData);
+    const existingEntry = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : {};
+    const existingIdentity = existingEntry.identity && typeof existingEntry.identity === "object" ? existingEntry.identity : {};
+    const currentDiscordId = sanitizeStoredDiscordIdCandidate(existingIdentity.discordId);
+    if (currentDiscordId) return false;
+
+    const nextEntry = existingEntry;
+    const nextIdentity = Object.assign({}, existingIdentity);
+    let changed = false;
+
+    if (normalizeTag(nextIdentity.tag) !== tag) {
+      nextIdentity.tag = tag;
+      changed = true;
+    }
+
+    const importedName = sanitizeNameCandidate(account.name);
+    if (importedName && !normalizeWhitespace(nextIdentity.name)) {
+      nextIdentity.name = importedName;
+      changed = true;
+    }
+
+    nextIdentity.discordId = importedDiscordId;
+    changed = true;
+
+    const importedDiscordUsername = sanitizeDiscordCandidate(account.discord);
+    const currentDiscordUsername = sanitizeDiscordCandidate(nextIdentity.discordUsername);
+    if (importedDiscordUsername && (options.allowDiscordUsernameOverwrite === true || !currentDiscordUsername)) {
+      if (importedDiscordUsername !== currentDiscordUsername) {
+        nextIdentity.discordUsername = importedDiscordUsername;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      nextIdentity.discordSource = "xlsx-import";
+      nextEntry.identity = nextIdentity;
+      if (!Array.isArray(nextEntry.trophyHistoryDaily)) nextEntry.trophyHistoryDaily = [];
+      if (!nextEntry.donationCycles || typeof nextEntry.donationCycles !== "object") nextEntry.donationCycles = {};
+      byTag[tag] = nextEntry;
+      rosterData.playerMetrics.updatedAt = new Date().toISOString();
+    }
+    return changed;
+  };
+
   // Build safe matched updates.
-  const buildSafeMatchedUpdates = (existingPlayerRaw, importedAccountRaw) => {
+  const buildSafeMatchedUpdates = (existingPlayerRaw, importedAccountRaw, existingIdentityRaw) => {
     const existingPlayer = existingPlayerRaw && typeof existingPlayerRaw === "object" ? existingPlayerRaw : {};
     const imported = importedAccountRaw && typeof importedAccountRaw === "object" ? importedAccountRaw : {};
+    const existingIdentity = existingIdentityRaw && typeof existingIdentityRaw === "object" ? existingIdentityRaw : {};
 
     const updates = {};
     const current = {
       name: normalizeWhitespace(existingPlayer.name),
       discord: normalizeWhitespace(existingPlayer.discord),
       th: parseIntStrict(existingPlayer.th),
+      discordId: sanitizeStoredDiscordIdCandidate(existingIdentity.discordId),
     };
 
     const importedName = sanitizeNameCandidate(imported.name);
     const importedDiscord = sanitizeDiscordCandidate(imported.discord);
+    const importedDiscordId = sanitizeDiscordIdCandidate(imported.discordId);
     const importedTh = parseIntStrict(imported.th);
 
     if (importedName && importedName !== current.name) {
@@ -526,6 +651,9 @@
     }
     if (importedTh != null && importedTh >= 1 && importedTh <= 25 && importedTh !== current.th) {
       updates.th = importedTh;
+    }
+    if (importedDiscordId && !current.discordId) {
+      updates.discordId = importedDiscordId;
     }
 
     return updates;
@@ -558,8 +686,14 @@
     const ignoredClanNotAllowed = [];
     const ignoredMissingDiscord = [];
     const matchedMissingDiscord = [];
+    const matchedMissingDiscordId = [];
+    const matchedDiscordIdConflicts = [];
     let matchedWithoutImportedDiscord = 0;
     let matchedWithoutAnyDiscord = 0;
+    let importedDiscordIdCount = 0;
+    let matchedWithoutImportedDiscordId = 0;
+    let matchedWithoutAnyDiscordId = 0;
+    let matchedMissingPlayerMetricsDiscordId = 0;
 
     for (const accountRaw of accounts) {
       const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
@@ -568,6 +702,8 @@
 
       const clanKey = normalizeClanKey(account.clanKey || account.clan);
       const clanLabel = normalizeWhitespace(account.clan);
+      const importedDiscordId = sanitizeDiscordIdCandidate(account.discordId);
+      if (importedDiscordId) importedDiscordIdCount++;
 
       if (allowedSet && !allowedSet.has(clanKey)) {
         ignoredClanNotAllowed.push({
@@ -581,9 +717,12 @@
 
       const existing = previewIndex.byTag[tag];
       if (existing) {
-        const updates = buildSafeMatchedUpdates(existing.player, account);
+        const existingIdentity = readPlayerMetricsIdentityByTag(rosterData, tag);
+        const updates = buildSafeMatchedUpdates(existing.player, account, existingIdentity);
         const currentDiscord = sanitizeDiscordCandidate(existing.player && existing.player.discord);
         const importedDiscord = sanitizeDiscordCandidate(account.discord);
+        const currentDiscordId = sanitizeStoredDiscordIdCandidate(existingIdentity.discordId);
+        const discordIdConflict = !!(importedDiscordId && currentDiscordId && importedDiscordId !== currentDiscordId);
         const entry = {
           rowNumber: account.rowNumber,
           tag,
@@ -595,15 +734,18 @@
           current: {
             name: normalizeWhitespace(existing.player && existing.player.name),
             discord: currentDiscord,
+            discordId: currentDiscordId,
             th: parseIntStrict(existing.player && existing.player.th),
           },
           imported: {
             name: normalizeWhitespace(account.name),
             discord: importedDiscord,
+            discordId: importedDiscordId,
             th: parseIntStrict(account.th),
           },
           updates,
         };
+        if (discordIdConflict) entry.discordIdConflict = true;
 
         if (!importedDiscord) {
           matchedWithoutImportedDiscord++;
@@ -617,6 +759,34 @@
             rosterTitle: existing.rosterTitle,
             currentDiscord,
             reason: currentDiscord ? "missing Discord in import row" : "missing Discord in import row and preview",
+          });
+        }
+        if (!importedDiscordId) {
+          matchedWithoutImportedDiscordId++;
+          if (!currentDiscordId) matchedWithoutAnyDiscordId++;
+          matchedMissingDiscordId.push({
+            rowNumber: account.rowNumber,
+            tag,
+            clan: clanLabel,
+            clanKey,
+            rosterId: existing.rosterId,
+            rosterTitle: existing.rosterTitle,
+            currentDiscordId,
+            reason: currentDiscordId ? "missing Discord ID in import row" : "missing Discord ID in import row and playerMetrics",
+          });
+        } else if (!currentDiscordId) {
+          matchedMissingPlayerMetricsDiscordId++;
+        } else if (discordIdConflict) {
+          matchedDiscordIdConflicts.push({
+            rowNumber: account.rowNumber,
+            tag,
+            clan: clanLabel,
+            clanKey,
+            rosterId: existing.rosterId,
+            rosterTitle: existing.rosterTitle,
+            currentDiscordId,
+            importedDiscordId,
+            reason: "import Discord ID differs from playerMetrics",
           });
         }
 
@@ -648,6 +818,7 @@
           tag,
           name: normalizeWhitespace(account.name),
           discord: normalizeWhitespace(account.discord),
+          discordId: importedDiscordId,
           th: parseIntStrict(account.th),
           clan: clanLabel,
           clanKey,
@@ -663,6 +834,7 @@
           tag,
           clan: clanLabel,
           targetRosterId: mappedRosterId,
+          discordId: importedDiscordId,
           reason: "missing Discord/Username for new member",
         });
         continue;
@@ -674,6 +846,7 @@
         tag,
         name: normalizeWhitespace(account.name),
         discord: normalizeWhitespace(account.discord),
+        discordId: importedDiscordId,
         th: parseIntStrict(account.th),
         clan: clanLabel,
         clanKey,
@@ -697,6 +870,11 @@
       ignoredMissingDiscord: ignoredMissingDiscord.length,
       matchedWithoutImportedDiscord,
       matchedWithoutAnyDiscord,
+      importedDiscordIdCount,
+      matchedWithoutImportedDiscordId,
+      matchedWithoutAnyDiscordId,
+      matchedMissingPlayerMetricsDiscordId,
+      matchedDiscordIdConflicts: matchedDiscordIdConflicts.length,
       ignoredBlankRows: ignoredRowsFromParse.length,
       invalidRows: invalidRows.length,
       actionableTotal,
@@ -715,6 +893,8 @@
         newAddable,
         reviewOnly,
         matchedMissingDiscord,
+        matchedMissingDiscordId,
+        matchedDiscordIdConflicts,
         ignored: {
           warOut: ignoredWarOut,
           clanNotAllowed: ignoredClanNotAllowed,
@@ -745,6 +925,7 @@
 
     const appliedUpdates = [];
     const skippedUpdates = [];
+    let identityUpdateCount = 0;
     for (const updateRaw of updates) {
       const update = updateRaw && typeof updateRaw === "object" ? updateRaw : {};
       const tag = normalizeTag(update.tag);
@@ -761,6 +942,19 @@
       if (safeUpdates.th != null) {
         const th = parseIntStrict(safeUpdates.th);
         if (th != null && th >= 1 && th <= 25) indexed.player.th = th;
+      }
+      if (safeUpdates.discordId != null) {
+        const importedIdentity = Object.assign({}, update.imported || {}, {
+          tag,
+          name: update.imported && update.imported.name != null ? update.imported.name : indexed.player.name,
+          discord: update.imported && update.imported.discord != null ? update.imported.discord : indexed.player.discord,
+          discordId: safeUpdates.discordId,
+        });
+        if (upsertImportedDiscordIdentity(nextRosterData, importedIdentity, {
+          allowDiscordUsernameOverwrite: safeUpdates.discord != null,
+        })) {
+          identityUpdateCount++;
+        }
       }
 
       appliedUpdates.push({
@@ -807,6 +1001,18 @@
       };
 
       roster.subs.push(player);
+      if (sanitizeDiscordIdCandidate(addition.discordId)) {
+        if (upsertImportedDiscordIdentity(nextRosterData, {
+          tag,
+          name: player.name,
+          discord: player.discord,
+          discordId: addition.discordId,
+        }, {
+          allowDiscordUsernameOverwrite: true,
+        })) {
+          identityUpdateCount++;
+        }
+      }
       previewIndex.byTag[tag] = {
         tag,
         rosterId,
@@ -846,6 +1052,7 @@
       applied: {
         updatedCount: appliedUpdates.length,
         addedCount: addedMembers.length,
+        identityUpdateCount,
         skippedUpdateCount: skippedUpdates.length,
         skippedAddCount: skippedAdds.length,
         updated: appliedUpdates,
@@ -870,6 +1077,7 @@
     _internal: {
       sanitizeNameCandidate,
       sanitizeDiscordCandidate,
+      sanitizeDiscordIdCandidate,
       normalizeLookupKey,
       buildSafeMatchedUpdates,
     },

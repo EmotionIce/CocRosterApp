@@ -25,6 +25,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return syncDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordUsernameForPlayerTag":
 			return syncDiscordUsernameForPlayerTag(args[0], args[1], args[2]);
+		case "backfillDiscordIdentitiesFromRosterCacheOnce":
+			return backfillDiscordIdentitiesFromRosterCacheOnce(args[0]);
 		case "reconcileCurrentSeasonEvents":
 			return reconcileCurrentSeasonEvents(args[0], args[1]);
 		case "getCurrentSeasonEvents":

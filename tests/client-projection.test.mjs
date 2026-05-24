@@ -381,7 +381,7 @@ test("archived donation event uses its own seasonId instead of current season", 
   assert.equal(model.rows[0].score, 75);
 });
 
-test("push event leaderboard calculates trophy delta from event window", () => {
+test("push event leaderboard ranks by league bucket then best trophies", () => {
   const { buildSeasonEventLeaderboardModel } = loadClientInternals();
   const event = {
     eventId: "push-ranked-legend-i-2026-05-18",
@@ -391,6 +391,8 @@ test("push event leaderboard calculates trophy delta from event window", () => {
     endsAt: "2026-06-15T05:00:00.000Z",
     participantsByDiscordId: {
       "111": { discordDisplayName: "Alpha", status: "signed_up", accounts: [{ tag: "#AAA", name: "Alpha" }] },
+      "222": { discordDisplayName: "Bravo", status: "signed_up", accounts: [{ tag: "#BBB", name: "Bravo" }] },
+      "333": { discordDisplayName: "Delta", status: "signed_up", accounts: [{ tag: "#DDD", name: "Delta" }] },
     },
   };
   const data = {
@@ -399,10 +401,24 @@ test("push event leaderboard calculates trophy delta from event window", () => {
         "#AAA": {
           identity: { tag: "#AAA", name: "Alpha" },
           trophyHistoryDaily: [
-            { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5000 },
-            { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5200 },
+            { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5000, league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
+            { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5200, league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
           ],
-          latestSnapshot: { tag: "#AAA", name: "Alpha", trophies: 5200, capturedAt: "2026-05-20T15:00:00.000Z" },
+          latestSnapshot: { tag: "#AAA", name: "Alpha", trophies: 5200, capturedAt: "2026-05-20T15:00:00.000Z", league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
+        },
+        "#BBB": {
+          identity: { tag: "#BBB", name: "Bravo" },
+          trophyHistoryDaily: [
+            { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5600, league: { name: "Titan League" }, leagueTier: { id: 105000027 } },
+          ],
+          latestSnapshot: { tag: "#BBB", name: "Bravo", trophies: 5600, capturedAt: "2026-05-20T15:00:00.000Z", league: { name: "Titan League" }, leagueTier: { id: 105000027 } },
+        },
+        "#DDD": {
+          identity: { tag: "#DDD", name: "Delta" },
+          trophyHistoryDaily: [
+            { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 6000, league: { name: "Legend League" }, leagueTier: { id: 105000035 } },
+          ],
+          latestSnapshot: { tag: "#DDD", name: "Delta", trophies: 6000, capturedAt: "2026-05-20T15:00:00.000Z", league: { name: "Legend League" }, leagueTier: { id: 105000035 } },
         },
       },
     },
@@ -410,8 +426,17 @@ test("push event leaderboard calculates trophy delta from event window", () => {
 
   const model = buildSeasonEventLeaderboardModel(event, data, { nowMs: Date.parse("2026-05-20T15:00:00.000Z") });
 
-  assert.equal(model.rows[0].score, 200);
-  assert.equal(model.rows[0].scoreLabel, "+200 trophies");
+  assert.equal(model.rows[0].displayName, "Alpha");
+  assert.equal(model.rows[0].score, 5200);
+  assert.match(model.rows[0].scoreLabel, /^Legends I - 5[,.]200 trophies$/);
+  assert.equal(model.rows[0].metric, "leagueTrophies");
+  assert.equal(model.rows[0].bestLeagueName, "Legends I");
+  assert.equal(model.rows[0].hasPushRank, true);
+  assert.equal(model.rows[1].displayName, "Delta");
+  assert.equal(model.rows[1].score, 6000);
+  assert.equal(model.rows[1].bestLeagueName, "Legends II");
+  assert.equal(model.rows[2].displayName, "Bravo");
+  assert.equal(model.rows[2].score, 5600);
 });
 
 test("general leaderboard still uses donationCycles for current cycle totals", () => {

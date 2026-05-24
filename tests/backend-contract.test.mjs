@@ -220,7 +220,8 @@ const buildSeasonEventRosterData = () => ({
           donations: 100,
           donationsReceived: 20,
           capturedAt: "2026-05-19T00:00:00.000Z",
-          league: { id: 29000022, name: "Legend League" },
+          league: { name: "Legend League" },
+          leagueTier: { id: 105000036 },
         },
         trophyHistoryDaily: [],
       },
@@ -239,7 +240,8 @@ const buildSeasonEventRosterData = () => ({
           donations: 80,
           donationsReceived: 30,
           capturedAt: "2026-05-19T00:00:00.000Z",
-          league: { id: 29000021, name: "Titan League I" },
+          league: { name: "Titan League" },
+          leagueTier: { id: 105000027 },
         },
         trophyHistoryDaily: [],
       },
@@ -258,7 +260,8 @@ const buildSeasonEventRosterData = () => ({
           donations: 60,
           donationsReceived: 25,
           capturedAt: "2026-05-19T00:00:00.000Z",
-          league: { id: 29000020, name: "Titan League II" },
+          league: { name: "Titan League" },
+          leagueTier: { id: 105000026 },
         },
         trophyHistoryDaily: [],
       },
@@ -277,7 +280,8 @@ const buildSeasonEventRosterData = () => ({
           donations: 50,
           donationsReceived: 25,
           capturedAt: "2026-05-19T00:00:00.000Z",
-          league: { id: 29000019, name: "Titan League III" },
+          league: { name: "Titan League" },
+          leagueTier: { id: 105000025 },
         },
         trophyHistoryDaily: [],
       },
@@ -304,11 +308,12 @@ const buildSeasonEventLeaderboardRosterData = () => ({
           donations: 150,
           donationsReceived: 40,
           capturedAt: "2026-05-20T15:00:00.000Z",
-          league: { id: 29000022, name: "Legend League" },
+          league: { name: "Legend League" },
+          leagueTier: { id: 105000036 },
         },
         trophyHistoryDaily: [
-          { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5000 },
-          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5200 },
+          { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5000, league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
+          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5200, league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
         ],
         donationCycles: {
           "ranked-legend-i-2026-05-18": {
@@ -333,15 +338,16 @@ const buildSeasonEventLeaderboardRosterData = () => ({
           tag: "#9PYLQG",
           name: "Bravo",
           townHallLevel: 15,
-          trophies: 5150,
+          trophies: 5600,
           donations: 200,
           donationsReceived: 50,
           capturedAt: "2026-05-20T15:00:00.000Z",
-          league: { id: 29000021, name: "Titan League I" },
+          league: { name: "Titan League" },
+          leagueTier: { id: 105000027 },
         },
         trophyHistoryDaily: [
-          { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5050 },
-          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5150 },
+          { dayKey: "2026-05-18", capturedAt: "2026-05-18T05:00:00.000Z", trophies: 5050, league: { name: "Titan League" }, leagueTier: { id: 105000027 } },
+          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 5600, league: { name: "Titan League" }, leagueTier: { id: 105000027 } },
         ],
         donationCycles: {
           "ranked-legend-i-2026-05-18": {
@@ -370,10 +376,11 @@ const buildSeasonEventLeaderboardRosterData = () => ({
           donations: 75,
           donationsReceived: 30,
           capturedAt: "2026-05-20T15:00:00.000Z",
-          league: { id: 29000020, name: "Titan League II" },
+          league: { name: "Titan League" },
+          leagueTier: { id: 105000026 },
         },
         trophyHistoryDaily: [
-          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 4900 },
+          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 4900, league: { name: "Titan League" }, leagueTier: { id: 105000026 } },
         ],
         donationCycles: {
           "ranked-legend-i-2026-05-18": {
@@ -391,6 +398,23 @@ const buildSeasonEventLeaderboardRosterData = () => ({
             receivedResetCount: 0,
           },
         },
+      },
+      "#PYYQQ": {
+        identity: { tag: "#PYYQQ", name: "Delta", discordId: "444", discordUsername: "delta" },
+        latestSnapshot: {
+          tag: "#PYYQQ",
+          name: "Delta",
+          townHallLevel: 16,
+          trophies: 6000,
+          donations: 10,
+          donationsReceived: 5,
+          capturedAt: "2026-05-20T15:00:00.000Z",
+          league: { name: "Legend League" },
+          leagueTier: { id: 105000035 },
+        },
+        trophyHistoryDaily: [
+          { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 6000, league: { name: "Legend League" }, leagueTier: { id: 105000035 } },
+        ],
       },
     },
   },
@@ -711,6 +735,74 @@ test("bot sync username-only works and does not erase existing Discord ID", () =
   assert.equal(activeData.rosters[0].main[0].discord, "newname");
 });
 
+test("one-time Discord backfill copies roster cache names into playerMetrics byTag", () => {
+  const backendRaw = loadBackend();
+  const data = buildValidRosterData();
+  data.rosters[0].main[0].tag = "#2LUCULP";
+  data.rosters[0].main[0].name = "Alpha";
+  data.rosters[0].main[0].discord = "alpha";
+  data.playerMetrics = { schemaVersion: 1, updatedAt: "", byTag: {} };
+  const backend = installMemoryFirebase(backendRaw, {
+    active: backendRaw.encodeFirebaseObjectKeysRecursive_(data),
+  });
+  backend.updateActiveRosterDataCaches_ = () => null;
+
+  const result = backend.backfillDiscordIdentitiesFromRosterCacheOnce("change-me");
+  const active = backend.readActiveRosterData_();
+  const identity = active.playerMetrics.byTag["#2LUCULP"].identity;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.rosterCacheTagCount, 1);
+  assert.equal(result.metricEntryCountBefore, 0);
+  assert.equal(result.metricEntryCountAfter, 1);
+  assert.equal(result.migratedFromRosterCache, 1);
+  assert.equal(identity.tag, "#2LUCULP");
+  assert.equal(identity.name, "Alpha");
+  assert.equal(identity.discordUsername, "alpha");
+  assert.equal(identity.discordSource, "roster-cache-backfill");
+  assert.equal(active.rosters[0].main[0].discord, "alpha");
+});
+
+test("one-time Discord backfill preserves bot-linked identities over roster cache", () => {
+  const backendRaw = loadBackend();
+  const data = buildValidRosterData();
+  data.rosters[0].main[0].tag = "#2LUCULP";
+  data.rosters[0].main[0].name = "Alpha";
+  data.rosters[0].main[0].discord = "old-row-name";
+  data.playerMetrics.byTag = {
+    "#2LUCULP": {
+      identity: {
+        tag: "#2LUCULP",
+        name: "Alpha",
+        discordId: "123456789012345678",
+        discordUsername: "bot-linked-name",
+        discordLinkedAt: "2026-05-19T00:00:00.000Z",
+        discordUpdatedAt: "2026-05-19T00:00:00.000Z",
+        discordSource: "discord-sync",
+      },
+      trophyHistoryDaily: [],
+    },
+  };
+  const backend = installMemoryFirebase(backendRaw, {
+    active: backendRaw.encodeFirebaseObjectKeysRecursive_(data),
+  });
+  backend.updateActiveRosterDataCaches_ = () => null;
+
+  const result = backend.backfillDiscordIdentitiesFromRosterCacheOnce("change-me");
+  const active = backend.readActiveRosterData_();
+  const identity = active.playerMetrics.byTag["#2LUCULP"].identity;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.migratedFromRosterCache, 0);
+  assert.equal(result.hydratedRosterCache, 1);
+  assert.equal(identity.discordId, "123456789012345678");
+  assert.equal(identity.discordUsername, "bot-linked-name");
+  assert.equal(identity.discordSource, "discord-sync");
+  assert.equal(active.rosters[0].main[0].discord, "bot-linked-name");
+});
+
 test("ranked season resolver uses deterministic Legend I cycle boundaries", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.cocFetch_ = () => {
@@ -1027,7 +1119,7 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordUsername: "alpha",
     discordDisplayName: "Alpha",
     status: "signed_up",
-    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legend League", matchType: "discordId" }],
+    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legends I", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     source: { type: "test" },
@@ -1037,7 +1129,7 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordUsername: "bravo",
     discordDisplayName: "Bravo",
     status: "signed_up",
-    accounts: [{ tag: "#9PYLQG", name: "Bravo", townHallLevel: 15, trophies: 5050, leagueName: "Titan League I", matchType: "discordId" }],
+    accounts: [{ tag: "#9PYLQG", name: "Bravo", townHallLevel: 15, trophies: 5050, leagueName: "Titan 27", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     source: { type: "test" },
@@ -1047,17 +1139,27 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordUsername: "charlie",
     discordDisplayName: "Charlie",
     status: "signed_up",
-    accounts: [{ tag: "#8CCVV", name: "Charlie", townHallLevel: 14, trophies: 4900, leagueName: "Titan League II", matchType: "discordId" }],
+    accounts: [{ tag: "#8CCVV", name: "Charlie", townHallLevel: 14, trophies: 4900, leagueName: "Titan 26", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     source: { type: "test" },
   });
   writeParticipant(pushEventId, {
     discordId: "444",
+    discordUsername: "delta",
+    discordDisplayName: "Delta",
+    status: "signed_up",
+    accounts: [{ tag: "#PYYQQ", name: "Delta", townHallLevel: 16, trophies: 6000, leagueName: "Legends II", matchType: "discordId" }],
+    signedUpAt: "2026-05-18T06:00:00.000Z",
+    updatedAt: "2026-05-18T06:00:00.000Z",
+    source: { type: "test" },
+  });
+  writeParticipant(pushEventId, {
+    discordId: "666",
     discordUsername: "missing",
     discordDisplayName: "Missing",
     status: "signed_up",
-    accounts: [{ tag: "#PYYQQ", name: "Missing", townHallLevel: 13, trophies: 0, leagueName: "", matchType: "discordId" }],
+    accounts: [{ tag: "#MISS", name: "Missing", townHallLevel: 13, trophies: 0, leagueName: "", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     source: { type: "test" },
@@ -1067,7 +1169,7 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordUsername: "cancelled",
     discordDisplayName: "Cancelled",
     status: "cancelled",
-    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legend League", matchType: "discordId" }],
+    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legends I", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     cancelledAt: "2026-05-19T00:00:00.000Z",
@@ -1079,7 +1181,7 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordUsername: "alpha",
     discordDisplayName: "Alpha",
     status: "signed_up",
-    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legend League", matchType: "discordId" }],
+    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legends I", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     source: { type: "test" },
@@ -1090,8 +1192,8 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordDisplayName: "Bravo",
     status: "signed_up",
     accounts: [
-      { tag: "#9PYLQG", name: "Bravo", townHallLevel: 15, trophies: 5050, leagueName: "Titan League I", matchType: "discordId" },
-      { tag: "#8CCVV", name: "Charlie", townHallLevel: 14, trophies: 4900, leagueName: "Titan League II", matchType: "discordId" },
+      { tag: "#9PYLQG", name: "Bravo", townHallLevel: 15, trophies: 5050, leagueName: "Titan 27", matchType: "discordId" },
+      { tag: "#8CCVV", name: "Charlie", townHallLevel: 14, trophies: 4900, leagueName: "Titan 26", matchType: "discordId" },
     ],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
@@ -1102,7 +1204,7 @@ test("season event leaderboards score push and donation events from event-cycle 
     discordUsername: "cancelled",
     discordDisplayName: "Cancelled",
     status: "cancelled",
-    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legend League", matchType: "discordId" }],
+    accounts: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16, trophies: 5000, leagueName: "Legends I", matchType: "discordId" }],
     signedUpAt: "2026-05-18T06:00:00.000Z",
     updatedAt: "2026-05-18T06:00:00.000Z",
     cancelledAt: "2026-05-19T00:00:00.000Z",
@@ -1115,12 +1217,20 @@ test("season event leaderboards score push and donation events from event-cycle 
     now: "2026-05-20T15:00:00.000Z",
   }, "secret");
 
-  assert.equal(push.leaderboard.length, 4);
+  assert.equal(push.leaderboard.length, 5);
   assert.equal(push.leaderboard[0].displayName, "Alpha");
-  assert.equal(push.leaderboard[0].score, 200);
-  assert.equal(push.leaderboard[1].displayName, "Bravo");
-  assert.equal(push.leaderboard[1].score, 100);
-  assert.equal(push.leaderboard.find((row) => row.displayName === "Charlie").coverage, "missing-baseline");
+  assert.equal(push.leaderboard[0].score, 5200);
+  assert.equal(push.leaderboard[0].scoreLabel, "Legends I - 5200 trophies");
+  assert.equal(push.leaderboard[0].metric, "leagueTrophies");
+  assert.equal(push.leaderboard[0].bestLeagueName, "Legends I");
+  assert.equal(push.leaderboard[0].hasPushRank, true);
+  assert.equal(push.leaderboard[1].displayName, "Delta");
+  assert.equal(push.leaderboard[1].score, 6000);
+  assert.equal(push.leaderboard[1].bestLeagueName, "Legends II");
+  assert.equal(push.leaderboard[2].displayName, "Bravo");
+  assert.equal(push.leaderboard[2].score, 5600);
+  assert.equal(push.leaderboard[3].displayName, "Charlie");
+  assert.equal(push.leaderboard.find((row) => row.displayName === "Charlie").coverage, "full");
   assert.ok(push.leaderboard.find((row) => row.displayName === "Missing").warnings.includes("missing-player-metrics"));
   assert.equal(push.leaderboard.some((row) => row.displayName === "Cancelled"), false);
 
