@@ -1236,16 +1236,38 @@ function getStableRegularWarKey_(warLikeRaw, clanTagRaw) {
 	return (clanTag || clanTagFallback || "") + "|" + (opponentTag || "") + "|" + keySeed;
 }
 
-// Find war log entry by war key.
-function findWarLogEntryByWarKey_(clanTag, warKey, limitRaw) {
+// Find war log entry in a provided warlog list by war key.
+function findWarLogEntryInEntriesByWarKey_(entriesRaw, clanTag, warKey) {
 	if (!clanTag || !warKey) return null;
-	const entries = fetchClanWarLog_(clanTag, limitRaw || REGULAR_WAR_WARLOG_LIMIT);
+	const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
 	for (let i = 0; i < entries.length; i++) {
 		const entry = entries[i] && typeof entries[i] === "object" ? entries[i] : {};
 		const entryWarKey = getStableRegularWarKey_(entry, clanTag);
 		if (entryWarKey && entryWarKey === warKey) return entry;
 	}
 	return null;
+}
+
+// Find war log entry by war key.
+function findWarLogEntryByWarKey_(clanTagRaw, warKey, limitRaw, optionsRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag || !warKey) return null;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const prefetchedRegularWarLogByClanTag =
+		options.prefetchedRegularWarLogByClanTag && typeof options.prefetchedRegularWarLogByClanTag === "object" ? options.prefetchedRegularWarLogByClanTag : {};
+	const prefetchedRegularWarLogErrorByClanTag =
+		options.prefetchedRegularWarLogErrorByClanTag && typeof options.prefetchedRegularWarLogErrorByClanTag === "object" ? options.prefetchedRegularWarLogErrorByClanTag : {};
+	if (Object.prototype.hasOwnProperty.call(prefetchedRegularWarLogErrorByClanTag, clanTag)) {
+		throw prefetchedRegularWarLogErrorByClanTag[clanTag];
+	}
+	if (Object.prototype.hasOwnProperty.call(prefetchedRegularWarLogByClanTag, clanTag)) {
+		return findWarLogEntryInEntriesByWarKey_(prefetchedRegularWarLogByClanTag[clanTag], clanTag, warKey);
+	}
+	if (isAutoRefreshSnapshotMode_(options)) {
+		throw buildAutoRefreshSnapshotMissError_("regularWarLog", clanTag, "findWarLogEntryByWarKey");
+	}
+	const entries = fetchClanWarLog_(clanTag, limitRaw || REGULAR_WAR_WARLOG_LIMIT);
+	return findWarLogEntryInEntriesByWarKey_(entries, clanTag, warKey);
 }
 
 // Handle war has member level data for clan.
@@ -1726,10 +1748,16 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 
 	let warLogEntry = null;
 	let warLogLookupFailed = false;
+	let warLogLookupFailureReason = "";
 	try {
-		warLogEntry = findWarLogEntryByWarKey_(clanTag, previousWarKey, REGULAR_WAR_WARLOG_LIMIT);
+		warLogEntry = findWarLogEntryByWarKey_(clanTag, previousWarKey, REGULAR_WAR_WARLOG_LIMIT, {
+			prefetchedRegularWarLogByClanTag: options.prefetchedRegularWarLogByClanTag,
+			prefetchedRegularWarLogErrorByClanTag: options.prefetchedRegularWarLogErrorByClanTag,
+			autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
+		});
 	} catch (err) {
 		warLogLookupFailed = true;
+		warLogLookupFailureReason = err && err.autoRefreshSnapshotMiss ? "snapshotMiss" : isPrivateWarLogError_(err) ? "privateWarLog" : "warLogLookupFailed";
 	}
 	if (warLogEntry && warHasMemberLevelDataForClan_(warLogEntry, clanTag)) {
 		const finalized = finalizeRegularWarIntoWarPerformance_(warPerformance, warLogEntry, clanTag, finalizationTagSet, nowIso, "targetedWarLog", "targetedWarLogFallback", false);
@@ -1738,7 +1766,11 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	}
 
 	if (!allowProvisionalFallback) {
-		const waitingReason = warLogEntry ? "warLogMissingMemberDetail_waitingForFinalData" : warLogLookupFailed ? "warLogLookupFailed_waitingForFinalData" : "waitingForFinalData";
+		const waitingReason = warLogEntry
+			? "warLogMissingMemberDetail_waitingForFinalData"
+			: warLogLookupFailed
+				? (warLogLookupFailureReason || "warLogLookupFailed") + "_waitingForFinalData"
+				: "waitingForFinalData";
 		Logger.log(
 			"regularWar finalization provisional fallback blocked clanTag=%s warKey=%s reason=%s",
 			clanTag,
@@ -1750,14 +1782,19 @@ function finalizeRegularWarFromLiveOrFallback_(optionsRaw) {
 	}
 
 	if (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey === previousWarKey) {
-		const fallbackReason = warLogEntry ? "warLogMissingMemberDetail_snapshotFallback" : warLogLookupFailed ? "warLogLookupFailed_snapshotFallback" : "snapshotFallbackNoFinalData";
+		const fallbackReason = warLogEntry
+			? "warLogMissingMemberDetail_snapshotFallback"
+			: warLogLookupFailed
+				? (warLogLookupFailureReason || "warLogLookupFailed") + "_snapshotFallback"
+				: "snapshotFallbackNoFinalData";
 		const finalized = finalizeRegularWarFromSnapshot_(warPerformance, previousSnapshot, finalizationTagSet, nowIso, "liveSnapshotFallback", fallbackReason, true);
 		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "liveSnapshotFallback", fallbackReason, true, finalized, nowIso);
 		return { attempted: true, finalized: finalized, source: "liveSnapshotFallback", incomplete: true, reason: fallbackReason };
 	}
 	if (warLogLookupFailed) {
-		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "warLogLookupFailed", "warLogLookupFailed_noSnapshot", true, false, nowIso);
-		return { attempted: true, finalized: false, source: "warLogLookupFailed", incomplete: true, reason: "warLogLookupFailed_noSnapshot" };
+		const noSnapshotReason = (warLogLookupFailureReason || "warLogLookupFailed") + "_noSnapshot";
+		recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, warLogLookupFailureReason || "warLogLookupFailed", noSnapshotReason, true, false, nowIso);
+		return { attempted: true, finalized: false, source: warLogLookupFailureReason || "warLogLookupFailed", incomplete: true, reason: noSnapshotReason };
 	}
 
 	recordRegularWarFinalizationAttempt_(warPerformance, previousWarKey, "noFinalData", "noFinalDataAvailable", true, false, nowIso);
@@ -1787,6 +1824,11 @@ function attemptRepairIncompleteRegularWarHistory_(optionsRaw) {
 	const nowIso = typeof options.nowIso === "string" && options.nowIso ? options.nowIso : new Date().toISOString();
 	const clanTag = normalizeTag_(options.clanTag);
 	const trackedTagSet = buildTagSetFromRaw_(options.trackedTagSet);
+	const prefetchedRegularWarLogByClanTag =
+		options.prefetchedRegularWarLogByClanTag && typeof options.prefetchedRegularWarLogByClanTag === "object" ? options.prefetchedRegularWarLogByClanTag : {};
+	const prefetchedRegularWarLogErrorByClanTag =
+		options.prefetchedRegularWarLogErrorByClanTag && typeof options.prefetchedRegularWarLogErrorByClanTag === "object" ? options.prefetchedRegularWarLogErrorByClanTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
 	const unresolvedWarKeys = Object.keys(historyByKey)
 		.filter((warKey) => {
@@ -1812,15 +1854,32 @@ function attemptRepairIncompleteRegularWarHistory_(optionsRaw) {
 	let warLogUnavailableReason = "";
 	const errors = [];
 	if (clanTag) {
-		try {
-			warLogEntries = fetchClanWarLog_(clanTag, REGULAR_WAR_WARLOG_LIMIT);
+		if (Object.prototype.hasOwnProperty.call(prefetchedRegularWarLogByClanTag, clanTag)) {
+			warLogEntries = Array.isArray(prefetchedRegularWarLogByClanTag[clanTag]) ? prefetchedRegularWarLogByClanTag[clanTag] : [];
 			warLogAvailable = true;
-		} catch (err) {
+		} else if (Object.prototype.hasOwnProperty.call(prefetchedRegularWarLogErrorByClanTag, clanTag)) {
+			const err = prefetchedRegularWarLogErrorByClanTag[clanTag];
 			if (isPrivateWarLogError_(err)) {
 				warLogUnavailableReason = "privateWarLog";
 			} else {
 				warLogUnavailableReason = "warLogLookupFailed";
 				errors.push(errorMessage_(err));
+			}
+		} else if (autoRefreshSnapshotMode) {
+			const err = buildAutoRefreshSnapshotMissError_("regularWarLog", clanTag, "attemptRepairIncompleteRegularWarHistory");
+			warLogUnavailableReason = "snapshotMiss";
+			errors.push(errorMessage_(err));
+		} else {
+			try {
+				warLogEntries = fetchClanWarLog_(clanTag, REGULAR_WAR_WARLOG_LIMIT);
+				warLogAvailable = true;
+			} catch (err) {
+				if (isPrivateWarLogError_(err)) {
+					warLogUnavailableReason = "privateWarLog";
+				} else {
+					warLogUnavailableReason = "warLogLookupFailed";
+					errors.push(errorMessage_(err));
+				}
 			}
 		}
 	}

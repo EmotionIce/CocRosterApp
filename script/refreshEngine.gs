@@ -256,16 +256,55 @@ function rethrowWithDuplicateRosterTagDetails_(stepLabelRaw, err, rosterDataRaw)
 	throw new Error(detailedMessage);
 }
 
-// First-wave prefetch for all clans: members + mode-specific war entry points.
-function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarClanTagsRaw, cwlClanTagsRaw, optionsRaw) {
+// Return whether the caller is running from the refresh-all snapshot.
+function isAutoRefreshSnapshotMode_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	return options.autoRefreshSnapshotMode === true;
+}
+
+// Build and log a controlled error for data that should have come from AutoRefreshSnapshot.
+function buildAutoRefreshSnapshotMissError_(endpointRaw, keyRaw, contextRaw) {
+	const endpoint = String(endpointRaw == null ? "" : endpointRaw).trim() || "unknown";
+	const key = String(keyRaw == null ? "" : keyRaw).trim() || "unknown";
+	const context = String(contextRaw == null ? "" : contextRaw).trim();
+	const message = "Auto-refresh snapshot missing " + endpoint + " for " + key + (context ? " (" + context + ")" : "") + ".";
+	const err = new Error(message);
+	err.name = "AutoRefreshSnapshotMissError";
+	err.autoRefreshSnapshotMiss = true;
+	err.endpoint = endpoint;
+	err.key = key;
+	err.context = context;
+	Logger.log("autoRefreshSnapshot miss endpoint=%s key=%s context=%s", endpoint, key, context);
+	return err;
+}
+
+// Count own enumerable keys for compact snapshot logging.
+function countMapKeys_(mapRaw) {
+	const map = mapRaw && typeof mapRaw === "object" ? mapRaw : {};
+	return Object.keys(map).length;
+}
+
+// Count errors captured by AutoRefreshSnapshot endpoint maps.
+function countAutoRefreshSnapshotErrors_(snapshotRaw) {
+	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+	return (
+		countMapKeys_(snapshot.clanMembersErrorByTag) +
+		countMapKeys_(snapshot.currentRegularWarErrorByClanTag) +
+		countMapKeys_(snapshot.leaguegroupErrorByClanTag) +
+		countMapKeys_(snapshot.cwlWarErrorByTag) +
+		countMapKeys_(snapshot.regularWarLogErrorByClanTag)
+	);
+}
+
+// Build the first snapshot wave: members + war entry-point endpoints.
+function buildAutoRefreshSnapshotWaveOne_(connectedClanTagsRaw, currentWarClanTagsRaw, cwlClanTagsRaw, optionsRaw) {
 	const connectedClanTags = Array.isArray(connectedClanTagsRaw) ? connectedClanTagsRaw : [];
-	const regularWarClanTags = Array.isArray(regularWarClanTagsRaw) ? regularWarClanTagsRaw : [];
+	const currentWarClanTags = Array.isArray(currentWarClanTagsRaw) ? currentWarClanTagsRaw : [];
 	const cwlClanTags = Array.isArray(cwlClanTagsRaw) ? cwlClanTagsRaw : [];
 	const entries = [];
 	const membersKeyByClanTag = {};
 	const regularWarKeyByClanTag = {};
 	const leagueGroupKeyByClanTag = {};
-	const currentWarProbeClanTagSet = {};
 
 	// Build batched path entries keyed by endpoint type and clan tag.
 	for (let i = 0; i < connectedClanTags.length; i++) {
@@ -278,15 +317,9 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 			path: "/clans/" + encodeTagForPath_(clanTag) + "/members",
 		});
 	}
-	for (let i = 0; i < regularWarClanTags.length; i++) {
-		const clanTag = normalizeTag_(regularWarClanTags[i]);
-		if (!clanTag) continue;
-		currentWarProbeClanTagSet[clanTag] = true;
-	}
 	for (let i = 0; i < cwlClanTags.length; i++) {
 		const clanTag = normalizeTag_(cwlClanTags[i]);
 		if (!clanTag) continue;
-		currentWarProbeClanTagSet[clanTag] = true;
 		const key = "leagueGroup:" + clanTag;
 		leagueGroupKeyByClanTag[clanTag] = key;
 		entries.push({
@@ -294,9 +327,8 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 			path: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup",
 		});
 	}
-	const currentWarProbeClanTags = Object.keys(currentWarProbeClanTagSet);
-	for (let i = 0; i < currentWarProbeClanTags.length; i++) {
-		const clanTag = normalizeTag_(currentWarProbeClanTags[i]);
+	for (let i = 0; i < currentWarClanTags.length; i++) {
+		const clanTag = normalizeTag_(currentWarClanTags[i]);
 		if (!clanTag) continue;
 		const key = "regularWar:" + clanTag;
 		regularWarKeyByClanTag[clanTag] = key;
@@ -339,8 +371,8 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 	}
 
 	// Current-war fetches treat 404/private-war-log as handled unavailable states.
-	for (let i = 0; i < currentWarProbeClanTags.length; i++) {
-		const clanTag = normalizeTag_(currentWarProbeClanTags[i]);
+	for (let i = 0; i < currentWarClanTags.length; i++) {
+		const clanTag = normalizeTag_(currentWarClanTags[i]);
 		if (!clanTag) continue;
 		const key = regularWarKeyByClanTag[clanTag];
 		if (!key) continue;
@@ -383,14 +415,21 @@ function buildRefreshAllMixedWaveOnePrefetch_(connectedClanTagsRaw, regularWarCl
 		currentRegularWarErrorByClanTag: currentRegularWarErrorByClanTag,
 		leaguegroupRawByClanTag: leaguegroupRawByClanTag,
 		leaguegroupErrorByClanTag: leaguegroupErrorByClanTag,
+		requestCounts: {
+			members: connectedClanTags.length,
+			currentWar: currentWarClanTags.length,
+			leagueGroup: cwlClanTags.length,
+			total: fetched.requestCount,
+		},
+		batchCount: fetched.batchCount,
 	};
 }
 
-// Build all prefetch maps needed to run every roster pipeline without refetching per roster.
-function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
+// Build the clan-tag portions of the AutoRefreshSnapshot request plan.
+function buildAutoRefreshSnapshotClanRequestPlan_(sourceRostersRaw) {
 	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
 	const connectedClanTagSet = {};
-	const regularWarClanTagSet = {};
+	const currentWarClanTagSet = {};
 	const cwlClanTagSet = {};
 
 	// Deduplicate clan tags and split by tracking mode so only relevant endpoints are fetched.
@@ -403,21 +442,97 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 		connectedClanTagSet[clanTag] = true;
 		const trackingMode = getRosterTrackingMode_(roster);
 		if (trackingMode === "regularWar") {
-			regularWarClanTagSet[clanTag] = true;
+			currentWarClanTagSet[clanTag] = true;
 		} else {
 			cwlClanTagSet[clanTag] = true;
+			currentWarClanTagSet[clanTag] = true;
 		}
 	}
 
+	return {
+		connectedClanTags: Object.keys(connectedClanTagSet),
+		currentWarClanTags: Object.keys(currentWarClanTagSet),
+		cwlClanTags: Object.keys(cwlClanTagSet),
+	};
+}
+
+// Return whether regular-war history has incomplete entries that repair may attempt.
+function hasIncompleteRegularWarHistoryForSnapshot_(warPerformanceRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
+	const warKeys = Object.keys(historyByKey);
+	for (let i = 0; i < warKeys.length; i++) {
+		const warKey = warKeys[i];
+		const entry = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
+		if (entry && entry.incomplete) return true;
+	}
+	return false;
+}
+
+// Return whether a regular-war roster needs warlog data for refresh-all finalization or repair.
+function shouldPrefetchRegularWarLogForRoster_(rosterRaw, currentRegularWarByClanTagRaw, currentRegularWarErrorByClanTagRaw, optionsRaw, nowIsoRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const trackingMode = getRosterTrackingMode_(roster);
+	const clanTag = normalizeTag_(roster.connectedClanTag);
+	if (!clanTag) return false;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const currentRegularWarByClanTag = currentRegularWarByClanTagRaw && typeof currentRegularWarByClanTagRaw === "object" ? currentRegularWarByClanTagRaw : {};
+	const currentRegularWarErrorByClanTag = currentRegularWarErrorByClanTagRaw && typeof currentRegularWarErrorByClanTagRaw === "object" ? currentRegularWarErrorByClanTagRaw : {};
+	const warPerformance = sanitizeRosterWarPerformance_(roster.warPerformance) || {};
+	if (trackingMode === "regularWar" && options.allowRegularWarHistoryRepair === true && hasIncompleteRegularWarHistoryForSnapshot_(warPerformance)) {
+		return true;
+	}
+
+	const previousSnapshot = sanitizeRegularWarSnapshot_(warPerformance.lastRegularWarSnapshot);
+	const lifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
+	const previousActiveWarKey = String((lifecycle && lifecycle.activeWarKey) || (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey) || "").trim();
+	if (!previousActiveWarKey) return false;
+	if (Object.prototype.hasOwnProperty.call(currentRegularWarErrorByClanTag, clanTag)) return false;
+	if (!Object.prototype.hasOwnProperty.call(currentRegularWarByClanTag, clanTag)) return false;
+
+	const currentWar = currentRegularWarByClanTag[clanTag] && typeof currentRegularWarByClanTag[clanTag] === "object" ? currentRegularWarByClanTag[clanTag] : null;
+	const currentWarMetaBase = currentWar && currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : buildNoCurrentRegularWarResult_(clanTag).currentWarMeta;
+	const currentWarMeta = sanitizeRegularWarCurrentWar_(Object.assign({}, currentWarMetaBase, { available: !!(currentWar && currentWar.available) }));
+	if (String(currentWarMeta.unavailableReason || "").trim() === "privateWarLog") return false;
+
+	const retryBudgetExhaustedWithoutDueAt =
+		String(lifecycle.finalizationStatus || "") === "exhausted" && !String(lifecycle.finalizationDueAt || "").trim();
+	if (retryBudgetExhaustedWithoutDueAt && options.allowRegularWarHistoryRepair !== true) return false;
+
+	const currentWarState = normalizeWarState_((currentWar && currentWar.state) || currentWarMeta.state) || "notinwar";
+	const currentWarKey = String(currentWarMeta.warKey || "").trim();
+	if (trackingMode !== "regularWar") {
+		if (isCwlPreparationActive_(roster)) return false;
+		if (!isActiveRegularWarTransitionSignal_({ ok: true, available: !!(currentWar && currentWar.available), sideMatches: true, state: currentWarState })) {
+			return false;
+		}
+	}
+	if (!shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentWarKey, currentWarState)) return false;
+
+	if (currentWar && currentWarKey === previousActiveWarKey && currentWarState === "warended" && warHasMemberLevelDataForClan_(currentWar, clanTag)) {
+		return false;
+	}
+	return true;
+}
+
+// Build the full AutoRefreshSnapshot needed before any per-roster refresh-all mutation starts.
+function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
+	const snapshotStartMs = Date.now();
+	const capturedAt = new Date().toISOString();
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const sourceRosters = Array.isArray(options.sourceRosters) ? options.sourceRosters : Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const prefetchOptions = {
 		batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
 		batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
 	};
+
+	const basePlan = buildAutoRefreshSnapshotClanRequestPlan_(sourceRosters);
+
 	// Wave one covers member and war-index endpoints keyed only by clan tag.
-	const connectedClanTags = Object.keys(connectedClanTagSet);
-	const regularWarClanTags = Object.keys(regularWarClanTagSet);
-	const cwlClanTags = Object.keys(cwlClanTagSet);
-	const waveOnePrefetch = buildRefreshAllMixedWaveOnePrefetch_(connectedClanTags, regularWarClanTags, cwlClanTags, prefetchOptions);
+	const waveOneStartMs = Date.now();
+	const waveOnePrefetch = buildAutoRefreshSnapshotWaveOne_(basePlan.connectedClanTags, basePlan.currentWarClanTags, basePlan.cwlClanTags, prefetchOptions);
+	const waveOneMs = Math.max(0, Date.now() - waveOneStartMs);
 
 	// Second wave: resolve war tags from league groups and prefetch raw CWL wars once.
 	const cwlWarTagSet = {};
@@ -434,9 +549,56 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 			cwlWarTagSet[warTag] = true;
 		}
 	}
-	const cwlWarPrefetch = prefetchCwlWarRawByTag_(Object.keys(cwlWarTagSet), prefetchOptions);
+	const cwlWarTags = Object.keys(cwlWarTagSet);
+	const cwlWarWaveStartMs = Date.now();
+	const cwlWarPrefetch = prefetchCwlWarRawByTag_(cwlWarTags, prefetchOptions);
+	const cwlWarWaveMs = Math.max(0, Date.now() - cwlWarWaveStartMs);
 
-	return {
+	const regularWarLogClanTagSet = {};
+	for (let i = 0; i < sourceRosters.length; i++) {
+		const roster = sourceRosters[i] && typeof sourceRosters[i] === "object" ? sourceRosters[i] : {};
+		const clanTag = normalizeTag_(roster.connectedClanTag);
+		if (!clanTag) continue;
+		if (
+			shouldPrefetchRegularWarLogForRoster_(
+				roster,
+				waveOnePrefetch.currentRegularWarByClanTag,
+				waveOnePrefetch.currentRegularWarErrorByClanTag,
+				options,
+				capturedAt,
+			)
+		) {
+			regularWarLogClanTagSet[clanTag] = true;
+		}
+	}
+	const regularWarLogClanTags = Object.keys(regularWarLogClanTagSet);
+	const regularWarLogWaveStartMs = Date.now();
+	const regularWarLogPrefetch = prefetchRegularWarLogByClanTag_(regularWarLogClanTags, prefetchOptions);
+	const regularWarLogWaveMs = Math.max(0, Date.now() - regularWarLogWaveStartMs);
+
+	const requestCounts = {
+		members: waveOnePrefetch.requestCounts.members,
+		currentWar: waveOnePrefetch.requestCounts.currentWar,
+		leagueGroup: waveOnePrefetch.requestCounts.leagueGroup,
+		cwlWar: cwlWarPrefetch.requestCount,
+		regularWarLog: regularWarLogPrefetch.requestCount,
+		total: waveOnePrefetch.requestCounts.total + cwlWarPrefetch.requestCount + regularWarLogPrefetch.requestCount,
+	};
+	const batchCounts = {
+		waveOne: waveOnePrefetch.batchCount,
+		cwlWarWave: cwlWarPrefetch.batchCount,
+		regularWarLogWave: regularWarLogPrefetch.batchCount,
+		total: waveOnePrefetch.batchCount + cwlWarPrefetch.batchCount + regularWarLogPrefetch.batchCount,
+	};
+	const snapshot = {
+		capturedAt: capturedAt,
+		requestPlan: {
+			connectedClanTags: basePlan.connectedClanTags,
+			currentWarClanTags: basePlan.currentWarClanTags,
+			cwlClanTags: basePlan.cwlClanTags,
+			cwlWarTags: cwlWarTags,
+			regularWarLogClanTags: regularWarLogClanTags,
+		},
 		clanMembersSnapshotByTag: waveOnePrefetch.clanMembersSnapshotByTag,
 		clanMembersErrorByTag: waveOnePrefetch.clanMembersErrorByTag,
 		currentRegularWarByClanTag: waveOnePrefetch.currentRegularWarByClanTag,
@@ -445,7 +607,38 @@ function buildRefreshAllPrefetchBundle_(sourceRostersRaw) {
 		leaguegroupErrorByClanTag: waveOnePrefetch.leaguegroupErrorByClanTag,
 		cwlWarRawByTag: cwlWarPrefetch.rawByWarTag,
 		cwlWarErrorByTag: cwlWarPrefetch.errorByWarTag,
+		regularWarLogByClanTag: regularWarLogPrefetch.entriesByClanTag,
+		regularWarLogErrorByClanTag: regularWarLogPrefetch.errorByClanTag,
+		timingMs: {
+			waveOne: waveOneMs,
+			cwlWarWave: cwlWarWaveMs,
+			regularWarLogWave: regularWarLogWaveMs,
+			total: Math.max(0, Date.now() - snapshotStartMs),
+		},
+		requestCounts: requestCounts,
+		batchCounts: batchCounts,
+		snapshotMisses: 0,
 	};
+	Logger.log(
+		"autoRefreshSnapshot timing totalMs=%s waveOneMs=%s cwlWarWaveMs=%s regularWarLogWaveMs=%s requestsTotal=%s members=%s currentWar=%s leagueGroup=%s cwlWar=%s regularWarLog=%s batchesTotal=%s waveOneBatches=%s cwlWarWaveBatches=%s regularWarLogWaveBatches=%s errorsTotal=%s snapshotMisses=%s",
+		snapshot.timingMs.total,
+		snapshot.timingMs.waveOne,
+		snapshot.timingMs.cwlWarWave,
+		snapshot.timingMs.regularWarLogWave,
+		snapshot.requestCounts.total,
+		snapshot.requestCounts.members,
+		snapshot.requestCounts.currentWar,
+		snapshot.requestCounts.leagueGroup,
+		snapshot.requestCounts.cwlWar,
+		snapshot.requestCounts.regularWarLog,
+		snapshot.batchCounts.total,
+		snapshot.batchCounts.waveOne,
+		snapshot.batchCounts.cwlWarWave,
+		snapshot.batchCounts.regularWarLogWave,
+		countAutoRefreshSnapshotErrors_(snapshot),
+		snapshot.snapshotMisses,
+	);
+	return snapshot;
 }
 
 // Extract the most useful failure text from heterogeneous step result/error shapes.
@@ -521,6 +714,17 @@ function resolveLeagueGroupForAutomaticTransition_(clanTagRaw, optionsRaw) {
 	if (Object.prototype.hasOwnProperty.call(rawByClanTag, clanTag)) {
 		raw = rawByClanTag[clanTag];
 		source = "prefetch";
+	} else if (isAutoRefreshSnapshotMode_(options)) {
+		const err = buildAutoRefreshSnapshotMissError_("leagueGroup", clanTag, "automaticTrackingModeTransition");
+		return {
+			ok: false,
+			source: "snapshotMiss",
+			state: "",
+			clanFound: false,
+			isMalformed: false,
+			statusCode: 0,
+			errorMessage: errorMessage_(err),
+		};
 	} else {
 		try {
 			raw = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/currentwar/leaguegroup");
@@ -579,6 +783,16 @@ function resolveCurrentRegularWarForAutomaticTransition_(clanTagRaw, optionsRaw)
 	if (Object.prototype.hasOwnProperty.call(currentWarByClanTag, clanTag)) {
 		currentWar = currentWarByClanTag[clanTag];
 		source = "prefetch";
+	} else if (isAutoRefreshSnapshotMode_(options)) {
+		const err = buildAutoRefreshSnapshotMissError_("currentWar", clanTag, "automaticTrackingModeTransition");
+		return {
+			ok: false,
+			source: "snapshotMiss",
+			state: "",
+			sideMatches: false,
+			statusCode: 0,
+			errorMessage: errorMessage_(err),
+		};
 	} else {
 		try {
 			currentWar = fetchCurrentRegularWar_(clanTag);
@@ -816,6 +1030,11 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {},
 		prefetchedCwlWarRawByTag: options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {},
 		prefetchedCwlWarErrorByTag: options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {},
+		prefetchedRegularWarLogByClanTag:
+			options.prefetchedRegularWarLogByClanTag && typeof options.prefetchedRegularWarLogByClanTag === "object" ? options.prefetchedRegularWarLogByClanTag : {},
+		prefetchedRegularWarLogErrorByClanTag:
+			options.prefetchedRegularWarLogErrorByClanTag && typeof options.prefetchedRegularWarLogErrorByClanTag === "object" ? options.prefetchedRegularWarLogErrorByClanTag : {},
+		autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
 		metricsRunState: options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null,
 		allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
 		allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
@@ -1123,34 +1342,40 @@ function buildRefreshAllRunSummary_(processedRostersRaw, rostersWithIssuesRaw, i
 	return "Processed " + processed + " roster(s), issues " + issueCount + " across " + withIssues + " roster(s).";
 }
 
-// Flatten prefetch bundle into the option shape expected by per-roster pipeline calls.
-function buildRefreshAllPipelinePrefetchOptions_(prefetchBundleRaw) {
-	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
+// Flatten AutoRefreshSnapshot into the option shape expected by per-roster pipeline calls.
+function buildAutoRefreshPipelineSnapshotOptions_(snapshotRaw) {
+	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
 	// Default every branch to an object so downstream code can use plain property checks.
 	return {
 		prefetchedClanSnapshotsByTag:
-			prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {},
-		prefetchedClanErrorsByTag: prefetch.clanMembersErrorByTag && typeof prefetch.clanMembersErrorByTag === "object" ? prefetch.clanMembersErrorByTag : {},
+			snapshot.clanMembersSnapshotByTag && typeof snapshot.clanMembersSnapshotByTag === "object" ? snapshot.clanMembersSnapshotByTag : {},
+		prefetchedClanErrorsByTag: snapshot.clanMembersErrorByTag && typeof snapshot.clanMembersErrorByTag === "object" ? snapshot.clanMembersErrorByTag : {},
 		prefetchedCurrentRegularWarByClanTag:
-			prefetch.currentRegularWarByClanTag && typeof prefetch.currentRegularWarByClanTag === "object" ? prefetch.currentRegularWarByClanTag : {},
+			snapshot.currentRegularWarByClanTag && typeof snapshot.currentRegularWarByClanTag === "object" ? snapshot.currentRegularWarByClanTag : {},
 		prefetchedRegularWarErrorByClanTag:
-			prefetch.currentRegularWarErrorByClanTag && typeof prefetch.currentRegularWarErrorByClanTag === "object" ? prefetch.currentRegularWarErrorByClanTag : {},
-		prefetchedLeaguegroupRawByClanTag: prefetch.leaguegroupRawByClanTag && typeof prefetch.leaguegroupRawByClanTag === "object" ? prefetch.leaguegroupRawByClanTag : {},
+			snapshot.currentRegularWarErrorByClanTag && typeof snapshot.currentRegularWarErrorByClanTag === "object" ? snapshot.currentRegularWarErrorByClanTag : {},
+		prefetchedLeaguegroupRawByClanTag: snapshot.leaguegroupRawByClanTag && typeof snapshot.leaguegroupRawByClanTag === "object" ? snapshot.leaguegroupRawByClanTag : {},
 		prefetchedLeaguegroupErrorByClanTag:
-			prefetch.leaguegroupErrorByClanTag && typeof prefetch.leaguegroupErrorByClanTag === "object" ? prefetch.leaguegroupErrorByClanTag : {},
-		prefetchedCwlWarRawByTag: prefetch.cwlWarRawByTag && typeof prefetch.cwlWarRawByTag === "object" ? prefetch.cwlWarRawByTag : {},
-		prefetchedCwlWarErrorByTag: prefetch.cwlWarErrorByTag && typeof prefetch.cwlWarErrorByTag === "object" ? prefetch.cwlWarErrorByTag : {},
+			snapshot.leaguegroupErrorByClanTag && typeof snapshot.leaguegroupErrorByClanTag === "object" ? snapshot.leaguegroupErrorByClanTag : {},
+		prefetchedCwlWarRawByTag: snapshot.cwlWarRawByTag && typeof snapshot.cwlWarRawByTag === "object" ? snapshot.cwlWarRawByTag : {},
+		prefetchedCwlWarErrorByTag: snapshot.cwlWarErrorByTag && typeof snapshot.cwlWarErrorByTag === "object" ? snapshot.cwlWarErrorByTag : {},
+		prefetchedRegularWarLogByClanTag:
+			snapshot.regularWarLogByClanTag && typeof snapshot.regularWarLogByClanTag === "object" ? snapshot.regularWarLogByClanTag : {},
+		prefetchedRegularWarLogErrorByClanTag:
+			snapshot.regularWarLogErrorByClanTag && typeof snapshot.regularWarLogErrorByClanTag === "object" ? snapshot.regularWarLogErrorByClanTag : {},
+		autoRefreshSnapshotMode: true,
 	};
 }
 
 // Build a shared ownership snapshot once so pool sync can avoid redundant lookups.
-function buildRefreshAllOwnershipSnapshot_(rosterData, prefetchBundleRaw) {
-	const prefetch = prefetchBundleRaw && typeof prefetchBundleRaw === "object" ? prefetchBundleRaw : {};
+function buildRefreshAllOwnershipSnapshot_(rosterData, snapshotRaw) {
+	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
 	// This snapshot is read-only input for pool sync, not a metrics-writing pass.
 	return buildLiveRosterOwnershipSnapshot_(rosterData, {
 		recordMetrics: false,
-		prefetchedClanSnapshotsByTag: prefetch.clanMembersSnapshotByTag && typeof prefetch.clanMembersSnapshotByTag === "object" ? prefetch.clanMembersSnapshotByTag : {},
-		prefetchedClanErrorsByTag: prefetch.clanMembersErrorByTag && typeof prefetch.clanMembersErrorByTag === "object" ? prefetch.clanMembersErrorByTag : {},
+		prefetchedClanSnapshotsByTag: snapshot.clanMembersSnapshotByTag && typeof snapshot.clanMembersSnapshotByTag === "object" ? snapshot.clanMembersSnapshotByTag : {},
+		prefetchedClanErrorsByTag: snapshot.clanMembersErrorByTag && typeof snapshot.clanMembersErrorByTag === "object" ? snapshot.clanMembersErrorByTag : {},
+		autoRefreshSnapshotMode: true,
 	});
 }
 
@@ -1175,7 +1400,7 @@ function buildRefreshAllRosterResultMessage_(pipelineResultRaw, rosterIssuesRaw)
 function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let rosterData = null;
 	const totalStartMs = Date.now();
-	let prefetchDurationMs = 0;
+	let snapshotDurationMs = 0;
 	let ownershipSnapshotDurationMs = 0;
 	let cumulativeRosterPipelineDurationMs = 0;
 	try {
@@ -1212,16 +1437,19 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const perRoster = [];
 	let processedRosters = 0;
 	let rostersWithIssues = 0;
-	// Prefetch once for all rosters to reduce API calls and keep data temporally aligned.
-	touchActiveRosterLockLease_("refresh all prefetch");
-	const prefetchStartMs = Date.now();
-	const refreshAllPrefetch = buildRefreshAllPrefetchBundle_(hasRequestedRosterFilter ? targetedSourceRosters : sourceRosters);
-	prefetchDurationMs = Math.max(0, Date.now() - prefetchStartMs);
-	const pipelinePrefetchOptions = buildRefreshAllPipelinePrefetchOptions_(refreshAllPrefetch);
+	// Capture all Clash API reads needed by refresh-all before per-roster mutation starts.
+	touchActiveRosterLockLease_("refresh all snapshot");
+	const snapshotStartMs = Date.now();
+	const autoRefreshSnapshot = buildAutoRefreshSnapshot_(rosterData, {
+		sourceRosters: hasRequestedRosterFilter ? targetedSourceRosters : sourceRosters,
+		allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
+	});
+	snapshotDurationMs = Math.max(0, Date.now() - snapshotStartMs);
+	const pipelinePrefetchOptions = buildAutoRefreshPipelineSnapshotOptions_(autoRefreshSnapshot);
 	const ownershipSnapshotStartMs = Date.now();
 	const ownershipSnapshot = statsOnlyRegularWarFinalization
 		? null
-		: buildRefreshAllOwnershipSnapshot_(rosterData, refreshAllPrefetch);
+		: buildRefreshAllOwnershipSnapshot_(rosterData, autoRefreshSnapshot);
 	ownershipSnapshotDurationMs = Math.max(0, Date.now() - ownershipSnapshotStartMs);
 
 	// Execute the same single-roster pipeline for each id and aggregate diagnostics.
@@ -1337,9 +1565,9 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(
-		"refreshAllRosters timing totalMs=%s prefetchMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s targeted=%s",
+		"refreshAllRosters timing totalMs=%s snapshotMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s targeted=%s",
 		totalDurationMs,
-		prefetchDurationMs,
+		snapshotDurationMs,
 		ownershipSnapshotDurationMs,
 		cumulativeRosterPipelineDurationMs,
 		processedRosters,

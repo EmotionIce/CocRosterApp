@@ -37,6 +37,9 @@ function resolveRosterPoolSource_(clanTagRaw, rosterIdRaw, ownershipSnapshotRaw)
 			return { sourceUsed: "members", members: membersByRosterId[rosterId] };
 		}
 	}
+	if (snapshot && snapshot.autoRefreshSnapshotMode === true) {
+		throw buildAutoRefreshSnapshotMissError_("members", clanTag || rosterId || "unknown", "resolveRosterPoolSource");
+	}
 	return { sourceUsed: "members", members: fetchClanMembers_(clanTag) };
 }
 
@@ -140,6 +143,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	}
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const membersByRosterId = {};
 	const memberTagSetByRosterId = {};
@@ -199,6 +203,10 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 			const hasPrefetchedSnapshot = Object.prototype.hasOwnProperty.call(prefetchedClanSnapshotsByTag, clanTag);
 			if (hasPrefetchedError) {
 				registerPoolSyncError(clanTag, "fetch clan members", prefetchedClanErrorsByTag[clanTag], rosterId);
+				membersByClanTag[clanTag] = [];
+				members = membersByClanTag[clanTag];
+			} else if (!hasPrefetchedSnapshot && autoRefreshSnapshotMode) {
+				registerPoolSyncError(clanTag, "fetch clan members", buildAutoRefreshSnapshotMissError_("members", clanTag, "buildLiveRosterOwnershipSnapshot"), rosterId);
 				membersByClanTag[clanTag] = [];
 				members = membersByClanTag[clanTag];
 			} else {
@@ -264,6 +272,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		connectedRosterIds: connectedRosterIds,
 		poolSyncErrorByTag: poolSyncErrorByTag,
 		seedPlayerByTag: buildRosterPlayerSeedByTag_(rosterData),
+		autoRefreshSnapshotMode: autoRefreshSnapshotMode,
 	};
 }
 
@@ -1276,6 +1285,7 @@ function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const prefetchedCwlWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
 	const prefetchedCwlWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	for (let i = 0; i < warTags.length; i++) {
 		const warTag = normalizeTag_(warTags[i]);
 		if (!warTag || warTag === "#0") continue;
@@ -1288,6 +1298,8 @@ function findCurrentCwlWarForClan_(clanTagRaw, warTagsRaw, optionsRaw) {
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarRawByTag, warTag)) {
 			war = prefetchedCwlWarRawByTag[warTag];
+		} else if (autoRefreshSnapshotMode) {
+			throw buildAutoRefreshSnapshotMissError_("cwlWar", warTag, "findCurrentCwlWarForClan");
 		} else {
 			try {
 				war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
@@ -1510,6 +1522,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {};
 	const prefetchedCwlWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
 	const prefetchedCwlWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	try {
 	if (ctx.trackingMode === "cwl" && isCwlPreparationActive_(ctx.roster)) {
 		setRosterPublicLineupProjectionInactive_(ctx.roster, {
@@ -1541,6 +1554,8 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedCurrentRegularWarByClanTag, ctx.clanTag)) {
 			currentWar = prefetchedCurrentRegularWarByClanTag[ctx.clanTag];
+		} else if (autoRefreshSnapshotMode) {
+			throw buildAutoRefreshSnapshotMissError_("currentWar", ctx.clanTag, "syncClanTodayLineupCore");
 		} else {
 			currentWar = fetchCurrentRegularWar_(ctx.clanTag);
 		}
@@ -1633,6 +1648,8 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedLeaguegroupRawByClanTag, ctx.clanTag)) {
 			leaguegroup = mapLeagueGroupDataForClan_(ctx.clanTag, prefetchedLeaguegroupRawByClanTag[ctx.clanTag]);
+		} else if (autoRefreshSnapshotMode) {
+			throw buildAutoRefreshSnapshotMissError_("leagueGroup", ctx.clanTag, "syncClanTodayLineupCore");
 		} else {
 			leaguegroup = fetchLeagueGroupData_(ctx.clanTag);
 		}
@@ -1689,6 +1706,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 	const currentWar = findCurrentCwlWarForClan_(ctx.clanTag, leaguegroup.warTags, {
 		prefetchedCwlWarRawByTag: prefetchedCwlWarRawByTag,
 		prefetchedCwlWarErrorByTag: prefetchedCwlWarErrorByTag,
+		autoRefreshSnapshotMode: autoRefreshSnapshotMode,
 	});
 	if (!currentWar) {
 		setRosterPublicLineupProjectionInactive_(ctx.roster, {
@@ -1763,6 +1781,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {};
 	const prefetchedCwlWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
 	const prefetchedCwlWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	const nowIso = new Date().toISOString();
 	let leaguegroup = null;
 	try {
@@ -1771,6 +1790,8 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedLeaguegroupRawByClanTag, ctx.clanTag)) {
 			leaguegroup = prefetchedLeaguegroupRawByClanTag[ctx.clanTag];
+		} else if (autoRefreshSnapshotMode) {
+			throw buildAutoRefreshSnapshotMissError_("leagueGroup", ctx.clanTag, "refreshCwlStatsCore");
 		} else {
 			leaguegroup = cocFetch_("/clans/" + encodeTagForPath_(ctx.clanTag) + "/currentwar/leaguegroup");
 		}
@@ -1829,6 +1850,8 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		}
 		if (Object.prototype.hasOwnProperty.call(prefetchedCwlWarRawByTag, warTag)) {
 			war = prefetchedCwlWarRawByTag[warTag];
+		} else if (autoRefreshSnapshotMode) {
+			throw buildAutoRefreshSnapshotMissError_("cwlWar", warTag, "refreshCwlStatsCore");
 		} else {
 			try {
 				war = cocFetch_("/clanwarleagues/wars/" + encodeTagForPath_(warTag));
@@ -1958,6 +1981,11 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object" ? options.prefetchedCurrentRegularWarByClanTag : {};
 	const prefetchedRegularWarErrorByClanTag =
 		options.prefetchedRegularWarErrorByClanTag && typeof options.prefetchedRegularWarErrorByClanTag === "object" ? options.prefetchedRegularWarErrorByClanTag : {};
+	const prefetchedRegularWarLogByClanTag =
+		options.prefetchedRegularWarLogByClanTag && typeof options.prefetchedRegularWarLogByClanTag === "object" ? options.prefetchedRegularWarLogByClanTag : {};
+	const prefetchedRegularWarLogErrorByClanTag =
+		options.prefetchedRegularWarLogErrorByClanTag && typeof options.prefetchedRegularWarLogErrorByClanTag === "object" ? options.prefetchedRegularWarLogErrorByClanTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	const nowIso = new Date().toISOString();
 
 	const previousRegularWar = ctx.roster.regularWar && typeof ctx.roster.regularWar === "object" ? ctx.roster.regularWar : {};
@@ -1978,6 +2006,8 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 	if (Object.prototype.hasOwnProperty.call(prefetchedCurrentRegularWarByClanTag, ctx.clanTag)) {
 		currentWar = prefetchedCurrentRegularWarByClanTag[ctx.clanTag];
+	} else if (autoRefreshSnapshotMode) {
+		throw buildAutoRefreshSnapshotMissError_("currentWar", ctx.clanTag, "refreshRegularWarStatsCore");
 	} else {
 		currentWar = fetchCurrentRegularWar_(ctx.clanTag);
 	}
@@ -2048,6 +2078,9 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			trackedTagSet: trackedHistoryTagSet,
 			nowIso: nowIso,
 			allowProvisionalFallback: allowRegularWarProvisionalFallback && !shouldDeferProvisionalFallback,
+			prefetchedRegularWarLogByClanTag: prefetchedRegularWarLogByClanTag,
+			prefetchedRegularWarLogErrorByClanTag: prefetchedRegularWarLogErrorByClanTag,
+			autoRefreshSnapshotMode: autoRefreshSnapshotMode,
 		});
 	}
 
@@ -2062,6 +2095,9 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			trackedTagSet: trackedHistoryTagSet,
 			nowIso: nowIso,
 			allowProvisionalFallback: allowRegularWarProvisionalFallback,
+			prefetchedRegularWarLogByClanTag: prefetchedRegularWarLogByClanTag,
+			prefetchedRegularWarLogErrorByClanTag: prefetchedRegularWarLogErrorByClanTag,
+			autoRefreshSnapshotMode: autoRefreshSnapshotMode,
 		});
 	}
 	const shouldAttemptRepair = options.allowRegularWarHistoryRepair !== false;
@@ -2071,6 +2107,9 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 				clanTag: ctx.clanTag,
 				trackedTagSet: trackedHistoryTagSet,
 				nowIso: nowIso,
+				prefetchedRegularWarLogByClanTag: prefetchedRegularWarLogByClanTag,
+				prefetchedRegularWarLogErrorByClanTag: prefetchedRegularWarLogErrorByClanTag,
+				autoRefreshSnapshotMode: autoRefreshSnapshotMode,
 			})
 		: {
 				attemptedWarCount: 0,
@@ -2343,6 +2382,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 			runState: metricsRunState,
 			prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
 			prefetchedClanErrorsByTag: prefetchedClanErrorsByTag,
+			autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
 		});
 		if (capture && capture.errors && capture.errors.length) {
 			Logger.log(

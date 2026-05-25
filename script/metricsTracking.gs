@@ -802,6 +802,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 	const assumeStoreAlreadySanitized = options.assumeStoreAlreadySanitized === true;
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
+	const autoRefreshSnapshotMode = isAutoRefreshSnapshotMode_(options);
 	if (!rosterData) {
 		return { attemptedClans: 0, capturedClans: 0, recorded: 0, updated: 0, errors: [], entryCount: 0, capturedTags: [] };
 	}
@@ -823,6 +824,9 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 			const hasPrefetchedError = Object.prototype.hasOwnProperty.call(prefetchedClanErrorsByTag, clanTag);
 			if (hasPrefetchedError) throw prefetchedClanErrorsByTag[clanTag];
 			const hasPrefetchedSnapshot = Object.prototype.hasOwnProperty.call(prefetchedClanSnapshotsByTag, clanTag);
+			if (!hasPrefetchedSnapshot && autoRefreshSnapshotMode) {
+				throw buildAutoRefreshSnapshotMissError_("members", clanTag, "captureConnectedClanMetrics");
+			}
 			const snapshot = hasPrefetchedSnapshot ? prefetchedClanSnapshotsByTag[clanTag] : fetchClanMembersSnapshot_(clanTag);
 			const metricsMembers = snapshot && snapshot.metricsMembers;
 			const result = recordClanMemberMetricsSnapshot_(rosterData, clanTag, metricsMembers, {
@@ -893,6 +897,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 		runState: runState,
 		prefetchedClanSnapshotsByTag: options.prefetchedClanSnapshotsByTag,
 		prefetchedClanErrorsByTag: options.prefetchedClanErrorsByTag,
+		autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
 		deferStoreSanitize: true,
 		assumeStoreAlreadySanitized: true,
 	});

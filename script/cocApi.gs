@@ -734,6 +734,49 @@ function fetchClanWarLog_(clanTagRaw, limitRaw) {
 	return out;
 }
 
+// Handle prefetch regular-war logs by clan tag.
+function prefetchRegularWarLogByClanTag_(clanTagsRaw, optionsRaw) {
+	const tagsRaw = Array.isArray(clanTagsRaw) ? clanTagsRaw : [];
+	const limit = REGULAR_WAR_WARLOG_LIMIT;
+	const entries = [];
+	const seen = {};
+	for (let i = 0; i < tagsRaw.length; i++) {
+		const clanTag = normalizeTag_(tagsRaw[i]);
+		if (!clanTag || seen[clanTag]) continue;
+		seen[clanTag] = true;
+		entries.push({
+			key: clanTag,
+			path: "/clans/" + encodeTagForPath_(clanTag) + "/warlog?limit=" + limit,
+		});
+	}
+	const fetched = cocFetchAllByPathEntries_(entries, optionsRaw);
+	const entriesByClanTag = {};
+	const errorByClanTag = {};
+	for (let i = 0; i < entries.length; i++) {
+		const clanTag = entries[i].key;
+		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, clanTag)) {
+			const data = fetched.dataByKey[clanTag];
+			const itemsRaw = Array.isArray(data) ? data : Array.isArray(data && data.items) ? data.items : [];
+			const warLogEntries = [];
+			for (let j = 0; j < itemsRaw.length; j++) {
+				const entry = itemsRaw[j] && typeof itemsRaw[j] === "object" ? itemsRaw[j] : {};
+				warLogEntries.push(entry);
+			}
+			entriesByClanTag[clanTag] = warLogEntries;
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(fetched.errorByKey, clanTag)) {
+			errorByClanTag[clanTag] = fetched.errorByKey[clanTag];
+		}
+	}
+	return {
+		entriesByClanTag: entriesByClanTag,
+		errorByClanTag: errorByClanTag,
+		requestCount: fetched.requestCount,
+		batchCount: fetched.batchCount,
+	};
+}
+
 // Extract league group war tags.
 function extractLeagueGroupWarTags_(leaguegroupRaw) {
 	const rounds = Array.isArray(leaguegroupRaw && leaguegroupRaw.rounds) ? leaguegroupRaw.rounds : [];
