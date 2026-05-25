@@ -1234,11 +1234,11 @@ function buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, confi
 // Compute bench suggestions core.
 function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const ctx = findRosterById_(rosterData, rosterId);
+	const ctx = findRosterByIdForRefreshStep_(rosterData, rosterId, options);
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
 	if (trackingMode === "regularWar") {
 		clearRosterBenchSuggestions_(ctx.roster);
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "compute bench suggestions");
 		return {
 			ok: true,
 			mode: "regularWar",
@@ -1263,7 +1263,7 @@ function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 	if (isCwlPreparationActive_(ctx.roster)) {
 		clearRosterBenchSuggestions_(ctx.roster);
 		const prep = getRosterCwlPreparation_(ctx.roster);
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "compute bench suggestions");
 		return {
 			ok: true,
 			benchTags: [],
@@ -1317,7 +1317,7 @@ function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 	ctx.roster.benchSuggestions = benchSuggestions;
 	Logger.log("computeBenchSuggestions planner rosterId=%s days=%s slack=%s solver=%s swaps=%s blocked=%s", ctx.rosterId, snapshot.remainingEditableDays, plan.optimalTotalSlack, plan.solverMode, suggestions.pairs.length, suggestions.blockedByExclusions ? "1" : "0");
 
-	const outRosterData = validateRosterData_(ctx.rosterData);
+	const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "compute bench suggestions");
 	return {
 		ok: true,
 		benchTags: benchSuggestions.benchTags,

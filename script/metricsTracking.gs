@@ -876,6 +876,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	}
 	const captureStartMs = Date.now();
 	const runState = options.runState && typeof options.runState === "object" ? options.runState : {};
+	const deferFinalStoreSanitize = options.deferFinalStoreSanitize === true;
 	if (!runState.seenClanTags || typeof runState.seenClanTags !== "object") runState.seenClanTags = {};
 	const existingStore = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : null;
 	const looksPreparedStore =
@@ -905,7 +906,11 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 	const finalErrors = [].concat(primary && Array.isArray(primary.errors) ? primary.errors : []);
 
 	const finalizeStartMs = Date.now();
-	ensurePlayerMetricsStore_(rosterData);
+	if (deferFinalStoreSanitize) {
+		ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterData);
+	} else {
+		ensurePlayerMetricsStore_(rosterData);
+	}
 	runState.metricsStorePrepared = true;
 	const finalizeDurationMs = Math.max(0, Date.now() - finalizeStartMs);
 	const totalDurationMs = Math.max(0, Date.now() - captureStartMs);
@@ -922,6 +927,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 			finalize: finalizeDurationMs,
 			total: totalDurationMs,
 		},
+		deferredFinalSanitize: deferFinalStoreSanitize,
 	};
 }
 

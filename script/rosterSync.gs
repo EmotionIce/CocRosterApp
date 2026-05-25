@@ -1,8 +1,8 @@
 // Live roster sync and roster mutation orchestration helpers.
 
 // Find roster for clan sync.
-function findRosterForClanSync_(rosterData, rosterIdRaw) {
-	const ctx = findRosterById_(rosterData, rosterIdRaw);
+function findRosterForClanSync_(rosterData, rosterIdRaw, optionsRaw) {
+	const ctx = findRosterByIdForRefreshStep_(rosterData, rosterIdRaw, optionsRaw);
 	const roster = ctx.roster;
 	const connectedClanTag = normalizeTag_(roster.connectedClanTag);
 	if (!connectedClanTag) {
@@ -1480,8 +1480,8 @@ function applyTodayLineupSync_(roster, participantsRaw) {
 
 // Sync clan roster pool core.
 function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
-	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const ctx = findRosterForClanSync_(rosterData, rosterId, options);
 	const ownershipSnapshot =
 		options.ownershipSnapshot && typeof options.ownershipSnapshot === "object"
 			? options.ownershipSnapshot
@@ -1503,14 +1503,14 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 		}
 	}
 	updateWarPerformanceMembership_(ctx.roster, nowIso);
-	const outRosterData = validateRosterData_(ctx.rosterData);
+	const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "sync clan roster pool");
 	return { ok: true, rosterData: outRosterData, result: result };
 }
 
 // Sync clan today lineup core.
 function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
-	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const ctx = findRosterForClanSync_(rosterData, rosterId, options);
 	const nowIso = new Date().toISOString();
 	const prefetchedCurrentRegularWarByClanTag =
 		options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object" ? options.prefetchedCurrentRegularWarByClanTag : {};
@@ -1532,7 +1532,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			updatedAt: nowIso,
 		});
 		const prep = getRosterCwlPreparation_(ctx.roster);
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1579,7 +1579,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			nextCurrentWar.statusMessage = "Live war data unavailable because the clan war log is private.";
 			if (!ctx.roster.regularWar || typeof ctx.roster.regularWar !== "object") ctx.roster.regularWar = {};
 			ctx.roster.regularWar.currentWar = nextCurrentWar;
-			const outRosterData = validateRosterData_(ctx.rosterData);
+			const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 			return {
 				ok: true,
 				rosterData: outRosterData,
@@ -1603,7 +1603,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 				unavailableReason: "noCurrentWar",
 				updatedAt: nowIso,
 			});
-			const outRosterData = validateRosterData_(ctx.rosterData);
+			const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 			return {
 				ok: true,
 				rosterData: outRosterData,
@@ -1626,7 +1626,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			}),
 		);
 		const result = applyTodayLineupSync_(ctx.roster, currentWar.participants);
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1661,7 +1661,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 				unavailableReason: "leagueGroup404",
 				updatedAt: nowIso,
 			});
-			const outRosterData = validateRosterData_(ctx.rosterData);
+			const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 			return {
 				ok: true,
 				rosterData: outRosterData,
@@ -1681,7 +1681,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			unavailableReason: "clanNotInLeagueGroup",
 			updatedAt: nowIso,
 		});
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1695,7 +1695,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			unavailableReason: "noWarTags",
 			updatedAt: nowIso,
 		});
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1715,7 +1715,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			unavailableReason: "noUsableWars",
 			updatedAt: nowIso,
 		});
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1732,7 +1732,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		}),
 	);
 	const result = applyTodayLineupSync_(ctx.roster, currentWar.members);
-	const outRosterData = validateRosterData_(ctx.rosterData);
+	const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 	return {
 		ok: true,
 		rosterData: outRosterData,
@@ -1749,7 +1749,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			unavailableReason: "syncFailed",
 			updatedAt: nowIso,
 		});
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: false,
 			rosterData: outRosterData,
@@ -1773,8 +1773,8 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 
 // Refresh CWL stats core.
 function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
-	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const ctx = findRosterForClanSync_(rosterData, rosterId, options);
 	const prefetchedLeaguegroupRawByClanTag =
 		options.prefetchedLeaguegroupRawByClanTag && typeof options.prefetchedLeaguegroupRawByClanTag === "object" ? options.prefetchedLeaguegroupRawByClanTag : {};
 	const prefetchedLeaguegroupErrorByClanTag =
@@ -1797,7 +1797,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		}
 	} catch (err) {
 		if (err && Number(err.statusCode) === 404) {
-			const outRosterData = validateRosterData_(ctx.rosterData);
+			const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 			return {
 				ok: true,
 				rosterData: outRosterData,
@@ -1819,7 +1819,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 
 	const warTags = extractLeagueGroupWarTags_(leaguegroup);
 	if (!leagueGroupContainsClan_(leaguegroup, ctx.clanTag)) {
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1827,7 +1827,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		};
 	}
 	if (!warTags.length) {
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1880,7 +1880,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		});
 	}
 	if (!usableWars.length) {
-		const outRosterData = validateRosterData_(ctx.rosterData);
+		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
 			rosterData: outRosterData,
@@ -1960,7 +1960,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	ctx.roster.warPerformance = warPerformance;
 	clearRosterBenchSuggestions_(ctx.roster);
 
-	const outRosterData = validateRosterData_(ctx.rosterData);
+	const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 	return {
 		ok: true,
 		rosterData: outRosterData,
@@ -1975,8 +1975,8 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 
 // Refresh regular war stats core.
 function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
-	const ctx = findRosterForClanSync_(rosterData, rosterId);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const ctx = findRosterForClanSync_(rosterData, rosterId, options);
 	const prefetchedCurrentRegularWarByClanTag =
 		options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object" ? options.prefetchedCurrentRegularWarByClanTag : {};
 	const prefetchedRegularWarErrorByClanTag =
@@ -2336,7 +2336,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	ctx.roster.regularWar.aggregateMeta = sanitizeRegularWarAggregateMeta_(aggregateMetaFinal);
 	clearRosterBenchSuggestions_(ctx.roster);
 
-	const outRosterData = validateRosterData_(ctx.rosterData);
+	const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 	return {
 		ok: true,
 		rosterData: outRosterData,
@@ -2367,12 +2367,14 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	const statsStartMs = Date.now();
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const autoRefreshFinalValidationMode = isAutoRefreshFinalValidationMode_(options);
 	const prefetchedClanSnapshotsByTag = options.prefetchedClanSnapshotsByTag && typeof options.prefetchedClanSnapshotsByTag === "object" ? options.prefetchedClanSnapshotsByTag : {};
 	const prefetchedClanErrorsByTag = options.prefetchedClanErrorsByTag && typeof options.prefetchedClanErrorsByTag === "object" ? options.prefetchedClanErrorsByTag : {};
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null;
-	const ctx = findRosterById_(rosterData, rosterId);
+	const ctx = findRosterByIdForRefreshStep_(rosterData, rosterId, options);
 	let capture = null;
 	let postCaptureRosterData = null;
+	let postCaptureRollbackSnapshot = null;
 	let captureDurationMs = 0;
 	let warRefreshDurationMs = 0;
 	const captureStartMs = Date.now();
@@ -2383,6 +2385,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 			prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
 			prefetchedClanErrorsByTag: prefetchedClanErrorsByTag,
 			autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
+			deferFinalStoreSanitize: autoRefreshFinalValidationMode,
 		});
 		if (capture && capture.errors && capture.errors.length) {
 			Logger.log(
@@ -2399,22 +2402,34 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 	const captureTiming = capture && capture.captureTimingMs && typeof capture.captureTimingMs === "object" ? capture.captureTimingMs : null;
 	if (captureTiming) {
 		Logger.log(
-			"refreshTrackingStatsCore capture-breakdown rosterId=%s primaryMs=%s finalizeMs=%s totalMs=%s recorded=%s",
+			"refreshTrackingStatsCore capture-breakdown rosterId=%s primaryMs=%s finalizeMs=%s totalMs=%s recorded=%s deferredFinalSanitize=%s",
 			ctx.rosterId,
 			toNonNegativeInt_(captureTiming.primary),
 			toNonNegativeInt_(captureTiming.finalize),
 			toNonNegativeInt_(captureTiming.total),
 			toNonNegativeInt_(capture && capture.recorded),
+			capture && capture.deferredFinalSanitize === true,
 		);
 	}
 	if (capture) {
 		try {
 			// Keep a clean post-capture snapshot so later war-refresh failures can preserve metrics safely.
-			postCaptureRosterData = validateRosterData_(ctx.rosterData);
+			if (autoRefreshFinalValidationMode) {
+				postCaptureRollbackSnapshot = snapshotRefreshStepRollbackState_(ctx.rosterData, ctx.rosterId, false, false);
+			} else {
+				postCaptureRosterData = validateRosterData_(ctx.rosterData);
+			}
 		} catch (snapshotErr) {
 			Logger.log("refreshTrackingStatsCore unable to create post-capture snapshot for roster '%s': %s", ctx.rosterId, errorMessage_(snapshotErr));
 		}
 	}
+	const restorePostCaptureRosterData = () => {
+		if (autoRefreshFinalValidationMode) {
+			const restoredRosterData = postCaptureRollbackSnapshot ? restoreRefreshStepRollbackState_(ctx.rosterData, postCaptureRollbackSnapshot) : ctx.rosterData;
+			return finalizeRefreshStepRosterDataForReturn_(restoredRosterData, options, "refresh tracking stats post-capture rollback");
+		}
+		return postCaptureRosterData || validateRosterData_(ctx.rosterData);
+	};
 	const trackingMode = getRosterTrackingMode_(ctx.roster);
 	let refresh = null;
 	const warRefreshStartMs = Date.now();
@@ -2440,7 +2455,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 			);
 			return {
 				ok: true,
-				rosterData: postCaptureRosterData || validateRosterData_(ctx.rosterData),
+				rosterData: restorePostCaptureRosterData(),
 				result: {
 					mode: trackingMode,
 					warDataSkipped: true,
@@ -2450,7 +2465,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 				},
 			};
 		}
-		if (capture && postCaptureRosterData) {
+		if (capture && (postCaptureRosterData || autoRefreshFinalValidationMode)) {
 			const warRefreshError = errorMessage_(err);
 			const refreshLabel = trackingMode === "regularWar" ? "regular war refresh" : "CWL refresh";
 			const captureErrorCount = capture && Array.isArray(capture.errors) ? capture.errors.length : 0;
@@ -2468,7 +2483,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 			);
 			return {
 				ok: false,
-				rosterData: postCaptureRosterData,
+				rosterData: restorePostCaptureRosterData(),
 				result: {
 					mode: trackingMode,
 					memberTracking: capture,

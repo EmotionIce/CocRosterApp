@@ -90,6 +90,36 @@ function findRosterInDataById_(rosterData, rosterIdRaw) {
 	return null;
 }
 
+// Return whether refresh-all is deferring full validation to the final payload boundary.
+function isAutoRefreshFinalValidationMode_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	return options.autoRefreshFinalValidationMode === true;
+}
+
+// Validate step output unless the caller explicitly defers validation to refresh-all finalization.
+function finalizeRefreshStepRosterDataForReturn_(rosterDataRaw, optionsRaw, labelRaw) {
+	if (isAutoRefreshFinalValidationMode_(optionsRaw)) {
+		if (!rosterDataRaw || typeof rosterDataRaw !== "object" || !Array.isArray(rosterDataRaw.rosters)) {
+			const label = String(labelRaw == null ? "refresh step" : labelRaw).trim() || "refresh step";
+			throw new Error(label + " returned invalid rosterData shape.");
+		}
+		return rosterDataRaw;
+	}
+	return validateRosterData_(rosterDataRaw);
+}
+
+// Find a roster while preserving manual callers' defensive validation behavior.
+function findRosterByIdForRefreshStep_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	if (!isAutoRefreshFinalValidationMode_(optionsRaw)) return findRosterById_(rosterDataRaw, rosterIdRaw);
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) throw new Error("Roster ID is required.");
+	if (!rosterData || !Array.isArray(rosterData.rosters)) throw new Error("Refresh step payload is invalid.");
+	const roster = findRosterInDataById_(rosterData, rosterId);
+	if (!roster) throw new Error("Roster not found: " + rosterId);
+	return { rosterData: rosterData, roster: roster, rosterId: rosterId };
+}
+
 // Deep-clone a rollback fragment so a failed step can restore only the state it owns.
 function cloneRefreshRollbackFragment_(valueRaw, labelRaw) {
 	try {
@@ -959,7 +989,7 @@ function detectAndApplyAutomaticTrackingModeTransition_(rosterDataRaw, rosterIdR
 		throw new Error("Automatic tracking-mode transition changed roster pool count for roster '" + rosterId + "' (" + beforePoolCount + " -> " + afterPoolCount + ").");
 	}
 
-	const validatedRosterData = validateRosterData_(rosterData);
+	const validatedRosterData = finalizeRefreshStepRosterDataForReturn_(rosterData, options, "automatic tracking-mode transition");
 	const finalRoster = findRosterInDataById_(validatedRosterData, rosterId);
 	const finalPoolCount = countRosterPoolSlotsForTransition_(finalRoster);
 	if (finalPoolCount !== beforePoolCount) {
@@ -1035,6 +1065,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		prefetchedRegularWarLogErrorByClanTag:
 			options.prefetchedRegularWarLogErrorByClanTag && typeof options.prefetchedRegularWarLogErrorByClanTag === "object" ? options.prefetchedRegularWarLogErrorByClanTag : {},
 		autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
+		autoRefreshFinalValidationMode: options.autoRefreshFinalValidationMode === true,
 		metricsRunState: options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : null,
 		allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
 		allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
@@ -1056,6 +1087,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		stats: 0,
 		bench: 0,
 	};
+	let rollbackCloneDurationMs = 0;
 	const issues = [];
 	// Get current roster.
 	const getCurrentRoster = () => findRosterInDataById_(rosterData, rosterId);
@@ -1123,7 +1155,23 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const runStepWithRollback = (stepKey, stepLabelRaw, stepFn) => {
 		const step = steps[stepKey];
 		const stepLabel = String(stepLabelRaw == null ? "" : stepLabelRaw).trim() || "pipeline";
-		const rollbackSnapshot = snapshotRefreshStepRollbackState_(rosterData, rosterId, stepKey === "stats", stepKey === "pool");
+		const includeAllRosters = stepKey === "pool";
+		const includePlayerMetrics = stepKey === "stats" && !pipelinePrefetchOptions.autoRefreshFinalValidationMode;
+		const rollbackCloneStartMs = Date.now();
+		const rollbackSnapshot = snapshotRefreshStepRollbackState_(rosterData, rosterId, includePlayerMetrics, includeAllRosters);
+		const rollbackCloneMs = Math.max(0, Date.now() - rollbackCloneStartMs);
+		rollbackCloneDurationMs += rollbackCloneMs;
+		if (rollbackCloneMs >= 25) {
+			Logger.log(
+				"refreshRosterPipeline rollbackClone rosterId=%s step=%s cloneMs=%s includeAllRosters=%s includePlayerMetrics=%s autoRefreshFinalValidationMode=%s",
+				rosterId,
+				stepKey,
+				rollbackCloneMs,
+				includeAllRosters,
+				includePlayerMetrics,
+				pipelinePrefetchOptions.autoRefreshFinalValidationMode === true,
+			);
+		}
 		const stepStartMs = Date.now();
 		try {
 			touchPipelineLockLease();
@@ -1135,7 +1183,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 				let failureRosterValidationErr = null;
 				if (stepResult && typeof stepResult === "object" && stepResult.rosterData) {
 					try {
-						failureRosterData = validateRosterData_(stepResult.rosterData);
+						failureRosterData = finalizeRefreshStepRosterDataForReturn_(stepResult.rosterData, pipelinePrefetchOptions, stepLabel + " failure");
 					} catch (validationErr) {
 						failureRosterValidationErr = validationErr;
 					}
@@ -1230,7 +1278,13 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			steps.pool.message = missingTagMessage;
 			addIssue(poolStepLabel, missingTagMessage);
 		} else {
-			runStepWithRollback("pool", poolStepLabel, () => syncClanRosterPoolCore_(rosterData, rosterId, { ownershipSnapshot: ownershipSnapshot }));
+			runStepWithRollback("pool", poolStepLabel, () =>
+				syncClanRosterPoolCore_(
+					rosterData,
+					rosterId,
+					Object.assign({}, pipelinePrefetchOptions, { ownershipSnapshot: ownershipSnapshot }),
+				),
+			);
 		}
 
 		const poolStepOk = !!steps.pool.ok;
@@ -1308,7 +1362,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const hasIssues = issues.length > 0;
 	const totalPipelineDurationMs = Math.max(0, Date.now() - rosterPipelineStartMs);
 	Logger.log(
-		"refreshRosterPipeline timing rosterId=%s trackingMode=%s poolMs=%s modeTransitionMs=%s lineupMs=%s statsMs=%s benchMs=%s totalMs=%s statsPartialFailure=%s hasIssues=%s",
+		"refreshRosterPipeline timing rosterId=%s trackingMode=%s poolMs=%s modeTransitionMs=%s lineupMs=%s statsMs=%s benchMs=%s rollbackCloneMs=%s totalMs=%s statsPartialFailure=%s hasIssues=%s autoRefreshFinalValidationMode=%s",
 		rosterId,
 		finalTrackingMode,
 		stepDurationMs.pool,
@@ -1316,9 +1370,11 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		stepDurationMs.lineup,
 		stepDurationMs.stats,
 		stepDurationMs.bench,
+		rollbackCloneDurationMs,
 		totalPipelineDurationMs,
 		partialFailure,
 		hasIssues,
+		pipelinePrefetchOptions.autoRefreshFinalValidationMode === true,
 	);
 	return {
 		ok: !hasIssues,
@@ -1330,6 +1386,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			partialFailure: partialFailure,
 			issues: issues,
 			steps: steps,
+			rollbackCloneMs: rollbackCloneDurationMs,
 		},
 	};
 }
@@ -1403,6 +1460,8 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let snapshotDurationMs = 0;
 	let ownershipSnapshotDurationMs = 0;
 	let cumulativeRosterPipelineDurationMs = 0;
+	let cumulativeRollbackCloneDurationMs = 0;
+	let finalValidationDurationMs = 0;
 	try {
 		rosterData = validateRosterData_(rosterDataRaw);
 	} catch (err) {
@@ -1410,6 +1469,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const metricsRunState = options.metricsRunState && typeof options.metricsRunState === "object" ? options.metricsRunState : {};
+	const autoRefreshFinalValidationMode = true;
 	// Ensure mutable run-state containers exist for cross-roster metrics reuse.
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
 	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
@@ -1477,6 +1537,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 						allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
 						allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
 						statsOnlyRegularWarFinalization: statsOnlyRegularWarFinalization,
+						autoRefreshFinalValidationMode: autoRefreshFinalValidationMode,
 					},
 					pipelinePrefetchOptions,
 				),
@@ -1487,6 +1548,7 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 			}
 			pipelineResult = pipelineRun && pipelineRun.result && typeof pipelineRun.result === "object" ? pipelineRun.result : {};
 			partialFailure = pipelineResult.partialFailure === true;
+			cumulativeRollbackCloneDurationMs += toNonNegativeInt_(pipelineResult.rollbackCloneMs);
 			trackingMode = String(pipelineResult.trackingMode == null ? trackingMode : pipelineResult.trackingMode).trim() || trackingMode;
 			const pipelineIssues = Array.isArray(pipelineResult.issues) ? pipelineResult.issues : [];
 			// Flatten per-step issues into both per-roster and global issue collections.
@@ -1558,20 +1620,25 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 
 	// Validate once after the loop so callers receive a safe final payload snapshot.
 	let validatedRosterData = null;
+	const finalValidationStartMs = Date.now();
 	try {
 		validatedRosterData = validateRosterData_(rosterData);
 	} catch (err) {
 		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh payload", err, rosterData));
 	}
+	finalValidationDurationMs = Math.max(0, Date.now() - finalValidationStartMs);
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(
-		"refreshAllRosters timing totalMs=%s snapshotMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rosters=%s targeted=%s",
+		"refreshAllRosters timing totalMs=%s snapshotMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rollbackCloneCumulativeMs=%s finalValidationMs=%s rosters=%s targeted=%s autoRefreshFinalValidationMode=%s",
 		totalDurationMs,
 		snapshotDurationMs,
 		ownershipSnapshotDurationMs,
 		cumulativeRosterPipelineDurationMs,
+		cumulativeRollbackCloneDurationMs,
+		finalValidationDurationMs,
 		processedRosters,
 		hasRequestedRosterFilter,
+		autoRefreshFinalValidationMode,
 	);
 
 	return {
