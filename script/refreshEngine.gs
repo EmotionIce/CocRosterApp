@@ -14,6 +14,28 @@ function normalizeActiveRosterForCompareValidated_(validatedRosterData) {
 	});
 }
 
+// Convert digest bytes into a compact stable hex string.
+function bytesToHex_(bytesRaw) {
+	const bytes = Array.isArray(bytesRaw) ? bytesRaw : [];
+	let out = "";
+	for (let i = 0; i < bytes.length; i++) {
+		const n = (Number(bytes[i]) + 256) % 256;
+		out += (n < 16 ? "0" : "") + n.toString(16);
+	}
+	return out;
+}
+
+// Build a source fingerprint from the same canonical fields used for active payload comparison.
+function buildActiveRosterSourceFingerprintValidated_(validatedRosterData) {
+	const normalized = normalizeActiveRosterForCompareValidated_(validatedRosterData);
+	if (typeof Utilities === "undefined" || typeof Utilities.computeDigest !== "function") {
+		throw new Error("Utilities.computeDigest is required to build active roster source fingerprints.");
+	}
+	const algorithm = Utilities.DigestAlgorithm && Utilities.DigestAlgorithm.SHA_256 ? Utilities.DigestAlgorithm.SHA_256 : "SHA_256";
+	const charset = Utilities.Charset && Utilities.Charset.UTF_8 ? Utilities.Charset.UTF_8 : "UTF-8";
+	return bytesToHex_(Utilities.computeDigest(algorithm, normalized, charset));
+}
+
 // Build a stable, validated payload fingerprint for refresh change detection.
 function normalizeActiveRosterForCompare_(rosterDataRaw) {
 	return normalizeActiveRosterForCompareValidated_(validateRosterData_(rosterDataRaw));
@@ -1453,6 +1475,194 @@ function buildRefreshAllRosterResultMessage_(pipelineResultRaw, rosterIssuesRaw)
 	return "Refresh pipeline complete.";
 }
 
+// Build the stable roster iteration plan shared by synchronous and resumable refresh-all.
+function buildRefreshAllRosterRunPlan_(rosterDataRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const requestedRosterIdSet = {};
+	const requestedRosterIdsRaw = Array.isArray(options.rosterIds) ? options.rosterIds : [];
+	for (let i = 0; i < requestedRosterIdsRaw.length; i++) {
+		const requestedRosterId = String(requestedRosterIdsRaw[i] == null ? "" : requestedRosterIdsRaw[i]).trim();
+		if (!requestedRosterId) continue;
+		requestedRosterIdSet[requestedRosterId] = true;
+	}
+	const hasRequestedRosterFilter = Object.keys(requestedRosterIdSet).length > 0;
+	const rosterIds = [];
+	const targetedSourceRosters = [];
+	// Freeze the roster iteration order up front so later mutations do not affect coverage.
+	for (let i = 0; i < sourceRosters.length; i++) {
+		const roster = sourceRosters[i] && typeof sourceRosters[i] === "object" ? sourceRosters[i] : {};
+		const rosterId = String(roster.id || "").trim();
+		if (!rosterId) continue;
+		if (hasRequestedRosterFilter && !requestedRosterIdSet[rosterId]) continue;
+		rosterIds.push(rosterId);
+		targetedSourceRosters.push(roster);
+	}
+	return {
+		sourceRosters: sourceRosters,
+		targetedSourceRosters: targetedSourceRosters,
+		rosterIds: rosterIds,
+		hasRequestedRosterFilter: hasRequestedRosterFilter,
+		statsOnlyRegularWarFinalization: options.statsOnlyRegularWarFinalization === true,
+	};
+}
+
+// Create aggregate refresh-all result state.
+function createRefreshAllAccumulator_() {
+	return {
+		issues: [],
+		perRoster: [],
+		processedRosters: 0,
+		rostersWithIssues: 0,
+		rosterPipelineCumulativeMs: 0,
+		rollbackCloneCumulativeMs: 0,
+	};
+}
+
+// Rehydrate aggregate result state from a persisted job.
+function buildRefreshAllAccumulatorFromJob_(jobStateRaw) {
+	const job = jobStateRaw && typeof jobStateRaw === "object" ? jobStateRaw : {};
+	return {
+		issues: Array.isArray(job.issues) ? job.issues : [],
+		perRoster: Array.isArray(job.perRoster) ? job.perRoster : [],
+		processedRosters: toNonNegativeInt_(job.processedRosters),
+		rostersWithIssues: toNonNegativeInt_(job.rostersWithIssues),
+		rosterPipelineCumulativeMs: toNonNegativeInt_(job.timings && job.timings.rosterPipelineCumulativeMs),
+		rollbackCloneCumulativeMs: toNonNegativeInt_(job.timings && job.timings.rollbackCloneCumulativeMs),
+	};
+}
+
+// Persist aggregate result state back into a resumable job.
+function applyRefreshAllAccumulatorToJob_(jobStateRaw, accumulatorRaw) {
+	const job = jobStateRaw && typeof jobStateRaw === "object" ? jobStateRaw : {};
+	const accumulator = accumulatorRaw && typeof accumulatorRaw === "object" ? accumulatorRaw : createRefreshAllAccumulator_();
+	if (!job.timings || typeof job.timings !== "object") job.timings = {};
+	job.issues = Array.isArray(accumulator.issues) ? accumulator.issues : [];
+	job.perRoster = Array.isArray(accumulator.perRoster) ? accumulator.perRoster : [];
+	job.processedRosters = toNonNegativeInt_(accumulator.processedRosters);
+	job.rostersWithIssues = toNonNegativeInt_(accumulator.rostersWithIssues);
+	job.timings.rosterPipelineCumulativeMs = toNonNegativeInt_(accumulator.rosterPipelineCumulativeMs);
+	job.timings.rollbackCloneCumulativeMs = toNonNegativeInt_(accumulator.rollbackCloneCumulativeMs);
+	return job;
+}
+
+// Run one roster pipeline and append its diagnostics to an aggregate refresh-all result.
+function processRefreshAllRosterPipelineIntoAccumulator_(rosterDataRaw, rosterIdRaw, pipelineOptionsRaw, accumulatorRaw) {
+	let rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const accumulator = accumulatorRaw && typeof accumulatorRaw === "object" ? accumulatorRaw : createRefreshAllAccumulator_();
+	const rosterPipelineStartMs = Date.now();
+	accumulator.processedRosters = toNonNegativeInt_(accumulator.processedRosters) + 1;
+	const currentRoster = findRosterInDataById_(rosterData, rosterId);
+	const rosterTitle = String((currentRoster && currentRoster.title) || "").trim();
+	const rosterName = rosterTitle || rosterId;
+	const rosterIssues = [];
+	let pipelineResult = {};
+	let partialFailure = false;
+	let trackingMode = getRosterTrackingMode_(currentRoster);
+	try {
+		const pipelineRun = runRosterRefreshPipelineCore_(rosterData, rosterId, pipelineOptionsRaw);
+		if (pipelineRun && pipelineRun.rosterData) {
+			// Carry forward each successful roster mutation into the next pipeline run.
+			rosterData = pipelineRun.rosterData;
+		}
+		pipelineResult = pipelineRun && pipelineRun.result && typeof pipelineRun.result === "object" ? pipelineRun.result : {};
+		partialFailure = pipelineResult.partialFailure === true;
+		accumulator.rollbackCloneCumulativeMs = toNonNegativeInt_(accumulator.rollbackCloneCumulativeMs) + toNonNegativeInt_(pipelineResult.rollbackCloneMs);
+		trackingMode = String(pipelineResult.trackingMode == null ? trackingMode : pipelineResult.trackingMode).trim() || trackingMode;
+		const pipelineIssues = Array.isArray(pipelineResult.issues) ? pipelineResult.issues : [];
+		// Flatten per-step issues into both per-roster and global issue collections.
+		for (let j = 0; j < pipelineIssues.length; j++) {
+			const issueRaw = pipelineIssues[j] && typeof pipelineIssues[j] === "object" ? pipelineIssues[j] : {};
+			const step = String(issueRaw.step == null ? "" : issueRaw.step).trim() || "pipeline";
+			const message = shortenIssueMessage_(issueRaw.message, 200);
+			if (!message) continue;
+			const issue = {
+				rosterId: rosterId,
+				rosterName: rosterName,
+				step: step,
+				message: message,
+			};
+			rosterIssues.push(issue);
+			accumulator.issues.push(issue);
+		}
+		if (pipelineIssues.length < 1 && pipelineRun && pipelineRun.ok === false) {
+			// Preserve a minimal issue even if the step-level issue list came back empty.
+			const issue = {
+				rosterId: rosterId,
+				rosterName: rosterName,
+				step: "pipeline",
+				message: "refresh pipeline failed.",
+			};
+			rosterIssues.push(issue);
+			accumulator.issues.push(issue);
+		}
+		if (partialFailure && rosterIssues.length < 1) {
+			// Partial failures still need a visible issue row in aggregate refresh results.
+			const issue = {
+				rosterId: rosterId,
+				rosterName: rosterName,
+				step: "refresh tracking stats",
+				message: "refresh pipeline completed with partial failure.",
+			};
+			rosterIssues.push(issue);
+			accumulator.issues.push(issue);
+		}
+	} catch (err) {
+		// Hard failures still collapse to the same roster-level issue shape as soft failures.
+		const detailedMessage = appendDuplicateRosterTagDetailsToError_("refresh roster pipeline", err, rosterData);
+		const issue = {
+			rosterId: rosterId,
+			rosterName: rosterName,
+			step: "pipeline",
+			message: shortenIssueMessage_(detailedMessage, 200),
+		};
+		rosterIssues.push(issue);
+		accumulator.issues.push(issue);
+	}
+	const rosterPipelineMs = Math.max(0, Date.now() - rosterPipelineStartMs);
+	accumulator.rosterPipelineCumulativeMs = toNonNegativeInt_(accumulator.rosterPipelineCumulativeMs) + rosterPipelineMs;
+	const rosterHasIssues = rosterIssues.length > 0 || partialFailure;
+	if (rosterHasIssues) accumulator.rostersWithIssues = toNonNegativeInt_(accumulator.rostersWithIssues) + 1;
+	const rosterMessage = buildRefreshAllRosterResultMessage_(pipelineResult, rosterIssues);
+	// Store both the summary row and the underlying issue list for the caller.
+	accumulator.perRoster.push({
+		rosterId: rosterId,
+		rosterName: rosterName,
+		trackingMode: trackingMode,
+		ok: !rosterHasIssues,
+		partialFailure: partialFailure,
+		issueCount: rosterIssues.length,
+		message: rosterMessage,
+		issues: rosterIssues,
+	});
+	return {
+		rosterData: rosterData,
+		rosterPipelineMs: rosterPipelineMs,
+		pipelineResult: pipelineResult,
+		rosterIssues: rosterIssues,
+		partialFailure: partialFailure,
+	};
+}
+
+// Build the public refresh-all result shape from aggregate state and final roster data.
+function buildRefreshAllRunResultFromAccumulator_(validatedRosterData, accumulatorRaw) {
+	const accumulator = accumulatorRaw && typeof accumulatorRaw === "object" ? accumulatorRaw : createRefreshAllAccumulator_();
+	const issues = Array.isArray(accumulator.issues) ? accumulator.issues : [];
+	return {
+		ok: issues.length < 1,
+		rosterData: validatedRosterData,
+		processedRosters: toNonNegativeInt_(accumulator.processedRosters),
+		rostersWithIssues: toNonNegativeInt_(accumulator.rostersWithIssues),
+		issueCount: issues.length,
+		issues: issues,
+		issueSummary: buildAutoRefreshIssueSummary_(issues),
+		summary: buildRefreshAllRunSummary_(accumulator.processedRosters, accumulator.rostersWithIssues, issues.length),
+		perRoster: Array.isArray(accumulator.perRoster) ? accumulator.perRoster : [],
+	};
+}
+
 // Run refresh pipeline for every roster (expects caller already holds the job lock).
 function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	let rosterData = null;
@@ -1472,151 +1682,43 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	const autoRefreshFinalValidationMode = true;
 	// Ensure mutable run-state containers exist for cross-roster metrics reuse.
 	if (!metricsRunState.seenClanTags || typeof metricsRunState.seenClanTags !== "object") metricsRunState.seenClanTags = {};
-	const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-	const statsOnlyRegularWarFinalization = options.statsOnlyRegularWarFinalization === true;
-	const requestedRosterIdSet = {};
-	const requestedRosterIdsRaw = Array.isArray(options.rosterIds) ? options.rosterIds : [];
-	for (let i = 0; i < requestedRosterIdsRaw.length; i++) {
-		const requestedRosterId = String(requestedRosterIdsRaw[i] == null ? "" : requestedRosterIdsRaw[i]).trim();
-		if (!requestedRosterId) continue;
-		requestedRosterIdSet[requestedRosterId] = true;
-	}
-	const hasRequestedRosterFilter = Object.keys(requestedRosterIdSet).length > 0;
-	const rosterIds = [];
-	const targetedSourceRosters = [];
-	// Freeze the roster iteration order up front so later mutations do not affect coverage.
-	for (let i = 0; i < sourceRosters.length; i++) {
-		const rosterId = String((sourceRosters[i] && sourceRosters[i].id) || "").trim();
-		if (!rosterId) continue;
-		if (hasRequestedRosterFilter && !requestedRosterIdSet[rosterId]) continue;
-		rosterIds.push(rosterId);
-		targetedSourceRosters.push(sourceRosters[i]);
-	}
-
-	const issues = [];
-	const perRoster = [];
-	let processedRosters = 0;
-	let rostersWithIssues = 0;
+	const runPlan = buildRefreshAllRosterRunPlan_(rosterData, options);
+	const accumulator = createRefreshAllAccumulator_();
 	// Capture all Clash API reads needed by refresh-all before per-roster mutation starts.
 	touchActiveRosterLockLease_("refresh all snapshot");
 	const snapshotStartMs = Date.now();
 	const autoRefreshSnapshot = buildAutoRefreshSnapshot_(rosterData, {
-		sourceRosters: hasRequestedRosterFilter ? targetedSourceRosters : sourceRosters,
+		sourceRosters: runPlan.hasRequestedRosterFilter ? runPlan.targetedSourceRosters : runPlan.sourceRosters,
 		allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
 	});
 	snapshotDurationMs = Math.max(0, Date.now() - snapshotStartMs);
 	const pipelinePrefetchOptions = buildAutoRefreshPipelineSnapshotOptions_(autoRefreshSnapshot);
 	const ownershipSnapshotStartMs = Date.now();
-	const ownershipSnapshot = statsOnlyRegularWarFinalization
+	const ownershipSnapshot = runPlan.statsOnlyRegularWarFinalization
 		? null
 		: buildRefreshAllOwnershipSnapshot_(rosterData, autoRefreshSnapshot);
 	ownershipSnapshotDurationMs = Math.max(0, Date.now() - ownershipSnapshotStartMs);
+	const pipelineOptions = Object.assign(
+		{
+			ownershipSnapshot: ownershipSnapshot,
+			skipInitialValidation: true,
+			metricsRunState: metricsRunState,
+			allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
+			allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
+			statsOnlyRegularWarFinalization: runPlan.statsOnlyRegularWarFinalization,
+			autoRefreshFinalValidationMode: autoRefreshFinalValidationMode,
+		},
+		pipelinePrefetchOptions,
+	);
 
 	// Execute the same single-roster pipeline for each id and aggregate diagnostics.
-	for (let i = 0; i < rosterIds.length; i++) {
-		touchActiveRosterLockLease_("refresh all roster " + (i + 1) + "/" + rosterIds.length);
-		const rosterPipelineStartMs = Date.now();
-		const rosterId = rosterIds[i];
-		processedRosters++;
-		const currentRoster = findRosterInDataById_(rosterData, rosterId);
-		const rosterTitle = String((currentRoster && currentRoster.title) || "").trim();
-		const rosterName = rosterTitle || rosterId;
-		const rosterIssues = [];
-		let pipelineResult = {};
-		let partialFailure = false;
-		let trackingMode = getRosterTrackingMode_(currentRoster);
-		try {
-			const pipelineRun = runRosterRefreshPipelineCore_(
-				rosterData,
-				rosterId,
-				Object.assign(
-					{
-						ownershipSnapshot: ownershipSnapshot,
-						skipInitialValidation: true,
-						metricsRunState: metricsRunState,
-						allowRegularWarHistoryRepair: options.allowRegularWarHistoryRepair !== false,
-						allowRegularWarProvisionalFallback: options.allowRegularWarProvisionalFallback === true,
-						statsOnlyRegularWarFinalization: statsOnlyRegularWarFinalization,
-						autoRefreshFinalValidationMode: autoRefreshFinalValidationMode,
-					},
-					pipelinePrefetchOptions,
-				),
-			);
-			if (pipelineRun && pipelineRun.rosterData) {
-				// Carry forward each successful roster mutation into the next pipeline run.
-				rosterData = pipelineRun.rosterData;
-			}
-			pipelineResult = pipelineRun && pipelineRun.result && typeof pipelineRun.result === "object" ? pipelineRun.result : {};
-			partialFailure = pipelineResult.partialFailure === true;
-			cumulativeRollbackCloneDurationMs += toNonNegativeInt_(pipelineResult.rollbackCloneMs);
-			trackingMode = String(pipelineResult.trackingMode == null ? trackingMode : pipelineResult.trackingMode).trim() || trackingMode;
-			const pipelineIssues = Array.isArray(pipelineResult.issues) ? pipelineResult.issues : [];
-			// Flatten per-step issues into both per-roster and global issue collections.
-			for (let j = 0; j < pipelineIssues.length; j++) {
-				const issueRaw = pipelineIssues[j] && typeof pipelineIssues[j] === "object" ? pipelineIssues[j] : {};
-				const step = String(issueRaw.step == null ? "" : issueRaw.step).trim() || "pipeline";
-				const message = shortenIssueMessage_(issueRaw.message, 200);
-				if (!message) continue;
-				const issue = {
-					rosterId: rosterId,
-					rosterName: rosterName,
-					step: step,
-					message: message,
-				};
-				rosterIssues.push(issue);
-				issues.push(issue);
-			}
-			if (pipelineIssues.length < 1 && pipelineRun && pipelineRun.ok === false) {
-				// Preserve a minimal issue even if the step-level issue list came back empty.
-				const fallbackMessage = "refresh pipeline failed.";
-				const issue = {
-					rosterId: rosterId,
-					rosterName: rosterName,
-					step: "pipeline",
-					message: fallbackMessage,
-				};
-				rosterIssues.push(issue);
-				issues.push(issue);
-			}
-			if (partialFailure && rosterIssues.length < 1) {
-				// Partial failures still need a visible issue row in aggregate refresh results.
-				const issue = {
-					rosterId: rosterId,
-					rosterName: rosterName,
-					step: "refresh tracking stats",
-					message: "refresh pipeline completed with partial failure.",
-				};
-				rosterIssues.push(issue);
-				issues.push(issue);
-			}
-		} catch (err) {
-			// Hard failures still collapse to the same roster-level issue shape as soft failures.
-			const detailedMessage = appendDuplicateRosterTagDetailsToError_("refresh roster pipeline", err, rosterData);
-			const issue = {
-				rosterId: rosterId,
-				rosterName: rosterName,
-				step: "pipeline",
-				message: shortenIssueMessage_(detailedMessage, 200),
-			};
-			rosterIssues.push(issue);
-			issues.push(issue);
-		}
-		cumulativeRosterPipelineDurationMs += Math.max(0, Date.now() - rosterPipelineStartMs);
-		const rosterHasIssues = rosterIssues.length > 0 || partialFailure;
-		if (rosterHasIssues) rostersWithIssues++;
-		const rosterMessage = buildRefreshAllRosterResultMessage_(pipelineResult, rosterIssues);
-		// Store both the summary row and the underlying issue list for the caller.
-		perRoster.push({
-			rosterId: rosterId,
-			rosterName: rosterName,
-			trackingMode: trackingMode,
-			ok: !rosterHasIssues,
-			partialFailure: partialFailure,
-			issueCount: rosterIssues.length,
-			message: rosterMessage,
-			issues: rosterIssues,
-		});
+	for (let i = 0; i < runPlan.rosterIds.length; i++) {
+		touchActiveRosterLockLease_("refresh all roster " + (i + 1) + "/" + runPlan.rosterIds.length);
+		const processed = processRefreshAllRosterPipelineIntoAccumulator_(rosterData, runPlan.rosterIds[i], pipelineOptions, accumulator);
+		rosterData = processed.rosterData;
 	}
+	cumulativeRosterPipelineDurationMs = toNonNegativeInt_(accumulator.rosterPipelineCumulativeMs);
+	cumulativeRollbackCloneDurationMs = toNonNegativeInt_(accumulator.rollbackCloneCumulativeMs);
 
 	// Validate once after the loop so callers receive a safe final payload snapshot.
 	let validatedRosterData = null;
@@ -1636,22 +1738,12 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		cumulativeRosterPipelineDurationMs,
 		cumulativeRollbackCloneDurationMs,
 		finalValidationDurationMs,
-		processedRosters,
-		hasRequestedRosterFilter,
+		accumulator.processedRosters,
+		runPlan.hasRequestedRosterFilter,
 		autoRefreshFinalValidationMode,
 	);
 
-	return {
-		ok: issues.length < 1,
-		rosterData: validatedRosterData,
-		processedRosters: processedRosters,
-		rostersWithIssues: rostersWithIssues,
-		issueCount: issues.length,
-		issues: issues,
-		issueSummary: buildAutoRefreshIssueSummary_(issues),
-		summary: buildRefreshAllRunSummary_(processedRosters, rostersWithIssues, issues.length),
-		perRoster: perRoster,
-	};
+	return buildRefreshAllRunResultFromAccumulator_(validatedRosterData, accumulator);
 }
 
 // Public refresh-all entrypoint that wraps the unlocked core with the job lock lifecycle.
