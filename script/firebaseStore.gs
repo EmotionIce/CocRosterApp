@@ -156,6 +156,21 @@ function appendFirebaseJsonUrlQueryParam_(urlRaw, keyRaw, valueRaw) {
 	return base + (base.indexOf("?") >= 0 ? "&" : "?") + key + "=" + value + hash;
 }
 
+// Append multiple query parameters to a Firebase JSON URL.
+function appendFirebaseJsonUrlQueryParams_(urlRaw, paramsRaw) {
+	let url = String(urlRaw == null ? "" : urlRaw);
+	const params = paramsRaw && typeof paramsRaw === "object" ? paramsRaw : {};
+	const keys = Object.keys(params);
+	for (let i = 0; i < keys.length; i++) {
+		const key = String(keys[i] == null ? "" : keys[i]).trim();
+		if (!key) continue;
+		const value = params[key];
+		if (value === undefined || value === null) continue;
+		url = appendFirebaseJsonUrlQueryParam_(url, key, value);
+	}
+	return url;
+}
+
 // Get Firebase config.
 function getFirebaseConfig_() {
 	if (firebaseConfigCache_) return firebaseConfigCache_;
@@ -344,29 +359,41 @@ function getFirebaseAccessToken_(forceRefreshRaw) {
 	return tokenPayload.accessToken;
 }
 
+// Format Firebase request context for transport errors.
+function formatFirebaseRequestContext_(contextRaw) {
+	const context = contextRaw && typeof contextRaw === "object" ? contextRaw : {};
+	const method = String(context.method == null ? "" : context.method).trim().toUpperCase();
+	const path = normalizeFirebasePath_(context.path);
+	if (method && path) return " for " + method + " /" + path;
+	if (method) return " for " + method + " /";
+	if (path) return " for /" + path;
+	return "";
+}
+
 // Parse one Firebase JSON response.
-function parseFirebaseJsonResponse_(responseRaw) {
+function parseFirebaseJsonResponse_(responseRaw, contextRaw) {
 	const response = responseRaw && typeof responseRaw === "object" ? responseRaw : null;
 	const code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
 	const text = response && typeof response.getContentText === "function" ? String(response.getContentText() || "") : "";
+	const contextLabel = formatFirebaseRequestContext_(contextRaw);
 	if (!code || code < 200 || code >= 300) {
-		throw new Error("Firebase Realtime Database request failed (" + code + "): " + text);
+		throw new Error("Firebase Realtime Database request failed" + contextLabel + " (" + code + "): " + text);
 	}
 	const trimmed = text.trim();
 	if (!trimmed) return null;
 	try {
 		return JSON.parse(trimmed);
 	} catch (err) {
-		throw new Error("Firebase Realtime Database response is not valid JSON: " + errorMessage_(err));
+		throw new Error("Firebase Realtime Database response is not valid JSON" + contextLabel + ": " + errorMessage_(err));
 	}
 }
 
 // Handle Firebase request JSON.
-function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw) {
+function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 	const path = normalizeFirebasePath_(pathRaw);
 	const method = String(methodRaw == null ? "GET" : methodRaw).trim().toUpperCase();
 	if (!method) throw new Error("Firebase request method is required.");
-	let url = buildFirebaseJsonUrl_(getFirebaseConfig_().dbUrl, path);
+	let url = appendFirebaseJsonUrlQueryParams_(buildFirebaseJsonUrl_(getFirebaseConfig_().dbUrl, path), queryParamsRaw);
 	if (method !== "GET") {
 		// Firebase echoes write payloads by default. Large active roster writes can
 		// exceed transport response limits, so suppress write response bodies.
@@ -399,7 +426,7 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw) {
 		code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
 	}
 
-	return parseFirebaseJsonResponse_(response);
+	return parseFirebaseJsonResponse_(response, { method: method, path: path });
 }
 
 // Batch Firebase GET requests with per-entry fallback to the single-request path.
@@ -470,7 +497,7 @@ function firebaseBatchGetJson_(pathsRaw) {
 	for (let i = 0; i < paths.length; i++) {
 		const path = paths[i];
 		try {
-			results[path] = parseFirebaseJsonResponse_(responses[i]);
+			results[path] = parseFirebaseJsonResponse_(responses[i], { method: "GET", path: path });
 		} catch (err) {
 			Logger.log("Firebase batch GET entry failed path=%s; falling back to single GET: %s", path, errorMessage_(err));
 			results[path] = fallbackOne(path);
@@ -1493,7 +1520,9 @@ function readFirebaseMapObject_(pathRaw) {
 
 // Handle list Firebase child keys.
 function listFirebaseChildKeys_(pathRaw) {
-	return Object.keys(readFirebaseMapObject_(pathRaw));
+	const payload = firebaseRequestJson_(pathRaw, "GET", undefined, { shallow: "true" });
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+	return Object.keys(payload);
 }
 
 // Handle write archived roster payload.

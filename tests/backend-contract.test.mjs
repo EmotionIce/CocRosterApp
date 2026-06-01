@@ -467,6 +467,32 @@ test("firebaseRequestJson suppresses write response bodies", () => {
   assert.equal(requests[0].options.payload, "{\"huge\":true}");
 });
 
+test("Firebase child key listing uses shallow reads", () => {
+  const backend = loadBackend();
+  const requests = [];
+  backend.getFirebaseConfig_ = () => ({ dbUrl: "https://firebase.test/db" });
+  backend.getFirebaseAccessToken_ = () => "token";
+  backend.UrlFetchApp = {
+    fetch(url, options) {
+      requests.push({ url, options });
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => "{\"backup-b\":true,\"backup-a\":true}",
+      };
+    },
+  };
+
+  const keys = backend.listFirebaseChildKeys_("archive/publish");
+
+  const sortedKeys = keys.sort();
+  assert.equal(sortedKeys.length, 2);
+  assert.equal(sortedKeys[0], "backup-a");
+  assert.equal(sortedKeys[1], "backup-b");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://firebase.test/db/archive/publish.json?shallow=true");
+  assert.equal(String(requests[0].options.method).toUpperCase(), "GET");
+});
+
 test("active contract accepts canonical roster players and playerMetrics.byTag", () => {
   const backend = loadBackend();
   const validated = backend.validateRosterData_(buildValidRosterData());
