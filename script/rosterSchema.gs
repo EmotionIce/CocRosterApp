@@ -3,9 +3,14 @@
 // Active Firebase database contract.
 //
 // Canonical layout:
-// - /active: the current validated active roster payload.
-// - /active/playerMetrics/byTag[normalizedPlayerTag]: the only long-lived global
-//   player metrics store.
+// - /active: legacy/current compatibility copy of the validated active roster
+//   payload.
+// - /activeVersions/{versionId}/rosters/{rosterId}: versioned roster shards.
+// - /activeVersions/{versionId}/playerMetrics/byTag[normalizedPlayerTag]: the
+//   versioned global player metrics store.
+// - /activeVersions/{versionId}/manifest: small version manifest.
+// - /activePublished/currentVersionId: small pointer that atomically publishes
+//   a completed version.
 // - /archive/publish: publish backups.
 // - /archive/autorefreshDaily: daily auto-refresh backups.
 // - /meta: operational metadata.
@@ -14,7 +19,8 @@
 // contain: slot, name, discord, th, tag, notes, excludeAsSwapTarget,
 // excludeAsSwapSource. player.discord is allowed only as a compatibility/display
 // cache; canonical Discord identity belongs at
-// /active/playerMetrics/byTag[normalizedPlayerTag]/identity.
+// /activeVersions/{versionId}/playerMetrics/byTag[normalizedPlayerTag]/identity
+// for published readers, with /active retained for legacy compatibility.
 //
 // Roster-scoped war state is allowed only for active war/CWL behavior:
 // cwlStats, regularWar, warPerformance, publicLineupProjection, cwlPreparation,
@@ -80,8 +86,12 @@ function getActiveRosterDatabaseContract_() {
 	return {
 		firebaseLayout: {
 			active: FIREBASE_ACTIVE_PATH,
-			canonicalMetrics: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]",
-			canonicalDiscordIdentity: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]/identity",
+			activePublishedCurrentVersion: FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH,
+			activeVersionManifest: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/manifest",
+			activeVersionRosters: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/rosters/{rosterId}",
+			canonicalMetrics: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/playerMetrics/byTag[normalizedPlayerTag]",
+			canonicalDiscordIdentity: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/playerMetrics/byTag[normalizedPlayerTag]/identity",
+			legacyCanonicalMetrics: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]",
 			publishArchive: FIREBASE_ARCHIVE_PUBLISH_PATH,
 			autoRefreshDailyArchive: FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH,
 			meta: FIREBASE_META_PATH,

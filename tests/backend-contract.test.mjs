@@ -98,11 +98,13 @@ const installMemoryFirebase = (backend, initial = {}) => {
     .filter(Boolean);
   const getNode = (segments, create = false) => {
     let node = db;
-    for (const segment of segments) {
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
       if (!node[segment]) {
         if (!create) return undefined;
         node[segment] = {};
       }
+      if (!create && i === segments.length - 1) return node[segment];
       if (typeof node[segment] !== "object" || Array.isArray(node[segment])) {
         if (!create) return undefined;
         node[segment] = {};
@@ -433,12 +435,64 @@ const assertRankedSeason = (actual, expected) => {
   assert.equal(actual.source, expected.source || "legend-cycle");
 };
 
+test("firebaseRequestJson suppresses write response bodies", () => {
+  const backend = loadBackend();
+  const requests = [];
+  backend.getFirebaseConfig_ = () => ({ dbUrl: "https://firebase.test/db" });
+  backend.getFirebaseAccessToken_ = () => "token";
+  backend.UrlFetchApp = {
+    fetch(url, options) {
+      requests.push({ url, options });
+      if (String(options.method).toUpperCase() === "GET") {
+        return {
+          getResponseCode: () => 200,
+          getContentText: () => "{\"ok\":true}",
+        };
+      }
+      return {
+        getResponseCode: () => 204,
+        getContentText: () => "",
+      };
+    },
+  };
+
+  const writeResult = backend.firebaseRequestJson_("active", "PUT", { huge: true });
+  const readResult = backend.firebaseRequestJson_("active", "GET");
+
+  assert.equal(writeResult, null);
+  assert.equal(readResult.ok, true);
+  assert.equal(requests[0].url, "https://firebase.test/db/active.json?print=silent");
+  assert.equal(requests[1].url, "https://firebase.test/db/active.json");
+  assert.equal(requests[0].options.contentType, "application/json");
+  assert.equal(requests[0].options.payload, "{\"huge\":true}");
+});
+
 test("active contract accepts canonical roster players and playerMetrics.byTag", () => {
   const backend = loadBackend();
   const validated = backend.validateRosterData_(buildValidRosterData());
 
   assert.deepEqual(Object.keys(validated.playerMetrics.byTag), ["#PLAYER"]);
   assert.equal(validated.rosters[0].main[0].discord, "player");
+});
+
+test("active reader reconstructs the published active version before legacy active", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const versionedData = buildValidRosterData();
+  versionedData.pageTitle = "Versioned Roster";
+  const legacyData = buildValidRosterData();
+  legacyData.pageTitle = "Legacy Active";
+
+  backend.writeActiveRosterVersionShards_("version-1", backend.validateRosterData_(versionedData), {
+    publish: true,
+    source: "test",
+  });
+  backend.firebaseRequestJson_("active", "PUT", backend.encodeFirebaseObjectKeysRecursive_(legacyData));
+
+  const snapshot = backend.readActiveRosterSnapshot_();
+
+  assert.equal(snapshot.versionId, "version-1");
+  assert.equal(snapshot.rosterData.pageTitle, "Versioned Roster");
+  assert.equal(snapshot.rosterData.rosters[0].id, "main");
 });
 
 test("active contract rejects metric-like fields on roster players", () => {

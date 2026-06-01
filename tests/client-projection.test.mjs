@@ -18,6 +18,7 @@ const loadClientInternals = (overrides = {}) => {
       "        buildLeaderboardEntriesModel,",
       "        buildSeasonEventLeaderboardModel,",
       "        buildSeasonEventsPublicModel,",
+      "        loadRosterDataViaFirebasePublic,",
       "        loadCurrentSeasonEventsViaFirebasePublic,",
       "        resolveLeaderboardRankedSeasonCycle,",
       "    };",
@@ -186,6 +187,81 @@ test("loads current season event payloads from public Firebase and decodes keys"
   assert.equal(loaded.current.push.eventId, pushId);
   assert.equal(loaded.byId[pushId].participantsByTag["#2LUCULP"].tag, "#2LUCULP");
   assert.equal(loaded.loadErrors.length, 0);
+});
+
+test("loads published active version shards before falling back to legacy active", async () => {
+  const encodedTagKey = "__FB64__" + Buffer.from("#PLAYER", "utf8").toString("base64url");
+  const responses = new Map([
+    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
+    ["https://firebase.test/activeVersions/version-1/manifest.json", {
+      versionId: "version-1",
+      schemaVersion: 1,
+      pageTitle: "Versioned Roster",
+      rosterOrder: ["main"],
+      rosterIds: ["main"],
+      lastUpdatedAt: "2026-05-25T00:00:00.000Z",
+    }],
+    ["https://firebase.test/activeVersions/version-1/rosters.json", {
+      main: {
+        id: "main",
+        title: "Main",
+        trackingMode: "cwl",
+        main: [{
+          slot: 1,
+          name: "Player",
+          discord: "player",
+          th: 16,
+          tag: "#PLAYER",
+          notes: [],
+          excludeAsSwapTarget: false,
+          excludeAsSwapSource: false,
+        }],
+        subs: [],
+        missing: [],
+      },
+    }],
+    ["https://firebase.test/activeVersions/version-1/playerMetrics.json", {
+      schemaVersion: 1,
+      updatedAt: "2026-05-25T00:00:00.000Z",
+      byTag: {
+        [encodedTagKey]: {
+          latestSnapshot: { tag: "#PLAYER", name: "Player", trophies: 5000 },
+          trophyHistoryDaily: [],
+          donationCycles: [],
+        },
+      },
+    }],
+    ["https://firebase.test/events/seasonEvents/current.json", null],
+    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+    ["https://firebase.test/active.json", {
+      schemaVersion: 1,
+      pageTitle: "Legacy Active",
+      rosterOrder: [],
+      rosters: [],
+      playerMetrics: { schemaVersion: 1, updatedAt: "", byTag: {} },
+    }],
+  ]);
+  const requested = [];
+  const { loadRosterDataViaFirebasePublic } = loadClientInternals({
+    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await loadRosterDataViaFirebasePublic();
+
+  assert.equal(loaded.data.pageTitle, "Versioned Roster");
+  assert.equal(loaded.data.rosters[0].id, "main");
+  assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
+  assert.equal(requested.includes("https://firebase.test/active.json"), false);
 });
 
 test("season events model renders unavailable and empty states safely", () => {

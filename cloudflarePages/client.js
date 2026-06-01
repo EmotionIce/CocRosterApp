@@ -12,6 +12,8 @@
     const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
     const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
     const FIREBASE_ACTIVE_PATH = "active";
+    const FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";
+    const FIREBASE_ACTIVE_VERSIONS_PATH = "activeVersions";
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
     const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
@@ -8385,6 +8387,57 @@
         return assertValidRosterPayload(decodedPayload, sourceLabel);
     };
 
+    // Build an active version public Firebase path.
+    const buildActiveVersionPublicPath = (versionIdRaw, childPathRaw) => {
+        const versionId = toStr(versionIdRaw).trim();
+        if (!versionId) return "";
+        const childPath = normalizeFirebasePath(childPathRaw);
+        const basePath = FIREBASE_ACTIVE_VERSIONS_PATH + "/" + encodeFirebaseObjectKey(versionId);
+        return childPath ? basePath + "/" + childPath : basePath;
+    };
+
+    // Load roster data from the published active version shards, if available.
+    const loadPublishedActiveVersionViaFirebasePublic = async () => {
+        const versionId = toStr(await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
+        if (!versionId) return null;
+        const versionLabel = "Firebase public /activeVersions/" + versionId;
+        const manifestPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "manifest"));
+        const rostersPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "rosters"));
+        const playerMetricsPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "playerMetrics"));
+        const manifest = decodeFirebaseObjectKeysRecursive(manifestPayload);
+        const rosterMap = decodeFirebaseObjectKeysRecursive(rostersPayload);
+        const playerMetrics = decodeFirebaseObjectKeysRecursive(playerMetricsPayload || {});
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+            throw new Error("Missing active version manifest at " + versionLabel + ".");
+        }
+        if (!rosterMap || typeof rosterMap !== "object" || Array.isArray(rosterMap)) {
+            throw new Error("Missing active version roster shards at " + versionLabel + ".");
+        }
+        const rosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : Object.keys(rosterMap);
+        const rosters = [];
+        for (let i = 0; i < rosterIds.length; i++) {
+            const rosterId = toStr(rosterIds[i]).trim();
+            if (!rosterId) continue;
+            const roster = rosterMap[rosterId];
+            if (!roster || typeof roster !== "object" || Array.isArray(roster)) {
+                throw new Error("Missing active version roster shard '" + rosterId + "' at " + versionLabel + ".");
+            }
+            rosters.push(roster);
+        }
+        const data = {
+            schemaVersion: Number.isFinite(Number(manifest.schemaVersion)) ? Number(manifest.schemaVersion) : 1,
+            pageTitle: toStr(manifest.pageTitle),
+            rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder.slice() : rosterIds.slice(),
+            rosters: rosters,
+            playerMetrics: playerMetrics && typeof playerMetrics === "object" && !Array.isArray(playerMetrics) ? playerMetrics : {},
+        };
+        if (manifest.lastUpdatedAt) data.lastUpdatedAt = toStr(manifest.lastUpdatedAt);
+        if (manifest.publicConfig && typeof manifest.publicConfig === "object" && !Array.isArray(manifest.publicConfig)) {
+            data.publicConfig = manifest.publicConfig;
+        }
+        return assertValidRosterPayload(data, versionLabel);
+    };
+
     // Return public Firebase event path by event id.
     const buildSeasonEventByIdPublicPath = (eventIdRaw) => {
         const eventId = toStr(eventIdRaw).trim();
@@ -8453,8 +8506,18 @@
 
     // Load roster data via Firebase public.
     const loadRosterDataViaFirebasePublic = async () => {
-        const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
-        const data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active");
+        let data = null;
+        try {
+            data = await loadPublishedActiveVersionViaFirebasePublic();
+        } catch (err) {
+            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                console.warn("[RosterData] Versioned Firebase active load failed; falling back to /active.", err);
+            }
+        }
+        if (!data) {
+            const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
+            data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active");
+        }
         try {
             data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
         } catch (err) {
