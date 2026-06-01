@@ -135,6 +135,25 @@ function getActiveCwlPreparationExcludedTagSet_(rosterRaw) {
 	return prep && prep.excludedTagSet && typeof prep.excludedTagSet === "object" ? prep.excludedTagSet : {};
 }
 
+// Update CWL preparation markers for players absent from the connected clan.
+function updateCwlPreparationClanAbsentTagSet_(rosterRaw, liveTagSetRaw, nowIsoRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster || getRosterTrackingMode_(roster) !== "cwl" || !isCwlPreparationActive_(roster)) return 0;
+	const liveTagSet = liveTagSetRaw && typeof liveTagSetRaw === "object" ? liveTagSetRaw : {};
+	const prep = getRosterCwlPreparation_(roster);
+	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
+	const clanAbsentTagSet = {};
+	for (let i = 0; i < poolEntries.length; i++) {
+		const tag = normalizeTag_(poolEntries[i] && poolEntries[i].tag);
+		if (!tag || liveTagSet[tag]) continue;
+		clanAbsentTagSet[tag] = true;
+	}
+	prep.clanAbsentTagSet = clanAbsentTagSet;
+	prep.clanAbsentUpdatedAt = String(nowIsoRaw == null ? "" : nowIsoRaw).trim() || new Date().toISOString();
+	roster.cwlPreparation = prep;
+	return Object.keys(clanAbsentTagSet).length;
+}
+
 // Build live roster ownership snapshot.
 function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -148,6 +167,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 	const membersByRosterId = {};
 	const memberTagSetByRosterId = {};
 	const ownerRosterIdByTag = {};
+	const liveOwnerRosterIdByTag = {};
 	const liveMemberByTag = {};
 	const connectedClanTagByRosterId = {};
 	const connectedRosterIds = [];
@@ -238,6 +258,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 			if (!tag || tagSet[tag]) continue;
 			tagSet[tag] = true;
 			if (!ownerRosterIdByTag[tag]) ownerRosterIdByTag[tag] = rosterId;
+			if (!liveOwnerRosterIdByTag[tag]) liveOwnerRosterIdByTag[tag] = rosterId;
 			if (!liveMemberByTag[tag]) liveMemberByTag[tag] = member;
 		}
 		memberTagSetByRosterId[rosterId] = tagSet;
@@ -249,6 +270,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		const tag = normalizeTag_(prepExcludedTags[i]);
 		const rosterId = String(prepExcludedRosterIdByTag[prepExcludedTags[i]] || "").trim();
 		if (!tag || !rosterId) continue;
+		if (liveOwnerRosterIdByTag[tag]) continue;
 		ownerRosterIdByTag[tag] = rosterId;
 	}
 
@@ -258,6 +280,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		const tag = normalizeTag_(prepAssignedTags[i]);
 		const rosterId = String(prepAssignedRosterIdByTag[prepAssignedTags[i]] || "").trim();
 		if (!tag || !rosterId) continue;
+		if (liveOwnerRosterIdByTag[tag]) continue;
 		ownerRosterIdByTag[tag] = rosterId;
 	}
 
@@ -265,6 +288,7 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		membersByRosterId: membersByRosterId,
 		memberTagSetByRosterId: memberTagSetByRosterId,
 		ownerRosterIdByTag: ownerRosterIdByTag,
+		liveOwnerRosterIdByTag: liveOwnerRosterIdByTag,
 		prepExcludedRosterIdByTag: prepExcludedRosterIdByTag,
 		prepAssignedRosterIdByTag: prepAssignedRosterIdByTag,
 		liveMemberByTag: liveMemberByTag,
@@ -629,6 +653,7 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 		if (!tag || sourceByTag[tag]) continue;
 		sourceByTag[tag] = member;
 	}
+	const cwlPreparationActive = getRosterTrackingMode_(roster) === "cwl" && isCwlPreparationActive_(roster);
 	const cwlPreparationExcludedTagSet = getActiveCwlPreparationExcludedTagSet_(roster);
 	const sourceTags = Object.keys(sourceByTag).filter((tag) => !cwlPreparationExcludedTagSet[normalizeTag_(tag)]);
 	const ownershipMove = evictOwnedSourceTagsFromOtherRosters_(rosterData, rosterId, sourceTags, ownerRosterIdByTag);
@@ -668,6 +693,7 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 	let removed = 0;
 	let removedCrossOwned = 0;
 	let removedCwlPreparationExcluded = 0;
+	let cwlPreparationClanAbsent = 0;
 
 	// Remove explicit CWL-prep exclusions without pruning their history.
 	const filterCwlPreparationExcludedPlayers = (playersRaw) => {
@@ -892,6 +918,7 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 	roster.main = main;
 	roster.subs = subs;
 	roster.missing = missing;
+	cwlPreparationClanAbsent = cwlPreparationActive ? updateCwlPreparationClanAbsentTagSet_(roster, sourceByTag, nowText) : 0;
 	roster.warPerformance = warPerformance;
 	const dedupeResult = dedupeRosterSectionsByTag_(roster);
 	if (dedupeResult.changed) {
@@ -912,6 +939,7 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 		removed: removed,
 		removedCrossOwned: removedCrossOwned,
 		removedCwlPreparationExcluded: removedCwlPreparationExcluded,
+		cwlPreparationClanAbsent: cwlPreparationClanAbsent,
 		updated: updated,
 		movedToMissing: movedToMissing,
 		restored: restored,

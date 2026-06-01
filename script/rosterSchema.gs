@@ -23,8 +23,8 @@
 // for published readers, with /active retained for legacy compatibility.
 //
 // Roster-scoped war state is allowed only for active war/CWL behavior:
-// cwlStats, regularWar, warPerformance, publicLineupProjection, cwlPreparation,
-// and benchSuggestions.
+// cwlStats, regularWar, warPerformance, publicLineupProjection, cwlPreparation
+// (including CWL-prep clan absence markers), and benchSuggestions.
 //
 // Forbidden duplicate metric locations include metric-like fields on roster
 // players and any roster-scoped playerMetrics/metrics store. Global Clash/player

@@ -249,6 +249,44 @@ const buildRosterData = () => ({
   },
 });
 
+const buildRosterPlayer = ({ tag = "#8CCVV", name = "Departed", discord = "", th = 15 } = {}) => ({
+  slot: 1,
+  name,
+  discord,
+  th,
+  tag,
+  notes: [],
+  excludeAsSwapTarget: false,
+  excludeAsSwapSource: false,
+});
+
+const playerTags = (playersRaw) => Array.from(playersRaw || [], (player) => player.tag);
+
+const buildPrepOutRosterData = (options = {}) => {
+  const tag = options.tag || "#8CCVV";
+  const data = buildRosterData();
+  data.rosters[0].connectedClanTag = "#2LUCULP";
+  data.rosters[1].connectedClanTag = "#9PYLQG";
+  data.rosters[0].main = [];
+  data.rosters[0].subs = [buildRosterPlayer({ tag, name: options.name || "Departed", discord: options.discord || "" })];
+  data.rosters[0].missing = [];
+  data.rosters[0].cwlPreparation = {
+    enabled: true,
+    rosterSize: 15,
+    lockStateByTag: { [tag]: options.lockState || "lockedOut" },
+    assignedTagSet: { [tag]: true },
+    excludedTagSet: {},
+  };
+  if (options.identity) {
+    data.playerMetrics.byTag[tag] = {
+      identity: Object.assign({ tag, name: options.name || "Departed" }, options.identity),
+      trophyHistoryDaily: [],
+      donationCycles: [],
+    };
+  }
+  return data;
+};
+
 const setupQueueRun = (backend, sourceDataRaw, options = {}) => {
   const data = backend.validateRosterData_(sourceDataRaw || buildRosterData());
   const runId = options.runId || "run-1";
@@ -503,6 +541,293 @@ test("roster ownership snapshot preserves live cross-roster owners for isolated 
   assert.equal(workingRosterData.rosters[0].main.length, 0);
   assert.equal(workingRosterData.rosters[0].subs.length, 0);
   assert.equal(workingRosterData.rosters[0].missing.length, 0);
+});
+
+test("CWL prep sync retains and marks unlinked locked-out players after they leave the connected clan", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData());
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(data, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationClanAbsent, 1);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.cwlPreparation.lockStateByTag["#8CCVV"], "lockedOut");
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], true);
+});
+
+test("CWL prep sync marks Discord-linked locked-out players the same way when absent", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData({
+    identity: {
+      discordId: "123456789012345678",
+      discordUsername: "departed",
+      discordSource: "discord-sync",
+    },
+  }));
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(data, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationClanAbsent, 1);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.cwlPreparation.lockStateByTag["#8CCVV"], "lockedOut");
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], true);
+});
+
+test("CWL prep sync marks locked-in players absent from the connected clan", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData({
+    lockState: "lockedIn",
+  }));
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(data, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationClanAbsent, 1);
+  assert.deepEqual(playerTags(roster.main), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.subs), []);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.cwlPreparation.lockStateByTag["#8CCVV"], "lockedIn");
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], true);
+  assert.match(roster.cwlPreparation.clanAbsentUpdatedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("CWL prep sync clears absent marker when a player rejoins the connected clan", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = buildPrepOutRosterData({
+    identity: {
+      discordId: "123456789012345678",
+      discordUsername: "departed",
+      discordSource: "discord-sync",
+    },
+  });
+  data.rosters[0].cwlPreparation.clanAbsentTagSet = { "#8CCVV": true };
+  data.rosters[0].cwlPreparation.clanAbsentUpdatedAt = "2026-05-25T00:00:00.000Z";
+  const validated = backend.validateRosterData_(data);
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-26T00:00:00.000Z",
+    members: clanTag === "#2LUCULP" ? [{ tag: "#8CCVV", name: "Departed", th: 15 }] : [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(validated, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationClanAbsent, 0);
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], undefined);
+});
+
+test("CWL prep sync treats players in another connected clan as cross-owned, not departed", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData());
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: clanTag === "#9PYLQG" ? [{ tag: "#8CCVV", name: "Departed", th: 15 }] : [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(data, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.removedCrossOwned, 1);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), []);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], undefined);
+});
+
+test("CWL prep sync keeps and marks absent players when another connected clan membership read fails", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData());
+  backend.fetchClanMembersSnapshot_ = (clanTag) => {
+    if (clanTag === "#9PYLQG") throw new Error("temporary clan read failure");
+    return {
+      clanTag,
+      capturedAt: "2026-05-25T00:00:00.000Z",
+      members: [],
+      metricsMembers: [],
+    };
+  };
+
+  const result = backend.syncClanRosterPoolCore_(data, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationClanAbsent, 1);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], true);
+});
+
+test("regular-war pool sync still moves absent players to missing without CWL prep markers", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const source = buildRosterData();
+  source.rosters[0].connectedClanTag = "#2LUCULP";
+  source.rosters[1].connectedClanTag = "#9PYLQG";
+  source.rosters[0].main[0].tag = "#8CCVV";
+  source.rosters[0].trackingMode = "regularWar";
+  const data = backend.validateRosterData_(source);
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(data, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.movedToMissing, 1);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), []);
+  assert.deepEqual(playerTags(roster.missing), ["#8CCVV"]);
+  assert.equal(roster.cwlPreparation, undefined);
+});
+
+test("automatic prep disable clears prep-only absence state without dropping lock state", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData());
+  const roster = data.rosters[0];
+  roster.cwlPreparation.clanAbsentTagSet = { "#8CCVV": true };
+  roster.cwlPreparation.clanAbsentUpdatedAt = "2026-05-25T00:00:00.000Z";
+  roster.cwlPreparation.excludedTagSet = { "#OTHER": true };
+
+  const disabled = backend.disableCwlPreparationForAutomaticTransition_(roster);
+
+  assert.equal(disabled, true);
+  assert.equal(roster.cwlPreparation.enabled, false);
+  assert.equal(Object.keys(roster.cwlPreparation.assignedTagSet).length, 0);
+  assert.equal(Object.keys(roster.cwlPreparation.excludedTagSet).length, 0);
+  assert.equal(Object.keys(roster.cwlPreparation.clanAbsentTagSet).length, 0);
+  assert.equal(roster.cwlPreparation.clanAbsentUpdatedAt, undefined);
+  assert.equal(roster.cwlPreparation.lockStateByTag["#8CCVV"], "lockedOut");
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+});
+
+test("automatic active-CWL transition clears prep absence markers and keeps CWL mode", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData());
+  data.rosters[0].cwlPreparation.clanAbsentTagSet = { "#8CCVV": true };
+  data.rosters[0].cwlPreparation.clanAbsentUpdatedAt = "2026-05-25T00:00:00.000Z";
+
+  const result = backend.detectAndApplyAutomaticTrackingModeTransition_(data, "main", {
+    prefetchedLeaguegroupRawByClanTag: {
+      "#2LUCULP": {
+        state: "inWar",
+        clans: [{ tag: "#2LUCULP", members: [] }],
+        rounds: [],
+      },
+    },
+  });
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationDisabled, true);
+  assert.equal(result.result.switchedToRegularWar, false);
+  assert.equal(roster.trackingMode, "cwl");
+  assert.equal(roster.cwlPreparation.enabled, false);
+  assert.equal(Object.keys(roster.cwlPreparation.clanAbsentTagSet).length, 0);
+  assert.equal(roster.cwlPreparation.clanAbsentUpdatedAt, undefined);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+});
+
+test("automatic regular-war transition clears stale prep absence markers without creating missing players", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildPrepOutRosterData());
+  const rosterBefore = data.rosters[0];
+  rosterBefore.cwlPreparation.enabled = false;
+  rosterBefore.cwlPreparation.assignedTagSet = {};
+  rosterBefore.cwlPreparation.clanAbsentTagSet = { "#8CCVV": true };
+  rosterBefore.cwlPreparation.clanAbsentUpdatedAt = "2026-05-25T00:00:00.000Z";
+
+  const result = backend.detectAndApplyAutomaticTrackingModeTransition_(data, "main", {
+    prefetchedCurrentRegularWarByClanTag: {
+      "#2LUCULP": {
+        available: true,
+        state: "inWar",
+        clanSide: { tag: "#2LUCULP" },
+        opponentSide: { tag: "#9PYLQG" },
+      },
+    },
+  });
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.cwlPreparationDisabled, false);
+  assert.equal(result.result.switchedToRegularWar, true);
+  assert.equal(roster.trackingMode, "regularWar");
+  assert.equal(roster.cwlPreparation.enabled, false);
+  assert.equal(Object.keys(roster.cwlPreparation.clanAbsentTagSet).length, 0);
+  assert.equal(roster.cwlPreparation.clanAbsentUpdatedAt, undefined);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+});
+
+test("queue worker loads source metrics for departed prep-out players before pool sync", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildPrepOutRosterData({
+    identity: {
+      discordId: "123456789012345678",
+      discordUsername: "departed",
+      discordSource: "discord-sync",
+    },
+  });
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: [],
+    metricsMembers: [],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    assert.equal(rosterData.playerMetrics.byTag["#8CCVV"].identity.discordId, "123456789012345678");
+    const poolResult = backend.syncClanRosterPoolCore_(rosterData, rosterId, options);
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData: poolResult.rosterData,
+      pipelineResult: {
+        memberTracking: { capturedPlayers: 0 },
+        pool: poolResult.result,
+      },
+    };
+  };
+
+  backend.executeAutoRefreshRosterTask_(current, tasks[0], Date.now());
+  const activeRosterShard = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("activeVersions/" + runId + "/rosters/main", "GET"),
+  );
+
+  assert.deepEqual(playerTags(activeRosterShard.main), []);
+  assert.deepEqual(playerTags(activeRosterShard.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(activeRosterShard.missing), []);
 });
 
 test("source tag reads batch duplicate encoded paths and skip missing entries", () => {

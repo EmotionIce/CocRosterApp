@@ -163,6 +163,13 @@
       gap: 6px;
     }
 
+    .player-admin-quick-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 4px;
+      align-items: stretch;
+    }
+
     .player-admin-summary {
       width: 100%;
       border: 1px solid #334155;
@@ -312,6 +319,11 @@
     .player-admin-btn.danger {
       border-color: #7f1d1d;
       background: #3f1414;
+    }
+
+    .player-admin-quick-remove {
+      min-width: 74px;
+      white-space: nowrap;
     }
 
     .player-admin-btn:disabled {
@@ -582,6 +594,10 @@
       .player-admin-buttons .player-admin-btn {
         flex: 1 1 0;
         min-width: 70px;
+      }
+
+      .player-admin-quick-row {
+        grid-template-columns: minmax(0, 1fr) auto;
       }
 
       .player-admin-toggle-row {

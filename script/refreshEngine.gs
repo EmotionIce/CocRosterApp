@@ -899,6 +899,10 @@ function disableCwlPreparationForAutomaticTransition_(rosterRaw) {
 	const prep = getRosterCwlPreparation_(roster);
 	const wasEnabled = !!(prep && prep.enabled);
 	prep.enabled = false;
+	prep.assignedTagSet = {};
+	prep.excludedTagSet = {};
+	prep.clanAbsentTagSet = {};
+	delete prep.clanAbsentUpdatedAt;
 	roster.cwlPreparation = prep;
 	clearRosterBenchSuggestions_(roster);
 	return wasEnabled;

@@ -789,11 +789,15 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 	const clanSnapshot = clanSnapshotRaw && typeof clanSnapshotRaw === "object" ? clanSnapshotRaw : null;
 	const members = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
 	const ownerRosterIdByTag = {};
+	const liveOwnerRosterIdByTag = {};
 	const liveMemberByTag = {};
 	const membersByRosterId = {};
 	const memberTagSetByRosterId = {};
 	const tagSet = {};
 	const sourceOwnership = sourceOwnershipRaw && typeof sourceOwnershipRaw === "object" ? sourceOwnershipRaw : {};
+	const liveOwnershipErrorByClanTag = sourceOwnership.liveOwnershipErrorByClanTag && typeof sourceOwnership.liveOwnershipErrorByClanTag === "object"
+		? sourceOwnership.liveOwnershipErrorByClanTag
+		: {};
 	const copyOwnerMap = (mapRaw) => {
 		const map = mapRaw && typeof mapRaw === "object" ? mapRaw : {};
 		const tags = Object.keys(map);
@@ -805,12 +809,22 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 	};
 	copyOwnerMap(sourceOwnership.sourceOwnerRosterIdByTag);
 	copyOwnerMap(sourceOwnership.liveOwnerRosterIdByTag);
+	const sourceLiveOwnerRosterIdByTag = sourceOwnership.liveOwnerRosterIdByTag && typeof sourceOwnership.liveOwnerRosterIdByTag === "object"
+		? sourceOwnership.liveOwnerRosterIdByTag
+		: {};
+	const sourceLiveOwnerTags = Object.keys(sourceLiveOwnerRosterIdByTag);
+	for (let i = 0; i < sourceLiveOwnerTags.length; i++) {
+		const tag = normalizeTag_(sourceLiveOwnerTags[i]);
+		const owner = String(sourceLiveOwnerRosterIdByTag[sourceLiveOwnerTags[i]] || "").trim();
+		if (tag && owner) liveOwnerRosterIdByTag[tag] = owner;
+	}
 	for (let i = 0; i < members.length; i++) {
 		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
 		const tag = normalizeTag_(member.tag);
 		if (!tag) continue;
 		tagSet[tag] = true;
 		ownerRosterIdByTag[tag] = rosterId;
+		liveOwnerRosterIdByTag[tag] = rosterId;
 		liveMemberByTag[tag] = member;
 	}
 	membersByRosterId[rosterId] = members;
@@ -822,6 +836,7 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 	for (let i = 0; i < excludedTags.length; i++) {
 		const tag = normalizeTag_(excludedTags[i]);
 		const owner = String(prepExcludedRosterIdByTag[excludedTags[i]] || "").trim();
+		if (tag && liveOwnerRosterIdByTag[tag]) continue;
 		if (tag && owner) ownerRosterIdByTag[tag] = owner;
 	}
 	const prepAssignedRosterIdByTag = sourceOwnership.prepAssignedRosterIdByTag && typeof sourceOwnership.prepAssignedRosterIdByTag === "object"
@@ -831,6 +846,7 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 	for (let i = 0; i < assignedTags.length; i++) {
 		const tag = normalizeTag_(assignedTags[i]);
 		const owner = String(prepAssignedRosterIdByTag[assignedTags[i]] || "").trim();
+		if (tag && liveOwnerRosterIdByTag[tag]) continue;
 		if (tag && owner) ownerRosterIdByTag[tag] = owner;
 	}
 	const seedPlayerByTag = sourceSeedByTagRaw && typeof sourceSeedByTagRaw === "object" ? sourceSeedByTagRaw : {};
@@ -842,8 +858,10 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 		membersByRosterId: membersByRosterId,
 		memberTagSetByRosterId: memberTagSetByRosterId,
 		ownerRosterIdByTag: ownerRosterIdByTag,
+		liveOwnerRosterIdByTag: liveOwnerRosterIdByTag,
 		prepExcludedRosterIdByTag: prepExcludedRosterIdByTag,
 		prepAssignedRosterIdByTag: prepAssignedRosterIdByTag,
+		liveOwnershipErrorByClanTag: liveOwnershipErrorByClanTag,
 		liveMemberByTag: liveMemberByTag,
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
 		connectedRosterIds: connectedRosterIds,
@@ -970,9 +988,22 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		const tag = normalizeTag_(metricsMembers[i] && metricsMembers[i].tag);
 		if (tag) metricTags.push(tag);
 	}
-	const metricReadStartMs = Date.now();
-	const sourceMetricByTag = readAutoRefreshSourceMetricEntriesForTags_(runId, metricTags);
 	const targetSeedByTag = buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
+	const targetSeedTags = Object.keys(targetSeedByTag);
+	const metricReadTags = metricTags.slice();
+	const metricReadTagSet = {};
+	for (let i = 0; i < metricReadTags.length; i++) {
+		const tag = normalizeTag_(metricReadTags[i]);
+		if (tag) metricReadTagSet[tag] = true;
+	}
+	for (let i = 0; i < targetSeedTags.length; i++) {
+		const tag = normalizeTag_(targetSeedTags[i]);
+		if (!tag || metricReadTagSet[tag]) continue;
+		metricReadTagSet[tag] = true;
+		metricReadTags.push(tag);
+	}
+	const metricReadStartMs = Date.now();
+	const sourceMetricByTag = readAutoRefreshSourceMetricEntriesForTags_(runId, metricReadTags);
 	const seedReadTags = [];
 	const seedReadSeen = {};
 	for (let i = 0; i < liveTags.length; i++) {
@@ -982,7 +1013,6 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		seedReadTags.push(tag);
 	}
 	const sourceSeedByTag = readAutoRefreshSourcePlayerSeedEntriesForTags_(runId, seedReadTags);
-	const targetSeedTags = Object.keys(targetSeedByTag);
 	for (let i = 0; i < targetSeedTags.length; i++) {
 		const tag = normalizeTag_(targetSeedTags[i]);
 		if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];

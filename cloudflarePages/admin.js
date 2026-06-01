@@ -3273,6 +3273,21 @@
     return out;
   };
 
+  // Normalize CWL preparation clan-absence marker set local.
+  const normalizePreparationClanAbsentTagSetLocal_ = (rawValue, rosterPoolTagSetRaw) => {
+    const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+    const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+    const out = {};
+    const keys = Object.keys(raw);
+    for (let i = 0; i < keys.length; i++) {
+      const tag = normalizeTag(keys[i]);
+      if (!tag || !rosterPoolTagSet[tag]) continue;
+      if (!toBoolFlag(raw[keys[i]])) continue;
+      out[tag] = true;
+    }
+    return out;
+  };
+
   // Sanitize roster CWL preparation local.
   const sanitizeRosterCwlPreparationLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
@@ -3305,20 +3320,31 @@
     const excludedTagSet = trackingMode === "cwl" && enabled
       ? normalizePreparationExcludedTagSetLocal_(source && source.excludedTagSet)
       : {};
+    const clanAbsentTagSet = trackingMode === "cwl" && enabled
+      ? normalizePreparationClanAbsentTagSetLocal_(source && source.clanAbsentTagSet, rosterPoolTagSet)
+      : {};
     const excludedTags = Object.keys(excludedTagSet);
     for (let i = 0; i < excludedTags.length; i++) {
       const tag = normalizeTag(excludedTags[i]);
       if (!tag) continue;
       delete lockStateByTag[tag];
       delete assignedTagSet[tag];
+      delete clanAbsentTagSet[tag];
     }
     const lockedInCount = Object.keys(lockStateByTag).filter((tag) => lockStateByTag[tag] === "lockedIn").length;
     if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
       throw new Error("Locked-In count exceeds roster size (" + lockedInCount + " > " + rosterSize + ").");
     }
     const lastAppliedAt = toStr(source && source.lastAppliedAt).trim();
+    const clanAbsentUpdatedAt = toStr(source && source.clanAbsentUpdatedAt).trim();
     const hasSource = !!source;
-    const hasMeaningfulContent = hasSource || enabled || Object.keys(lockStateByTag).length > 0 || Object.keys(assignedTagSet).length > 0 || excludedTags.length > 0;
+    const hasMeaningfulContent =
+      hasSource ||
+      enabled ||
+      Object.keys(lockStateByTag).length > 0 ||
+      Object.keys(assignedTagSet).length > 0 ||
+      excludedTags.length > 0 ||
+      Object.keys(clanAbsentTagSet).length > 0;
     if (!hasMeaningfulContent && options.keepWhenEmpty !== true) {
       delete rosterSafe.cwlPreparation;
       return null;
@@ -3329,9 +3355,11 @@
       lockStateByTag,
       assignedTagSet,
       excludedTagSet,
+      clanAbsentTagSet,
       algorithm: CWL_PREPARATION_ALGORITHM,
     };
     if (lastAppliedAt) out.lastAppliedAt = lastAppliedAt;
+    if (enabled && clanAbsentUpdatedAt) out.clanAbsentUpdatedAt = clanAbsentUpdatedAt;
     rosterSafe.cwlPreparation = out;
     return out;
   };
@@ -3453,11 +3481,13 @@
       lockStateByTag: {},
       assignedTagSet: {},
       excludedTagSet: {},
+      clanAbsentTagSet: {},
       algorithm: CWL_PREPARATION_ALGORITHM,
     };
     if (!prep.lockStateByTag || typeof prep.lockStateByTag !== "object") prep.lockStateByTag = {};
     if (!prep.assignedTagSet || typeof prep.assignedTagSet !== "object") prep.assignedTagSet = {};
     if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
+    if (!prep.clanAbsentTagSet || typeof prep.clanAbsentTagSet !== "object") prep.clanAbsentTagSet = {};
 
     const beforeMainTags = rosterSafe.main.map((player) => normalizeTag(player && player.tag)).filter(Boolean);
     const beforeSubsTags = rosterSafe.subs.map((player) => normalizeTag(player && player.tag)).filter(Boolean);
@@ -3467,6 +3497,8 @@
       prep.enabled = false;
       prep.assignedTagSet = {};
       prep.excludedTagSet = {};
+      prep.clanAbsentTagSet = {};
+      delete prep.clanAbsentUpdatedAt;
       rosterSafe.cwlPreparation = prep;
       return {
         enabled: false,
@@ -3668,12 +3700,20 @@
       delete sourcePrep.excludedTagSet[playerTag];
       source.cwlPreparation = sourcePrep;
     }
+    if (sourcePrep && sourcePrep.clanAbsentTagSet && Object.prototype.hasOwnProperty.call(sourcePrep.clanAbsentTagSet, playerTag)) {
+      delete sourcePrep.clanAbsentTagSet[playerTag];
+      source.cwlPreparation = sourcePrep;
+    }
 
     const destinationPrepActive = !!(destinationPrep && destinationPrep.enabled && getRosterTrackingMode(destination) === "cwl");
     if (destinationPrep && !destinationPrep.assignedTagSet) destinationPrep.assignedTagSet = {};
     if (destinationPrep && !destinationPrep.excludedTagSet) destinationPrep.excludedTagSet = {};
+    if (destinationPrep && !destinationPrep.clanAbsentTagSet) destinationPrep.clanAbsentTagSet = {};
     if (destinationPrep && destinationPrep.excludedTagSet && Object.prototype.hasOwnProperty.call(destinationPrep.excludedTagSet, playerTag)) {
       delete destinationPrep.excludedTagSet[playerTag];
+    }
+    if (destinationPrep && destinationPrep.clanAbsentTagSet && Object.prototype.hasOwnProperty.call(destinationPrep.clanAbsentTagSet, playerTag)) {
+      delete destinationPrep.clanAbsentTagSet[playerTag];
     }
     if (destinationPrepActive && (sourceLock === "lockedIn" || sourceLock === "lockedOut")) {
       destinationPrep.assignedTagSet[playerTag] = true;
@@ -3691,6 +3731,9 @@
       }
       if (destinationPrep.excludedTagSet && Object.prototype.hasOwnProperty.call(destinationPrep.excludedTagSet, playerTag)) {
         delete destinationPrep.excludedTagSet[playerTag];
+      }
+      if (destinationPrep.clanAbsentTagSet && Object.prototype.hasOwnProperty.call(destinationPrep.clanAbsentTagSet, playerTag)) {
+        delete destinationPrep.clanAbsentTagSet[playerTag];
       }
       destination.cwlPreparation = destinationPrep;
     }
@@ -3719,6 +3762,10 @@
     if (prep.excludedTagSet && typeof prep.excludedTagSet === "object" && Object.prototype.hasOwnProperty.call(prep.excludedTagSet, previousTag)) {
       delete prep.excludedTagSet[previousTag];
       prep.excludedTagSet[nextTag] = true;
+    }
+    if (prep.clanAbsentTagSet && typeof prep.clanAbsentTagSet === "object" && Object.prototype.hasOwnProperty.call(prep.clanAbsentTagSet, previousTag)) {
+      delete prep.clanAbsentTagSet[previousTag];
+      prep.clanAbsentTagSet[nextTag] = true;
     }
     rosterSafe.cwlPreparation = prep;
   };
@@ -4008,6 +4055,7 @@
       lockStateByTag: {},
       assignedTagSet: {},
       excludedTagSet: {},
+      clanAbsentTagSet: {},
       algorithm: CWL_PREPARATION_ALGORITHM,
     };
     if (enabled) {
@@ -4015,6 +4063,8 @@
       prep.rosterSize = normalizePreparationRosterSizeLocal_(prep.rosterSize, getInitialPreparationRosterSizeForEnableLocal_(roster));
       prep.assignedTagSet = {};
       prep.excludedTagSet = {};
+      prep.clanAbsentTagSet = {};
+      delete prep.clanAbsentUpdatedAt;
       const poolTagSet = buildRosterPoolTagSetForPreparationLocal_(roster);
       const poolTags = Object.keys(poolTagSet);
       for (let i = 0; i < poolTags.length; i++) {
@@ -4029,6 +4079,8 @@
       prep.enabled = false;
       prep.assignedTagSet = {};
       prep.excludedTagSet = {};
+      prep.clanAbsentTagSet = {};
+      delete prep.clanAbsentUpdatedAt;
       roster.cwlPreparation = prep;
       reindexRoster(roster);
     }
@@ -4178,6 +4230,10 @@
       }
       if (prep && prep.assignedTagSet && Object.prototype.hasOwnProperty.call(prep.assignedTagSet, playerTag)) {
         delete prep.assignedTagSet[playerTag];
+        roster.cwlPreparation = prep;
+      }
+      if (prep && prep.clanAbsentTagSet && Object.prototype.hasOwnProperty.call(prep.clanAbsentTagSet, playerTag)) {
+        delete prep.clanAbsentTagSet[playerTag];
         roster.cwlPreparation = prep;
       }
       if (prep && prep.enabled && getRosterTrackingMode(roster) === "cwl") {
@@ -4669,6 +4725,10 @@
         : "";
       if (prepActive && prepLockState === "lockedIn") addSummaryPill("prep In");
       if (prepActive && prepLockState === "lockedOut") addSummaryPill("prep Out");
+      const clanAbsentTagSet = prepActive && roster && roster.cwlPreparation && roster.cwlPreparation.clanAbsentTagSet && typeof roster.cwlPreparation.clanAbsentTagSet === "object"
+        ? roster.cwlPreparation.clanAbsentTagSet
+        : {};
+      if (prepActive && clanAbsentTagSet[playerTag]) addSummaryPill("not in clan");
       if (!prepActive) {
         if (ctx.player.excludeAsSwapTarget) addSummaryPill("swap target off");
         if (ctx.player.excludeAsSwapSource) addSummaryPill("swap source off");
@@ -4680,7 +4740,16 @@
     summaryCaret.textContent = "v";
     summaryMeta.appendChild(summaryCaret);
     summaryBtn.appendChild(summaryMeta);
-    wrap.appendChild(summaryBtn);
+
+    const removeBtn = mkPlayerActionButton("Remove", "danger player-admin-quick-remove");
+    removeBtn.title = "Remove from roster";
+    removeBtn.setAttribute("aria-label", "Remove " + playerTag + " from this roster");
+
+    const quickRow = document.createElement("div");
+    quickRow.className = "player-admin-quick-row";
+    quickRow.appendChild(summaryBtn);
+    quickRow.appendChild(removeBtn);
+    wrap.appendChild(quickRow);
 
     const tray = document.createElement("div");
     tray.className = "player-admin-tray hidden";
@@ -4692,11 +4761,9 @@
 
     const editBtn = mkPlayerActionButton("Edit", "secondary");
     const moveBtn = mkPlayerActionButton("Move", "secondary");
-    const removeBtn = mkPlayerActionButton("Remove", "danger");
 
     row.appendChild(editBtn);
     row.appendChild(moveBtn);
-    row.appendChild(removeBtn);
     tray.appendChild(row);
 
     if (trackingMode === "cwl" && prepActive) {
@@ -6059,6 +6126,8 @@
               prep.enabled = false;
               prep.assignedTagSet = {};
               prep.excludedTagSet = {};
+              prep.clanAbsentTagSet = {};
+              delete prep.clanAbsentUpdatedAt;
               r.cwlPreparation = prep;
             }
             reindexRoster(r);

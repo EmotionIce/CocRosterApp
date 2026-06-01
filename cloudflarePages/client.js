@@ -707,9 +707,19 @@
         const rosterSize = Number.isFinite(rosterSizeRaw)
             ? Math.max(5, Math.min(50, Math.floor(rosterSizeRaw / 5) * 5))
             : 0;
+        const clanAbsentTagSet = {};
+        const rawClanAbsentTagSet = raw.clanAbsentTagSet && typeof raw.clanAbsentTagSet === "object" && !Array.isArray(raw.clanAbsentTagSet)
+            ? raw.clanAbsentTagSet
+            : {};
+        for (const rawTag of Object.keys(rawClanAbsentTagSet)) {
+            const tag = normalizeClanTag(rawTag);
+            if (tag && rawClanAbsentTagSet[rawTag] === true) clanAbsentTagSet[tag] = true;
+        }
         return {
             enabled: enabled,
             rosterSize: rosterSize > 0 ? rosterSize : 0,
+            clanAbsentTagSet: clanAbsentTagSet,
+            clanAbsentUpdatedAt: enabled ? toStr(raw.clanAbsentUpdatedAt).trim() : "",
         };
     };
 
@@ -717,6 +727,14 @@
     const isCwlPreparationActivePublic_ = (rosterRaw) => {
         const prep = getRosterCwlPreparationModel(rosterRaw);
         return !!(prep && prep.enabled);
+    };
+
+    // Return whether a CWL-prep player was absent from the connected clan at last refresh.
+    const isCwlPreparationPlayerClanAbsent_ = (rosterRaw, playerTagRaw) => {
+        const tag = normalizeClanTag(playerTagRaw);
+        if (!tag) return false;
+        const prep = getRosterCwlPreparationModel(rosterRaw);
+        return !!(prep && prep.enabled && prep.clanAbsentTagSet && prep.clanAbsentTagSet[tag]);
     };
 
     // Build default public view state.
@@ -6331,6 +6349,7 @@
         const hideSuggestions = !!context.hideSuggestions;
         const player = normalizePlayer(rawPlayer);
         const playerTag = normalizeClanTag(player.tag);
+        const roster = context.roster && typeof context.roster === "object" ? context.roster : null;
         const cwlStats = getPlayerCwlStats(context.cwlStats, playerTag);
         const regularWarStats = getPlayerRegularWarStats(context.regularWarStats, playerTag, context.warPerformance);
         const longTermStats = getPlayerLongTermWarStats(context.warPerformance, playerTag);
@@ -6338,6 +6357,11 @@
         const playerSuggestion = hideSuggestions || trackingMode !== "cwl"
             ? null
             : getPlayerBenchSuggestion(context.suggestionModel, playerTag);
+        const clanAbsentInPrep =
+            typeof window !== "undefined" &&
+            window.ROSTER_ADMIN_MODE &&
+            trackingMode === "cwl" &&
+            isCwlPreparationPlayerClanAbsent_(roster, playerTag);
 
         const wrap = el("div", "player");
         wrap.classList.add("roster-player-card");
@@ -6345,6 +6369,7 @@
         wrap.dataset.rosterId = toStr(context.rosterId).trim();
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.status === "out") wrap.classList.add("suggest-bench");
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.status === "in") wrap.classList.add("suggest-in");
+        if (clanAbsentInPrep) wrap.classList.add("is-clan-absent");
 
         const top = el("div", "player-top");
         top.setAttribute("data-player-profile-trigger", "1");
@@ -6485,6 +6510,7 @@
             if (typeof window !== "undefined" && window.ROSTER_ADMIN_MODE) {
                 if (player.excludeAsSwapTarget) attentionItems.push({ tone: "warning", text: "swap target disabled" });
                 if (player.excludeAsSwapSource) attentionItems.push({ tone: "warning", text: "swap source disabled" });
+                if (clanAbsentInPrep) attentionItems.push({ tone: "warning", text: "not in clan" });
             }
         }
 
@@ -6553,6 +6579,7 @@
         const trackingMode = options.trackingMode;
         const rosterId = options.rosterId;
         const rosterTitle = options.rosterTitle;
+        const roster = options.roster && typeof options.roster === "object" ? options.roster : null;
         const cwlStats = options.cwlStats;
         const regularWarStats = options.regularWarStats;
         const warPerformance = options.warPerformance;
@@ -6572,6 +6599,7 @@
                 index: i,
                 rosterId: toStr(rosterId),
                 rosterTitle: toStr(rosterTitle),
+                roster: roster,
                 cwlStats: cwlStats,
                 regularWarStats: regularWarStats,
                 warPerformance: warPerformance,
@@ -6634,6 +6662,7 @@
             trackingMode: options.trackingMode,
             rosterId: options.rosterId,
             rosterTitle: options.rosterTitle,
+            roster: options.roster,
             cwlStats: options.cwlStats,
             regularWarStats: options.regularWarStats,
             warPerformance: options.warPerformance,
@@ -6775,6 +6804,7 @@
                     trackingMode,
                     rosterId: roster.id,
                     rosterTitle: roster.title,
+                    roster: roster,
                     cwlStats: roster && roster.cwlStats,
                     regularWarStats: roster && roster.regularWar,
                     warPerformance: roster && roster.warPerformance,
@@ -6789,6 +6819,7 @@
                     trackingMode,
                     rosterId: roster.id,
                     rosterTitle: roster.title,
+                    roster: roster,
                     cwlStats: roster && roster.cwlStats,
                     regularWarStats: roster && roster.regularWar,
                     warPerformance: roster && roster.warPerformance,
@@ -6803,6 +6834,7 @@
                     trackingMode,
                     rosterId: roster.id,
                     rosterTitle: roster.title,
+                    roster: roster,
                     cwlStats: roster && roster.cwlStats,
                     regularWarStats: roster && roster.regularWar,
                     warPerformance: roster && roster.warPerformance,
@@ -6819,6 +6851,7 @@
                     trackingMode,
                     rosterId: roster.id,
                     rosterTitle: roster.title,
+                    roster: roster,
                     cwlStats: roster && roster.cwlStats,
                     regularWarStats: roster && roster.regularWar,
                     warPerformance: roster && roster.warPerformance,
@@ -6833,6 +6866,7 @@
                     trackingMode,
                     rosterId: roster.id,
                     rosterTitle: roster.title,
+                    roster: roster,
                     cwlStats: roster && roster.cwlStats,
                     regularWarStats: roster && roster.regularWar,
                     warPerformance: roster && roster.warPerformance,

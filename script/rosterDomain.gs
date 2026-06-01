@@ -436,6 +436,21 @@ function normalizePreparationExcludedTagSet_(rawValue) {
 	return out;
 }
 
+// Normalize CWL preparation clan-absence markers.
+function normalizePreparationClanAbsentTagSet_(rawValue, rosterPoolTagSetRaw) {
+	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+	const rosterPoolTagSet = rosterPoolTagSetRaw && typeof rosterPoolTagSetRaw === "object" ? rosterPoolTagSetRaw : {};
+	const out = {};
+	const keys = Object.keys(raw);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag || !rosterPoolTagSet[tag]) continue;
+		if (!toBooleanFlag_(raw[keys[i]])) continue;
+		out[tag] = true;
+	}
+	return out;
+}
+
 // Sanitize roster CWL preparation.
 function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingModeRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -457,22 +472,28 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 		}
 	}
 	const excludedTagSet = trackingMode === "cwl" ? normalizePreparationExcludedTagSet_(raw && raw.excludedTagSet) : {};
+	const clanAbsentTagSet =
+		trackingMode === "cwl" && enabled ? normalizePreparationClanAbsentTagSet_(raw && raw.clanAbsentTagSet, rosterPoolTagSet) : {};
 	const excludedTags = Object.keys(excludedTagSet);
 	for (let i = 0; i < excludedTags.length; i++) {
 		const tag = normalizeTag_(excludedTags[i]);
 		if (!tag) continue;
 		delete lockStateByTag[tag];
 		delete assignedTagSet[tag];
+		delete clanAbsentTagSet[tag];
 	}
 	const assignedTags = Object.keys(assignedTagSet);
+	const clanAbsentTags = Object.keys(clanAbsentTagSet);
 	const rosterSize = normalizePreparationRosterSize_(raw && raw.rosterSize, defaultRosterSize);
 	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
 	if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
 		throw new Error("CWL Preparation Mode invalid: lockedIn count (" + lockedInCount + ") exceeds roster size (" + rosterSize + ").");
 	}
 	const lastAppliedAt = raw && typeof raw.lastAppliedAt === "string" ? raw.lastAppliedAt.trim() : "";
+	const clanAbsentUpdatedAt = raw && typeof raw.clanAbsentUpdatedAt === "string" ? raw.clanAbsentUpdatedAt.trim() : "";
 	const hasSource = !!raw;
-	const hasMeaningfulContent = hasSource || enabled || lockTags.length > 0 || assignedTags.length > 0 || excludedTags.length > 0;
+	const hasMeaningfulContent =
+		hasSource || enabled || lockTags.length > 0 || assignedTags.length > 0 || excludedTags.length > 0 || clanAbsentTags.length > 0;
 	if (!hasMeaningfulContent) return null;
 	const out = {
 		enabled: enabled,
@@ -480,9 +501,11 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 		lockStateByTag: lockStateByTag,
 		assignedTagSet: assignedTagSet,
 		excludedTagSet: excludedTagSet,
+		clanAbsentTagSet: clanAbsentTagSet,
 		algorithm: CWL_PREPARATION_ALGORITHM,
 	};
 	if (lastAppliedAt) out.lastAppliedAt = lastAppliedAt;
+	if (enabled && clanAbsentUpdatedAt) out.clanAbsentUpdatedAt = clanAbsentUpdatedAt;
 	return out;
 }
 
@@ -541,11 +564,13 @@ function getRosterCwlPreparation_(rosterRaw) {
 			lockStateByTag: {},
 			assignedTagSet: {},
 			excludedTagSet: {},
+			clanAbsentTagSet: {},
 			algorithm: CWL_PREPARATION_ALGORITHM,
 		};
 	if (!sanitized.lockStateByTag || typeof sanitized.lockStateByTag !== "object") sanitized.lockStateByTag = {};
 	if (!sanitized.assignedTagSet || typeof sanitized.assignedTagSet !== "object") sanitized.assignedTagSet = {};
 	if (!sanitized.excludedTagSet || typeof sanitized.excludedTagSet !== "object") sanitized.excludedTagSet = {};
+	if (!sanitized.clanAbsentTagSet || typeof sanitized.clanAbsentTagSet !== "object") sanitized.clanAbsentTagSet = {};
 	if (!sanitized.algorithm) sanitized.algorithm = CWL_PREPARATION_ALGORITHM;
 	return sanitized;
 }
@@ -676,11 +701,13 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 			lockStateByTag: {},
 			assignedTagSet: {},
 			excludedTagSet: {},
+			clanAbsentTagSet: {},
 			algorithm: CWL_PREPARATION_ALGORITHM,
 		};
 	if (!prep.lockStateByTag || typeof prep.lockStateByTag !== "object") prep.lockStateByTag = {};
 	if (!prep.assignedTagSet || typeof prep.assignedTagSet !== "object") prep.assignedTagSet = {};
 	if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
+	if (!prep.clanAbsentTagSet || typeof prep.clanAbsentTagSet !== "object") prep.clanAbsentTagSet = {};
 	prep.algorithm = CWL_PREPARATION_ALGORITHM;
 
 	const lockStateByTag = prep.lockStateByTag;
@@ -700,6 +727,8 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 		prep.enabled = false;
 		prep.assignedTagSet = {};
 		prep.excludedTagSet = {};
+		prep.clanAbsentTagSet = {};
+		delete prep.clanAbsentUpdatedAt;
 		roster.cwlPreparation = prep;
 		return {
 			enabled: false,
