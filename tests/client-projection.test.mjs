@@ -457,7 +457,7 @@ test("archived donation event uses its own seasonId instead of current season", 
   assert.equal(model.rows[0].score, 75);
 });
 
-test("push event leaderboard ranks by league bucket then best trophies", () => {
+test("push event leaderboard ranks by current league bucket then current trophies", () => {
   const { buildSeasonEventLeaderboardModel } = loadClientInternals();
   const event = {
     eventId: "push-ranked-legend-i-2026-05-18",
@@ -492,6 +492,7 @@ test("push event leaderboard ranks by league bucket then best trophies", () => {
         "#DDD": {
           identity: { tag: "#DDD", name: "Delta" },
           trophyHistoryDaily: [
+            { dayKey: "2026-05-19", capturedAt: "2026-05-19T15:00:00.000Z", trophies: 6100, league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
             { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 6000, league: { name: "Legend League" }, leagueTier: { id: 105000035 } },
           ],
           latestSnapshot: { tag: "#DDD", name: "Delta", trophies: 6000, capturedAt: "2026-05-20T15:00:00.000Z", league: { name: "Legend League" }, leagueTier: { id: 105000035 } },
@@ -506,10 +507,12 @@ test("push event leaderboard ranks by league bucket then best trophies", () => {
   assert.equal(model.rows[0].score, 5200);
   assert.match(model.rows[0].scoreLabel, /^Legends I - 5[,.]200 trophies$/);
   assert.equal(model.rows[0].metric, "leagueTrophies");
+  assert.equal(model.rows[0].currentLeagueName, "Legends I");
   assert.equal(model.rows[0].bestLeagueName, "Legends I");
   assert.equal(model.rows[0].hasPushRank, true);
   assert.equal(model.rows[1].displayName, "Delta");
   assert.equal(model.rows[1].score, 6000);
+  assert.equal(model.rows[1].currentLeagueName, "Legends II");
   assert.equal(model.rows[1].bestLeagueName, "Legends II");
   assert.equal(model.rows[2].displayName, "Bravo");
   assert.equal(model.rows[2].score, 5600);

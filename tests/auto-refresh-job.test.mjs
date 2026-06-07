@@ -529,6 +529,101 @@ test("queue coordinator references published source version without copying full
   assert.ok(sourceSeeds.byTag["#PLAYER"]);
 });
 
+test("queue coordinator reads published source version without full playerMetrics payload", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  sourceData.playerMetrics.byTag["#PLAYER"] = {
+    identity: { tag: "#PLAYER", name: "Player" },
+    latestSnapshot: { tag: "#PLAYER", name: "Player", trophies: 5000 },
+    trophyHistoryDaily: [],
+    donationCycles: [],
+  };
+  const data = backend.validateRosterData_(sourceData);
+  const sourceManifest = backend.buildActiveVersionManifestFromValidatedData_("source-1", data, {
+    source: "test",
+    runId: "source-1",
+    publishedAt: "2026-05-25T00:00:00.000Z",
+    sourceFingerprint: "fingerprint-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  backend.firebaseRequestJson_("activeVersions/source-1/manifest", "PUT", backend.encodeFirebaseObjectKeysRecursive_(sourceManifest));
+  for (const roster of data.rosters) {
+    backend.firebaseRequestJson_("activeVersions/source-1/rosters/" + roster.id, "PUT", backend.encodeFirebaseObjectKeysRecursive_(roster));
+  }
+  backend.firebaseRequestJson_("activeVersions/source-1/playerMetrics", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.playerMetrics));
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("coordinator should not read the full active payload");
+  };
+  backend.isRecentSuccessfulActiveWrite_ = () => false;
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  backend.prefetchClanMembersSnapshotsByTag_ = () => ({
+    snapshotByClanTag: {
+      "#CLAN": {
+        clanTag: "#CLAN",
+        members: [{ tag: "#PLAYER", name: "Player", th: 16 }],
+        metricsMembers: [],
+      },
+    },
+    errorByClanTag: {},
+    requestCount: 1,
+    batchCount: 1,
+  });
+
+  const result = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-05-25T00:00:00.000Z",
+  });
+  const current = backend.readAutoRefreshQueueCurrent_();
+  const sourceMeta = backend.readAutoRefreshRunShard_(current.runId, "source/meta");
+  const firstTask = backend.readAutoRefreshTask_(current.runId, current.taskIds[0]);
+  const stagedMetrics = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("activeVersions/" + current.runId + "/playerMetrics", "GET"),
+  );
+
+  assert.equal(result.inProgress, true);
+  assert.equal(current.sourceVersionId, "source-1");
+  assert.equal(current.sourceFingerprint, "fingerprint-1");
+  assert.equal(firstTask.type, "metricCopy");
+  assert.equal(sourceMeta.metricCopyKeyCount, 1);
+  assert.equal(sourceMeta.sourceMetricEntryCount, 0);
+  assert.equal(backend.readAutoRefreshRunShard_(current.runId, "source/playerMetrics"), null);
+  assert.equal(Object.keys(stagedMetrics.byTag).length, 0);
+});
+
+test("metric copy queue task stages source metric entries in the target active version", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedTag = backend.encodeFirebaseObjectKey_("#PLAYER");
+  backend.firebaseRequestJson_("activeVersions/source-1/playerMetrics/byTag/" + encodedTag, "PUT", backend.encodeFirebaseObjectKeysRecursive_({
+    identity: { tag: "#PLAYER", name: "Player" },
+    latestSnapshot: { tag: "#PLAYER", name: "Player", trophies: 5000 },
+    trophyHistoryDaily: [],
+    donationCycles: [],
+  }));
+  const tasks = backend.buildAutoRefreshQueueTasks_("run-1", ["main"], { metricCopyKeys: [encodedTag] });
+  const current = backend.writeAutoRefreshQueueCurrent_({
+    runId: "run-1",
+    kind: "auto-refresh-queue",
+    status: "running",
+    sourceVersionId: "source-1",
+    rosterIds: ["main"],
+    taskIds: tasks.map((task) => task.taskId),
+    taskCount: tasks.length,
+  });
+  backend.writeAutoRefreshQueueTasks_("run-1", tasks);
+
+  const result = backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now());
+  const copiedEntry = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("activeVersions/run-1/playerMetrics/byTag/" + encodedTag, "GET"),
+  );
+  const marker = backend.readAutoRefreshRunShard_("run-1", "metricCopies/" + tasks[0].taskId);
+
+  assert.equal(result.copiedCount, 1);
+  assert.equal(result.missingCount, 0);
+  assert.equal(copiedEntry.latestSnapshot.trophies, 5000);
+  assert.equal(marker.copiedCount, 1);
+});
+
 test("roster ownership snapshot preserves live cross-roster owners for isolated workers", () => {
   const backend = installMemoryFirebase(loadBackend());
   const sourceData = buildRosterData();
@@ -1134,6 +1229,9 @@ test("roster queue task writes war and metric shards from clan member data", () 
   const activeRosterShard = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "GET"),
   );
+  const activeMetricEntry = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("activeVersions/run-1/playerMetrics/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"), "GET"),
+  );
 
   assert.equal(result.rosterId, "main");
   assert.equal(fetchCalls, 1);
@@ -1141,7 +1239,10 @@ test("roster queue task writes war and metric shards from clan member data", () 
   assert.equal(rootSourceRosterGets.length, 0);
   assert.equal(warResult.rosterShardWritten, true);
   assert.equal(warResult.rosterSummary.trackingMode, "cwl");
-  assert.equal(metricResult.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
+  assert.equal(metricResult.metricsStaged, true);
+  assert.equal(metricResult.entryCount, 1);
+  assert.equal(metricResult.tags.join(","), "#PLAYER");
+  assert.equal(activeMetricEntry.latestSnapshot.trophies, 5000);
   assert.equal(activeRosterShard.regularWar.state, "notInWar");
 });
 
@@ -1196,6 +1297,20 @@ test("queue finalization uses source version guard without reading the active pa
   backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true, issues: [] }, "PUT");
   backend.writeAutoRefreshRunShard_(runId, "metricResults/main", { byTag: {}, tags: [] }, "PUT");
   let activePayloadReads = 0;
+  let targetRosterReads = 0;
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    const path = String(pathRaw || "").replace(/^\/+|\/+$/g, "");
+    const method = String(methodRaw || "GET").toUpperCase();
+    if (method === "GET" && path === "activeVersions/run-1/rosters/main") {
+      targetRosterReads++;
+      throw new Error("finalization should not read target roster shards in staged metrics mode");
+    }
+    if (method === "GET" && path === "internal/autoRefresh/runs/run-1/metricResults/main/byTag") {
+      throw new Error("finalization should not read full metric result payloads");
+    }
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
   backend.readActiveRosterSnapshot_ = () => {
     activePayloadReads++;
     throw new Error("finalization should not read the active payload");
@@ -1209,6 +1324,7 @@ test("queue finalization uses source version guard without reading the active pa
 
   assert.equal(result.status, "completed");
   assert.equal(activePayloadReads, 0);
+  assert.equal(targetRosterReads, 0);
   assert.equal(backend.readPublishedActiveVersionId_(), runId);
 });
 

@@ -415,6 +415,7 @@ const buildSeasonEventLeaderboardRosterData = () => ({
           leagueTier: { id: 105000035 },
         },
         trophyHistoryDaily: [
+          { dayKey: "2026-05-19", capturedAt: "2026-05-19T15:00:00.000Z", trophies: 6100, league: { name: "Legend League" }, leagueTier: { id: 105000036 } },
           { dayKey: "2026-05-20", capturedAt: "2026-05-20T15:00:00.000Z", trophies: 6000, league: { name: "Legend League" }, leagueTier: { id: 105000035 } },
         ],
       },
@@ -1302,10 +1303,12 @@ test("season event leaderboards score push and donation events from event-cycle 
   assert.equal(push.leaderboard[0].score, 5200);
   assert.equal(push.leaderboard[0].scoreLabel, "Legends I - 5200 trophies");
   assert.equal(push.leaderboard[0].metric, "leagueTrophies");
+  assert.equal(push.leaderboard[0].currentLeagueName, "Legends I");
   assert.equal(push.leaderboard[0].bestLeagueName, "Legends I");
   assert.equal(push.leaderboard[0].hasPushRank, true);
   assert.equal(push.leaderboard[1].displayName, "Delta");
   assert.equal(push.leaderboard[1].score, 6000);
+  assert.equal(push.leaderboard[1].currentLeagueName, "Legends II");
   assert.equal(push.leaderboard[1].bestLeagueName, "Legends II");
   assert.equal(push.leaderboard[2].displayName, "Bravo");
   assert.equal(push.leaderboard[2].score, 5600);

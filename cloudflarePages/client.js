@@ -5624,7 +5624,8 @@
         const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
         if (!metricsEntry) {
             const fallbackLeagueSort = parseLeaderboardLeagueSortKey(account.leagueName);
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-player-metrics"], currentTrophies: 0, bestTrophies: 0, bestLeagueName: toStr(account.leagueName).trim(), bestLeagueSort: fallbackLeagueSort, hasPushRank: false };
+            const fallbackLeagueName = toStr(account.leagueName).trim();
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-player-metrics"], currentTrophies: 0, bestTrophies: 0, currentLeagueName: fallbackLeagueName, currentLeagueSort: fallbackLeagueSort, currentCapturedAt: "", bestLeagueName: fallbackLeagueName, bestLeagueSort: fallbackLeagueSort, bestCapturedAt: "", hasPushRank: false };
         }
         const startsMs = parseTimeMs(event.startsAt);
         const endsMs = parseTimeMs(event.endsAt);
@@ -5636,31 +5637,41 @@
             const fallbackDescriptor = resolveLeaderboardLeagueDescriptorFromSnapshot(latest);
             if (!fallbackDescriptor.name && account.leagueName) fallbackDescriptor.name = toStr(account.leagueName).trim();
             const fallbackLeagueSort = parseLeaderboardLeagueSortKey(fallbackDescriptor);
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-trophy-history"], currentTrophies: 0, bestTrophies: 0, bestLeagueName: toStr(fallbackDescriptor.name).trim(), bestLeagueSort: fallbackLeagueSort, hasPushRank: false };
+            const fallbackLeagueName = toStr(fallbackDescriptor.name).trim();
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "no-history", warnings: ["missing-trophy-history"], currentTrophies: 0, bestTrophies: 0, currentLeagueName: fallbackLeagueName, currentLeagueSort: fallbackLeagueSort, currentCapturedAt: "", bestLeagueName: fallbackLeagueName, bestLeagueSort: fallbackLeagueSort, bestCapturedAt: "", hasPushRank: false };
         }
-        let current = null;
-        let bestPoint = null;
+        // Push standings use the latest captured point in the event window, not the season peak.
+        let currentPoint = null;
         for (let i = 0; i < points.length; i++) {
             const point = points[i];
-            if (point.capturedMs >= startsMs && point.capturedMs <= effectiveEndMs && isBetterSeasonEventPushRankPoint(point, bestPoint)) bestPoint = point;
-            if (point.capturedMs <= effectiveEndMs) current = point;
+            if (point.capturedMs < startsMs || point.capturedMs > effectiveEndMs) continue;
+            if (
+                !currentPoint ||
+                point.capturedMs > currentPoint.capturedMs ||
+                (point.capturedMs === currentPoint.capturedMs && isBetterSeasonEventPushRankPoint(point, currentPoint))
+            ) {
+                currentPoint = point;
+            }
         }
         const warnings = [];
-        if (!bestPoint) {
+        if (!currentPoint) {
             addSeasonEventWarning(warnings, "missing-current");
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-current", warnings: warnings, currentTrophies: 0, bestTrophies: 0, bestLeagueName: "", bestLeagueSort: parseLeaderboardLeagueSortKey(""), hasPushRank: false };
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-current", warnings: warnings, currentTrophies: 0, bestTrophies: 0, currentLeagueName: "", currentLeagueSort: parseLeaderboardLeagueSortKey(""), currentCapturedAt: "", bestLeagueName: "", bestLeagueSort: parseLeaderboardLeagueSortKey(""), bestCapturedAt: "", hasPushRank: false };
         }
         return {
-            score: bestPoint.trophies,
+            score: currentPoint.trophies,
             startValue: 0,
-            currentValue: bestPoint.trophies,
+            currentValue: currentPoint.trophies,
             coverage: "full",
             warnings: warnings,
-            currentTrophies: current ? current.trophies : 0,
-            bestTrophies: bestPoint.trophies,
-            bestLeagueName: toStr(bestPoint.leagueName).trim(),
-            bestLeagueSort: bestPoint.leagueSort && typeof bestPoint.leagueSort === "object" ? bestPoint.leagueSort : parseLeaderboardLeagueSortKey(""),
-            bestCapturedAt: bestPoint.capturedMs > 0 ? new Date(bestPoint.capturedMs).toISOString() : "",
+            currentTrophies: currentPoint.trophies,
+            bestTrophies: currentPoint.trophies,
+            currentLeagueName: toStr(currentPoint.leagueName).trim(),
+            currentLeagueSort: currentPoint.leagueSort && typeof currentPoint.leagueSort === "object" ? currentPoint.leagueSort : parseLeaderboardLeagueSortKey(""),
+            currentCapturedAt: currentPoint.capturedMs > 0 ? new Date(currentPoint.capturedMs).toISOString() : "",
+            bestLeagueName: toStr(currentPoint.leagueName).trim(),
+            bestLeagueSort: currentPoint.leagueSort && typeof currentPoint.leagueSort === "object" ? currentPoint.leagueSort : parseLeaderboardLeagueSortKey(""),
+            bestCapturedAt: currentPoint.capturedMs > 0 ? new Date(currentPoint.capturedMs).toISOString() : "",
             hasPushRank: true,
         };
     };
@@ -5713,12 +5724,17 @@
             bestTrophies: toNonNegativeInt(score.bestTrophies),
         };
         if (type === "push") {
-            out.bestLeagueName = toStr(score.bestLeagueName).trim();
-            out.bestLeagueRank = Number.isFinite(Number(score.bestLeagueSort && score.bestLeagueSort.rank)) ? Number(score.bestLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
-            out.bestLeagueLabel = toStr((score.bestLeagueSort && score.bestLeagueSort.tierLabel) || score.bestLeagueName).trim();
-            out.bestCapturedAt = toStr(score.bestCapturedAt).trim();
+            out.currentLeagueName = toStr(score.currentLeagueName).trim();
+            out.currentLeagueRank = Number.isFinite(Number(score.currentLeagueSort && score.currentLeagueSort.rank)) ? Number(score.currentLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
+            out.currentLeagueLabel = toStr((score.currentLeagueSort && score.currentLeagueSort.tierLabel) || score.currentLeagueName).trim();
+            out.currentCapturedAt = toStr(score.currentCapturedAt).trim();
+            out.bestLeagueName = out.currentLeagueName;
+            out.bestLeagueRank = out.currentLeagueRank;
+            out.bestLeagueLabel = out.currentLeagueLabel;
+            out.bestCapturedAt = out.currentCapturedAt;
             out.hasPushRank = score.hasPushRank === true;
-            out.bestLeagueSort = score.bestLeagueSort && typeof score.bestLeagueSort === "object" ? score.bestLeagueSort : parseLeaderboardLeagueSortKey("");
+            out.currentLeagueSort = score.currentLeagueSort && typeof score.currentLeagueSort === "object" ? score.currentLeagueSort : parseLeaderboardLeagueSortKey("");
+            out.bestLeagueSort = out.currentLeagueSort;
         }
         return out;
     };
@@ -5741,8 +5757,9 @@
             let score = 0;
             let currentTrophies = 0;
             let bestTrophies = 0;
-            let bestLeagueName = "";
-            let bestLeagueSort = parseLeaderboardLeagueSortKey("");
+            let currentLeagueName = "";
+            let currentLeagueSort = parseLeaderboardLeagueSortKey("");
+            let currentCapturedAt = "";
             let hasPushRank = false;
             for (let j = 0; j < accountsRaw.length; j++) {
                 const account = calculateSeasonEventAccountBreakdown(event, data, accountsRaw[j], nowMs);
@@ -5750,17 +5767,18 @@
                 accounts.push(account);
                 if (type === "push") {
                     const candidate = {
-                        trophies: account.bestTrophies,
-                        leagueSort: account.bestLeagueSort,
-                        capturedMs: parseTimeMs(account.bestCapturedAt),
+                        trophies: account.currentTrophies,
+                        leagueSort: account.currentLeagueSort,
+                        capturedMs: parseTimeMs(account.currentCapturedAt),
                     };
-                    const currentBest = hasPushRank ? { trophies: bestTrophies, leagueSort: bestLeagueSort, capturedMs: 0 } : null;
+                    const currentBest = hasPushRank ? { trophies: currentTrophies, leagueSort: currentLeagueSort, capturedMs: parseTimeMs(currentCapturedAt) } : null;
                     if (account.hasPushRank && isBetterSeasonEventPushRankPoint(candidate, currentBest)) {
                         score = account.score;
                         currentTrophies = account.currentTrophies;
-                        bestTrophies = account.bestTrophies;
-                        bestLeagueName = account.bestLeagueName;
-                        bestLeagueSort = account.bestLeagueSort;
+                        bestTrophies = account.currentTrophies;
+                        currentLeagueName = account.currentLeagueName;
+                        currentLeagueSort = account.currentLeagueSort;
+                        currentCapturedAt = account.currentCapturedAt;
                         hasPushRank = true;
                     }
                 } else {
@@ -5778,7 +5796,7 @@
                 discordUsername: toStr(participant.discordUsername).trim(),
                 accounts: accounts,
                 score: score,
-                scoreLabel: type === "push" ? buildSeasonEventPushScoreLabel(score, bestLeagueSort, bestLeagueName) : (formatNumber(score) + " donations"),
+                scoreLabel: type === "push" ? buildSeasonEventPushScoreLabel(score, currentLeagueSort, currentLeagueName) : (formatNumber(score) + " donations"),
                 metric: type === "push" ? "leagueTrophies" : "donations",
                 coverage: accounts.some((account) => account.coverage !== "full") ? "partial" : "full",
                 warnings: warnings,
@@ -5787,8 +5805,8 @@
                     currentTrophies: currentTrophies,
                     bestTrophies: bestTrophies,
                     hasPushRank: hasPushRank,
-                    leagueRank: Number.isFinite(Number(bestLeagueSort && bestLeagueSort.rank)) ? Number(bestLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK,
-                    leagueLabel: toStr((bestLeagueSort && bestLeagueSort.tierLabel) || bestLeagueName).trim().toLowerCase(),
+                    leagueRank: Number.isFinite(Number(currentLeagueSort && currentLeagueSort.rank)) ? Number(currentLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK,
+                    leagueLabel: toStr((currentLeagueSort && currentLeagueSort.tierLabel) || currentLeagueName).trim().toLowerCase(),
                     displayName: displayName.toLowerCase(),
                     firstTag: firstTag,
                 },
@@ -5796,9 +5814,14 @@
             if (type === "push") {
                 row.currentTrophies = currentTrophies;
                 row.bestTrophies = bestTrophies;
-                row.bestLeagueName = bestLeagueName;
-                row.bestLeagueRank = Number.isFinite(Number(bestLeagueSort && bestLeagueSort.rank)) ? Number(bestLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
-                row.bestLeagueLabel = toStr((bestLeagueSort && bestLeagueSort.tierLabel) || bestLeagueName).trim();
+                row.currentLeagueName = currentLeagueName;
+                row.currentLeagueRank = Number.isFinite(Number(currentLeagueSort && currentLeagueSort.rank)) ? Number(currentLeagueSort.rank) : LEADERBOARD_LEAGUE_FALLBACK_RANK;
+                row.currentLeagueLabel = toStr((currentLeagueSort && currentLeagueSort.tierLabel) || currentLeagueName).trim();
+                row.currentCapturedAt = currentCapturedAt;
+                row.bestLeagueName = currentLeagueName;
+                row.bestLeagueRank = row.currentLeagueRank;
+                row.bestLeagueLabel = row.currentLeagueLabel;
+                row.bestCapturedAt = currentCapturedAt;
                 row.hasPushRank = hasPushRank;
             }
             rows.push(row);
@@ -5807,7 +5830,6 @@
             if (type === "push") {
                 if (left._sort.hasPushRank !== right._sort.hasPushRank) return left._sort.hasPushRank ? -1 : 1;
                 if (left._sort.leagueRank !== right._sort.leagueRank) return left._sort.leagueRank - right._sort.leagueRank;
-                if (left._sort.bestTrophies !== right._sort.bestTrophies) return right._sort.bestTrophies - left._sort.bestTrophies;
                 if (left._sort.currentTrophies !== right._sort.currentTrophies) return right._sort.currentTrophies - left._sort.currentTrophies;
             } else {
                 if (left.score !== right.score) return right.score - left.score;

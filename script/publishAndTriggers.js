@@ -505,6 +505,67 @@ function writeAutoRefreshRunShard_(runIdRaw, childPathRaw, valueRaw, methodRaw) 
 	return firebaseRequestJson_(buildAutoRefreshRunPath_(runIdRaw, childPathRaw), method, encodeFirebaseObjectKeysRecursive_(valueRaw));
 }
 
+// Read only the source fields the coordinator needs when the active payload is
+// already published as immutable version shards. Full playerMetrics stay out of
+// this phase and are copied by bounded worker tasks.
+function readAutoRefreshCoordinatorSourceSnapshot_() {
+	const versionId = readPublishedActiveVersionId_();
+	if (versionId) {
+		try {
+			const encodedManifest = firebaseRequestJson_(buildActiveVersionPath_(versionId, "manifest"), "GET");
+			const encodedRosters = firebaseRequestJson_(buildActiveVersionPath_(versionId, "rosters"), "GET");
+			if (!encodedManifest || typeof encodedManifest !== "object" || Array.isArray(encodedManifest)) {
+				throw new Error("Missing active version manifest for " + versionId + ".");
+			}
+			if (!encodedRosters || typeof encodedRosters !== "object" || Array.isArray(encodedRosters)) {
+				throw new Error("Missing active version rosters for " + versionId + ".");
+			}
+			const manifest = decodeFirebaseObjectKeysRecursive_(encodedManifest);
+			const rosterMap = decodeFirebaseObjectKeysRecursive_(encodedRosters);
+			const rosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : Object.keys(rosterMap);
+			const rosters = [];
+			for (let i = 0; i < rosterIds.length; i++) {
+				const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
+				if (!rosterId) continue;
+				const roster = rosterMap[rosterId] && typeof rosterMap[rosterId] === "object" ? rosterMap[rosterId] : null;
+				if (!roster) throw new Error("Missing active version roster shard '" + rosterId + "' for " + versionId + ".");
+				rosters.push(roster);
+			}
+			const sourceLastUpdatedAt = String(manifest.lastUpdatedAt || manifest.publishedAt || "");
+			const sourcePayload = {
+				schemaVersion: typeof manifest.schemaVersion === "number" && isFinite(manifest.schemaVersion) ? manifest.schemaVersion : 1,
+				pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
+				rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder : rosterIds,
+				rosters: rosters,
+				playerMetrics: createEmptyPlayerMetricsStore_(),
+				lastUpdatedAt: sourceLastUpdatedAt,
+			};
+			if (manifest.publicConfig && typeof manifest.publicConfig === "object") sourcePayload.publicConfig = manifest.publicConfig;
+			const rosterData = validateRosterData_(sourcePayload);
+			return {
+				rosterData: rosterData,
+				versionId: versionId,
+				manifest: manifest,
+				source: "firebase:/activeVersions/" + versionId + " (coordinator-light)",
+				sourceFingerprint: String(manifest.sourceFingerprint || ("version:" + versionId + ":" + String(manifest.publishedAt || ""))),
+				sourceMetricsLoaded: false,
+			};
+		} catch (err) {
+			Logger.log("Unable to read lightweight active version source '%s'; falling back to full active snapshot: %s", versionId, errorMessage_(err));
+		}
+	}
+	const snapshot = readActiveRosterSnapshot_();
+	return {
+		rosterData: snapshot && snapshot.rosterData,
+		text: snapshot && snapshot.text,
+		versionId: normalizeActiveVersionId_(snapshot && snapshot.versionId),
+		manifest: snapshot && snapshot.manifest,
+		source: snapshot && snapshot.source,
+		sourceFingerprint: "",
+		sourceMetricsLoaded: true,
+	};
+}
+
 // Read a task record.
 function readAutoRefreshTask_(runIdRaw, taskIdRaw) {
 	const taskId = String(taskIdRaw == null ? "" : taskIdRaw).trim();
@@ -522,12 +583,41 @@ function writeAutoRefreshTask_(runIdRaw, taskRaw) {
 	return task;
 }
 
-// Build the queue tasks for one run. One bounded roster task runs the existing
-// single-roster pipeline; the final task validates shards and publishes the version pointer.
-function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw) {
+// Build the queue tasks for one run. Optional metric-copy chunks stage source
+// metrics before roster tasks patch their refreshed entries.
+function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const runId = normalizeActiveVersionId_(runIdRaw);
 	const rosterIds = Array.isArray(rosterIdsRaw) ? rosterIdsRaw : [];
 	const tasks = [];
+	const metricCopyKeysRaw = Array.isArray(options.metricCopyKeys) ? options.metricCopyKeys : [];
+	const metricCopyKeys = [];
+	const metricCopySeen = {};
+	for (let i = 0; i < metricCopyKeysRaw.length; i++) {
+		const key = String(metricCopyKeysRaw[i] == null ? "" : metricCopyKeysRaw[i]).trim();
+		if (!key || metricCopySeen[key]) continue;
+		metricCopySeen[key] = true;
+		metricCopyKeys.push(key);
+	}
+	const copyLimit = Math.max(1, toNonNegativeInt_(options.metricCopyTaskTagLimit || AUTO_REFRESH_METRIC_COPY_TASK_TAG_LIMIT));
+	for (let i = 0; i < metricCopyKeys.length; i += copyLimit) {
+		const chunkIndex = Math.floor(i / copyLimit) + 1;
+		tasks.push({
+			taskId: buildAutoRefreshTaskId_(tasks.length, "metricCopy", String(chunkIndex)),
+			runId: runId,
+			type: "metricCopy",
+			status: "pending",
+			rosterId: "",
+			metricKeys: metricCopyKeys.slice(i, i + copyLimit),
+			index: tasks.length,
+			attempts: 0,
+			startedAt: "",
+			updatedAt: "",
+			completedAt: "",
+			error: "",
+			summary: "",
+		});
+	}
 	for (let i = 0; i < rosterIds.length; i++) {
 		const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
 		if (!rosterId) continue;
@@ -584,7 +674,10 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const runPlan = runPlanRaw && typeof runPlanRaw === "object" ? runPlanRaw : {};
 	const sourceVersionId = normalizeActiveVersionId_(sourceVersionIdRaw);
+	const runId = normalizeActiveVersionId_(runIdRaw);
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const sourceCounts = countRosterPayload_(rosterData);
+	const sourceMetrics = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : createEmptyPlayerMetricsStore_();
 	const connectedClanTagByRosterId = {};
 	const connectedRosterIds = [];
 	for (let i = 0; i < rosters.length; i++) {
@@ -596,7 +689,7 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		connectedRosterIds.push(rosterId);
 	}
 	const meta = {
-		runId: normalizeActiveVersionId_(runIdRaw),
+		runId: runId,
 		schemaVersion: typeof rosterData.schemaVersion === "number" && isFinite(rosterData.schemaVersion) ? rosterData.schemaVersion : 1,
 		pageTitle: typeof rosterData.pageTitle === "string" ? rosterData.pageTitle : "",
 		rosterOrder: Array.isArray(rosterData.rosterOrder) ? rosterData.rosterOrder.slice() : [],
@@ -606,7 +699,15 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		sourceFingerprint: String(sourceFingerprintRaw || ""),
 		sourceVersionId: sourceVersionId,
 		sourceShardMode: sourceVersionId ? "activeVersion" : "runCopy",
+		metricResultMode: "activeVersionPatches",
+		metricCopyMode: sourceVersionId ? "sourceVersionChunks" : "runSourceCopy",
+		metricCopyKeyCount: toNonNegativeInt_(runPlan.metricCopyKeyCount),
+		playerMetricsStagedVersionId: runId,
 		sourceLastUpdatedAt: String(rosterData.lastUpdatedAt || ""),
+		sourceRosterCount: rosters.length,
+		sourcePlayerCount: sourceCounts.playerCount,
+		sourceNoteCount: sourceCounts.noteCount,
+		sourceMetricEntryCount: countPlayerMetricsEntries_(sourceMetrics),
 		createdAt: new Date().toISOString(),
 	};
 	if (rosterData.publicConfig && typeof rosterData.publicConfig === "object") meta.publicConfig = rosterData.publicConfig;
@@ -743,6 +844,11 @@ function writeAutoRefreshRunSourceShards_(runIdRaw, rosterDataRaw, sourceFingerp
 		}),
 	});
 	const sourceMetrics = source.playerMetrics && typeof source.playerMetrics === "object" ? source.playerMetrics : createEmptyPlayerMetricsStore_();
+	writes.push({
+		path: buildActiveVersionPath_(runIdRaw, "playerMetrics"),
+		method: "PUT",
+		payload: encodeFirebaseObjectKeysRecursive_(sanitizePlayerMetricsStore_(sourceMetrics, source.lastUpdatedAt || new Date().toISOString())),
+	});
 	if (!sourceVersionId) {
 		writes.push({
 			path: buildAutoRefreshRunPath_(runIdRaw, "source/playerMetrics"),
@@ -811,6 +917,115 @@ function readAutoRefreshSourceMetricEntriesForTags_(runIdRaw, tagsRaw, sourceVer
 		? buildActiveVersionPath_(sourceVersionId, "playerMetrics/byTag")
 		: buildAutoRefreshRunPath_(runIdRaw, "source/playerMetrics/byTag");
 	return readAutoRefreshSourceEntriesForTags_(runIdRaw, basePath, tagsRaw);
+}
+
+// List encoded player-metric child keys from an immutable source version without
+// downloading the metric entries themselves.
+function listAutoRefreshSourceMetricKeys_(sourceVersionIdRaw) {
+	const sourceVersionId = normalizeActiveVersionId_(sourceVersionIdRaw);
+	if (!sourceVersionId) return [];
+	return listFirebaseChildKeys_(buildActiveVersionPath_(sourceVersionId, "playerMetrics/byTag"));
+}
+
+// Copy a bounded metric-key chunk from the source active version into this run's
+// target active version.
+function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMsRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	const runId = current && current.runId;
+	const sourceVersionId = normalizeActiveVersionId_(current && current.sourceVersionId);
+	const taskId = String(task.taskId || "").trim();
+	const taskStartMs = Date.now();
+	if (!runId || !taskId) throw new Error("Auto-refresh metric copy task is missing runId or taskId.");
+	if (isAutoRefreshTaskResultComplete_(runId, task)) {
+		Logger.log(
+			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
+			runId,
+			taskId,
+			"",
+			"metricCopy",
+			0,
+			0,
+			0,
+			Math.max(0, Date.now() - taskStartMs),
+			getAutoRefreshJobRemainingMs_(executionStartMsRaw),
+			"resultExists",
+		);
+		return { skipped: true, reason: "resultExists", copiedCount: 0 };
+	}
+	const metricKeysRaw = Array.isArray(task.metricKeys) ? task.metricKeys : [];
+	const metricKeys = [];
+	const seen = {};
+	for (let i = 0; i < metricKeysRaw.length; i++) {
+		const key = String(metricKeysRaw[i] == null ? "" : metricKeysRaw[i]).trim();
+		if (!key || seen[key]) continue;
+		seen[key] = true;
+		metricKeys.push(key);
+	}
+	const fetchStartMs = Date.now();
+	let encodedByPath = {};
+	const sourcePathByKey = {};
+	const sourcePaths = [];
+	if (sourceVersionId && metricKeys.length) {
+		for (let i = 0; i < metricKeys.length; i++) {
+			const path = buildActiveVersionPath_(sourceVersionId, "playerMetrics/byTag/" + metricKeys[i]);
+			sourcePathByKey[metricKeys[i]] = path;
+			sourcePaths.push(path);
+		}
+		encodedByPath = firebaseBatchGetJson_(sourcePaths);
+	}
+	const fetchMs = Math.max(0, Date.now() - fetchStartMs);
+	const writeStartMs = Date.now();
+	const writes = [];
+	let copiedCount = 0;
+	let missingCount = 0;
+	for (let i = 0; i < metricKeys.length; i++) {
+		const key = metricKeys[i];
+		const payload = encodedByPath[sourcePathByKey[key]];
+		if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+			missingCount++;
+			continue;
+		}
+		writes.push({
+			path: buildActiveVersionPath_(runId, "playerMetrics/byTag/" + key),
+			method: "PUT",
+			payload: payload,
+		});
+		copiedCount++;
+	}
+	if (missingCount > 0) {
+		throw new Error("Auto-refresh metric copy missing " + missingCount + " source metric entr" + (missingCount === 1 ? "y" : "ies") + " for task " + taskId + ".");
+	}
+	writes.push({
+		path: buildAutoRefreshRunPath_(runId, "metricCopies/" + encodeFirebaseObjectKey_(taskId)),
+		method: "PUT",
+		payload: encodeFirebaseObjectKeysRecursive_({
+			taskId: taskId,
+			sourceVersionId: sourceVersionId,
+			requestedCount: metricKeys.length,
+			copiedCount: copiedCount,
+			missingCount: missingCount,
+			writtenAt: new Date().toISOString(),
+		}),
+	});
+	firebaseBatchPutJson_(writes);
+	const shardWriteMs = Math.max(0, Date.now() - writeStartMs);
+	const totalMs = Math.max(0, Date.now() - taskStartMs);
+	Logger.log(
+		"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s copied=%s missing=%s",
+		runId,
+		taskId,
+		"",
+		"metricCopy",
+		fetchMs,
+		0,
+		shardWriteMs,
+		totalMs,
+		getAutoRefreshJobRemainingMs_(executionStartMsRaw),
+		copiedCount,
+		missingCount,
+	);
+	return { copiedCount: copiedCount, missingCount: missingCount, totalMs: totalMs };
 }
 
 // Read source roster seed players for only live clan tags in this task.
@@ -930,6 +1145,54 @@ function buildRosterMetricResult_(workingRosterDataRaw, capturedTagsRaw, capture
 	};
 }
 
+// Build active-version metric entry writes from a roster task result.
+function buildActiveVersionPlayerMetricEntryWrites_(runIdRaw, metricResultRaw, writtenAtRaw) {
+	const metricResult = metricResultRaw && typeof metricResultRaw === "object" ? metricResultRaw : {};
+	const resultByTag = metricResult.byTag && typeof metricResult.byTag === "object" ? metricResult.byTag : {};
+	const writtenAt = String(writtenAtRaw || new Date().toISOString());
+	const sanitizedStore = sanitizePlayerMetricsStore_({ byTag: resultByTag, updatedAt: writtenAt }, writtenAt);
+	const byTag = sanitizedStore.byTag && typeof sanitizedStore.byTag === "object" ? sanitizedStore.byTag : {};
+	const keys = Object.keys(byTag);
+	const writes = [];
+	const tags = [];
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag) continue;
+		tags.push(tag);
+		writes.push({
+			path: buildActiveVersionPath_(runIdRaw, "playerMetrics/byTag/" + encodeFirebaseObjectKey_(tag)),
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_(byTag[keys[i]]),
+		});
+	}
+	return {
+		writes: writes,
+		tags: tags,
+		entryCount: tags.length,
+	};
+}
+
+// Keep per-roster metric result shards small once metric entries are staged in
+// the target active version.
+function buildRosterMetricResultSummary_(metricResultRaw, stagedRaw, writtenAtRaw) {
+	const metricResult = metricResultRaw && typeof metricResultRaw === "object" ? metricResultRaw : {};
+	const staged = stagedRaw && typeof stagedRaw === "object" ? stagedRaw : {};
+	const tagsRaw = Array.isArray(staged.tags) ? staged.tags : [];
+	const tags = [];
+	for (let i = 0; i < tagsRaw.length; i++) {
+		const tag = normalizeTag_(tagsRaw[i]);
+		if (tag) tags.push(tag);
+	}
+	return {
+		metricResultMode: "activeVersionPatches",
+		metricsStaged: true,
+		tags: tags,
+		entryCount: toNonNegativeInt_(staged.entryCount),
+		summary: metricResult.summary && typeof metricResult.summary === "object" ? metricResult.summary : {},
+		writtenAt: String(writtenAtRaw || new Date().toISOString()),
+	};
+}
+
 // Build the roster result shard from a single-roster pipeline output.
 function buildRosterWarResult_(workingRosterDataRaw, rosterIdRaw, pipelineResultRaw, accumulatorRaw, timingsRaw) {
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
@@ -961,6 +1224,12 @@ function buildRosterWarResult_(workingRosterDataRaw, rosterIdRaw, pipelineResult
 function isAutoRefreshTaskResultComplete_(runIdRaw, taskRaw) {
 	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
 	const type = String(task.type || "");
+	if (type === "metricCopy") {
+		const taskId = String(task.taskId || "").trim();
+		if (!taskId) return false;
+		const result = readAutoRefreshRunShard_(runIdRaw, "metricCopies/" + encodeFirebaseObjectKey_(taskId));
+		return !!(result && typeof result === "object");
+	}
 	if (type === "roster") {
 		const rosterId = String(task.rosterId || "").trim();
 		if (!rosterId) return false;
@@ -1102,7 +1371,9 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 	});
 	const activeRoster = findRosterInDataById_(processed.rosterData, rosterId);
 	if (!activeRoster) throw new Error("Active roster shard missing after pipeline: " + rosterId + ".");
-	firebaseBatchPutJson_([
+	const writtenAt = new Date().toISOString();
+	const stagedMetricWrites = buildActiveVersionPlayerMetricEntryWrites_(runId, metricResult, writtenAt);
+	const rosterWrites = [
 		{
 			path: buildActiveVersionPath_(runId, "rosters/" + encodedRosterId),
 			method: "PUT",
@@ -1115,7 +1386,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				rosterId: rosterId,
 				versionId: runId,
 				path: buildActiveVersionPath_(runId, "rosters/" + encodedRosterId),
-				writtenAt: new Date().toISOString(),
+				writtenAt: writtenAt,
 			}),
 		},
 		{
@@ -1123,12 +1394,18 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			method: "PUT",
 			payload: encodeFirebaseObjectKeysRecursive_(warResult),
 		},
+	];
+	for (let i = 0; i < stagedMetricWrites.writes.length; i++) {
+		rosterWrites.push(stagedMetricWrites.writes[i]);
+	}
+	rosterWrites.push(
 		{
 			path: buildAutoRefreshRunPath_(runId, "metricResults/" + encodedRosterId),
 			method: "PUT",
-			payload: encodeFirebaseObjectKeysRecursive_(metricResult),
+			payload: encodeFirebaseObjectKeysRecursive_(buildRosterMetricResultSummary_(metricResult, stagedMetricWrites, writtenAt)),
 		},
-	]);
+	);
+	firebaseBatchPutJson_(rosterWrites);
 	const shardWriteMs = Math.max(0, Date.now() - shardWriteStartMs);
 	const totalMs = Math.max(0, Date.now() - taskStartMs);
 	Logger.log(
@@ -1149,7 +1426,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		rosterId: rosterId,
 		issueCount: Array.isArray(accumulator.issues) ? accumulator.issues.length : 0,
 		issueSummary: buildAutoRefreshIssueSummary_(accumulator.issues),
-		metricTags: metricResult.tags.length,
+		metricTags: stagedMetricWrites.entryCount,
 		totalMs: totalMs,
 	};
 }
@@ -1346,7 +1623,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			return { ok: true, status: "skipped", skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
 		}
 		const sourceReadStartMs = Date.now();
-		const sourceSnapshot = readActiveRosterSnapshot_();
+		const sourceSnapshot = readAutoRefreshCoordinatorSourceSnapshot_();
 		const rosterData = validateRosterData_(sourceSnapshot && sourceSnapshot.rosterData);
 		const sourceVersionId = normalizeActiveVersionId_(sourceSnapshot && sourceSnapshot.versionId);
 		const sourceReadMs = Math.max(0, Date.now() - sourceReadStartMs);
@@ -1354,12 +1631,25 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			return deferFreshAutoRefreshStartForBudget_("sourceReadTooSlowBeforeQueueCreate", startedAt, executionStartMs, AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS);
 		}
 		const fingerprintStartMs = Date.now();
-		const sourceFingerprint = buildActiveRosterSourceFingerprintValidated_(rosterData);
+		const sourceFingerprint = sourceVersionId && sourceSnapshot && sourceSnapshot.sourceFingerprint
+			? String(sourceSnapshot.sourceFingerprint || "")
+			: buildActiveRosterSourceFingerprintValidated_(rosterData);
 		const fingerprintMs = Math.max(0, Date.now() - fingerprintStartMs);
 		const runPlan = buildRefreshAllRosterRunPlan_(rosterData, {
 			allowRegularWarHistoryRepair: false,
 			allowRegularWarProvisionalFallback: false,
 		});
+		let metricCopyKeys = [];
+		let metricKeyReadMs = 0;
+		if (sourceVersionId && !(sourceSnapshot && sourceSnapshot.sourceMetricsLoaded === true)) {
+			const metricKeyReadStartMs = Date.now();
+			metricCopyKeys = listAutoRefreshSourceMetricKeys_(sourceVersionId);
+			metricKeyReadMs = Math.max(0, Date.now() - metricKeyReadStartMs);
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMs, AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS)) {
+				return deferFreshAutoRefreshStartForBudget_("sourceMetricKeysTooSlowBeforeQueueCreate", startedAt, executionStartMs, AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS);
+			}
+		}
+		runPlan.metricCopyKeyCount = metricCopyKeys.length;
 		const ownershipStartMs = Date.now();
 		const sourceOwnershipIndex = collectAutoRefreshSourceOwnershipIndex_(rosterData);
 		const ownershipMs = Math.max(0, Date.now() - ownershipStartMs);
@@ -1369,7 +1659,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 		const runId = createActiveVersionId_("auto-refresh");
 		const shardWriteStartMs = Date.now();
 		const sourceMeta = writeAutoRefreshRunSourceShards_(runId, rosterData, sourceFingerprint, runPlan, sourceOwnershipIndex, sourceVersionId);
-		const tasks = buildAutoRefreshQueueTasks_(runId, runPlan.rosterIds);
+		const tasks = buildAutoRefreshQueueTasks_(runId, runPlan.rosterIds, { metricCopyKeys: metricCopyKeys });
 		const taskIds = writeAutoRefreshQueueTasks_(runId, tasks);
 		const current = writeAutoRefreshQueueCurrent_({
 			runId: runId,
@@ -1401,12 +1691,14 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 		const summary = "Auto-refresh queued: 0/" + runPlan.rosterIds.length + " roster(s) processed.";
 		setAutoRefreshRunResult_("inProgress", summary, "", 0, "", startedAt, new Date().toISOString());
 		Logger.log(
-			"autoRefresh coordinator queued runId=%s rosters=%s tasks=%s sourceReadMs=%s fingerprintMs=%s ownershipMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s sourceFingerprint=%s",
+			"autoRefresh coordinator queued runId=%s rosters=%s tasks=%s metricKeys=%s sourceReadMs=%s fingerprintMs=%s metricKeyReadMs=%s ownershipMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s sourceFingerprint=%s",
 			runId,
 			runPlan.rosterIds.length,
 			taskIds.length,
+			metricCopyKeys.length,
 			sourceReadMs,
 			fingerprintMs,
+			metricKeyReadMs,
 			ownershipMs,
 			shardWriteMs,
 			getAutoRefreshJobElapsedMs_(executionStartMs),
@@ -1442,6 +1734,113 @@ function setAutoRefreshQueueInProgressResult_(currentRaw) {
 	if (!current) return;
 	const summary = "Auto-refresh in progress: processed " + toNonNegativeInt_(current.processedRosters) + "/" + current.rosterIds.length + " roster(s).";
 	setAutoRefreshRunResult_("inProgress", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
+}
+
+// Verify completed result markers for finalization. Staged-metrics runs verify
+// small roster write markers instead of downloading the active roster payloads.
+function verifyAutoRefreshFinalizeResultMarkers_(runIdRaw, rosterIdsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const rosterIds = Array.isArray(rosterIdsRaw) ? rosterIdsRaw : [];
+	const includeActiveRosters = options.includeActiveRosters === true;
+	const verifyPaths = [];
+	const verifyMeta = [];
+	for (let i = 0; i < rosterIds.length; i++) {
+		const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
+		if (!rosterId) continue;
+		const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
+		verifyMeta.push({ rosterId: rosterId, kind: "war" });
+		verifyPaths.push(buildAutoRefreshRunPath_(runIdRaw, "warResults/" + encodedRosterId));
+		verifyMeta.push({ rosterId: rosterId, kind: "metric" });
+		verifyPaths.push(buildAutoRefreshRunPath_(runIdRaw, "metricResults/" + encodedRosterId));
+		verifyMeta.push({ rosterId: rosterId, kind: includeActiveRosters ? "roster" : "rosterWrite" });
+		verifyPaths.push(includeActiveRosters
+			? buildActiveVersionPath_(runIdRaw, "rosters/" + encodedRosterId)
+			: buildAutoRefreshRunPath_(runIdRaw, "rosterWrites/" + encodedRosterId));
+	}
+	const verifyPayloadByPath = firebaseBatchGetJson_(verifyPaths);
+	const activeRosterById = {};
+	const metricResultByRosterId = {};
+	for (let i = 0; i < verifyPaths.length; i++) {
+		const meta = verifyMeta[i] || {};
+		const payload = verifyPayloadByPath[verifyPaths[i]];
+		if (meta.kind === "war") {
+			const warResult = decodeFirebaseObjectKeysRecursive_(payload);
+			if (!warResult || typeof warResult !== "object") {
+				throw new Error("Auto-refresh finalization missing roster result shard: " + meta.rosterId + ".");
+			}
+		} else if (meta.kind === "metric") {
+			const metricResult = decodeFirebaseObjectKeysRecursive_(payload);
+			if (!metricResult || typeof metricResult !== "object") {
+				throw new Error("Auto-refresh finalization missing metric result shard: " + meta.rosterId + ".");
+			}
+			metricResultByRosterId[meta.rosterId] = metricResult;
+		} else if (meta.kind === "rosterWrite") {
+			const rosterWrite = decodeFirebaseObjectKeysRecursive_(payload);
+			if (!rosterWrite || typeof rosterWrite !== "object") {
+				throw new Error("Auto-refresh finalization missing roster write marker: " + meta.rosterId + ".");
+			}
+		} else if (!payload) {
+			throw new Error("Auto-refresh finalization missing active roster shard: " + meta.rosterId + ".");
+		} else {
+			const activeRoster = decodeFirebaseObjectKeysRecursive_(payload);
+			if (activeRoster && typeof activeRoster === "object") activeRosterById[meta.rosterId] = activeRoster;
+		}
+	}
+	return {
+		activeRosterById: activeRosterById,
+		metricResultByRosterId: metricResultByRosterId,
+	};
+}
+
+// Count active-version metric entries using a shallow byTag read.
+function countActiveVersionPlayerMetricEntriesShallow_(versionIdRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	if (!versionId) return 0;
+	const encoded = firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerMetrics/byTag"), "GET", undefined, { shallow: "true" });
+	return encoded && typeof encoded === "object" && !Array.isArray(encoded) ? Object.keys(encoded).length : 0;
+}
+
+// Build a manifest from source metadata without rebuilding the full roster
+// payload. The target active version already contains completed roster shards.
+function buildAutoRefreshActiveVersionManifestFromSourceMeta_(runIdRaw, sourceMetaRaw, rosterIdsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const sourceMeta = sourceMetaRaw && typeof sourceMetaRaw === "object" ? sourceMetaRaw : {};
+	const versionId = normalizeActiveVersionId_(runIdRaw);
+	const rosterIds = Array.isArray(rosterIdsRaw) ? rosterIdsRaw.slice() : [];
+	const publishedAt = String(options.publishedAt || new Date().toISOString());
+	const manifest = {
+		versionId: versionId,
+		status: "published",
+		source: String(options.source == null ? ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH : options.source).trim(),
+		runId: String(options.runId == null ? versionId : options.runId).trim(),
+		publishedAt: publishedAt,
+		schemaVersion: typeof sourceMeta.schemaVersion === "number" && isFinite(sourceMeta.schemaVersion) ? sourceMeta.schemaVersion : 1,
+		pageTitle: typeof sourceMeta.pageTitle === "string" ? sourceMeta.pageTitle : "",
+		rosterOrder: Array.isArray(sourceMeta.rosterOrder) ? sourceMeta.rosterOrder.slice() : rosterIds.slice(),
+		rosterIds: rosterIds,
+		lastUpdatedAt: String(options.lastUpdatedAt || publishedAt),
+		playerMetricsSchemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
+		playerMetricEntryCount: toNonNegativeInt_(options.playerMetricEntryCount),
+		layoutVersion: FIREBASE_LAYOUT_VERSION,
+	};
+	if (sourceMeta.publicConfig && typeof sourceMeta.publicConfig === "object") manifest.publicConfig = sourceMeta.publicConfig;
+	if (options.sourceFingerprint) manifest.sourceFingerprint = String(options.sourceFingerprint || "");
+	return manifest;
+}
+
+// Ensure all metric-copy tasks that precede staged finalization wrote their
+// completion markers.
+function verifyAutoRefreshMetricCopyTasksComplete_(runIdRaw, taskIdsRaw) {
+	const taskIds = Array.isArray(taskIdsRaw) ? taskIdsRaw : [];
+	for (let i = 0; i < taskIds.length; i++) {
+		const taskId = String(taskIds[i] == null ? "" : taskIds[i]).trim();
+		if (!taskId) continue;
+		const task = readAutoRefreshTask_(runIdRaw, taskId);
+		if (!task || String(task.type || "") !== "metricCopy") continue;
+		if (!isAutoRefreshTaskResultComplete_(runIdRaw, task)) {
+			throw new Error("Auto-refresh finalization missing metric copy marker: " + taskId + ".");
+		}
+	}
 }
 
 // Execute finalization task: verify shards, guard source fingerprint, write final
@@ -1494,42 +1893,9 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	}
 	const finalizeStartMs = Date.now();
 	const rosterIds = current.rosterIds;
-	const verifyPaths = [];
-	const verifyMeta = [];
-	for (let i = 0; i < rosterIds.length; i++) {
-		const rosterId = rosterIds[i];
-		const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
-		verifyMeta.push({ rosterId: rosterId, kind: "war" });
-		verifyPaths.push(buildAutoRefreshRunPath_(runId, "warResults/" + encodedRosterId));
-		verifyMeta.push({ rosterId: rosterId, kind: "metric" });
-		verifyPaths.push(buildAutoRefreshRunPath_(runId, "metricResults/" + encodedRosterId));
-		verifyMeta.push({ rosterId: rosterId, kind: "roster" });
-		verifyPaths.push(buildActiveVersionPath_(runId, "rosters/" + encodedRosterId));
-	}
-	const verifyPayloadByPath = firebaseBatchGetJson_(verifyPaths);
-	const activeRosterById = {};
-	const metricResultByRosterId = {};
-	for (let i = 0; i < verifyPaths.length; i++) {
-		const meta = verifyMeta[i] || {};
-		const payload = verifyPayloadByPath[verifyPaths[i]];
-		if (meta.kind === "war") {
-			const warResult = decodeFirebaseObjectKeysRecursive_(payload);
-			if (!warResult || typeof warResult !== "object") {
-				throw new Error("Auto-refresh finalization missing roster result shard: " + meta.rosterId + ".");
-			}
-		} else if (meta.kind === "metric") {
-			const metricResult = decodeFirebaseObjectKeysRecursive_(payload);
-			if (!metricResult || typeof metricResult !== "object") {
-				throw new Error("Auto-refresh finalization missing metric result shard: " + meta.rosterId + ".");
-			}
-			metricResultByRosterId[meta.rosterId] = metricResult;
-		} else if (!payload) {
-			throw new Error("Auto-refresh finalization missing active roster shard: " + meta.rosterId + ".");
-		} else {
-			const activeRoster = decodeFirebaseObjectKeysRecursive_(payload);
-			if (activeRoster && typeof activeRoster === "object") activeRosterById[meta.rosterId] = activeRoster;
-		}
-	}
+	const sourceMeta = readAutoRefreshRunShard_(runId, "source/meta");
+	if (!sourceMeta || typeof sourceMeta !== "object") throw new Error("Auto-refresh source metadata is missing.");
+	const stagedMetricsMode = String(sourceMeta.metricResultMode || "") === "activeVersionPatches";
 	let currentSourceSnapshot = null;
 	let sourceReadMs = 0;
 	let currentSourceFingerprint = "";
@@ -1573,11 +1939,102 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		archiveAndClearAutoRefreshQueueStateBestEffort_(current, "stale", summary, summary, "autoRefresh queue stale cleanup");
 		return { ok: true, status: "stale", stale: true, summary: summary, processedRosters: current.processedRosters, issueCount: current.issueCount };
 	}
+	if (stagedMetricsMode) {
+		verifyAutoRefreshMetricCopyTasksComplete_(runId, current.taskIds);
+		verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: false });
+		const writeStartMs = Date.now();
+		const writtenAt = new Date().toISOString();
+		const playerMetricEntryCount = countActiveVersionPlayerMetricEntriesShallow_(runId);
+		const manifest = buildAutoRefreshActiveVersionManifestFromSourceMeta_(runId, sourceMeta, rosterIds, {
+			source: ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH,
+			runId: runId,
+			publishedAt: writtenAt,
+			lastUpdatedAt: writtenAt,
+			playerMetricEntryCount: playerMetricEntryCount,
+			sourceFingerprint: current.sourceFingerprint,
+		});
+		firebaseBatchPutJson_([
+			{
+				path: buildActiveVersionPath_(runId, "playerMetrics/schemaVersion"),
+				method: "PUT",
+				payload: PLAYER_METRICS_SCHEMA_VERSION,
+			},
+			{
+				path: buildActiveVersionPath_(runId, "playerMetrics/updatedAt"),
+				method: "PUT",
+				payload: writtenAt,
+			},
+			{
+				path: buildActiveVersionPath_(runId, "manifest"),
+				method: "PUT",
+				payload: encodeFirebaseObjectKeysRecursive_(manifest),
+			},
+		]);
+		publishActiveRosterVersionPointer_(runId, manifest);
+		clearActiveRosterDataCache_();
+		markActiveDataWriteSuccess_(writtenAt, ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH);
+		const cleanupResult = maybeCleanupOldAutoRefreshDailyArchives_(getServerDateString_(new Date()));
+		const archiveCleanupDeleted = toNonNegativeInt_(cleanupResult && cleanupResult.deletedCount);
+		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+			layoutVersion: FIREBASE_LAYOUT_VERSION,
+			lastAutoRefreshWriteAt: writtenAt,
+			lastAutoRefreshVersionId: runId,
+			lastAutoRefreshArchiveCleanupDeleted: archiveCleanupDeleted,
+		});
+		const writeMs = Math.max(0, Date.now() - writeStartMs);
+		const runResult = {
+			processedRosters: current.processedRosters,
+			rostersWithIssues: current.issueCount > 0 ? 1 : 0,
+			issueCount: current.issueCount,
+			issueSummary: current.issueSummary,
+			issues: [],
+		};
+		const writeResult = {
+			changed: true,
+			written: true,
+			writtenAt: writtenAt,
+			versionPublished: true,
+			versionId: runId,
+			rosterCount: rosterIds.length,
+			playerCount: toNonNegativeInt_(sourceMeta.sourcePlayerCount),
+			noteCount: toNonNegativeInt_(sourceMeta.sourceNoteCount),
+			archiveCreated: false,
+			archiveDate: "",
+			archiveCleanupDeleted: archiveCleanupDeleted,
+		};
+		const summary = buildAutoRefreshFinalSummary_(runResult, writeResult);
+		setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
+		tryReconcileCurrentSeasonEventsForAutoRefresh_();
+		current.status = "completed";
+		current.phase = "completed";
+		current.completedAt = new Date().toISOString();
+		current.processedTasks = current.taskCount;
+		Logger.log(
+			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s processMs=%s writeMs=%s totalMs=%s remainingMs=%s changed=%s stagedMetrics=true metricEntries=%s",
+			runId,
+			String(task.taskId || ""),
+			"",
+			"finalize",
+			sourceReadMs,
+			fingerprintMs,
+			writeMs,
+			Math.max(0, Date.now() - finalizeStartMs),
+			getAutoRefreshJobRemainingMs_(executionStartMsRaw),
+			true,
+			playerMetricEntryCount,
+		);
+		archiveAndClearAutoRefreshQueueStateBestEffort_(current, "completed", summary, "", "autoRefresh queue completed cleanup");
+		return { ok: true, status: "completed", summary: summary, changed: true, processedRosters: current.processedRosters, issueCount: current.issueCount };
+	}
+	const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: true });
+	const activeRosterById = verifiedResults.activeRosterById;
+	const metricResultByRosterId = verifiedResults.metricResultByRosterId;
 	const writeStartMs = Date.now();
 	const writtenAt = new Date().toISOString();
 	let finalRosterData = buildAutoRefreshFinalRosterDataFromShards_(runId, rosterIds, writtenAt, {
 		activeRosterById: activeRosterById,
 		metricResultByRosterId: metricResultByRosterId,
+		sourceMeta: sourceMeta,
 		sourceVersionId: sourceVersionId,
 	});
 	const sourceRosterData = currentSourceSnapshot && currentSourceSnapshot.rosterData ? currentSourceSnapshot.rosterData : null;
@@ -1745,7 +2202,9 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 		try {
 			result = task.type === "finalize"
 				? executeAutoRefreshFinalizeTask_(current, task, executionStartMs)
-				: executeAutoRefreshRosterTask_(current, task, executionStartMs);
+				: task.type === "metricCopy"
+					? executeAutoRefreshMetricCopyTask_(current, task, executionStartMs)
+					: executeAutoRefreshRosterTask_(current, task, executionStartMs);
 			if (result && result.deferred) {
 				task.status = "pending";
 				task.summary = String(result.reason || "deferred");
