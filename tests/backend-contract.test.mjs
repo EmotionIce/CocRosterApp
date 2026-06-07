@@ -5,18 +5,18 @@ import vm from "node:vm";
 
 const repoRoot = new URL("../", import.meta.url);
 const appScriptFiles = [
-  "script/config.gs",
-  "script/cocApi.gs",
-  "script/rosterDomain.gs",
-  "script/warDomain.gs",
-  "script/firebaseStore.gs",
-  "script/metricsTracking.gs",
-  "script/rosterSchema.gs",
-  "script/refreshEngine.gs",
-  "script/seasonEvents.gs",
-  "script/publishAndTriggers.gs",
-  "script/authAndLocks.gs",
-  "script/adminApi.gs",
+  "script/config.js",
+  "script/cocApi.js",
+  "script/rosterDomain.js",
+  "script/warDomain.js",
+  "script/firebaseStore.js",
+  "script/metricsTracking.js",
+  "script/rosterSchema.js",
+  "script/refreshEngine.js",
+  "script/seasonEvents.js",
+  "script/publishAndTriggers.js",
+  "script/authAndLocks.js",
+  "script/adminApi.js",
 ];
 
 const loadBackend = () => {

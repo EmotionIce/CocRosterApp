@@ -6,13 +6,13 @@ import vm from "node:vm";
 const generatorPath = new URL("../cloudflarePages/generator.js", import.meta.url);
 const generatorCode = fs.readFileSync(generatorPath, "utf8");
 const backendFiles = [
-  "script/config.gs",
-  "script/cocApi.gs",
-  "script/rosterDomain.gs",
-  "script/warDomain.gs",
-  "script/firebaseStore.gs",
-  "script/metricsTracking.gs",
-  "script/rosterSchema.gs",
+  "script/config.js",
+  "script/cocApi.js",
+  "script/rosterDomain.js",
+  "script/warDomain.js",
+  "script/firebaseStore.js",
+  "script/metricsTracking.js",
+  "script/rosterSchema.js",
 ];
 
 const loadGenerator = () => {

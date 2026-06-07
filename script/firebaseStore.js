@@ -506,6 +506,135 @@ function firebaseBatchGetJson_(pathsRaw) {
 	return results;
 }
 
+// Batch Firebase write requests with per-entry fallback to the single-request path.
+function firebaseBatchWriteJson_(entriesRaw) {
+	const input = Array.isArray(entriesRaw) ? entriesRaw : [];
+	const entries = [];
+	for (let i = 0; i < input.length; i++) {
+		const entry = input[i] && typeof input[i] === "object" ? input[i] : {};
+		const path = normalizeFirebasePath_(entry.path);
+		const method = String(entry.method == null ? "PUT" : entry.method).trim().toUpperCase() || "PUT";
+		if (!path || method === "GET") continue;
+		entries.push({
+			path: path,
+			method: method,
+			payload: entry.payload,
+		});
+	}
+	if (!entries.length) return [];
+
+	const fallbackAll = () => {
+		const results = [];
+		for (let i = 0; i < entries.length; i++) {
+			results.push(firebaseRequestJson_(entries[i].path, entries[i].method, entries[i].payload));
+		}
+		return results;
+	};
+	if (typeof UrlFetchApp === "undefined" || !UrlFetchApp || typeof UrlFetchApp.fetchAll !== "function") {
+		return fallbackAll();
+	}
+
+	const config = getFirebaseConfig_();
+	const buildRequests = (forceTokenRefresh) => {
+		const accessToken = getFirebaseAccessToken_(forceTokenRefresh);
+		const requests = [];
+		for (let i = 0; i < entries.length; i++) {
+			const entry = entries[i];
+			const request = {
+				url: appendFirebaseJsonUrlQueryParam_(buildFirebaseJsonUrl_(config.dbUrl, entry.path), "print", "silent"),
+				method: entry.method.toLowerCase(),
+				muteHttpExceptions: true,
+				headers: {
+					Authorization: "Bearer " + accessToken,
+					Accept: "application/json",
+				},
+			};
+			if (entry.payload !== undefined) {
+				request.contentType = "application/json";
+				request.payload = JSON.stringify(entry.payload);
+			}
+			requests.push(request);
+		}
+		return requests;
+	};
+
+	let responses = null;
+	try {
+		responses = UrlFetchApp.fetchAll(buildRequests(false));
+	} catch (err) {
+		Logger.log("Firebase batch write fetchAll failed; falling back to single writes: %s", errorMessage_(err));
+		return fallbackAll();
+	}
+
+	let hasAuthFailure = false;
+	for (let i = 0; i < responses.length; i++) {
+		const code = responses[i] && typeof responses[i].getResponseCode === "function" ? Number(responses[i].getResponseCode()) : 0;
+		if (code === 401 || code === 403) {
+			hasAuthFailure = true;
+			break;
+		}
+	}
+	if (hasAuthFailure) {
+		clearFirebaseAccessTokenCache_();
+		try {
+			responses = UrlFetchApp.fetchAll(buildRequests(true));
+		} catch (err) {
+			Logger.log("Firebase batch write auth retry failed; falling back to single writes: %s", errorMessage_(err));
+			return fallbackAll();
+		}
+	}
+
+	const results = [];
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		try {
+			results.push(parseFirebaseJsonResponse_(responses[i], { method: entry.method, path: entry.path }));
+		} catch (err) {
+			Logger.log("Firebase batch write entry failed path=%s method=%s; falling back to single write: %s", entry.path, entry.method, errorMessage_(err));
+			results.push(firebaseRequestJson_(entry.path, entry.method, entry.payload));
+		}
+	}
+	return results;
+}
+
+// Write multiple exact child paths with one Firebase multi-location PATCH.
+function firebaseBatchPutJson_(entriesRaw) {
+	const input = Array.isArray(entriesRaw) ? entriesRaw : [];
+	const entries = [];
+	for (let i = 0; i < input.length; i++) {
+		const entry = input[i] && typeof input[i] === "object" ? input[i] : {};
+		const path = normalizeFirebasePath_(entry.path);
+		if (!path || entry.payload === undefined) continue;
+		entries.push({
+			path: path,
+			payload: entry.payload,
+		});
+	}
+	if (!entries.length) return null;
+
+	const fallbackAll = () => {
+		const results = [];
+		for (let i = 0; i < entries.length; i++) {
+			results.push(firebaseRequestJson_(entries[i].path, "PUT", entries[i].payload));
+		}
+		return results;
+	};
+	if (typeof UrlFetchApp === "undefined" || !UrlFetchApp || typeof UrlFetchApp.fetch !== "function") {
+		return fallbackAll();
+	}
+
+	const patch = {};
+	for (let i = 0; i < entries.length; i++) {
+		patch[entries[i].path] = entries[i].payload;
+	}
+	try {
+		return firebaseRequestJson_("", "PATCH", patch);
+	} catch (err) {
+		Logger.log("Firebase multi-location PUT failed; falling back to single writes: %s", errorMessage_(err));
+		return fallbackAll();
+	}
+}
+
 // Handle Firebase root request JSON.
 function firebaseRootRequestJson_(methodRaw, payloadRaw) {
 	return firebaseRequestJson_("", methodRaw, payloadRaw);
@@ -1566,7 +1695,7 @@ function createAutoRefreshDailyArchiveIfNeeded_(dateStringRaw, rosterDataRaw) {
 		return { created: false, existed: false, archiveDate: "", key: "" };
 	}
 	const path = buildFirebaseChildPath_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH, archiveDate);
-	const existing = firebaseRequestJson_(path, "GET");
+	const existing = firebaseRequestJson_(path, "GET", undefined, { shallow: "true" });
 	if (existing && typeof existing === "object" && !Array.isArray(existing)) {
 		return { created: false, existed: true, archiveDate: archiveDate, key: archiveDate };
 	}
