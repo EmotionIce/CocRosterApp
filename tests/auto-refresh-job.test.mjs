@@ -1218,7 +1218,7 @@ test("roster queue task writes war and metric shards from clan member data", () 
       trophyHistoryDaily: [],
       donationCycles: [],
     };
-    processed.rosters[0].regularWar = { state: "notInWar" };
+    processed.rosters[0].title = "Main Processed";
     accumulator.perRoster.push({ rosterId: "main", ok: true, issueCount: 0, issues: [] });
     return { rosterData: processed, pipelineResult: { memberTracking: { capturedPlayers: 1 } } };
   };
@@ -1242,8 +1242,60 @@ test("roster queue task writes war and metric shards from clan member data", () 
   assert.equal(metricResult.metricsStaged, true);
   assert.equal(metricResult.entryCount, 1);
   assert.equal(metricResult.tags.join(","), "#PLAYER");
+  assert.equal(backend.readAutoRefreshRunShard_(runId, "rosterWrites/main").playerTags.join(","), "#PLAYER");
   assert.equal(activeMetricEntry.latestSnapshot.trophies, 5000);
-  assert.equal(activeRosterShard.regularWar.state, "notInWar");
+  assert.equal(activeRosterShard.title, "Main Processed");
+});
+
+test("roster queue task defers before pipeline when pre-process reads consume the budget", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  let processCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = () => {
+    processCalls++;
+    throw new Error("pipeline should not start when the worker budget is already low");
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(
+    current,
+    tasks[0],
+    Date.now() - (270 * 1000) + 1000,
+  );
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "beforeRosterProcess");
+  assert.equal(processCalls, 0);
+});
+
+test("roster queue task validates the staged roster shard before writing it", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    const processed = clone(rosterData);
+    processed.rosters[0].main[0].latestSnapshot = { tag: "#PLAYER", trophies: 5000 };
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData: processed,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  assert.throws(
+    () => backend.executeAutoRefreshRosterTask_(current, tasks[0], Date.now()),
+    /metric-like field 'latestSnapshot' is not allowed/,
+  );
+  assert.equal(backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "GET"), null);
+  assert.equal(backend.readAutoRefreshRunShard_("run-1", "rosterWrites/main"), null);
 });
 
 test("queue finalization publishes completed shards through the active version pointer", () => {
@@ -1293,7 +1345,7 @@ test("queue finalization uses source version guard without reading the active pa
   });
   backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.rosters[0]));
-  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId, playerTags: ["#PLAYER"] }, "PUT");
   backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true, issues: [] }, "PUT");
   backend.writeAutoRefreshRunShard_(runId, "metricResults/main", { byTag: {}, tags: [] }, "PUT");
   let activePayloadReads = 0;
@@ -1326,6 +1378,36 @@ test("queue finalization uses source version guard without reading the active pa
   assert.equal(activePayloadReads, 0);
   assert.equal(targetRosterReads, 0);
   assert.equal(backend.readPublishedActiveVersionId_(), runId);
+});
+
+test("queue finalization refuses duplicate player tags before publishing staged active version", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main", "second"],
+    currentTaskIndex: 2,
+    processedTasks: 2,
+    processedRosters: 2,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  for (const roster of data.rosters) {
+    backend.firebaseRequestJson_("activeVersions/run-1/rosters/" + roster.id, "PUT", backend.encodeFirebaseObjectKeysRecursive_(roster));
+    backend.writeAutoRefreshRunShard_(runId, "warResults/" + roster.id, { rosterId: roster.id, rosterShardWritten: true, issues: [] }, "PUT");
+    backend.writeAutoRefreshRunShard_(runId, "metricResults/" + roster.id, { metricsStaged: true, tags: [] }, "PUT");
+  }
+  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId, playerTags: ["#DUP"] }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/second", { rosterId: "second", versionId: runId, playerTags: ["#DUP"] }, "PUT");
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("duplicate marker validation should not read the active payload");
+  };
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+
+  assert.throws(
+    () => backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now()),
+    /Duplicate player tag in output: #DUP/,
+  );
+  assert.equal(backend.readPublishedActiveVersionId_(), "source-1");
 });
 
 test("queue finalization marks stale source version mismatch without reading the active payload", () => {

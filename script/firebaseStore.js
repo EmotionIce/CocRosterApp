@@ -777,6 +777,66 @@ function writeActiveRosterVersionShards_(versionIdRaw, validatedRosterData, opti
 	return { versionId: versionId, manifest: manifest, rosterData: validated };
 }
 
+// Read active-version roster shards. Prefer the roster ids in the small
+// manifest so callers do not have to download the whole /rosters node in one
+// request.
+function readActiveVersionRosterShards_(versionIdRaw, manifestRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	if (!versionId) throw new Error("Active version id is required.");
+	const manifest = manifestRaw && typeof manifestRaw === "object" ? manifestRaw : {};
+	const rosterIdsRaw = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : [];
+	const rosterIds = [];
+	const seen = {};
+	for (let i = 0; i < rosterIdsRaw.length; i++) {
+		const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
+		if (!rosterId || seen[rosterId]) continue;
+		seen[rosterId] = true;
+		rosterIds.push(rosterId);
+	}
+	if (rosterIds.length) {
+		const paths = [];
+		const rosterIdByPath = {};
+		for (let i = 0; i < rosterIds.length; i++) {
+			const path = buildActiveVersionPath_(versionId, "rosters/" + encodeFirebaseObjectKey_(rosterIds[i]));
+			paths.push(path);
+			rosterIdByPath[path] = rosterIds[i];
+		}
+		const encodedByPath = firebaseBatchGetJson_(paths);
+		const rosters = [];
+		const rosterMap = {};
+		for (let i = 0; i < paths.length; i++) {
+			const path = paths[i];
+			const rosterId = rosterIdByPath[path];
+			const encodedRoster = encodedByPath[path];
+			if (!encodedRoster || typeof encodedRoster !== "object" || Array.isArray(encodedRoster)) {
+				throw new Error("Missing active version roster shard '" + rosterId + "' for " + versionId + ".");
+			}
+			const roster = decodeFirebaseObjectKeysRecursive_(encodedRoster);
+			if (!roster || typeof roster !== "object" || Array.isArray(roster)) {
+				throw new Error("Invalid active version roster shard '" + rosterId + "' for " + versionId + ".");
+			}
+			rosters.push(roster);
+			rosterMap[rosterId] = roster;
+		}
+		return { rosterIds: rosterIds, rosters: rosters, rosterMap: rosterMap };
+	}
+	const encodedRosters = firebaseRequestJson_(buildActiveVersionPath_(versionId, "rosters"), "GET");
+	if (!encodedRosters || typeof encodedRosters !== "object" || Array.isArray(encodedRosters)) {
+		throw new Error("Missing active version rosters for " + versionId + ".");
+	}
+	const rosterMap = decodeFirebaseObjectKeysRecursive_(encodedRosters);
+	const fallbackRosterIds = Object.keys(rosterMap);
+	const rosters = [];
+	for (let i = 0; i < fallbackRosterIds.length; i++) {
+		const rosterId = String(fallbackRosterIds[i] == null ? "" : fallbackRosterIds[i]).trim();
+		if (!rosterId) continue;
+		const roster = rosterMap[rosterId] && typeof rosterMap[rosterId] === "object" ? rosterMap[rosterId] : null;
+		if (!roster) throw new Error("Missing active version roster shard '" + rosterId + "' for " + versionId + ".");
+		rosters.push(roster);
+	}
+	return { rosterIds: fallbackRosterIds, rosters: rosters, rosterMap: rosterMap };
+}
+
 // Reconstruct a validated active payload from /activeVersions/{versionId} shards.
 function readActiveRosterSnapshotFromVersion_(versionIdRaw) {
 	const versionId = normalizeActiveVersionId_(versionIdRaw);
@@ -786,20 +846,9 @@ function readActiveRosterSnapshotFromVersion_(versionIdRaw) {
 		throw new Error("Missing active version manifest for " + versionId + ".");
 	}
 	const manifest = decodeFirebaseObjectKeysRecursive_(encodedManifest);
-	const encodedRosters = firebaseRequestJson_(buildActiveVersionPath_(versionId, "rosters"), "GET");
-	if (!encodedRosters || typeof encodedRosters !== "object" || Array.isArray(encodedRosters)) {
-		throw new Error("Missing active version rosters for " + versionId + ".");
-	}
-	const rosterMap = decodeFirebaseObjectKeysRecursive_(encodedRosters);
-	const rosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : Object.keys(rosterMap);
-	const rosters = [];
-	for (let i = 0; i < rosterIds.length; i++) {
-		const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
-		if (!rosterId) continue;
-		const roster = rosterMap[rosterId] && typeof rosterMap[rosterId] === "object" ? rosterMap[rosterId] : null;
-		if (!roster) throw new Error("Missing active version roster shard '" + rosterId + "' for " + versionId + ".");
-		rosters.push(roster);
-	}
+	const rosterShardResult = readActiveVersionRosterShards_(versionId, manifest);
+	const rosterIds = rosterShardResult.rosterIds;
+	const rosters = rosterShardResult.rosters;
 	const encodedPlayerMetrics = firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerMetrics"), "GET");
 	const playerMetrics = encodedPlayerMetrics && typeof encodedPlayerMetrics === "object" && !Array.isArray(encodedPlayerMetrics)
 		? decodeFirebaseObjectKeysRecursive_(encodedPlayerMetrics)

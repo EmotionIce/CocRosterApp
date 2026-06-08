@@ -148,6 +148,15 @@ const installMemoryFirebase = (backend, initial = {}) => {
     }
     throw new Error(`Unsupported Firebase method ${method}`);
   };
+  backend.firebaseBatchGetJson_ = (pathsRaw) => {
+    const paths = Array.isArray(pathsRaw) ? pathsRaw : [];
+    const out = {};
+    for (const pathRaw of paths) {
+      const path = String(pathRaw || "").replace(/^\/+|\/+$/g, "");
+      out[path] = backend.firebaseRequestJson_(path, "GET");
+    }
+    return out;
+  };
   backend.__getFirebaseDb = () => db;
   return backend;
 };
@@ -514,12 +523,26 @@ test("active reader reconstructs the published active version before legacy acti
     source: "test",
   });
   backend.firebaseRequestJson_("active", "PUT", backend.encodeFirebaseObjectKeysRecursive_(legacyData));
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  const reads = [];
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    const path = String(pathRaw || "").replace(/^\/+|\/+$/g, "");
+    const method = String(methodRaw || "GET").toUpperCase();
+    if (method === "GET") reads.push(path);
+    if (method === "GET" && path === "activeVersions/version-1/rosters") {
+      throw new Error("active reader should read roster shards individually");
+    }
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
 
   const snapshot = backend.readActiveRosterSnapshot_();
 
   assert.equal(snapshot.versionId, "version-1");
   assert.equal(snapshot.rosterData.pageTitle, "Versioned Roster");
   assert.equal(snapshot.rosterData.rosters[0].id, "main");
+  assert.ok(reads.includes("activeVersions/version-1/manifest"));
+  assert.ok(reads.includes("activeVersions/version-1/rosters/main"));
+  assert.equal(reads.includes("activeVersions/version-1/rosters"), false);
 });
 
 test("active contract rejects metric-like fields on roster players", () => {
