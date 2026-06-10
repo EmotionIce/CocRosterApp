@@ -2073,6 +2073,7 @@ function calculateSeasonEventAccountLeaderboardScore_(eventRaw, accountRaw, metr
 		startValue: toNonNegativeInt_(score.startValue),
 		currentValue: toNonNegativeInt_(score.currentValue),
 		delta: Number(score.delta) || 0,
+		score: Number(score.score) || 0,
 		coverage: score.coverage,
 		warnings: Array.isArray(score.warnings) ? score.warnings.slice() : [],
 	};

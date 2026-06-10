@@ -18,6 +18,7 @@
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
     const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
     const SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/seasonState/current";
+    const SEASON_EVENT_COLLAPSED_ROW_COUNT = 3;
     const FIREBASE_PUBLIC_SOURCE = "firebase-public";
     const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
@@ -33,6 +34,7 @@
     let searchUiBound = false;
     let publicViewUiBound = false;
     let profileUiBound = false;
+    let seasonEventCardExpandedByType = Object.create(null);
     let globalLastUpdatedTimerId = 0;
     let globalLastUpdatedTimerValue = "";
     let warCountdownTimerId = 0;
@@ -5445,9 +5447,9 @@
         if (startsMs > 0 && endsMs > 0) {
             const start = new Date(startsMs);
             const end = new Date(endsMs);
-            return start.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
-                " - " +
-                end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+            return start.toLocaleDateString("en-GB", { day: "numeric", month: "short" }) +
+                " \u2013 " +
+                end.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
         }
         if (startsMs > 0) return "Starts " + new Date(startsMs).toLocaleDateString();
         if (endsMs > 0) return "Ends " + new Date(endsMs).toLocaleDateString();
@@ -5615,6 +5617,32 @@
         const leagueLabel = leagueName || toStr(leagueSort.tierLabel).trim();
         const trophyLabel = formatNumber(trophies) + " trophies";
         return leagueLabel ? (leagueLabel + " - " + trophyLabel) : trophyLabel;
+    };
+
+    // Format Season Events numbers with stable comma grouping.
+    const formatSeasonEventNumber = (valueRaw) => toNonNegativeInt(valueRaw).toLocaleString("en-US");
+
+    // Format the score shown at the right edge of a season event row.
+    const buildSeasonEventScoreValueLabel = (typeRaw, scoreRaw) => {
+        const type = normalizeSeasonEventType(typeRaw);
+        const score = toNonNegativeInt(scoreRaw);
+        return formatSeasonEventNumber(score) + (type === "push" ? " trophies" : " donations");
+    };
+
+    // Format a compact league badge for season event push rows.
+    const formatSeasonEventLeagueBadgeLabel = (leagueSortRaw, leagueNameRaw) => {
+        const leagueSort = leagueSortRaw && typeof leagueSortRaw === "object" ? leagueSortRaw : {};
+        const family = toStr(leagueSort.family).trim().toLowerCase() || getLeaderboardLeagueFamilyByName(leagueNameRaw);
+        const tierValue = toNonNegativeInt(leagueSort.tierValue);
+        if (family === "legend") {
+            if (tierValue === 36) return "Legend I";
+            if (tierValue === 35) return "Legend II";
+            if (tierValue === 34) return "Legend III";
+            return "Legend";
+        }
+        const tierLabel = toStr(leagueSort.tierLabel).trim();
+        const leagueName = toStr(leagueNameRaw).trim();
+        return tierLabel || leagueName;
     };
 
     // Calculate push event account score.
@@ -5797,6 +5825,8 @@
                 accounts: accounts,
                 score: score,
                 scoreLabel: type === "push" ? buildSeasonEventPushScoreLabel(score, currentLeagueSort, currentLeagueName) : (formatNumber(score) + " donations"),
+                scoreValueLabel: buildSeasonEventScoreValueLabel(type, type === "push" ? currentTrophies : score),
+                leagueBadgeLabel: type === "push" && hasPushRank ? formatSeasonEventLeagueBadgeLabel(currentLeagueSort, currentLeagueName) : "",
                 metric: type === "push" ? "leagueTrophies" : "donations",
                 coverage: accounts.some((account) => account.coverage !== "full") ? "partial" : "full",
                 warnings: warnings,
@@ -5850,6 +5880,19 @@
         };
     };
 
+    // Resolve the shared season events meta line when both cards use the same window.
+    const buildSeasonEventsSharedMetaLine = (cardsRaw) => {
+        const cards = Array.isArray(cardsRaw) ? cardsRaw : [];
+        const availableCards = cards.filter((card) => card && !card.unavailable);
+        if (!availableCards.length || availableCards.length !== cards.length) return "";
+        const dateRange = toStr(availableCards[0].dateRange).trim();
+        if (!dateRange || dateRange === "Season window unavailable") return "";
+        for (let i = 1; i < availableCards.length; i++) {
+            if (toStr(availableCards[i].dateRange).trim() !== dateRange) return "";
+        }
+        return dateRange + " \u00b7 Discord signups";
+    };
+
     // Build public model for current push and donation events.
     const buildSeasonEventsPublicModel = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
@@ -5860,7 +5903,7 @@
             return {
                 type: type,
                 event: event,
-                title: toStr(event && event.title).trim() || (type === "push" ? "Push Event" : "Donation Event"),
+                title: type === "push" ? "Push" : "Donations",
                 status: toStr(event && event.status).trim() || "unavailable",
                 signupsOpen: event && event.signupsOpen === true,
                 dateRange: event ? formatSeasonEventDateRange(event) : "Season window unavailable",
@@ -5870,17 +5913,13 @@
                 unavailable: !event || !toStr(event.eventId).trim() || !bundle.byId[toStr(event.eventId).trim()],
             };
         });
+        const sharedMetaLine = buildSeasonEventsSharedMetaLine(cards);
         return {
             cards: cards,
             loadErrors: bundle.loadErrors,
+            sharedMetaLine: sharedMetaLine,
             unavailable: cards.every((card) => card.unavailable),
         };
-    };
-
-    // Format event type label.
-    const formatSeasonEventTypeLabel = (typeRaw) => {
-        const type = normalizeSeasonEventType(typeRaw);
-        return type === "push" ? "Push Event" : type === "donation" ? "Donation Event" : "Season Event";
     };
 
     // Format event status label.
@@ -5893,12 +5932,40 @@
         return "Unavailable";
     };
 
+    // Format compact card status text.
+    const formatSeasonEventCardStatusLine = (cardRaw) => {
+        const card = cardRaw && typeof cardRaw === "object" ? cardRaw : {};
+        return formatSeasonEventStatusLabel(card.status) +
+            " \u00b7 " +
+            formatSeasonEventNumber(card.activeParticipantCount) +
+            " signed up";
+    };
+
+    // Build a stable state key for one Season Events card.
+    const getSeasonEventCardStateKey = (cardRaw) => {
+        const card = cardRaw && typeof cardRaw === "object" ? cardRaw : {};
+        return normalizeSeasonEventType(card.type) || toStr(card.event && card.event.eventId).trim() || "unknown";
+    };
+
+    // Read whether a Season Events card is expanded.
+    const isSeasonEventCardExpanded = (cardRaw) => seasonEventCardExpandedByType[getSeasonEventCardStateKey(cardRaw)] === true;
+
+    // Set whether a Season Events card is expanded.
+    const setSeasonEventCardExpanded = (cardRaw, expanded) => {
+        const key = getSeasonEventCardStateKey(cardRaw);
+        if (!key) return;
+        seasonEventCardExpandedByType[key] = expanded === true;
+        if (lastRenderedData) render(lastRenderedData);
+    };
+
     // Render one season event leaderboard row.
     const renderSeasonEventLeaderboardRow = (rowRaw, eventTypeRaw) => {
         const row = rowRaw && typeof rowRaw === "object" ? rowRaw : {};
         const eventType = normalizeSeasonEventType(eventTypeRaw);
-        const wrap = el("div", "season-event-row");
-        const rank = el("div", "season-event-row__rank", "#" + toNonNegativeInt(row.rank));
+        const rankNumber = toNonNegativeInt(row.rank);
+        const topRankClass = rankNumber >= 1 && rankNumber <= 3 ? (" season-event-row--top-" + rankNumber) : "";
+        const wrap = el("div", "season-event-row" + topRankClass);
+        const rank = el("div", "season-event-row__rank", "#" + rankNumber);
         const body = el("div", "season-event-row__body");
         body.appendChild(el("div", "season-event-row__name", toStr(row.displayName).trim() || "Unknown player"));
         const accounts = Array.isArray(row.accounts) ? row.accounts : [];
@@ -5907,13 +5974,14 @@
             const tag = toStr(account && account.tag).trim();
             return name && tag && name !== tag ? (name + " " + tag) : (name || tag);
         }).filter((label) => label);
-        body.appendChild(el("div", "season-event-row__accounts", accountLabels.length ? accountLabels.join(" + ") : "No registered account"));
+        const meta = el("div", "season-event-row__meta");
+        const badgeLabel = eventType === "push" ? toStr(row.leagueBadgeLabel).trim() : "";
+        if (badgeLabel) meta.appendChild(el("span", "season-event-row__league-badge", badgeLabel));
+        meta.appendChild(el("span", "season-event-row__accounts", accountLabels.length ? accountLabels.join(" + ") : "No registered account"));
+        body.appendChild(meta);
         const score = el("div", "season-event-row__score");
-        score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreLabel).trim() || (eventType === "push" ? "0 trophies" : "0 donations")));
-        if (eventType === "push" && accounts.length) {
-            const rankedAccount = accounts.find((account) => account && account.hasPushRank) || accounts[0];
-            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(rankedAccount && rankedAccount.currentTrophies) + " current"));
-        } else {
+        score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreValueLabel).trim() || buildSeasonEventScoreValueLabel(eventType, row.score)));
+        if (eventType !== "push") {
             score.appendChild(el("div", "season-event-row__score-sub", accounts.length + " " + pluralize(accounts.length, "account", "accounts")));
         }
         wrap.appendChild(rank);
@@ -5923,26 +5991,21 @@
     };
 
     // Render one season event card.
-    const renderSeasonEventCard = (cardRaw) => {
+    const renderSeasonEventCard = (cardRaw, optionsRaw) => {
         const card = cardRaw && typeof cardRaw === "object" ? cardRaw : {};
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const eventType = normalizeSeasonEventType(card.type);
         const wrap = el("article", "card season-event-card season-event-card--" + (eventType || "unknown"));
         const header = el("div", "season-event-card__header");
         const titleWrap = el("div", "season-event-card__title-wrap");
-        titleWrap.appendChild(el("div", "season-event-card__eyebrow", formatSeasonEventTypeLabel(eventType)));
-        titleWrap.appendChild(el("h3", "season-event-card__title", toStr(card.title).trim() || formatSeasonEventTypeLabel(eventType)));
+        titleWrap.appendChild(el("h3", "season-event-card__title", toStr(card.title).trim() || (eventType === "push" ? "Push" : "Donations")));
         header.appendChild(titleWrap);
-        const status = el("div", "season-event-card__status");
-        status.appendChild(el("span", "badge season-event-chip season-event-chip--status", formatSeasonEventStatusLabel(card.status)));
-        status.appendChild(el("span", "badge season-event-chip " + (card.signupsOpen ? "season-event-chip--open" : "season-event-chip--muted"), card.signupsOpen ? "Signups open" : "Signups closed"));
-        header.appendChild(status);
+        header.appendChild(el("div", "season-event-card__status", formatSeasonEventCardStatusLine(card)));
         wrap.appendChild(header);
 
-        const meta = el("div", "season-event-card__meta");
-        meta.appendChild(el("span", "badge season-event-card__meta-item", toStr(card.dateRange).trim() || "Season window unavailable"));
-        meta.appendChild(el("span", "badge season-event-card__meta-item", formatNumber(card.activeParticipantCount) + " signed up"));
-        wrap.appendChild(meta);
-        wrap.appendChild(el("div", "season-event-card__note", "Signups are handled through Discord."));
+        if (!toStr(options.sharedMetaLine).trim()) {
+            wrap.appendChild(el("div", "season-event-card__meta", (toStr(card.dateRange).trim() || "Season window unavailable") + " \u00b7 Discord signups"));
+        }
 
         const rows = Array.isArray(card.rows) ? card.rows : [];
         if (card.unavailable) {
@@ -5950,9 +6013,18 @@
         } else if (!rows.length) {
             wrap.appendChild(el("div", "season-event-card__empty", "No signed-up players yet."));
         } else {
+            const expanded = isSeasonEventCardExpanded(card);
+            const visibleRows = expanded ? rows : rows.slice(0, SEASON_EVENT_COLLAPSED_ROW_COUNT);
             const list = el("div", "season-event-card__rows");
-            for (let i = 0; i < rows.length; i++) list.appendChild(renderSeasonEventLeaderboardRow(rows[i], eventType));
+            for (let i = 0; i < visibleRows.length; i++) list.appendChild(renderSeasonEventLeaderboardRow(visibleRows[i], eventType));
             wrap.appendChild(list);
+            if (rows.length > SEASON_EVENT_COLLAPSED_ROW_COUNT) {
+                const toggle = el("button", "season-event-card__toggle", expanded ? "Show less" : ("Show all " + formatSeasonEventNumber(rows.length)));
+                toggle.type = "button";
+                toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+                toggle.addEventListener("click", () => setSeasonEventCardExpanded(card, !expanded));
+                wrap.appendChild(toggle);
+            }
         }
         return wrap;
     };
@@ -5963,15 +6035,17 @@
         const section = el("section", "season-events-section");
         const header = el("div", "season-events-section__header");
         const copy = el("div", "season-events-section__copy");
-        copy.appendChild(el("div", "season-events-section__eyebrow", "Current season events"));
-        copy.appendChild(el("h2", "season-events-section__title", "Push and donation events"));
+        copy.appendChild(el("h2", "season-events-section__title", "Season Events"));
+        if (toStr(model.sharedMetaLine).trim()) {
+            copy.appendChild(el("div", "season-events-section__meta", model.sharedMetaLine));
+        }
         header.appendChild(copy);
         if (model.loadErrors.length) {
             header.appendChild(el("div", "season-events-section__status", "Event data unavailable"));
         }
         section.appendChild(header);
         const grid = el("div", "season-events-grid");
-        for (let i = 0; i < model.cards.length; i++) grid.appendChild(renderSeasonEventCard(model.cards[i]));
+        for (let i = 0; i < model.cards.length; i++) grid.appendChild(renderSeasonEventCard(model.cards[i], { sharedMetaLine: model.sharedMetaLine }));
         section.appendChild(grid);
         return section;
     };

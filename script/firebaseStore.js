@@ -1623,7 +1623,16 @@ function updateActiveRosterDataCaches_(text) {
 function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 	const validated = validateRosterData_(validatedRosterData);
 	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
-	firebaseRequestJson_(FIREBASE_ACTIVE_PATH, "PUT", encodedPayload);
+	const activeFields = ["schemaVersion", "pageTitle", "rosterOrder", "rosters", "playerMetrics", "lastUpdatedAt", "publicConfig"];
+	const writes = [];
+	for (let i = 0; i < activeFields.length; i++) {
+		const field = activeFields[i];
+		writes.push({
+			path: buildFirebaseChildPath_(FIREBASE_ACTIVE_PATH, field),
+			payload: Object.prototype.hasOwnProperty.call(encodedPayload, field) ? encodedPayload[field] : null,
+		});
+	}
+	firebaseBatchPutJson_(writes);
 	writeActiveRosterVersionShards_(createActiveVersionId_("active-write"), validated, {
 		publish: true,
 		source: "active-write",

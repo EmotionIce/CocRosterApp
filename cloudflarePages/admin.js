@@ -4680,6 +4680,20 @@
     return wrap;
   };
 
+  const getCwlLeaguePreferenceForTag = (playerTagRaw) => {
+    const tag = normalizeTag(playerTagRaw);
+    if (!tag || !state.lastRosterData || typeof state.lastRosterData !== "object") return null;
+    const signupRoot = state.lastRosterData.cwlLeagueSignups && typeof state.lastRosterData.cwlLeagueSignups === "object"
+      ? state.lastRosterData.cwlLeagueSignups
+      : {};
+    const preferencesByTag = signupRoot.preferencesByTag && typeof signupRoot.preferencesByTag === "object"
+      ? signupRoot.preferencesByTag
+      : {};
+    const pref = preferencesByTag[tag] && typeof preferencesByTag[tag] === "object" ? preferencesByTag[tag] : null;
+    if (!pref || !toStr(pref.leagueName).trim()) return null;
+    return pref;
+  };
+
   // Build player action controls.
   const buildPlayerActionControls = (ctx) => {
     if (!ctx || !ctx.player) return null;
@@ -4729,6 +4743,8 @@
         ? roster.cwlPreparation.clanAbsentTagSet
         : {};
       if (prepActive && clanAbsentTagSet[playerTag]) addSummaryPill("not in clan");
+      const cwlLeaguePreference = prepActive ? getCwlLeaguePreferenceForTag(playerTag) : null;
+      if (cwlLeaguePreference) addSummaryPill("pref " + toStr(cwlLeaguePreference.leagueName).trim());
       if (!prepActive) {
         if (ctx.player.excludeAsSwapTarget) addSummaryPill("swap target off");
         if (ctx.player.excludeAsSwapSource) addSummaryPill("swap source off");
@@ -4805,6 +4821,31 @@
       }
       prepPanel.appendChild(segmented);
       tray.appendChild(prepPanel);
+
+      const cwlLeaguePreference = getCwlLeaguePreferenceForTag(playerTag);
+      if (cwlLeaguePreference) {
+        const signupPanel = document.createElement("div");
+        signupPanel.className = "player-admin-settings cwl-signup-pref-panel";
+
+        const signupTitle = document.createElement("div");
+        signupTitle.className = "player-admin-settings-title";
+        signupTitle.textContent = "CWL signup preference";
+        signupPanel.appendChild(signupTitle);
+
+        const signupValue = document.createElement("div");
+        signupValue.className = "cwl-signup-pref-value";
+        signupValue.textContent = toStr(cwlLeaguePreference.leagueName).trim();
+        signupPanel.appendChild(signupValue);
+
+        const signupMeta = document.createElement("div");
+        signupMeta.className = "cwl-signup-pref-meta";
+        const displayName = toStr(cwlLeaguePreference.discordDisplayName || cwlLeaguePreference.discordUsername || cwlLeaguePreference.discordId).trim();
+        const updatedAt = toStr(cwlLeaguePreference.updatedAt).trim();
+        signupMeta.textContent = [displayName, updatedAt].filter(Boolean).join(" - ");
+        if (signupMeta.textContent) signupPanel.appendChild(signupMeta);
+
+        tray.appendChild(signupPanel);
+      }
     }
 
     if (trackingMode === "cwl" && !prepActive) {

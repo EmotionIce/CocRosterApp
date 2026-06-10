@@ -37,6 +37,12 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getSeasonEventLeaderboard(args[0], args[1]);
 		case "getCurrentSeasonEventLeaderboards":
 			return getCurrentSeasonEventLeaderboards(args[0], args[1]);
+		case "getCwlLeagueSignupOptions":
+			return getCwlLeagueSignupOptions(args[0], args[1]);
+		case "setCwlLeaguePreference":
+			return setCwlLeaguePreference(args[0], args[1]);
+		case "resetCwlLeaguePreferences":
+			return resetCwlLeaguePreferences(args[0], args[1]);
 		case "updateSeasonEvent":
 			return updateSeasonEvent(args[0], args[1]);
 		case "registerSeasonEventSignup":
@@ -56,7 +62,13 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 
 // Get roster data.
 function getRosterData() {
-	return parseRosterDataText_(getAssetText_(ACTIVE_ROSTER_FILENAME), ACTIVE_ROSTER_FILENAME);
+	const rosterData = parseRosterDataText_(getAssetText_(ACTIVE_ROSTER_FILENAME), ACTIVE_ROSTER_FILENAME);
+	try {
+		rosterData.cwlLeagueSignups = readActiveCwlLeagueSignups_();
+	} catch (err) {
+		Logger.log("Unable to hydrate CWL league signups into roster data: %s", errorMessage_(err));
+	}
+	return rosterData;
 }
 
 // Handle verify admin password.

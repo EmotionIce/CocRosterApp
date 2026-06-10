@@ -1349,6 +1349,8 @@ test("season event leaderboards score push and donation events from event-cycle 
   assert.equal(donation.leaderboard.length, 2);
   assert.equal(donation.leaderboard[0].displayName, "Bravo");
   assert.equal(donation.leaderboard[0].score, 275);
+  assert.equal(donation.leaderboard[0].accounts[0].score, 200);
+  assert.equal(donation.leaderboard[0].accounts[1].score, 75);
   assert.equal(donation.leaderboard[1].displayName, "Alpha");
   assert.equal(donation.leaderboard[1].score, 150);
   assert.equal(donation.leaderboard[1].accounts[0].debug.hasPlayerMetrics, true);

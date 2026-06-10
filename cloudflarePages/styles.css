@@ -1519,34 +1519,33 @@ h1{
 
 .season-events-section{
   display:grid;
-  gap: 12px;
+  gap: 10px;
   margin: 0 0 16px;
 }
 
 .season-events-section__header{
   display:flex;
-  align-items:end;
+  align-items:flex-start;
   justify-content:space-between;
   gap: 12px;
 }
 
 .season-events-section__copy{
+  display:grid;
+  gap: 4px;
   min-width:0;
 }
 
-.season-events-section__eyebrow,
-.season-event-card__eyebrow{
-  color: #f5d67d;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: .12em;
-  text-transform: uppercase;
+.season-events-section__title{
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.2;
 }
 
-.season-events-section__title{
-  margin: 2px 0 0;
-  font-size: 18px;
-  line-height: 1.2;
+.season-events-section__meta{
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .season-events-section__status{
@@ -1563,6 +1562,7 @@ h1{
 .season-events-grid{
   display:grid;
   grid-template-columns: 1fr;
+  align-items:start;
   gap: 12px;
 }
 
@@ -1574,24 +1574,28 @@ h1{
 
 .card.season-event-card{
   display:grid;
-  gap: 12px;
+  align-content:start;
+  gap: 8px;
   min-width:0;
   margin: 0;
+  border-radius: 14px;
 }
 
 .card.season-event-card--push{
-  border-color: rgba(56,189,248,.26);
+  border-color: rgba(56,189,248,.22);
 }
 
 .card.season-event-card--donation{
-  border-color: rgba(34,197,94,.28);
+  border-color: rgba(34,197,94,.22);
 }
 
 .season-event-card__header{
-  display:flex;
-  align-items:start;
-  justify-content:space-between;
-  gap: 12px;
+  display:grid;
+  align-content:start;
+  gap: 3px;
+  min-height: 43px;
+  padding: 0 0 8px;
+  margin: 0;
 }
 
 .season-event-card__title-wrap{
@@ -1599,9 +1603,9 @@ h1{
 }
 
 .season-event-card__title{
-  margin: 2px 0 0;
+  margin: 0;
   color: var(--text);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.25;
   letter-spacing: 0;
   text-transform: none;
@@ -1609,50 +1613,18 @@ h1{
 }
 
 .season-event-card__status{
-  display:flex;
-  flex-wrap:wrap;
-  justify-content:flex-end;
-  gap: 6px;
-}
-
-.season-event-chip{
-  min-height: 24px;
+  color: #cbd5e1;
+  font-size: 12px;
   font-weight: 800;
+  line-height: 1.3;
   white-space: nowrap;
 }
 
-.badge.season-event-chip--status{
-  color: #e0f2fe;
-  border-color: rgba(56,189,248,.28);
-  background: rgba(14,165,233,.12);
-}
-
-.badge.season-event-chip--open{
-  color: #bbf7d0;
-  border-color: rgba(34,197,94,.30);
-  background: rgba(22,163,74,.12);
-}
-
-.badge.season-event-chip--muted{
-  color: #cbd5e1;
-}
-
 .season-event-card__meta{
-  display:flex;
-  flex-wrap:wrap;
-  gap: 7px;
-}
-
-.badge.season-event-card__meta-item{
-  background: rgba(255,255,255,.05);
-  color: #cbd5e1;
-  font-weight: 700;
-}
-
-.season-event-card__note{
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+  margin-top: -2px;
 }
 
 .season-event-card__empty{
@@ -1660,34 +1632,117 @@ h1{
   align-items:center;
   min-height: 68px;
   padding: 12px;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px dashed rgba(148,163,184,.28);
-  background: rgba(15,23,42,.42);
+  background: rgba(15,23,42,.30);
   color: var(--muted);
   font-size: 13px;
 }
 
 .season-event-card__rows{
   display:grid;
-  gap: 8px;
+  gap: 0;
+  border-top: 1px solid rgba(148,163,184,.12);
+}
+
+.season-event-card__toggle{
+  justify-self:center;
+  min-height: 28px;
+  margin-top: 2px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #93c5fd;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  cursor:pointer;
+}
+
+.season-event-card__toggle:hover{
+  background: rgba(59,130,246,.08);
+  color: #bfdbfe;
+}
+
+.season-event-card__toggle:focus-visible{
+  outline: 2px solid rgba(125,211,252,.54);
+  outline-offset: 2px;
 }
 
 .season-event-row{
+  position:relative;
   display:grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 11px;
   align-items:center;
-  padding: 10px;
-  border-radius: 12px;
-  background: rgba(2,6,23,.28);
-  border: 1px solid rgba(148,163,184,.14);
+  padding: 10px 0 10px 8px;
+  border-bottom: 1px solid rgba(148,163,184,.10);
+}
+
+.season-event-row:last-child{
+  border-bottom: 0;
+}
+
+.season-event-row::before{
+  content: "";
+  position:absolute;
+  left: 0;
+  top: 11px;
+  bottom: 11px;
+  width: 2px;
+  border-radius: 999px;
+  opacity: 0;
+}
+
+.season-event-row--top-1::before{
+  background: rgba(245,191,79,.62);
+  opacity: 1;
+}
+
+.season-event-row--top-2::before{
+  background: rgba(203,213,225,.58);
+  opacity: 1;
+}
+
+.season-event-row--top-3::before{
+  background: rgba(217,145,88,.56);
+  opacity: 1;
 }
 
 .season-event-row__rank{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
   min-width: 34px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(56,189,248,.20);
+  background: rgba(14,165,233,.08);
   color: #bae6fd;
   font-size: 12px;
   font-weight: 900;
+  line-height: 1;
+}
+
+.season-event-row--top-1 .season-event-row__rank{
+  border-color: rgba(245,191,79,.28);
+  background: rgba(245,191,79,.10);
+  color: #fde68a;
+}
+
+.season-event-row--top-2 .season-event-row__rank{
+  border-color: rgba(203,213,225,.24);
+  background: rgba(203,213,225,.08);
+  color: #e2e8f0;
+}
+
+.season-event-row--top-3 .season-event-row__rank{
+  border-color: rgba(217,145,88,.26);
+  background: rgba(217,145,88,.09);
+  color: #fed7aa;
 }
 
 .season-event-row__body{
@@ -1695,14 +1750,38 @@ h1{
 }
 
 .season-event-row__name{
-  font-size: 14px;
-  font-weight: 800;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 850;
   line-height: 1.25;
   overflow-wrap:anywhere;
 }
 
+.season-event-row__meta{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap: 5px 7px;
+  margin-top: 3px;
+  min-width:0;
+}
+
+.season-event-row__league-badge{
+  display:inline-flex;
+  align-items:center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(250,204,21,.18);
+  background: rgba(250,204,21,.055);
+  color: #e8d68b;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
 .season-event-row__accounts{
-  margin-top: 2px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
@@ -1711,7 +1790,7 @@ h1{
 
 .season-event-row__score{
   text-align:right;
-  min-width: 86px;
+  min-width: 104px;
 }
 
 .season-event-row__score-value{
@@ -1719,6 +1798,7 @@ h1{
   font-size: 13px;
   font-weight: 900;
   line-height: 1.25;
+  white-space: nowrap;
 }
 
 .season-event-row__score-sub{
@@ -1729,14 +1809,9 @@ h1{
 }
 
 @media (max-width: 560px){
-  .season-events-section__header,
-  .season-event-card__header{
+  .season-events-section__header{
     align-items:start;
     flex-direction:column;
-  }
-
-  .season-event-card__status{
-    justify-content:flex-start;
   }
 
   .season-event-row{

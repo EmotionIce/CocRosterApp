@@ -973,6 +973,15 @@ function detectAndApplyAutomaticTrackingModeTransition_(rosterDataRaw, rosterIdR
 			});
 			result.changed = true;
 			result.cwlPreparationDisabled = true;
+			try {
+				const signupArchive = archiveAndResetCwlLeagueSignups_("cwl-started", "automatic-tracking-mode-transition");
+				if (signupArchive && signupArchive.archived) {
+					result.cwlLeagueSignupsArchived = true;
+					result.cwlLeagueSignupCount = signupArchive.count;
+				}
+			} catch (err) {
+				Logger.log("Unable to archive CWL league signups during automatic transition for rosterId=%s: %s", rosterId, errorMessage_(err));
+			}
 			messages.push("CWL Preparation Mode disabled automatically because active CWL league group was detected");
 		} else {
 			const detail = leagueProbe.ok

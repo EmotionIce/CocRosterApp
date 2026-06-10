@@ -257,6 +257,8 @@
     .player-admin-summary-pill {
       display: inline-flex;
       align-items: center;
+      min-width: 0;
+      max-width: 100%;
       border: 1px solid #475569;
       border-radius: 999px;
       padding: 2px 6px;
@@ -265,6 +267,22 @@
       color: #fda4af;
       background: rgba(127, 29, 29, 0.28);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cwl-signup-pref-value {
+      font-size: 12px;
+      font-weight: 800;
+      color: #bbf7d0;
+      overflow-wrap: anywhere;
+    }
+
+    .cwl-signup-pref-meta {
+      margin-top: 3px;
+      font-size: 10px;
+      color: #94a3b8;
+      overflow-wrap: anywhere;
     }
 
     .player-admin-summary-caret {
@@ -1832,6 +1850,4 @@
 </body>
 
 </html>
-
-
 
