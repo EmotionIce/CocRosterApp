@@ -140,7 +140,103 @@ const readDiscordBotSecret = (request) => {
   return String(request.headers.get("x-discord-bot-secret") || "").trim();
 };
 
-// Handle Discord bot username sync API.
+// Normalize Discord bot sync/delete request body into an Apps Script call.
+const buildDiscordBotSyncUpstreamCall = (body, secret) => {
+  const requestedMethod = String(body && (body.methodName || body.method) || "").trim();
+  const args = Array.isArray(body && body.args) ? body.args : [];
+  const readObjectOrPositional = () => {
+    const first = args[0] && typeof args[0] === "object" && !Array.isArray(args[0]) ? args[0] : null;
+    if (first) {
+      return {
+        playerTag: typeof first.playerTag === "string" ? first.playerTag : typeof first.tag === "string" ? first.tag : "",
+        discordId: typeof first.discordId === "string" ? first.discordId : "",
+        discordUsername: typeof first.discordUsername === "string" ? first.discordUsername : typeof first.username === "string" ? first.username : "",
+      };
+    }
+    return {
+      playerTag: typeof args[0] === "string" ? args[0] : "",
+      discordId: typeof args[1] === "string" ? args[1] : "",
+      discordUsername: typeof args[2] === "string" ? args[2] : "",
+    };
+  };
+
+  if (requestedMethod === "syncDiscordIdentityForPlayerTag") {
+    const parsed = readObjectOrPositional();
+    if (!parsed.playerTag.trim() || (!parsed.discordId.trim() && !parsed.discordUsername.trim())) {
+      return {
+        errorStatus: 400,
+        error: "playerTag and discordUsername or discordId are required.",
+      };
+    }
+    return {
+      method: "syncDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        discordId: parsed.discordId,
+        discordUsername: parsed.discordUsername,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (requestedMethod === "deleteDiscordIdentityForPlayerTag") {
+    const parsed = readObjectOrPositional();
+    if (!parsed.playerTag.trim()) {
+      return {
+        errorStatus: 400,
+        error: "playerTag is required.",
+      };
+    }
+    return {
+      method: "deleteDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  const playerTag = body && typeof body.playerTag === "string" ? body.playerTag : "";
+  const discordId = body && typeof body.discordId === "string" ? body.discordId : "";
+  const discordUsername = body && typeof body.discordUsername === "string" ? body.discordUsername : "";
+  const action = String(body && (body.action || body.operation || body.linkAction) || "").trim().toLowerCase();
+  const isDelete = body && body.deleted === true || ["delete", "deleted", "remove", "removed", "unlink", "unlinked"].includes(action);
+
+  if (isDelete) {
+    if (!playerTag.trim()) {
+      return {
+        errorStatus: 400,
+        error: "playerTag is required.",
+      };
+    }
+    return {
+      method: "deleteDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (!playerTag.trim() || (!discordId.trim() && !discordUsername.trim())) {
+    return {
+      errorStatus: 400,
+      error: "playerTag and discordUsername or discordId are required.",
+    };
+  }
+
+  return {
+    method: "syncDiscordIdentityForPlayerTag",
+    args: [{
+      playerTag,
+      discordId,
+      discordUsername,
+      botSecret: secret,
+    }],
+  };
+};
+
+// Handle Discord bot identity sync API.
 const handleDiscordBotSyncApi = async (request, env) => {
   const method = String(request.method || "").toUpperCase();
   if (method === "OPTIONS") {
@@ -178,13 +274,11 @@ const handleDiscordBotSyncApi = async (request, env) => {
     });
   }
 
-  const playerTag = body && typeof body.playerTag === "string" ? body.playerTag : "";
-  const discordId = body && typeof body.discordId === "string" ? body.discordId : "";
-  const discordUsername = body && typeof body.discordUsername === "string" ? body.discordUsername : "";
-  if (!playerTag.trim() || (!discordId.trim() && !discordUsername.trim())) {
+  const upstreamCall = buildDiscordBotSyncUpstreamCall(body, secret);
+  if (upstreamCall.error) {
     return jsonResponse(400, {
       ok: false,
-      error: "playerTag and discordUsername or discordId are required.",
+      error: upstreamCall.error,
     });
   }
 
@@ -203,8 +297,8 @@ const handleDiscordBotSyncApi = async (request, env) => {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        method: "syncDiscordIdentityForPlayerTag",
-        args: [playerTag, discordId, discordUsername, secret],
+        method: upstreamCall.method,
+        args: upstreamCall.args,
       }),
     });
 

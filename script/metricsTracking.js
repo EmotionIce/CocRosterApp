@@ -696,6 +696,93 @@ function upsertDiscordIdentityForPlayerTag_(rosterDataRaw, playerTagRaw, identit
 	};
 }
 
+// Clear canonical Discord identity and roster-row cache values for a player tag.
+function clearDiscordIdentityForPlayerTag_(rosterDataRaw, playerTagRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
+	const tag = normalizeTag_(playerTagRaw);
+	if (!rosterData || !tag) {
+		return {
+			changed: false,
+			found: false,
+			tag: tag,
+			updatedCanonical: false,
+			updatedRosterCache: false,
+			updatedCount: 0,
+			removedDiscordId: "",
+			removedDiscordUsername: "",
+		};
+	}
+
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const nowDate = new Date(nowMs);
+	const store = ensureMutablePlayerMetricsStoreWithoutSanitize_(rosterData);
+	const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
+	store.byTag = byTag;
+
+	const hasRawEntry = Object.prototype.hasOwnProperty.call(byTag, tag);
+	const existingEntry = sanitizePlayerMetricsEntry_(tag, byTag[tag], nowMs, nowDate);
+	let updatedCanonical = false;
+	let removedDiscordId = "";
+	let removedDiscordUsername = "";
+
+	if (existingEntry) {
+		const existingIdentity = sanitizePlayerMetricsIdentity_(
+			existingEntry.identity,
+			tag,
+			existingEntry.identity && existingEntry.identity.name,
+		) || { tag: tag, name: "" };
+		removedDiscordId = sanitizeDiscordIdValue_(existingIdentity.discordId);
+		removedDiscordUsername = sanitizeDiscordUsernameValue_(existingIdentity.discordUsername);
+
+		const nextEntry = Object.assign({}, existingEntry, {
+			identity: {
+				tag: tag,
+				name: String(existingIdentity.name == null ? "" : existingIdentity.name).trim(),
+			},
+		});
+		const sanitizedNextEntry = sanitizePlayerMetricsEntry_(tag, nextEntry, nowMs, nowDate);
+		const previousText = JSON.stringify(existingEntry);
+		const nextText = JSON.stringify(sanitizedNextEntry || null);
+
+		if (sanitizedNextEntry) byTag[tag] = sanitizedNextEntry;
+		else delete byTag[tag];
+
+		updatedCanonical = previousText !== nextText;
+	} else if (hasRawEntry) {
+		delete byTag[tag];
+		updatedCanonical = true;
+	}
+
+	let updatedCount = 0;
+	const locations = collectRosterPlayerLocationsByTag_(rosterData, tag);
+	for (let i = 0; i < locations.length; i++) {
+		const location = locations[i];
+		const player = location && location.player && typeof location.player === "object" ? location.player : null;
+		if (!player) continue;
+		if (typeof player.discord === "string" && player.discord === "") continue;
+		player.discord = "";
+		updatedCount++;
+	}
+
+	const updatedRosterCache = updatedCount > 0;
+	const changed = updatedCanonical || updatedRosterCache;
+	if (changed || !store.updatedAt) store.updatedAt = nowIso;
+	rosterData.playerMetrics = sanitizePlayerMetricsStore_(store, nowIso);
+
+	return {
+		changed: changed,
+		found: !!(existingEntry || hasRawEntry || locations.length > 0),
+		tag: tag,
+		updatedCanonical: updatedCanonical,
+		updatedRosterCache: updatedRosterCache,
+		updatedCount: updatedCount,
+		removedDiscordId: removedDiscordId,
+		removedDiscordUsername: removedDiscordUsername,
+	};
+}
+
 // Handle count player metrics entries.
 function countPlayerMetricsEntries_(storeRaw) {
 	const store = storeRaw && typeof storeRaw === "object" ? storeRaw : {};

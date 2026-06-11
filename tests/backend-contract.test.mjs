@@ -839,6 +839,94 @@ test("bot sync username-only works and does not erase existing Discord ID", () =
   assert.equal(activeData.rosters[0].main[0].discord, "newname");
 });
 
+test("bot delete clears Discord identity and roster cache for a player tag", () => {
+  const backend = loadBackend();
+  let activeData = buildValidRosterData();
+  activeData.rosters[0].main[0].tag = "#2LUCULP";
+  activeData.rosters[0].main[0].discord = "phuuni";
+  activeData.playerMetrics.byTag = {
+    "#2LUCULP": {
+      identity: {
+        tag: "#2LUCULP",
+        name: "Player",
+        discordId: "123456789012345678",
+        discordUsername: "phuuni",
+        discordLinkedAt: "2026-05-19T00:00:00.000Z",
+        discordUpdatedAt: "2026-05-19T00:00:00.000Z",
+        discordSource: "discord-sync",
+      },
+      trophyHistoryDaily: [],
+    },
+  };
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: activeData, text: JSON.stringify(activeData) });
+  backend.replaceActiveRosterData_ = (payload) => {
+    activeData = backend.validateRosterData_(payload);
+    return { validatedRosterData: activeData, text: JSON.stringify(activeData) };
+  };
+
+  const result = backend.deleteDiscordIdentityForPlayerTag("#2LUCULP", "secret");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.found, true);
+  assert.equal(result.updated, true);
+  assert.equal(result.discordId, "");
+  assert.equal(result.discordUsername, "");
+  assert.equal(result.removedDiscordId, "123456789012345678");
+  assert.equal(result.removedDiscordUsername, "phuuni");
+  assert.equal(activeData.rosters[0].main[0].discord, "");
+  assert.equal(activeData.playerMetrics.byTag["#2LUCULP"], undefined);
+});
+
+test("bot delete preserves real metrics while removing Discord identity fields", () => {
+  const backend = loadBackend();
+  let activeData = buildValidRosterData();
+  activeData.rosters[0].main[0].tag = "#2LUCULP";
+  activeData.rosters[0].main[0].discord = "phuuni";
+  activeData.playerMetrics.byTag = {
+    "#2LUCULP": {
+      identity: {
+        tag: "#2LUCULP",
+        name: "Player",
+        discordId: "123456789012345678",
+        discordUsername: "phuuni",
+        discordLinkedAt: "2026-05-19T00:00:00.000Z",
+        discordUpdatedAt: "2026-05-19T00:00:00.000Z",
+        discordSource: "discord-sync",
+      },
+      latestSnapshot: {
+        tag: "#2LUCULP",
+        name: "Player",
+        trophies: 5000,
+        donations: 10,
+        donationsReceived: 5,
+        capturedAt: "2026-05-19T03:00:00.000Z",
+      },
+      trophyHistoryDaily: [],
+    },
+  };
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: activeData, text: JSON.stringify(activeData) });
+  backend.replaceActiveRosterData_ = (payload) => {
+    activeData = backend.validateRosterData_(payload);
+    return { validatedRosterData: activeData, text: JSON.stringify(activeData) };
+  };
+
+  const result = backend.deleteDiscordIdentityForPlayerTag({ playerTag: "#2LUCULP", botSecret: "secret" });
+  const entry = activeData.playerMetrics.byTag["#2LUCULP"];
+
+  assert.equal(result.ok, true);
+  assert.equal(result.updatedCanonical, true);
+  assert.equal(result.updatedRosterCache, true);
+  assert.equal(activeData.rosters[0].main[0].discord, "");
+  assert.equal(entry.identity.tag, "#2LUCULP");
+  assert.equal(entry.identity.name, "Player");
+  assert.equal(entry.identity.discordId, undefined);
+  assert.equal(entry.identity.discordUsername, undefined);
+  assert.equal(entry.identity.discordLinkedAt, undefined);
+  assert.equal(entry.identity.discordUpdatedAt, undefined);
+  assert.equal(entry.identity.discordSource, undefined);
+  assert.equal(entry.latestSnapshot.trophies, 5000);
+});
+
 test("one-time Discord backfill copies roster cache names into playerMetrics byTag", () => {
   const backendRaw = loadBackend();
   const data = buildValidRosterData();

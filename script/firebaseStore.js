@@ -1467,6 +1467,78 @@ function syncDiscordIdentityIntoActiveRoster_(payloadRaw, optionsRaw) {
 	};
 }
 
+// Clear one Discord identity through the active Firebase write boundary.
+function deleteDiscordIdentityFromActiveRoster_(payloadRaw, optionsRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const normalizedTag = normalizeTag_(payload.playerTag || payload.tag);
+	if (!normalizedTag || !isValidPlayerTag_(normalizedTag)) {
+		throw new Error("Invalid player tag.");
+	}
+
+	const sourceSnapshot = options.sourceSnapshot && typeof options.sourceSnapshot === "object" ? options.sourceSnapshot : readActiveRosterSnapshot_();
+	const rosterData = sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
+	if (!rosterData || !Array.isArray(rosterData.rosters)) {
+		throw new Error("Active roster data is unavailable.");
+	}
+
+	const beforeLocations = collectRosterPlayerLocationsByTag_(rosterData, normalizedTag);
+	const updatedAt = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
+	const clearResult = clearDiscordIdentityForPlayerTag_(rosterData, normalizedTag, {
+		updatedAt: updatedAt,
+	});
+	const afterLocations = collectRosterPlayerLocationsByTag_(rosterData, normalizedTag);
+	const locations = [];
+	let updatedLocationCount = 0;
+	for (let i = 0; i < afterLocations.length; i++) {
+		const after = afterLocations[i];
+		let previousDiscord = "";
+		for (let j = 0; j < beforeLocations.length; j++) {
+			const before = beforeLocations[j];
+			if (before.rosterId === after.rosterId && before.role === after.role && before.index === after.index) {
+				previousDiscord = before.previousDiscord;
+				break;
+			}
+		}
+		const currentDiscord = typeof after.player.discord === "string" ? after.player.discord : "";
+		const updatedRosterCacheForLocation = previousDiscord !== currentDiscord;
+		if (updatedRosterCacheForLocation) updatedLocationCount++;
+		locations.push({
+			rosterId: after.rosterId,
+			rosterTitle: after.rosterTitle,
+			role: after.role,
+			index: after.index,
+			previousDiscord: previousDiscord,
+			discord: currentDiscord,
+			updatedRosterCache: updatedRosterCacheForLocation,
+			updated: updatedRosterCacheForLocation,
+		});
+	}
+
+	const updatedCanonical = !!(clearResult && clearResult.updatedCanonical);
+	const updatedRosterCache = updatedLocationCount > 0;
+	const updated = updatedCanonical || updatedRosterCache;
+	if (updated) {
+		const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
+		replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
+	}
+
+	return {
+		ok: true,
+		found: !!(clearResult && clearResult.found),
+		updated: updated,
+		tag: normalizedTag,
+		discordId: "",
+		discordUsername: "",
+		removedDiscordId: clearResult && clearResult.removedDiscordId ? clearResult.removedDiscordId : "",
+		removedDiscordUsername: clearResult && clearResult.removedDiscordUsername ? clearResult.removedDiscordUsername : "",
+		updatedCanonical: updatedCanonical,
+		updatedRosterCache: updatedRosterCache,
+		updatedCount: updatedLocationCount,
+		locations: locations,
+	};
+}
+
 // Convert a decoded active payload into the current strict active schema before
 // validation. This is intentionally only used by manual one-time cleanup.
 function buildManualCleanupActivePayload_(payloadRaw) {

@@ -21,6 +21,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return publishRosterData(args[0], args[1]);
 		case "getPlayerProfile":
 			return getPlayerProfile(args[0], args[1]);
+		case "deleteDiscordIdentityForPlayerTag":
+			return deleteDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordIdentityForPlayerTag":
 			return syncDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordUsernameForPlayerTag":
@@ -224,6 +226,21 @@ function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3) {
 	};
 }
 
+// Parse Discord bot delete argument shapes.
+function parseDiscordIdentityDeleteArgs_(arg0, arg1) {
+	if (arg0 && typeof arg0 === "object" && !Array.isArray(arg0)) {
+		const payload = arg0;
+		return {
+			playerTag: payload.playerTag || payload.tag,
+			botSecret: payload.botSecret != null ? payload.botSecret : arg1,
+		};
+	}
+	return {
+		playerTag: arg0,
+		botSecret: arg1,
+	};
+}
+
 // Sync canonical Discord identity for a player tag.
 function syncDiscordIdentityForPlayerTag(arg0, arg1, arg2, arg3) {
 	const parsed = parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3);
@@ -248,6 +265,30 @@ function syncDiscordIdentityForPlayerTag(arg0, arg1, arg2, arg3) {
 				updatedAt: updatedAt,
 				source: ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC,
 				createMissing: true,
+			},
+		);
+		if (result && result.updated) {
+			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
+		}
+		return result;
+	});
+}
+
+// Delete canonical Discord identity for a player tag.
+function deleteDiscordIdentityForPlayerTag(arg0, arg1) {
+	const parsed = parseDiscordIdentityDeleteArgs_(arg0, arg1);
+	assertDiscordBotApiSecret_(parsed.botSecret);
+	const normalizedTag = normalizeDiscordSyncPlayerTag_(parsed.playerTag);
+
+	return withActiveRosterJobLock_("discord-sync", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		const updatedAt = new Date().toISOString();
+		const result = deleteDiscordIdentityFromActiveRoster_(
+			{
+				playerTag: normalizedTag,
+			},
+			{
+				updatedAt: updatedAt,
+				source: ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC,
 			},
 		);
 		if (result && result.updated) {
