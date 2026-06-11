@@ -29,7 +29,11 @@ function normalizeCwlSignupLeagueKey_(leagueNameRaw) {
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "")
-		.slice(0, 80);
+		.slice(0, 48);
+}
+
+function buildCwlLeagueSignupId_() {
+	return Utilities.getUuid().replace(/-/g, "").slice(0, 12);
 }
 
 function getCwlSignupRosterPlayers_(rosterRaw) {
@@ -139,20 +143,46 @@ function resolveCwlSignupClanNameForRoster_(rosterRaw, optionsRaw) {
 }
 
 function buildCwlLeagueSignupOptionsFromRosterData_(rosterDataRaw, optionsRaw) {
+	return buildCwlLeagueSignupOptionsResultFromRosterData_(rosterDataRaw, optionsRaw).options;
+}
+
+function buildCwlLeagueSignupOptionsResultFromRosterData_(rosterDataRaw, optionsRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const clanDetailsCache = {};
 	const resolveOptions = Object.assign({}, options, { clanDetailsCache: clanDetailsCache });
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const byKey = {};
+	const skippedRosters = [];
+	let representedRosterCount = 0;
+	let connectedRosterCount = 0;
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-		if (getRosterTrackingMode_(roster) !== "cwl") continue;
 		const rosterId = sanitizeCwlSignupText_(roster.id, 80);
-		if (!rosterId) continue;
+		const rosterTitle = sanitizeCwlSignupText_(roster.title || roster.name, 80);
+		const clanTag = normalizeTag_(roster.connectedClanTag);
+		const hasConnectedClan = !!(clanTag && isValidClanTag_(clanTag));
+		if (hasConnectedClan) connectedRosterCount++;
+		if (!rosterId) {
+			skippedRosters.push({
+				rosterId: "",
+				rosterTitle: rosterTitle,
+				clanTag: clanTag,
+				reason: "missingRosterId",
+			});
+			continue;
+		}
 		const leagueName = resolveCwlSignupLeagueNameForRoster_(roster, resolveOptions);
 		const leagueKey = normalizeCwlSignupLeagueKey_(leagueName);
-		if (!leagueKey) continue;
+		if (!leagueKey) {
+			skippedRosters.push({
+				rosterId: rosterId,
+				rosterTitle: rosterTitle,
+				clanTag: clanTag,
+				reason: hasConnectedClan ? "missingLeague" : "missingConnectedClanTag",
+			});
+			continue;
+		}
 		const clanName = resolveCwlSignupClanNameForRoster_(roster, resolveOptions);
 		if (!byKey[leagueKey]) {
 			byKey[leagueKey] = {
@@ -165,19 +195,28 @@ function buildCwlLeagueSignupOptionsFromRosterData_(rosterDataRaw, optionsRaw) {
 			};
 		}
 		byKey[leagueKey].rosterIds.push(rosterId);
-		const clanTag = normalizeTag_(roster.connectedClanTag);
 		if (clanTag) byKey[leagueKey].clanTags.push(clanTag);
 		if (clanName) byKey[leagueKey].clanNames.push(clanName);
 		byKey[leagueKey].playerCount += getCwlSignupRosterPlayers_(roster).length;
+		representedRosterCount++;
 	}
 	const keys = Object.keys(byKey).sort((a, b) => byKey[a].leagueName.localeCompare(byKey[b].leagueName));
-	return keys.map((key) => {
+	const signupOptions = keys.map((key) => {
 		const option = byKey[key];
 		option.rosterIds = option.rosterIds.filter((value, index, list) => list.indexOf(value) === index);
 		option.clanTags = option.clanTags.filter((value, index, list) => list.indexOf(value) === index);
 		option.clanNames = option.clanNames.filter((value, index, list) => list.indexOf(value) === index);
 		return option;
 	});
+	return {
+		options: signupOptions,
+		diagnostics: {
+			rosterCount: rosters.length,
+			connectedRosterCount: connectedRosterCount,
+			representedRosterCount: representedRosterCount,
+			skippedRosters: skippedRosters,
+		},
+	};
 }
 
 function sanitizeCwlLeagueSignupsPayload_(payloadRaw) {
@@ -217,6 +256,7 @@ function sanitizeCwlLeagueSignupsPayload_(payloadRaw) {
 	}
 	return {
 		schemaVersion: CWL_LEAGUE_SIGNUPS_SCHEMA_VERSION,
+		signupId: sanitizeCwlSignupText_(payload.signupId, 40),
 		status: sanitizeCwlSignupText_(payload.status, 40) || "open",
 		createdAt: sanitizeCwlSignupText_(payload.createdAt, 40) || new Date().toISOString(),
 		updatedAt: sanitizeCwlSignupText_(payload.updatedAt, 40),
@@ -232,9 +272,18 @@ function readActiveCwlLeagueSignups_() {
 
 function writeActiveCwlLeagueSignups_(payloadRaw) {
 	const payload = sanitizeCwlLeagueSignupsPayload_(payloadRaw);
+	if (!payload.signupId) payload.signupId = buildCwlLeagueSignupId_();
 	firebaseRequestJson_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH, "PUT", encodeFirebaseObjectKeysRecursive_(payload));
 	clearActiveRosterDataCache_();
 	return payload;
+}
+
+function ensureActiveCwlLeagueSignupId_() {
+	return withCwlLeagueSignupWriteLock_(function () {
+		const signups = readActiveCwlLeagueSignups_();
+		if (signups.signupId) return signups;
+		return writeActiveCwlLeagueSignups_(signups);
+	});
 }
 
 function buildCwlSignupAuditKey_(timestampRaw) {
@@ -257,10 +306,13 @@ function getCwlLeagueSignupOptions(payloadRaw, secretOrPasswordRaw) {
 	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
 	const snapshot = readActiveRosterSnapshot_();
 	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
-	const signups = readActiveCwlLeagueSignups_();
+	const signups = ensureActiveCwlLeagueSignupId_();
+	const signupOptionsResult = buildCwlLeagueSignupOptionsResultFromRosterData_(rosterData, { fetchMissing: parsed.payload.fetchMissing !== false });
 	return {
 		ok: true,
-		options: buildCwlLeagueSignupOptionsFromRosterData_(rosterData, { fetchMissing: parsed.payload.fetchMissing !== false }),
+		signupId: signups.signupId,
+		options: signupOptionsResult.options,
+		diagnostics: signupOptionsResult.diagnostics,
 		preferencesByTag: signups.preferencesByTag,
 		updatedAt: signups.updatedAt || "",
 	};
@@ -279,7 +331,11 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		const selected = findCwlSignupOptionByKey_(options, payload.leagueKey || payload.leagueName);
 		if (!selected) throw new Error("Selected CWL league is not available.");
 		const nowIso = new Date().toISOString();
-		const signups = readActiveCwlLeagueSignups_();
+		const signups = ensureActiveCwlLeagueSignupId_();
+		const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
+		if (!signupId || signupId !== signups.signupId) {
+			throw new Error("This CWL league signup message is no longer active. Please use the latest signup message.");
+		}
 		const existing = signups.preferencesByTag[playerTag] || {};
 		if (existing && existing.leagueKey) {
 			throw new Error("This player tag already has an active CWL league preference.");
@@ -324,29 +380,33 @@ function archiveAndResetCwlLeagueSignups_(reasonRaw, sourceRaw) {
 	return withCwlLeagueSignupWriteLock_(function () {
 		const signups = readActiveCwlLeagueSignups_();
 		const count = Object.keys(signups.preferencesByTag || {}).length;
-		if (!count && !Object.keys(signups.audit || {}).length) return { archived: false, count: 0 };
+		const hasArchiveData = !!(count || Object.keys(signups.audit || {}).length);
 		const nowIso = new Date().toISOString();
-		const archiveKey = buildCwlSignupAuditKey_(nowIso);
-		const archivePayload = Object.assign({}, signups, {
-			status: "archived",
-			archivedAt: nowIso,
-			archiveReason: sanitizeCwlSignupText_(reasonRaw, 120),
-			archiveSource: sanitizeCwlSignupText_(sourceRaw, 120),
-		});
-		firebaseRequestJson_(
-			buildFirebaseChildPath_(CWL_LEAGUE_SIGNUPS_ARCHIVE_PATH, encodeFirebaseObjectKey_(archiveKey)),
-			"PUT",
-			encodeFirebaseObjectKeysRecursive_(archivePayload),
-		);
-		writeActiveCwlLeagueSignups_({
+		let archiveKey = "";
+		if (hasArchiveData) {
+			archiveKey = buildCwlSignupAuditKey_(nowIso);
+			const archivePayload = Object.assign({}, signups, {
+				status: "archived",
+				archivedAt: nowIso,
+				archiveReason: sanitizeCwlSignupText_(reasonRaw, 120),
+				archiveSource: sanitizeCwlSignupText_(sourceRaw, 120),
+			});
+			firebaseRequestJson_(
+				buildFirebaseChildPath_(CWL_LEAGUE_SIGNUPS_ARCHIVE_PATH, encodeFirebaseObjectKey_(archiveKey)),
+				"PUT",
+				encodeFirebaseObjectKeysRecursive_(archivePayload),
+			);
+		}
+		const saved = writeActiveCwlLeagueSignups_({
 			schemaVersion: CWL_LEAGUE_SIGNUPS_SCHEMA_VERSION,
+			signupId: buildCwlLeagueSignupId_(),
 			status: "open",
 			createdAt: nowIso,
 			updatedAt: nowIso,
 			preferencesByTag: {},
 			audit: {},
 		});
-		return { archived: true, count: count, archiveKey: archiveKey };
+		return { archived: hasArchiveData, count: count, archiveKey: archiveKey, signupId: saved.signupId };
 	});
 }
 
@@ -362,5 +422,6 @@ function resetCwlLeaguePreferences(payloadRaw, secretOrPasswordRaw) {
 		archived: !!(result && result.archived),
 		count: toNonNegativeInt_(result && result.count),
 		archiveKey: sanitizeCwlSignupText_(result && result.archiveKey, 160),
+		signupId: sanitizeCwlSignupText_(result && result.signupId, 40),
 	};
 }
