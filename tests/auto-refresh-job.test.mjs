@@ -1332,6 +1332,8 @@ test("queue finalization publishes completed shards through the active version p
   assert.equal(activeRosterShard.id, "main");
   assert.equal(lastJob.status, "completed");
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/run-1", "GET") !== null, true);
 });
 
 test("queue finalization uses source version guard without reading the active payload", () => {
@@ -1439,6 +1441,8 @@ test("queue finalization marks stale source version mismatch without reading the
   assert.equal(result.status, "stale");
   assert.equal(activePayloadReads, 0);
   assert.equal(backend.readPublishedActiveVersionId_(), "source-2");
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/run-1", "GET"), null);
 });
 
 test("queue finalization refuses to publish when a metric shard is missing", () => {
@@ -1487,6 +1491,8 @@ test("queue finalization aborts when the active source fingerprint changed", () 
   assert.equal(backend.firebaseRequestJson_("activePublished/currentVersionId", "GET"), null);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.__properties.get("AUTO_REFRESH_LAST_RUN_STATUS"), "stale");
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/run-1", "GET"), null);
 });
 
 test("queue finalization clears current state when the version is already published", () => {
@@ -1509,6 +1515,7 @@ test("queue finalization clears current state when the version is already publis
   assert.equal(result.status, "completed");
   assert.equal(result.alreadyPublished, true);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
 });
 
 test("queue worker recovers after partial completion by continuing at the next pending task", () => {

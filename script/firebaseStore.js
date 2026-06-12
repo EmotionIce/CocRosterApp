@@ -987,6 +987,11 @@ function cleanupActiveFirebaseSchemaOnce() {
 		manualSchemaCleanupAt: cleanupAt,
 		manualSchemaCleanupMetricEntryCount: metricEntryCount,
 	});
+	const storageCleanup = result && result.storageCleanup
+		? result.storageCleanup
+		: cleanupFirebaseStorageRetentionBestEffort_("manual active schema cleanup storage retention", {
+			reason: "manual-active-schema-cleanup",
+		});
 	return {
 		ok: true,
 		cleanedAt: cleanupAt,
@@ -995,6 +1000,7 @@ function cleanupActiveFirebaseSchemaOnce() {
 		playerCount: counts.playerCount,
 		noteCount: counts.noteCount,
 		metricEntryCount: metricEntryCount,
+		storageCleanup: storageCleanup,
 	};
 }
 
@@ -1705,12 +1711,16 @@ function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 		});
 	}
 	firebaseBatchPutJson_(writes);
-	writeActiveRosterVersionShards_(createActiveVersionId_("active-write"), validated, {
+	const versionWrite = writeActiveRosterVersionShards_(createActiveVersionId_("active-write"), validated, {
 		publish: true,
 		source: "active-write",
 	});
+	const storageCleanup = cleanupFirebaseStorageRetentionBestEffort_("active roster write storage retention", {
+		reason: "active-write",
+		additionalProtectedVersionIds: [versionWrite.versionId],
+	});
 	const payloadText = JSON.stringify(validated);
-	return { rosterData: validated, text: payloadText };
+	return { rosterData: validated, text: payloadText, storageCleanup: storageCleanup };
 }
 
 // Handle write already-validated active roster data to Firebase.
@@ -1782,6 +1792,217 @@ function listFirebaseChildKeys_(pathRaw) {
 	const payload = firebaseRequestJson_(pathRaw, "GET", undefined, { shallow: "true" });
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
 	return Object.keys(payload);
+}
+
+// Normalize a Firebase child key for retention comparisons. Current generated
+// version/run ids are Firebase-safe already, but this keeps old encoded keys
+// comparable before deciding whether a node can be deleted.
+function normalizeFirebaseStorageChildIdForRetention_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw).trim();
+	if (!key) return "";
+	let decoded = key;
+	try {
+		decoded = decodeFirebaseObjectKey_(key);
+	} catch (err) {
+		decoded = key;
+	}
+	return normalizeActiveVersionId_(decoded) || key;
+}
+
+// Mark one normalized id as retained.
+function markFirebaseStorageRetentionId_(setRaw, idRaw) {
+	const set = setRaw && typeof setRaw === "object" ? setRaw : {};
+	const id = normalizeActiveVersionId_(idRaw);
+	if (id) set[id] = true;
+	return id;
+}
+
+// Read current retention-protected ids. Only the published active version and a
+// live queue's source/staging versions are protected; historical copies are not.
+function buildFirebaseStorageRetentionState_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const retainedActiveVersionIds = {};
+	const retainedAutoRefreshRunIds = {};
+	const errors = [];
+
+	try {
+		markFirebaseStorageRetentionId_(retainedActiveVersionIds, readPublishedActiveVersionId_());
+	} catch (err) {
+		errors.push("currentVersionId: " + errorMessage_(err));
+	}
+
+	const additionalVersionIds = Array.isArray(options.additionalProtectedVersionIds) ? options.additionalProtectedVersionIds : [];
+	for (let i = 0; i < additionalVersionIds.length; i++) {
+		markFirebaseStorageRetentionId_(retainedActiveVersionIds, additionalVersionIds[i]);
+	}
+	const additionalRunIds = Array.isArray(options.additionalProtectedRunIds) ? options.additionalProtectedRunIds : [];
+	for (let i = 0; i < additionalRunIds.length; i++) {
+		markFirebaseStorageRetentionId_(retainedAutoRefreshRunIds, additionalRunIds[i]);
+	}
+
+	let currentQueue = null;
+	if (typeof readAutoRefreshQueueCurrent_ === "function") {
+		try {
+			currentQueue = readAutoRefreshQueueCurrent_();
+		} catch (err) {
+			errors.push("autoRefreshCurrent: " + errorMessage_(err));
+		}
+	}
+	const queueStatus = String((currentQueue && currentQueue.status) || "").trim();
+	const isLiveQueue = !!(
+		currentQueue &&
+		currentQueue.kind === "auto-refresh-queue" &&
+		(queueStatus === "running" || queueStatus === "finalizing")
+	);
+	if (isLiveQueue) {
+		const runId = markFirebaseStorageRetentionId_(retainedAutoRefreshRunIds, currentQueue.runId);
+		if (runId) markFirebaseStorageRetentionId_(retainedActiveVersionIds, runId);
+		markFirebaseStorageRetentionId_(retainedActiveVersionIds, currentQueue.sourceVersionId);
+	}
+
+	return {
+		retainedActiveVersionIds: retainedActiveVersionIds,
+		retainedAutoRefreshRunIds: retainedAutoRefreshRunIds,
+		currentQueueRunId: currentQueue && currentQueue.kind === "auto-refresh-queue" ? normalizeActiveVersionId_(currentQueue.runId) : "",
+		errors: errors,
+	};
+}
+
+// Delete child nodes under a Firebase path except explicitly retained ids.
+function cleanupFirebaseChildNodesExceptRetained_(parentPathRaw, retainedIdsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const parentPath = normalizeFirebasePath_(parentPathRaw);
+	const retainedIds = retainedIdsRaw && typeof retainedIdsRaw === "object" ? retainedIdsRaw : {};
+	const keys = listFirebaseChildKeys_(parentPath)
+		.filter((key) => String(key == null ? "" : key).trim())
+		.sort();
+	const retainedCount = Object.keys(retainedIds).length;
+	const keepNewestCount = Math.max(0, toNonNegativeInt_(options.keepNewestCount));
+	if (options.requireRetained === true && retainedCount < 1 && keys.length > 0) {
+		return {
+			attempted: false,
+			deletedCount: 0,
+			existingCount: keys.length,
+			retainedCount: retainedCount,
+			extraRetainedCount: 0,
+			skippedReason: "no-retained-id",
+			deletedKeysSample: [],
+		};
+	}
+	const deletedKeys = [];
+	let extraRetainedCount = 0;
+	for (let i = keys.length - 1; i >= 0; i--) {
+		const key = String(keys[i] == null ? "" : keys[i]).trim();
+		if (!key) continue;
+		const comparableId = normalizeFirebaseStorageChildIdForRetention_(key);
+		if (retainedIds[comparableId] || retainedIds[key]) continue;
+		if (extraRetainedCount < keepNewestCount) {
+			extraRetainedCount++;
+			continue;
+		}
+		firebaseRequestJson_(buildFirebaseChildPath_(parentPath, key), "DELETE");
+		deletedKeys.push(comparableId || key);
+	}
+	return {
+		attempted: true,
+		deletedCount: deletedKeys.length,
+		existingCount: keys.length,
+		retainedCount: retainedCount,
+		extraRetainedCount: extraRetainedCount,
+		deletedKeysSample: deletedKeys.slice(0, 20),
+	};
+}
+
+// Delete old active-version shards while preserving the live public version and
+// any in-progress queue source/staging version.
+function cleanupActiveVersionRetention_(stateRaw) {
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : buildFirebaseStorageRetentionState_();
+	const result = cleanupFirebaseChildNodesExceptRetained_(FIREBASE_ACTIVE_VERSIONS_PATH, state.retainedActiveVersionIds, {
+		requireRetained: true,
+		keepNewestCount: FIREBASE_ACTIVE_VERSION_HISTORY_KEEP_COUNT,
+	});
+	result.retainedVersionIds = Object.keys(state.retainedActiveVersionIds).sort();
+	if (state.errors && state.errors.length) result.retentionStateErrors = state.errors.slice();
+	return result;
+}
+
+// Clear legacy/current auto-refresh state that predates the tiny queue shape.
+function cleanupLegacyAutoRefreshCurrentState_() {
+	const shallow = firebaseRequestJson_(FIREBASE_INTERNAL_AUTO_REFRESH_JOB_PATH, "GET", undefined, { shallow: "true" });
+	if (!shallow || typeof shallow !== "object" || Array.isArray(shallow)) {
+		return { deleted: false, reason: "missing" };
+	}
+	let kind = "";
+	try {
+		kind = String(firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_JOB_PATH, "kind"), "GET") || "").trim();
+	} catch (err) {
+		kind = "";
+	}
+	if (kind === "auto-refresh-queue") {
+		return { deleted: false, reason: "queue-current" };
+	}
+	firebaseRequestJson_(FIREBASE_INTERNAL_AUTO_REFRESH_JOB_PATH, "DELETE");
+	return { deleted: true, kind: kind };
+}
+
+// Delete completed/stale/failed auto-refresh run shards. A live queue run is
+// protected so workers can continue safely.
+function cleanupAutoRefreshRunRetention_(stateRaw) {
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : buildFirebaseStorageRetentionState_();
+	const result = cleanupFirebaseChildNodesExceptRetained_(FIREBASE_INTERNAL_AUTO_REFRESH_RUNS_PATH, state.retainedAutoRefreshRunIds, {
+		requireRetained: FIREBASE_AUTOREFRESH_RUN_HISTORY_KEEP_COUNT > 0,
+		keepNewestCount: FIREBASE_AUTOREFRESH_RUN_HISTORY_KEEP_COUNT,
+	});
+	result.retainedRunIds = Object.keys(state.retainedAutoRefreshRunIds).sort();
+	if (state.errors && state.errors.length) result.retentionStateErrors = state.errors.slice();
+	return result;
+}
+
+// Apply all Firebase storage retention cleanup. This is intentionally separate
+// from archive cleanup: archives keep bounded backups, while activeVersions and
+// internal run shards are working storage and should not grow indefinitely.
+function cleanupFirebaseStorageRetention_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const cleanupAt = new Date().toISOString();
+	const state = buildFirebaseStorageRetentionState_(options);
+	const activeVersions = cleanupActiveVersionRetention_(state);
+	const legacyCurrent = cleanupLegacyAutoRefreshCurrentState_();
+	const autoRefreshRuns = cleanupAutoRefreshRunRetention_(state);
+	firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+		layoutVersion: FIREBASE_LAYOUT_VERSION,
+		storageRetentionCleanupAt: cleanupAt,
+		storageRetentionCleanupReason: String(options.reason || ""),
+		storageRetentionActiveVersionDeletedCount: toNonNegativeInt_(activeVersions.deletedCount),
+		storageRetentionAutoRefreshRunDeletedCount: toNonNegativeInt_(autoRefreshRuns.deletedCount),
+		storageRetentionLegacyAutoRefreshCurrentDeleted: !!legacyCurrent.deleted,
+	});
+	return {
+		ok: true,
+		cleanedAt: cleanupAt,
+		activeVersions: activeVersions,
+		autoRefreshRuns: autoRefreshRuns,
+		legacyAutoRefreshCurrent: legacyCurrent,
+		errors: state.errors,
+	};
+}
+
+// Best-effort wrapper for hot paths where retention cleanup must never fail an
+// otherwise successful publish/refresh.
+function cleanupFirebaseStorageRetentionBestEffort_(labelRaw, optionsRaw) {
+	const label = String(labelRaw == null ? "Firebase storage retention cleanup" : labelRaw).trim() || "Firebase storage retention cleanup";
+	try {
+		return cleanupFirebaseStorageRetention_(optionsRaw);
+	} catch (err) {
+		Logger.log("%s failed: %s", label, errorMessage_(err));
+		return { ok: false, error: errorMessage_(err) };
+	}
+}
+
+// Public Apps Script run-menu wrapper for reclaiming Firebase storage after
+// activeVersions/internal growth. Run this once after deployment if the database
+// is already over quota.
+function runFirebaseStorageRetentionCleanupOnce() {
+	return cleanupFirebaseStorageRetention_({ reason: "manual-run-menu" });
 }
 
 // Handle write archived roster payload.
@@ -1955,5 +2176,6 @@ function replaceActiveRosterData_(validatedRosterData, options) {
 		replacedCount: sourceSnapshot ? 1 : 0,
 		validatedRosterData: writeResult.rosterData,
 		text: writeResult.text,
+		storageCleanup: writeResult.storageCleanup || null,
 	};
 }

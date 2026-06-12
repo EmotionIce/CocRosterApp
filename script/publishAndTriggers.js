@@ -1623,6 +1623,32 @@ function writeAutoRefreshQueueLastJobState_(currentRaw, statusRaw, summaryRaw, e
 	return summary;
 }
 
+// Delete terminal queue run storage. The published active version is preserved;
+// failed/stale staging versions are removed even if no published pointer exists.
+function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const label = String(labelRaw == null ? "auto-refresh queue terminal cleanup" : labelRaw).trim() || "auto-refresh queue terminal cleanup";
+	const runId = normalizeActiveVersionId_(current && current.runId);
+	if (!runId) return { deletedRunShard: false, deletedStagingVersion: false };
+	let deletedRunShard = false;
+	let deletedStagingVersion = false;
+	try {
+		firebaseRequestJson_(buildAutoRefreshRunPath_(runId, ""), "DELETE");
+		deletedRunShard = true;
+	} catch (err) {
+		Logger.log("%s: unable to delete run shard %s: %s", label, runId, errorMessage_(err));
+	}
+	try {
+		if (readPublishedActiveVersionId_() !== runId) {
+			firebaseRequestJson_(buildActiveVersionPath_(runId, ""), "DELETE");
+			deletedStagingVersion = true;
+		}
+	} catch (err) {
+		Logger.log("%s: unable to delete staging active version %s: %s", label, runId, errorMessage_(err));
+	}
+	return { deletedRunShard: deletedRunShard, deletedStagingVersion: deletedStagingVersion };
+}
+
 // Archive and clear current queue state without throwing.
 function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, summaryRaw, errorRaw, labelRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
@@ -1641,6 +1667,14 @@ function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, 
 		removeAutoRefreshJobResumeTriggers_();
 	} catch (err) {
 		Logger.log("%s: unable to remove worker triggers: %s", label, errorMessage_(err));
+	}
+	cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(current, label);
+	try {
+		cleanupFirebaseStorageRetentionBestEffort_(label + " storage retention", {
+			reason: label,
+		});
+	} catch (err) {
+		Logger.log("%s: unable to run storage retention cleanup: %s", label, errorMessage_(err));
 	}
 }
 

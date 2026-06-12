@@ -57,6 +57,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return debugFirebaseAuthForDiscordSync(args[0], args[1]);
 		case "debugFirebasePrivateKeySigning":
 			return debugFirebasePrivateKeySigning(args[0]);
+		case "cleanupFirebaseStorageRetention":
+			return cleanupFirebaseStorageRetention(args[0]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}
@@ -197,6 +199,12 @@ function debugFirebaseAuthForDiscordSync(botSecret, forceRefreshRaw) {
 	getFirebaseAccessToken_(forceRefresh);
 	diagnostics.tokenAcquired = true;
 	return diagnostics;
+}
+
+// Run Firebase storage retention cleanup through the admin bridge.
+function cleanupFirebaseStorageRetention(password) {
+	assertAdminPassword_(password);
+	return cleanupFirebaseStorageRetention_({ reason: "admin-api" });
 }
 
 // Parse old and new Discord bot sync argument shapes.

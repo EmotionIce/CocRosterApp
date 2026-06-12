@@ -18,6 +18,8 @@ function listFirebaseDataDebugInfo_() {
 		activeExists: activeExists,
 		activeLastUpdatedAt: activeLastUpdatedAt,
 		hasLegacyRootPayload: hasLegacyRootPayload,
+		activeVersionCount: listFirebaseChildKeys_(FIREBASE_ACTIVE_VERSIONS_PATH).length,
+		autoRefreshRunShardCount: listFirebaseChildKeys_(FIREBASE_INTERNAL_AUTO_REFRESH_RUNS_PATH).length,
 		publishArchiveCount: listFirebaseChildKeys_(FIREBASE_ARCHIVE_PUBLISH_PATH).length,
 		autorefreshDailyCount: listFirebaseChildKeys_(FIREBASE_ARCHIVE_AUTOREFRESH_DAILY_PATH).length,
 		latestAutorefreshDailyArchiveDate: findLatestAutoRefreshArchiveDate_(),

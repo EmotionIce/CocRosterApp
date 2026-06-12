@@ -603,6 +603,70 @@ test("active reader reconstructs the published active version before legacy acti
   assert.equal(reads.includes("activeVersions/version-1/rosters"), false);
 });
 
+test("storage retention cleanup keeps live active versions and deletes historical storage", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildValidRosterData());
+  backend.writeActiveRosterVersionShards_("current-version", data, {
+    publish: true,
+    source: "test",
+  });
+  backend.firebaseRequestJson_("activeVersions/old-version", "PUT", { huge: true });
+  backend.firebaseRequestJson_("activeVersions/live-run", "PUT", { staging: true });
+  backend.firebaseRequestJson_("internal/autoRefresh/runs/old-run", "PUT", { huge: true });
+  backend.firebaseRequestJson_("internal/autoRefresh/runs/live-run", "PUT", { needed: true });
+  backend.firebaseRequestJson_("internal/autoRefresh/current", "PUT", {
+    kind: "auto-refresh-queue",
+    runId: "live-run",
+    status: "running",
+    sourceVersionId: "current-version",
+    rosterIds: [],
+    taskIds: [],
+    taskCount: 0,
+  });
+
+  const result = backend.cleanupFirebaseStorageRetention_({ reason: "test" });
+
+  assert.equal(result.ok, true);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/current-version", "GET") !== null, true);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/live-run", "GET") !== null, true);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/old-version", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/live-run", "GET") !== null, true);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/old-run", "GET"), null);
+  assert.equal(result.activeVersions.deletedCount, 1);
+  assert.equal(result.autoRefreshRuns.deletedCount, 1);
+});
+
+test("storage retention cleanup clears legacy full auto-refresh current state", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    activePublished: {
+      currentVersionId: "current-version",
+    },
+    activeVersions: {
+      "current-version": { manifest: { versionId: "current-version" } },
+      "old-version": { huge: true },
+    },
+    internal: {
+      autoRefresh: {
+        current: {
+          kind: "auto-refresh",
+          rosterDataDraft: { huge: true },
+        },
+        runs: {
+          "old-run": { huge: true },
+        },
+      },
+    },
+  });
+
+  const result = backend.cleanupFirebaseStorageRetention_({ reason: "test" });
+
+  assert.equal(result.legacyAutoRefreshCurrent.deleted, true);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/current", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/old-run", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/old-version", "GET"), null);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/current-version", "GET") !== null, true);
+});
+
 test("active contract rejects metric-like fields on roster players", () => {
   const backend = loadBackend();
   const data = buildValidRosterData();

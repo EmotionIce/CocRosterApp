@@ -177,6 +177,10 @@ The project now supports config-driven family branding without backend changes.
 - Archive retention in Firebase:
   - publish backups (`archive/publish`, keep latest 10),
   - daily auto-refresh backups (`archive/autorefreshDaily`, keep latest 2).
+- Working-storage retention in Firebase:
+  - historical `activeVersions` are pruned after a new version is published,
+  - completed/stale/failed `internal/autoRefresh/runs` shards are deleted,
+  - `runFirebaseStorageRetentionCleanupOnce()` reclaims existing oversized storage manually.
 - Public hydration fallback when primary source is unavailable.
 
 ## Deployment
