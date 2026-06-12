@@ -23,6 +23,8 @@
     const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
+    const ROSTER_SNAPSHOT_IDB_DB_NAME = "roster-public-cache";
+    const ROSTER_SNAPSHOT_IDB_STORE_NAME = "snapshots";
     const ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS = 14 * DAY_MS;
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
@@ -812,11 +814,23 @@
 
     // Handle write local storage JSON.
     const writeLocalStorageJson = (key, value) => {
-        if (!key || typeof window === "undefined" || !window.localStorage) return;
+        if (!key || typeof window === "undefined" || !window.localStorage) return false;
         try {
             window.localStorage.setItem(key, JSON.stringify(value));
+            return true;
         } catch (err) {
             // ignore quota/storage errors
+            return false;
+        }
+    };
+
+    // Handle remove local storage item.
+    const removeLocalStorageItem = (key) => {
+        if (!key || typeof window === "undefined" || !window.localStorage) return;
+        try {
+            window.localStorage.removeItem(key);
+        } catch (err) {
+            // ignore storage errors
         }
     };
 
@@ -8263,6 +8277,121 @@
         return data;
     };
 
+    // Clone JSON-compatible roster data before reusing a cached snapshot.
+    const cloneJsonValue = (valueRaw) => {
+        if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
+        return JSON.parse(JSON.stringify(valueRaw));
+    };
+
+    // Return the browser IndexedDB factory, if available.
+    const getIndexedDbFactory = () => {
+        if (typeof window !== "undefined" && window && window.indexedDB) return window.indexedDB;
+        if (typeof indexedDB !== "undefined" && indexedDB) return indexedDB;
+        return null;
+    };
+
+    // Open the durable roster snapshot database.
+    const openRosterSnapshotIndexedDb = () => new Promise((resolve) => {
+        const indexedDbFactory = getIndexedDbFactory();
+        if (!indexedDbFactory || typeof indexedDbFactory.open !== "function") {
+            resolve(null);
+            return;
+        }
+
+        let request = null;
+        try {
+            request = indexedDbFactory.open(ROSTER_SNAPSHOT_IDB_DB_NAME, 1);
+        } catch (err) {
+            resolve(null);
+            return;
+        }
+
+        request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db || typeof db.createObjectStore !== "function") return;
+            const storeNames = db.objectStoreNames;
+            const hasStore = storeNames && typeof storeNames.contains === "function"
+                ? storeNames.contains(ROSTER_SNAPSHOT_IDB_STORE_NAME)
+                : false;
+            if (!hasStore) db.createObjectStore(ROSTER_SNAPSHOT_IDB_STORE_NAME);
+        };
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => resolve(null);
+        request.onblocked = () => resolve(null);
+    });
+
+    // Read the durable roster snapshot payload from IndexedDB.
+    const readRosterSnapshotPayloadFromIndexedDb = async () => {
+        const db = await openRosterSnapshotIndexedDb();
+        if (!db) return null;
+
+        return new Promise((resolve) => {
+            let result = null;
+            let settled = false;
+            const finish = (value) => {
+                if (settled) return;
+                settled = true;
+                try {
+                    if (typeof db.close === "function") db.close();
+                } catch (err) {
+                    // ignore close errors
+                }
+                resolve(value || null);
+            };
+
+            try {
+                const transaction = db.transaction(ROSTER_SNAPSHOT_IDB_STORE_NAME, "readonly");
+                const store = transaction.objectStore(ROSTER_SNAPSHOT_IDB_STORE_NAME);
+                const request = store.get(ROSTER_SNAPSHOT_CACHE_KEY);
+                request.onsuccess = () => {
+                    result = request.result || null;
+                };
+                request.onerror = () => finish(null);
+                transaction.oncomplete = () => finish(result);
+                transaction.onerror = () => finish(null);
+                transaction.onabort = () => finish(null);
+            } catch (err) {
+                finish(null);
+            }
+        });
+    };
+
+    // Write the durable roster snapshot payload to IndexedDB.
+    const writeRosterSnapshotPayloadToIndexedDb = async (payload) => {
+        if (!payload || typeof payload !== "object") return false;
+        const db = await openRosterSnapshotIndexedDb();
+        if (!db) return false;
+
+        return new Promise((resolve) => {
+            let requestFailed = false;
+            let settled = false;
+            const finish = (ok) => {
+                if (settled) return;
+                settled = true;
+                try {
+                    if (typeof db.close === "function") db.close();
+                } catch (err) {
+                    // ignore close errors
+                }
+                resolve(ok === true);
+            };
+
+            try {
+                const transaction = db.transaction(ROSTER_SNAPSHOT_IDB_STORE_NAME, "readwrite");
+                const store = transaction.objectStore(ROSTER_SNAPSHOT_IDB_STORE_NAME);
+                const request = store.put(payload, ROSTER_SNAPSHOT_CACHE_KEY);
+                request.onerror = () => {
+                    requestFailed = true;
+                };
+                transaction.oncomplete = () => finish(!requestFailed);
+                transaction.onerror = () => finish(false);
+                transaction.onabort = () => finish(false);
+            } catch (err) {
+                finish(false);
+            }
+        });
+    };
+
     // Get roster payload freshness key.
     const getRosterPayloadFreshnessKey = (dataRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
@@ -8281,11 +8410,26 @@
         return parts.join("|");
     };
 
-    // Handle read cached roster snapshot.
-    const readCachedRosterSnapshot = () => {
+    // Build a cached roster snapshot payload.
+    const buildCachedRosterSnapshotPayload = (dataRaw, sourceRaw, metadataRaw) => {
+        const data = assertValidRosterPayload(dataRaw, "Roster snapshot cache write");
+        const metadata = metadataRaw && typeof metadataRaw === "object" ? metadataRaw : {};
+        return {
+            schemaVersion: 1,
+            cachedAt: new Date().toISOString(),
+            source: toStr(sourceRaw).trim() || "unknown",
+            freshnessKey: getRosterPayloadFreshnessKey(data),
+            activeVersionId: toStr(metadata.activeVersionId).trim(),
+            data: data,
+        };
+    };
+
+    // Normalize cached roster snapshot payload.
+    const normalizeCachedRosterSnapshotPayload = (payloadRaw, sourceLabelRaw) => {
         try {
-            const payload = readLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY);
-            if (!payload || typeof payload !== "object") return null;
+            const sourceLabel = toStr(sourceLabelRaw).trim() || "Cached roster snapshot";
+            const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : null;
+            if (!payload) return null;
             const data = assertValidRosterPayload(payload.data, "Cached roster snapshot");
             const cachedAtText = toStr(payload.cachedAt).trim();
             const cachedAtMs = cachedAtText ? Date.parse(cachedAtText) : 0;
@@ -8299,25 +8443,62 @@
                 cachedAt: cachedAtMs > 0 ? new Date(cachedAtMs).toISOString() : "",
                 source: cachedSource,
                 freshnessKey: toStr(payload.freshnessKey).trim() || getRosterPayloadFreshnessKey(data),
+                activeVersionId: toStr(payload.activeVersionId).trim(),
+                cacheSource: sourceLabel,
             };
         } catch (err) {
             return null;
         }
     };
 
+    // Handle read cached roster snapshot from localStorage.
+    const readCachedRosterSnapshot = () =>
+        normalizeCachedRosterSnapshotPayload(
+            readLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY),
+            "localStorage"
+        );
+
+    // Handle read cached roster snapshot from IndexedDB.
+    const readIndexedDbCachedRosterSnapshot = async () =>
+        normalizeCachedRosterSnapshotPayload(
+            await readRosterSnapshotPayloadFromIndexedDb(),
+            "IndexedDB"
+        );
+
+    // Select the best available cached roster snapshot.
+    const selectPreferredCachedRosterSnapshot = (firstRaw, secondRaw) => {
+        const first = firstRaw && typeof firstRaw === "object" ? firstRaw : null;
+        const second = secondRaw && typeof secondRaw === "object" ? secondRaw : null;
+        if (!first) return second;
+        if (!second) return first;
+
+        const firstAt = Date.parse(toStr(first.cachedAt).trim()) || 0;
+        const secondAt = Date.parse(toStr(second.cachedAt).trim()) || 0;
+        if (secondAt > firstAt) return second;
+        if (!first.activeVersionId && second.activeVersionId) return second;
+        return first;
+    };
+
+    // Handle read durable cached roster snapshot.
+    const readDurableCachedRosterSnapshot = async (localSnapshotRaw) => {
+        const localSnapshot = localSnapshotRaw && typeof localSnapshotRaw === "object"
+            ? localSnapshotRaw
+            : readCachedRosterSnapshot();
+        const indexedDbSnapshot = await readIndexedDbCachedRosterSnapshot();
+        return selectPreferredCachedRosterSnapshot(localSnapshot, indexedDbSnapshot);
+    };
+
     // Handle write cached roster snapshot.
-    const writeCachedRosterSnapshot = (dataRaw, sourceRaw) => {
+    const writeCachedRosterSnapshot = async (dataRaw, sourceRaw, metadataRaw) => {
         try {
-            const data = assertValidRosterPayload(dataRaw, "Roster snapshot cache write");
-            writeLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY, {
-                schemaVersion: 1,
-                cachedAt: new Date().toISOString(),
-                source: toStr(sourceRaw).trim() || "unknown",
-                freshnessKey: getRosterPayloadFreshnessKey(data),
-                data: data,
-            });
+            const payload = buildCachedRosterSnapshotPayload(dataRaw, sourceRaw, metadataRaw);
+            const localWritten = writeLocalStorageJson(ROSTER_SNAPSHOT_CACHE_KEY, payload);
+            if (!localWritten) removeLocalStorageItem(ROSTER_SNAPSHOT_CACHE_KEY);
+            const indexedDbWritten = await writeRosterSnapshotPayloadToIndexedDb(payload);
+            return localWritten || indexedDbWritten;
         } catch (err) {
             // Ignore storage/validation errors.
+            return false;
         }
     };
 
@@ -8526,9 +8707,13 @@
         return childPath ? basePath + "/" + childPath : basePath;
     };
 
+    // Load current active published version id from Firebase public.
+    const loadActivePublishedVersionIdViaFirebasePublic = async () =>
+        toStr(await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
+
     // Load roster data from the published active version shards, if available.
-    const loadPublishedActiveVersionViaFirebasePublic = async () => {
-        const versionId = toStr(await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
+    const loadPublishedActiveVersionViaFirebasePublic = async (versionIdRaw) => {
+        const versionId = toStr(versionIdRaw).trim() || await loadActivePublishedVersionIdViaFirebasePublic();
         if (!versionId) return null;
         const versionLabel = "Firebase public /activeVersions/" + versionId;
         const manifestPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "manifest"));
@@ -8565,7 +8750,10 @@
         if (manifest.publicConfig && typeof manifest.publicConfig === "object" && !Array.isArray(manifest.publicConfig)) {
             data.publicConfig = manifest.publicConfig;
         }
-        return assertValidRosterPayload(data, versionLabel);
+        return {
+            data: assertValidRosterPayload(data, versionLabel),
+            activeVersionId: versionId,
+        };
     };
 
     // Return public Firebase event path by event id.
@@ -8634,11 +8822,53 @@
         };
     };
 
-    // Load roster data via Firebase public.
-    const loadRosterDataViaFirebasePublic = async () => {
-        let data = null;
+    // Reuse cached roster/playerMetrics when the active published version is unchanged.
+    const loadCachedActiveVersionSnapshotViaFirebasePublic = async (cachedSnapshotRaw, activeVersionIdRaw) => {
+        const cachedSnapshot = cachedSnapshotRaw && typeof cachedSnapshotRaw === "object" ? cachedSnapshotRaw : null;
+        const activeVersionId = toStr(activeVersionIdRaw).trim();
+        if (!cachedSnapshot || !cachedSnapshot.data || !activeVersionId) return null;
+        if (toStr(cachedSnapshot.activeVersionId).trim() !== activeVersionId) return null;
+
+        const data = cloneJsonValue(cachedSnapshot.data);
         try {
-            data = await loadPublishedActiveVersionViaFirebasePublic();
+            data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
+        } catch (err) {
+            if (!data.seasonEvents || typeof data.seasonEvents !== "object" || Array.isArray(data.seasonEvents)) {
+                data.seasonEvents = buildEmptySeasonEventsBundle([{
+                    path: "/" + SEASON_EVENTS_BASE_PATH,
+                    message: err && err.message ? err.message : toStr(err),
+                }]);
+            }
+            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                console.warn("[SeasonEvents] Public Firebase event hydration failed while reusing cached active version.", err);
+            }
+        }
+
+        return {
+            source: FIREBASE_PUBLIC_SOURCE + "-cached-active-version",
+            data: assertValidRosterPayload(data, "Cached Firebase public /activeVersions/" + activeVersionId),
+            activeVersionId: activeVersionId,
+        };
+    };
+
+    // Load roster data via Firebase public.
+    const loadRosterDataViaFirebasePublic = async (optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const cachedSnapshot = options.cachedSnapshot && typeof options.cachedSnapshot === "object" ? options.cachedSnapshot : null;
+        let data = null;
+        let activeVersionId = "";
+        try {
+            if (cachedSnapshot && cachedSnapshot.activeVersionId) {
+                activeVersionId = await loadActivePublishedVersionIdViaFirebasePublic();
+                const cachedLoaded = await loadCachedActiveVersionSnapshotViaFirebasePublic(cachedSnapshot, activeVersionId);
+                if (cachedLoaded) return cachedLoaded;
+            }
+
+            const versionedLoaded = await loadPublishedActiveVersionViaFirebasePublic(activeVersionId);
+            if (versionedLoaded) {
+                data = versionedLoaded.data;
+                activeVersionId = toStr(versionedLoaded.activeVersionId).trim();
+            }
         } catch (err) {
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
                 console.warn("[RosterData] Versioned Firebase active load failed; falling back to /active.", err);
@@ -8647,6 +8877,7 @@
         if (!data) {
             const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
             data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active");
+            activeVersionId = "";
         }
         try {
             data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
@@ -8662,6 +8893,7 @@
         return {
             source: FIREBASE_PUBLIC_SOURCE,
             data: data,
+            activeVersionId: activeVersionId,
         };
     };
 
@@ -8768,13 +9000,17 @@
     };
 
     // Load roster data with fallback.
-    const loadRosterDataWithFallback = async () => {
+    const loadRosterDataWithFallback = async (optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         let firebaseError = null;
         try {
-            const loaded = await loadRosterDataViaFirebasePublic();
+            const loaded = await loadRosterDataViaFirebasePublic({
+                cachedSnapshot: options.cachedSnapshot,
+            });
             return {
                 source: toStr(loaded && loaded.source).trim() || FIREBASE_PUBLIC_SOURCE,
                 data: assertValidRosterPayload(loaded && loaded.data, "Firebase public hydration"),
+                activeVersionId: toStr(loaded && loaded.activeVersionId).trim(),
             };
         } catch (err) {
             firebaseError = err;
@@ -8830,7 +9066,7 @@
 
     if (!window.ROSTER_CLIENT_DISABLE_AUTOLOAD) {
         rosterHydrationInFlight = true;
-        const cachedSnapshot = readCachedRosterSnapshot();
+        let cachedSnapshot = readCachedRosterSnapshot();
         if (cachedSnapshot && cachedSnapshot.data) {
             markBootTiming("cached-roster-render-start", { source: cachedSnapshot.source });
             render(cachedSnapshot.data);
@@ -8840,10 +9076,29 @@
         (async () => {
             markBootTiming("roster-fetch-start");
             try {
-                const loaded = await loadRosterDataWithFallback();
+                const durableCachedSnapshot = await readDurableCachedRosterSnapshot(cachedSnapshot);
+                if (durableCachedSnapshot && durableCachedSnapshot.data) {
+                    const durableFreshnessKey = getRosterPayloadFreshnessKey(durableCachedSnapshot.data);
+                    const shouldRenderDurableCache = !!(
+                        durableFreshnessKey &&
+                        durableFreshnessKey !== lastRenderedRosterFreshnessKey
+                    );
+                    cachedSnapshot = durableCachedSnapshot;
+                    if (shouldRenderDurableCache) {
+                        markBootTiming("durable-cached-roster-render-start", { source: cachedSnapshot.source });
+                        render(cachedSnapshot.data);
+                        markBootTiming("durable-cached-roster-render-complete", { source: cachedSnapshot.source });
+                    }
+                }
+
+                const loaded = await loadRosterDataWithFallback({
+                    cachedSnapshot: cachedSnapshot,
+                });
                 markBootTiming("roster-fetch-complete", { source: loaded.source });
                 measureBootTiming("roster-fetch", "roster-fetch-start", "roster-fetch-complete");
-                writeCachedRosterSnapshot(loaded.data, loaded.source);
+                const cacheWritePromise = writeCachedRosterSnapshot(loaded.data, loaded.source, {
+                    activeVersionId: loaded.activeVersionId,
+                });
                 const loadedFreshnessKey = getRosterPayloadFreshnessKey(loaded.data);
                 const shouldSkipRerender = !!(loadedFreshnessKey && lastRenderedRosterFreshnessKey && loadedFreshnessKey === lastRenderedRosterFreshnessKey);
                 rosterHydrationInFlight = false;
@@ -8856,6 +9111,7 @@
                         source: loaded.source,
                     });
                 }
+                await cacheWritePromise;
                 promoteLandingMediaStart_("hydration-complete");
                 markBootTiming("full-data-render-complete", { source: loaded.source });
                 measureBootTiming("full-data-render", "shell-boot-start", "full-data-render-complete");

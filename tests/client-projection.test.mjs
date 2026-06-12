@@ -20,6 +20,9 @@ const loadClientInternals = (overrides = {}) => {
       "        buildSeasonEventsPublicModel,",
       "        loadRosterDataViaFirebasePublic,",
       "        loadCurrentSeasonEventsViaFirebasePublic,",
+      "        readCachedRosterSnapshot,",
+      "        readDurableCachedRosterSnapshot,",
+      "        writeCachedRosterSnapshot,",
       "        resolveLeaderboardRankedSeasonCycle,",
       "    };",
       "    return;",
@@ -41,6 +44,89 @@ const loadClientInternals = (overrides = {}) => {
   vm.createContext(context);
   vm.runInContext(instrumentedCode, context);
   return context.window.__ROSTER_CLIENT_TEST_INTERNALS__;
+};
+
+const makeMemoryIndexedDb = () => {
+  const records = new Map();
+  let storeCreated = false;
+  const defer = (fn) => Promise.resolve().then(fn);
+
+  const db = {
+    objectStoreNames: {
+      contains: () => storeCreated,
+    },
+    createObjectStore: () => {
+      storeCreated = true;
+    },
+    close: () => {},
+    transaction: () => {
+      const transaction = {
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        objectStore: () => ({
+          get: (key) => {
+            const request = {
+              result: undefined,
+              onsuccess: null,
+              onerror: null,
+            };
+            defer(() => {
+              request.result = records.get(key);
+              if (typeof request.onsuccess === "function") request.onsuccess();
+              if (typeof transaction.oncomplete === "function") transaction.oncomplete();
+            });
+            return request;
+          },
+          put: (value, key) => {
+            const request = {
+              onsuccess: null,
+              onerror: null,
+            };
+            defer(() => {
+              records.set(key, value);
+              if (typeof request.onsuccess === "function") request.onsuccess();
+              if (typeof transaction.oncomplete === "function") transaction.oncomplete();
+            });
+            return request;
+          },
+        }),
+      };
+      return transaction;
+    },
+  };
+
+  return {
+    open: () => {
+      const request = {
+        result: db,
+        onupgradeneeded: null,
+        onsuccess: null,
+        onerror: null,
+        onblocked: null,
+      };
+      defer(() => {
+        if (!storeCreated && typeof request.onupgradeneeded === "function") {
+          request.onupgradeneeded();
+        }
+        if (typeof request.onsuccess === "function") request.onsuccess();
+      });
+      return request;
+    },
+  };
+};
+
+const makeThrowingLocalStorage = () => {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) || null,
+    setItem: () => {
+      throw new Error("QuotaExceededError");
+    },
+    removeItem: (key) => {
+      values.delete(key);
+    },
+  };
 };
 
 test("keeps canonical Discord when a stale live projection has an empty Discord value", () => {
@@ -261,6 +347,201 @@ test("loads published active version shards before falling back to legacy active
   assert.equal(loaded.data.pageTitle, "Versioned Roster");
   assert.equal(loaded.data.rosters[0].id, "main");
   assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
+  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+});
+
+test("reuses cached roster and player metrics when active published version is unchanged", async () => {
+  const responses = new Map([
+    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
+    ["https://firebase.test/events/seasonEvents/current.json", null],
+    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+  ]);
+  const requested = [];
+  const { loadRosterDataViaFirebasePublic } = loadClientInternals({
+    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await loadRosterDataViaFirebasePublic({
+    cachedSnapshot: {
+      activeVersionId: "version-1",
+      data: {
+        schemaVersion: 1,
+        pageTitle: "Cached Version",
+        rosterOrder: ["main"],
+        rosters: [{
+          id: "main",
+          title: "Cached Main",
+          main: [],
+          subs: [],
+          missing: [],
+        }],
+        playerMetrics: {
+          schemaVersion: 1,
+          updatedAt: "2026-05-25T00:00:00.000Z",
+          byTag: {
+            "#PLAYER": {
+              latestSnapshot: { tag: "#PLAYER", trophies: 5000 },
+            },
+          },
+        },
+        seasonEvents: {
+          current: {
+            push: { eventId: "cached-push" },
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(loaded.source, "firebase-public-cached-active-version");
+  assert.equal(loaded.activeVersionId, "version-1");
+  assert.equal(loaded.data.pageTitle, "Cached Version");
+  assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/rosters.json"), false);
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/playerMetrics.json"), false);
+  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+});
+
+test("uses IndexedDB cached snapshot when localStorage cannot store the full active payload", async () => {
+  const responses = new Map([
+    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
+    ["https://firebase.test/events/seasonEvents/current.json", null],
+    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+  ]);
+  const requested = [];
+  const internals = loadClientInternals({
+    window: {
+      ROSTER_FIREBASE_DB_URL: "https://firebase.test",
+      indexedDB: makeMemoryIndexedDb(),
+      localStorage: makeThrowingLocalStorage(),
+    },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+  const cachedData = {
+    schemaVersion: 1,
+    pageTitle: "IndexedDB Cached Version",
+    rosterOrder: ["main"],
+    rosters: [{
+      id: "main",
+      title: "Cached Main",
+      main: [],
+      subs: [],
+      missing: [],
+    }],
+    playerMetrics: {
+      schemaVersion: 1,
+      updatedAt: "2026-05-25T00:00:00.000Z",
+      byTag: {
+        "#PLAYER": {
+          latestSnapshot: { tag: "#PLAYER", trophies: 5000 },
+        },
+      },
+    },
+  };
+
+  assert.equal(
+    await internals.writeCachedRosterSnapshot(cachedData, "firebase-public", {
+      activeVersionId: "version-1",
+    }),
+    true,
+  );
+  assert.equal(internals.readCachedRosterSnapshot(), null);
+
+  const durableSnapshot = await internals.readDurableCachedRosterSnapshot();
+  assert.equal(durableSnapshot.activeVersionId, "version-1");
+  assert.equal(durableSnapshot.cacheSource, "IndexedDB");
+
+  const loaded = await internals.loadRosterDataViaFirebasePublic({
+    cachedSnapshot: durableSnapshot,
+  });
+
+  assert.equal(loaded.source, "firebase-public-cached-active-version");
+  assert.equal(loaded.data.pageTitle, "IndexedDB Cached Version");
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/rosters.json"), false);
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/playerMetrics.json"), false);
+  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+});
+
+test("downloads active version shards when cached active published version is stale", async () => {
+  const responses = new Map([
+    ["https://firebase.test/activePublished/currentVersionId.json", "version-2"],
+    ["https://firebase.test/activeVersions/version-2/manifest.json", {
+      versionId: "version-2",
+      schemaVersion: 1,
+      pageTitle: "Fresh Version",
+      rosterOrder: ["main"],
+      rosterIds: ["main"],
+      lastUpdatedAt: "2026-05-26T00:00:00.000Z",
+    }],
+    ["https://firebase.test/activeVersions/version-2/rosters.json", {
+      main: {
+        id: "main",
+        title: "Fresh Main",
+        main: [],
+        subs: [],
+        missing: [],
+      },
+    }],
+    ["https://firebase.test/activeVersions/version-2/playerMetrics.json", {
+      schemaVersion: 1,
+      updatedAt: "2026-05-26T00:00:00.000Z",
+      byTag: {},
+    }],
+    ["https://firebase.test/events/seasonEvents/current.json", null],
+    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+  ]);
+  const requested = [];
+  const { loadRosterDataViaFirebasePublic } = loadClientInternals({
+    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await loadRosterDataViaFirebasePublic({
+    cachedSnapshot: {
+      activeVersionId: "version-1",
+      data: {
+        schemaVersion: 1,
+        pageTitle: "Cached Version",
+        rosterOrder: ["main"],
+        rosters: [{ id: "main", title: "Cached Main", main: [], subs: [], missing: [] }],
+        playerMetrics: { byTag: {} },
+      },
+    },
+  });
+
+  assert.equal(loaded.source, "firebase-public");
+  assert.equal(loaded.activeVersionId, "version-2");
+  assert.equal(loaded.data.pageTitle, "Fresh Version");
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-2/rosters.json"), true);
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-2/playerMetrics.json"), true);
   assert.equal(requested.includes("https://firebase.test/active.json"), false);
 });
 
