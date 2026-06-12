@@ -146,6 +146,53 @@ function buildCwlLeagueSignupOptionsFromRosterData_(rosterDataRaw, optionsRaw) {
 	return buildCwlLeagueSignupOptionsResultFromRosterData_(rosterDataRaw, optionsRaw).options;
 }
 
+function sanitizeCwlLeagueSignupOption_(optionRaw) {
+	const option = optionRaw && typeof optionRaw === "object" ? optionRaw : {};
+	const leagueName = sanitizeCwlSignupText_(option.leagueName, 80);
+	const leagueKey = normalizeCwlSignupLeagueKey_(option.leagueKey || leagueName);
+	if (!leagueKey || !leagueName) return null;
+	const sanitizeList = function (valuesRaw) {
+		const values = Array.isArray(valuesRaw) ? valuesRaw : [];
+		const out = [];
+		const seen = {};
+		for (let i = 0; i < values.length; i++) {
+			const value = sanitizeCwlSignupText_(values[i], 80);
+			const key = value.toLowerCase();
+			if (!value || seen[key]) continue;
+			seen[key] = true;
+			out.push(value);
+		}
+		return out;
+	};
+	return {
+		leagueKey: leagueKey,
+		leagueName: leagueName,
+		rosterIds: sanitizeList(option.rosterIds),
+		clanTags: sanitizeList(option.clanTags).map((tag) => normalizeTag_(tag)).filter((tag) => tag),
+		clanNames: sanitizeList(option.clanNames),
+		playerCount: toNonNegativeInt_(option.playerCount),
+	};
+}
+
+function buildCwlLeagueSignupOptionsByKey_(optionsRaw) {
+	let options = [];
+	if (Array.isArray(optionsRaw)) {
+		options = optionsRaw;
+	} else if (optionsRaw && typeof optionsRaw === "object") {
+		const keys = Object.keys(optionsRaw);
+		for (let i = 0; i < keys.length; i++) {
+			options.push(optionsRaw[keys[i]]);
+		}
+	}
+	const byKey = {};
+	for (let i = 0; i < options.length; i++) {
+		const option = sanitizeCwlLeagueSignupOption_(options[i]);
+		if (!option) continue;
+		byKey[option.leagueKey] = option;
+	}
+	return byKey;
+}
+
 function buildCwlLeagueSignupOptionsResultFromRosterData_(rosterDataRaw, optionsRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -254,12 +301,15 @@ function sanitizeCwlLeagueSignupsPayload_(payloadRaw) {
 		if (!key) continue;
 		audit[key] = entryRaw;
 	}
+	const optionsByLeagueKey = buildCwlLeagueSignupOptionsByKey_(payload.optionsByLeagueKey);
 	return {
 		schemaVersion: CWL_LEAGUE_SIGNUPS_SCHEMA_VERSION,
 		signupId: sanitizeCwlSignupText_(payload.signupId, 40),
 		status: sanitizeCwlSignupText_(payload.status, 40) || "open",
 		createdAt: sanitizeCwlSignupText_(payload.createdAt, 40) || new Date().toISOString(),
 		updatedAt: sanitizeCwlSignupText_(payload.updatedAt, 40),
+		optionSnapshotUpdatedAt: sanitizeCwlSignupText_(payload.optionSnapshotUpdatedAt, 40),
+		optionsByLeagueKey: optionsByLeagueKey,
 		preferencesByTag: preferencesByTag,
 		audit: audit,
 	};
@@ -306,8 +356,16 @@ function getCwlLeagueSignupOptions(payloadRaw, secretOrPasswordRaw) {
 	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
 	const snapshot = readActiveRosterSnapshot_();
 	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
-	const signups = ensureActiveCwlLeagueSignupId_();
 	const signupOptionsResult = buildCwlLeagueSignupOptionsResultFromRosterData_(rosterData, { fetchMissing: parsed.payload.fetchMissing !== false });
+	const signups = withCwlLeagueSignupWriteLock_(function () {
+		const current = readActiveCwlLeagueSignups_();
+		const nowIso = new Date().toISOString();
+		if (!current.signupId) current.signupId = buildCwlLeagueSignupId_();
+		current.optionsByLeagueKey = buildCwlLeagueSignupOptionsByKey_(signupOptionsResult.options);
+		current.optionSnapshotUpdatedAt = nowIso;
+		if (!current.updatedAt) current.updatedAt = nowIso;
+		return writeActiveCwlLeagueSignups_(current);
+	});
 	return {
 		ok: true,
 		signupId: signups.signupId,
@@ -325,13 +383,8 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 	const playerTag = normalizeTag_(payload.playerTag);
 	if (!playerTag || !isValidPlayerTag_(playerTag)) throw new Error("Invalid player tag.");
 	return withCwlLeagueSignupWriteLock_(function () {
-		const snapshot = readActiveRosterSnapshot_();
-		const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
-		const options = buildCwlLeagueSignupOptionsFromRosterData_(rosterData, { fetchMissing: true });
-		const selected = findCwlSignupOptionByKey_(options, payload.leagueKey || payload.leagueName);
-		if (!selected) throw new Error("Selected CWL league is not available.");
 		const nowIso = new Date().toISOString();
-		const signups = ensureActiveCwlLeagueSignupId_();
+		const signups = readActiveCwlLeagueSignups_();
 		const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
 		if (!signupId || signupId !== signups.signupId) {
 			throw new Error("This CWL league signup message is no longer active. Please use the latest signup message.");
@@ -340,6 +393,19 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		if (existing && existing.leagueKey) {
 			throw new Error("This player tag already has an active CWL league preference.");
 		}
+		const storedOptionKeys = Object.keys(signups.optionsByLeagueKey || {});
+		const storedOptions = [];
+		for (let i = 0; i < storedOptionKeys.length; i++) {
+			storedOptions.push(signups.optionsByLeagueKey[storedOptionKeys[i]]);
+		}
+		let selected = findCwlSignupOptionByKey_(storedOptions, payload.leagueKey || payload.leagueName);
+		if (!selected) {
+			const snapshot = readActiveRosterSnapshot_();
+			const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+			const options = buildCwlLeagueSignupOptionsFromRosterData_(rosterData, { fetchMissing: true });
+			selected = findCwlSignupOptionByKey_(options, payload.leagueKey || payload.leagueName);
+		}
+		if (!selected) throw new Error("Selected CWL league is not available.");
 		const pref = {
 			playerTag: playerTag,
 			playerName: sanitizeCwlSignupText_(payload.playerName || existing.playerName, 80),
@@ -403,6 +469,8 @@ function archiveAndResetCwlLeagueSignups_(reasonRaw, sourceRaw) {
 			status: "open",
 			createdAt: nowIso,
 			updatedAt: nowIso,
+			optionSnapshotUpdatedAt: "",
+			optionsByLeagueKey: {},
 			preferencesByTag: {},
 			audit: {},
 		});

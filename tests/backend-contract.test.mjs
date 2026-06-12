@@ -16,6 +16,8 @@ const appScriptFiles = [
   "script/seasonEvents.js",
   "script/publishAndTriggers.js",
   "script/authAndLocks.js",
+  "script/assets.js",
+  "script/cwlLeagueSignups.js",
   "script/adminApi.js",
 ];
 
@@ -199,6 +201,62 @@ const buildValidRosterData = () => ({
           trophies: 5000,
           donations: 10,
           donationsReceived: 5,
+          capturedAt: "2026-05-19T00:00:00.000Z",
+        },
+        trophyHistoryDaily: [],
+      },
+    },
+  },
+});
+
+const buildCwlLeagueSignupRosterData = () => ({
+  schemaVersion: 1,
+  pageTitle: "Roster",
+  rosterOrder: ["main", "second"],
+  rosters: [
+    {
+      id: "main",
+      title: "Turtle Main",
+      connectedClanTag: "#2LUCULP",
+      trackingMode: "cwl",
+      cwlLeagueName: "Champion I",
+      main: [
+        {
+          slot: 1,
+          name: "Alpha",
+          discord: "alpha",
+          th: 16,
+          tag: "#2LUCULP",
+          notes: [],
+          excludeAsSwapTarget: false,
+          excludeAsSwapSource: false,
+        },
+      ],
+      subs: [],
+      missing: [],
+    },
+    {
+      id: "second",
+      title: "Turtle Second",
+      connectedClanTag: "#9PYLQG",
+      trackingMode: "cwl",
+      cwlLeagueName: "Master II",
+      main: [],
+      subs: [],
+      missing: [],
+    },
+  ],
+  playerMetrics: {
+    schemaVersion: 1,
+    updatedAt: "2026-05-19T00:00:00.000Z",
+    byTag: {
+      "#2LUCULP": {
+        identity: { tag: "#2LUCULP", name: "Alpha" },
+        latestSnapshot: {
+          tag: "#2LUCULP",
+          name: "Alpha",
+          townHallLevel: 16,
+          trophies: 5000,
           capturedAt: "2026-05-19T00:00:00.000Z",
         },
         trophyHistoryDaily: [],
@@ -1458,6 +1516,84 @@ test("current season event leaderboards reconcile before reading current pointer
   assert.equal(result.leaderboards.push.event.eventId, "push-ranked-legend-i-2026-06-15");
   assert.equal(result.leaderboards.donation.event.eventId, "donation-ranked-legend-i-2026-06-15");
   assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/push").eventId, "push-ranked-legend-i-2026-06-15");
+});
+
+test("CWL league signup options store the active message snapshot", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+
+  const result = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+
+  assert.equal(result.ok, true);
+  assert.ok(result.signupId);
+  assert.equal(JSON.stringify(result.options.map((option) => option.leagueKey)), JSON.stringify(["champion-i", "master-ii"]));
+  assert.equal(signups.signupId, result.signupId);
+  assert.equal(signups.optionsByLeagueKey["champion-i"].leagueName, "Champion I");
+  assert.equal(signups.optionsByLeagueKey["master-ii"].leagueName, "Master II");
+  assert.ok(signups.optionSnapshotUpdatedAt);
+});
+
+test("CWL league preference saves from the message snapshot without rebuilding options", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  let rosterSnapshotReads = 0;
+  backend.readActiveRosterSnapshot_ = () => {
+    rosterSnapshotReads += 1;
+    throw new Error("roster options should not rebuild for a snapshotted signup");
+  };
+  backend.cocFetch_ = () => {
+    throw new Error("Clash should not be fetched for a snapshotted signup");
+  };
+
+  const result = backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "champion-i",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+    messageId: "message-1",
+    channelId: "channel-1",
+    guildId: "guild-1",
+  }, "secret");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.preference.leagueName, "Champion I");
+  assert.equal(result.preferenceCount, 1);
+  assert.equal(rosterSnapshotReads, 0);
+});
+
+test("stale CWL league signup messages reject before rebuilding options", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  const reset = backend.resetCwlLeaguePreferences({ source: "test", reason: "new-message" }, "secret");
+  let rosterSnapshotReads = 0;
+  backend.readActiveRosterSnapshot_ = () => {
+    rosterSnapshotReads += 1;
+    throw new Error("stale signup should fail before roster option rebuild");
+  };
+  backend.cocFetch_ = () => {
+    throw new Error("stale signup should fail before Clash fetch");
+  };
+
+  assert.notEqual(reset.signupId, signup.signupId);
+  assert.throws(() => backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "champion-i",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+    messageId: "message-1",
+    channelId: "channel-1",
+    guildId: "guild-1",
+  }, "secret"), /no longer active/i);
+  assert.equal(rosterSnapshotReads, 0);
 });
 
 test("manual cleanup converts known legacy active schema leftovers", () => {
