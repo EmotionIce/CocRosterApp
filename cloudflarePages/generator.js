@@ -1063,6 +1063,211 @@
     };
   };
 
+  const normalizeCwlLeaguePreferenceKey = (raw) => normalizeWhitespace(raw)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+
+  const collectCwlLeaguePreferenceOptionsByKey = (cwlLeagueSignups) => {
+    const source = isObj(cwlLeagueSignups) && isObj(cwlLeagueSignups.optionsByLeagueKey)
+      ? cwlLeagueSignups.optionsByLeagueKey
+      : {};
+    const out = {};
+    const keys = Object.keys(source);
+    for (const rawKey of keys) {
+      const option = isObj(source[rawKey]) ? source[rawKey] : {};
+      const leagueName = normalizeWhitespace(option.leagueName);
+      const leagueKey = normalizeCwlLeaguePreferenceKey(option.leagueKey || rawKey || leagueName);
+      if (!leagueKey || !leagueName) continue;
+      const rosterIds = Array.isArray(option.rosterIds)
+        ? option.rosterIds.map((value) => normalizeWhitespace(value)).filter(Boolean)
+        : [];
+      out[leagueKey] = {
+        leagueKey,
+        leagueName,
+        rosterIds,
+      };
+    }
+    return out;
+  };
+
+  const collectCwlLeaguePreferences = (cwlLeagueSignups) => {
+    const source = isObj(cwlLeagueSignups) && isObj(cwlLeagueSignups.preferencesByTag)
+      ? cwlLeagueSignups.preferencesByTag
+      : {};
+    const out = [];
+    const keys = Object.keys(source).sort();
+    for (const rawTag of keys) {
+      const preference = isObj(source[rawTag]) ? source[rawTag] : {};
+      const playerTag = normalizeTag(preference.playerTag || rawTag);
+      const leagueName = normalizeWhitespace(preference.leagueName);
+      const leagueKey = normalizeCwlLeaguePreferenceKey(preference.leagueKey || leagueName);
+      out.push({
+        playerTag,
+        playerName: normalizeWhitespace(preference.playerName),
+        leagueKey,
+        leagueName,
+        discordId: normalizeWhitespace(preference.discordId),
+      });
+    }
+    return out;
+  };
+
+  const getCwlPreferenceLockState = (roster, playerTag) => {
+    const prep = isObj(roster && roster.cwlPreparation) ? roster.cwlPreparation : {};
+    const lockStateByTag = isObj(prep.lockStateByTag) ? prep.lockStateByTag : {};
+    const value = normalizeWhitespace(lockStateByTag[playerTag]);
+    return value === "lockedIn" || value === "lockedOut" ? value : "";
+  };
+
+  const buildCwlPreferencePlanSummary = (plan) => ({
+    validMoveCount: plan.moves.length,
+    alreadyCorrectCount: plan.alreadyCorrect.length,
+    skippedCount: plan.skipped.length,
+    conflictCount: plan.conflicts.length,
+    missingPlayerCount: plan.missingPlayers.length,
+    missingOptionCount: plan.missingOptions.length,
+    preferenceCount: plan.preferenceCount,
+  });
+
+  const planCwlLeaguePreferenceMoves = (args) => {
+    const input = isObj(args) ? args : {};
+    const rosterData = isObj(input.rosterData) ? input.rosterData : {};
+    const cwlLeagueSignups = isObj(input.cwlLeagueSignups)
+      ? input.cwlLeagueSignups
+      : (isObj(rosterData.cwlLeagueSignups) ? rosterData.cwlLeagueSignups : {});
+    const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+    const optionsByKey = collectCwlLeaguePreferenceOptionsByKey(cwlLeagueSignups);
+    const preferences = collectCwlLeaguePreferences(cwlLeagueSignups);
+    const rosterById = {};
+    const playerLocationByTag = {};
+
+    for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
+      const roster = isObj(rosters[rosterIndex]) ? rosters[rosterIndex] : {};
+      const rosterId = normalizeWhitespace(roster.id);
+      if (rosterId && !rosterById[rosterId]) rosterById[rosterId] = { roster, rosterIndex };
+      const sections = [
+        { role: "main", players: Array.isArray(roster.main) ? roster.main : [] },
+        { role: "sub", players: Array.isArray(roster.subs) ? roster.subs : [] },
+        { role: "missing", players: Array.isArray(roster.missing) ? roster.missing : [] },
+      ];
+      for (const section of sections) {
+        for (let playerIndex = 0; playerIndex < section.players.length; playerIndex++) {
+          const player = isObj(section.players[playerIndex]) ? section.players[playerIndex] : {};
+          const playerTag = normalizeTag(player.tag);
+          if (!playerTag || playerLocationByTag[playerTag]) continue;
+          playerLocationByTag[playerTag] = {
+            roster,
+            rosterId,
+            rosterIndex,
+            role: section.role,
+            playerIndex,
+            player,
+          };
+        }
+      }
+    }
+
+    const plan = {
+      preferenceCount: preferences.length,
+      moves: [],
+      alreadyCorrect: [],
+      skipped: [],
+      conflicts: [],
+      missingPlayers: [],
+      missingOptions: [],
+      summary: null,
+    };
+
+    for (const preference of preferences) {
+      const playerTag = normalizeTag(preference.playerTag);
+      const base = {
+        playerTag,
+        playerName: normalizeWhitespace(preference.playerName),
+        leagueKey: normalizeCwlLeaguePreferenceKey(preference.leagueKey || preference.leagueName),
+        leagueName: normalizeWhitespace(preference.leagueName),
+      };
+      if (!playerTag || !base.leagueKey) {
+        plan.skipped.push(Object.assign({}, base, {
+          reason: !playerTag ? "invalid-player-tag" : "missing-league",
+        }));
+        continue;
+      }
+
+      const option = optionsByKey[base.leagueKey];
+      if (!option) {
+        plan.missingOptions.push(Object.assign({}, base, {
+          reason: "missing-option",
+        }));
+        continue;
+      }
+
+      const targetRosterIds = option.rosterIds.filter((rosterId) => !!rosterById[rosterId]);
+      if (!targetRosterIds.length) {
+        plan.missingOptions.push(Object.assign({}, base, {
+          reason: "missing-target-roster",
+          targetRosterIds: option.rosterIds.slice(),
+        }));
+        continue;
+      }
+
+      const location = playerLocationByTag[playerTag];
+      if (!location) {
+        plan.missingPlayers.push(Object.assign({}, base, {
+          reason: "missing-player",
+          targetRosterIds,
+        }));
+        continue;
+      }
+
+      if (targetRosterIds.indexOf(location.rosterId) >= 0) {
+        plan.alreadyCorrect.push(Object.assign({}, base, {
+          rosterId: location.rosterId,
+          targetRosterIds,
+        }));
+        continue;
+      }
+
+      const lockState = getCwlPreferenceLockState(location.roster, playerTag);
+      if (lockState) {
+        plan.conflicts.push(Object.assign({}, base, {
+          reason: "locked-player",
+          lockState,
+          sourceRosterId: location.rosterId,
+          targetRosterIds,
+        }));
+        continue;
+      }
+
+      let targetRosterId = "";
+      for (const roster of rosters) {
+        const candidateId = normalizeWhitespace(roster && roster.id);
+        if (targetRosterIds.indexOf(candidateId) >= 0) {
+          targetRosterId = candidateId;
+          break;
+        }
+      }
+      if (!targetRosterId) {
+        plan.missingOptions.push(Object.assign({}, base, {
+          reason: "missing-target-roster",
+          targetRosterIds,
+        }));
+        continue;
+      }
+
+      plan.moves.push(Object.assign({}, base, {
+        fromRosterId: location.rosterId,
+        fromRole: location.role,
+        targetRosterId,
+        targetRosterIds,
+      }));
+    }
+
+    plan.summary = buildCwlPreferencePlanSummary(plan);
+    return plan;
+  };
+
   const api = {
     normalizeTag,
     normalizeClanKey,
@@ -1074,12 +1279,16 @@
     buildPreviewTagIndex,
     buildImportComparison,
     applyImportComparison,
+    planCwlLeaguePreferenceMoves,
     _internal: {
       sanitizeNameCandidate,
       sanitizeDiscordCandidate,
       sanitizeDiscordIdCandidate,
       normalizeLookupKey,
       buildSafeMatchedUpdates,
+      normalizeCwlLeaguePreferenceKey,
+      collectCwlLeaguePreferenceOptionsByKey,
+      collectCwlLeaguePreferences,
     },
   };
 

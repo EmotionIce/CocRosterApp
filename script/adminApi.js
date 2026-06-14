@@ -47,6 +47,10 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getCwlLeagueSignupOptions(args[0], args[1]);
 		case "setCwlLeaguePreference":
 			return setCwlLeaguePreference(args[0], args[1]);
+		case "getCwlLeaguePreferencesForDiscordUser":
+			return getCwlLeaguePreferencesForDiscordUser(args[0], args[1]);
+		case "clearCwlLeaguePreference":
+			return clearCwlLeaguePreference(args[0], args[1]);
 		case "resetCwlLeaguePreferences":
 			return resetCwlLeaguePreferences(args[0], args[1]);
 		case "updateSeasonEvent":

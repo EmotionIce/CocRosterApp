@@ -16,6 +16,7 @@
     benchMarksByRoster: {},
     swapInMarksByRoster: {},
     suggestionNotesByRoster: {},
+    lastCwlPreferenceApplyPlan: null,
     pendingProfileReopen: null,
     autoRefreshSettings: null,
     autoRefreshBusy: false,
@@ -2669,6 +2670,121 @@
     btn.textContent = state.bulkRefreshBusy ? "Refreshing..." : "Refresh all";
   };
 
+  // Count loaded CWL league preferences.
+  const countLoadedCwlLeaguePreferences_ = () => {
+    const root = state.lastRosterData && state.lastRosterData.cwlLeagueSignups && typeof state.lastRosterData.cwlLeagueSignups === "object"
+      ? state.lastRosterData.cwlLeagueSignups
+      : {};
+    const preferencesByTag = root.preferencesByTag && typeof root.preferencesByTag === "object" && !Array.isArray(root.preferencesByTag)
+      ? root.preferencesByTag
+      : {};
+    return Object.keys(preferencesByTag).length;
+  };
+
+  // Refresh CWL preference apply UI.
+  const refreshCwlPreferenceApplyUi_ = () => {
+    const btn = $("#applyCwlPreferencesBtn");
+    if (!btn) return;
+    const hasLoadedPreview = !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters) && state.lastRosterData.rosters.length);
+    const preferenceCount = countLoadedCwlLeaguePreferences_();
+    btn.disabled = !hasLoadedPreview || state.bulkRefreshBusy || preferenceCount < 1;
+    btn.title = preferenceCount > 0
+      ? ("Apply " + preferenceCount + " loaded CWL preference" + (preferenceCount === 1 ? "" : "s") + " to preview only")
+      : "No loaded CWL preferences.";
+  };
+
+  // Clear CWL preference apply summary.
+  const clearCwlPreferenceApplySummary_ = () => {
+    state.lastCwlPreferenceApplyPlan = null;
+    const el = $("#cwlPreferenceApplySummary");
+    if (!el) return;
+    el.textContent = "";
+    el.classList.add("hidden");
+  };
+
+  // Format a CWL preference apply detail line.
+  const formatCwlPreferenceApplyDetail_ = (itemRaw) => {
+    const item = itemRaw && typeof itemRaw === "object" ? itemRaw : {};
+    const player = toStr(item.playerName).trim() || normalizeTag(item.playerTag) || "Unknown player";
+    const tag = normalizeTag(item.playerTag);
+    const league = toStr(item.leagueName).trim() || toStr(item.leagueKey).trim() || "unknown league";
+    const fromRoster = toStr(item.fromRosterId || item.sourceRosterId || item.rosterId).trim();
+    const targetRoster = toStr(item.targetRosterId).trim();
+    const reason = toStr(item.reason || item.lockState).trim();
+    const parts = [player + (tag ? " (" + tag + ")" : ""), league];
+    if (fromRoster && targetRoster) parts.push(fromRoster + " -> " + targetRoster);
+    else if (fromRoster) parts.push(fromRoster);
+    if (reason) parts.push(reason);
+    return parts.join(" - ");
+  };
+
+  // Render CWL preference apply summary.
+  const renderCwlPreferenceApplySummary_ = (planRaw, appliedMoveCountRaw) => {
+    const el = $("#cwlPreferenceApplySummary");
+    if (!el) return;
+    const plan = planRaw && typeof planRaw === "object" ? planRaw : null;
+    if (!plan || !plan.summary) {
+      el.textContent = "";
+      el.classList.add("hidden");
+      return;
+    }
+    const summary = plan.summary;
+    const appliedMoveCount = Number.isFinite(Number(appliedMoveCountRaw)) ? Number(appliedMoveCountRaw) : 0;
+    const line = [
+      (appliedMoveCount || summary.validMoveCount || 0) + " moved",
+      (summary.alreadyCorrectCount || 0) + " already correct",
+      (summary.conflictCount || 0) + " locked/conflict",
+      (summary.missingPlayerCount || 0) + " missing player",
+      (summary.missingOptionCount || 0) + " missing option",
+      (summary.skippedCount || 0) + " skipped",
+    ].join(", ");
+
+    el.textContent = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "CWL preferences applied to preview: ";
+    const text = document.createTextNode(line + ".");
+    const head = document.createElement("div");
+    head.appendChild(strong);
+    head.appendChild(text);
+    el.appendChild(head);
+
+    const groups = [
+      { title: "Moves", items: plan.moves || [] },
+      { title: "Already correct", items: plan.alreadyCorrect || [] },
+      { title: "Locked/conflicts", items: plan.conflicts || [] },
+      { title: "Missing players", items: plan.missingPlayers || [] },
+      { title: "Missing options", items: plan.missingOptions || [] },
+      { title: "Skipped", items: plan.skipped || [] },
+    ].filter((group) => Array.isArray(group.items) && group.items.length);
+
+    if (groups.length) {
+      const details = document.createElement("details");
+      const summaryNode = document.createElement("summary");
+      summaryNode.textContent = "Details";
+      details.appendChild(summaryNode);
+      const detailWrap = document.createElement("div");
+      detailWrap.className = "cwl-preference-apply-details";
+      for (const group of groups) {
+        const groupWrap = document.createElement("div");
+        groupWrap.className = "cwl-preference-apply-details-group";
+        const groupTitle = document.createElement("strong");
+        groupTitle.textContent = group.title;
+        groupWrap.appendChild(groupTitle);
+        const list = document.createElement("ul");
+        for (let i = 0; i < group.items.length; i++) {
+          const item = document.createElement("li");
+          item.textContent = formatCwlPreferenceApplyDetail_(group.items[i]);
+          list.appendChild(item);
+        }
+        groupWrap.appendChild(list);
+        detailWrap.appendChild(groupWrap);
+      }
+      details.appendChild(detailWrap);
+      el.appendChild(details);
+    }
+    el.classList.remove("hidden");
+  };
+
   // Format local timestamp.
   const formatLocalTimestamp = (isoRaw) => {
     const iso = toStr(isoRaw).trim();
@@ -3936,6 +4052,7 @@
       refreshAddPreviewRosterUi();
       refreshAddPlayerUi();
       refreshRefreshAllUi();
+      refreshCwlPreferenceApplyUi_();
       renderConnectedRostersTable();
       renderImportUi();
       applyBenchMarks_();
@@ -3947,6 +4064,7 @@
     refreshAddPreviewRosterUi();
     refreshAddPlayerUi();
     refreshRefreshAllUi();
+    refreshCwlPreferenceApplyUi_();
     renderConnectedRostersTable();
     renderImportUi();
     applyBenchMarks_();
@@ -3970,6 +4088,7 @@
     normalizeAllRosterPublicLineupProjectionsLocal_();
     clearSavedBenchSuggestionsFromPreview_();
     clearSuggestionMarks_();
+    clearCwlPreferenceApplySummary_();
     renderPreviewFromState();
     markReportStale();
     const publishBtn = $("#publishBtn");
@@ -4203,6 +4322,183 @@
 
     const targetName = toStr(targetRoster.title).trim() || toStr(targetRoster.id).trim() || "target roster";
     applyPreviewMutation(playerTag + " moved to " + targetName + ".");
+  };
+
+  // Rebuild CWL preference apply plan summary.
+  const rebuildCwlPreferenceApplyPlanSummaryLocal_ = (planRaw) => {
+    const plan = planRaw && typeof planRaw === "object" ? planRaw : {};
+    const moves = Array.isArray(plan.moves) ? plan.moves : [];
+    const alreadyCorrect = Array.isArray(plan.alreadyCorrect) ? plan.alreadyCorrect : [];
+    const skipped = Array.isArray(plan.skipped) ? plan.skipped : [];
+    const conflicts = Array.isArray(plan.conflicts) ? plan.conflicts : [];
+    const missingPlayers = Array.isArray(plan.missingPlayers) ? plan.missingPlayers : [];
+    const missingOptions = Array.isArray(plan.missingOptions) ? plan.missingOptions : [];
+    plan.moves = moves;
+    plan.alreadyCorrect = alreadyCorrect;
+    plan.skipped = skipped;
+    plan.conflicts = conflicts;
+    plan.missingPlayers = missingPlayers;
+    plan.missingOptions = missingOptions;
+    plan.preferenceCount = Number.isFinite(Number(plan.preferenceCount))
+      ? Number(plan.preferenceCount)
+      : (moves.length + alreadyCorrect.length + skipped.length + conflicts.length + missingPlayers.length + missingOptions.length);
+    plan.summary = {
+      validMoveCount: moves.length,
+      alreadyCorrectCount: alreadyCorrect.length,
+      skippedCount: skipped.length,
+      conflictCount: conflicts.length,
+      missingPlayerCount: missingPlayers.length,
+      missingOptionCount: missingOptions.length,
+      preferenceCount: plan.preferenceCount,
+    };
+    return plan.summary;
+  };
+
+  // Return locked CWL preparation state for a player in a roster.
+  const getCwlPreferenceApplyLockStateLocal_ = (rosterRaw, playerTagRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+    const playerTag = normalizeTag(playerTagRaw);
+    if (!roster || !playerTag) return "";
+    const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
+    const lockState = prep && prep.lockStateByTag && typeof prep.lockStateByTag === "object"
+      ? toStr(prep.lockStateByTag[playerTag]).trim()
+      : "";
+    return lockState === "lockedIn" || lockState === "lockedOut" ? lockState : "";
+  };
+
+  // Move one player for CWL preference apply without publishing or rendering.
+  const movePlayerToRosterForCwlPreferenceApply_ = (moveRaw) => {
+    const move = moveRaw && typeof moveRaw === "object" ? moveRaw : {};
+    const rosters = getRosters();
+    const playerTag = normalizeTag(move.playerTag);
+    const targetRosterId = toStr(move.targetRosterId).trim();
+    const base = {
+      playerTag,
+      playerName: toStr(move.playerName).trim(),
+      leagueKey: toStr(move.leagueKey).trim(),
+      leagueName: toStr(move.leagueName).trim(),
+      targetRosterId,
+    };
+    if (!playerTag) return Object.assign({}, base, { status: "skipped", reason: "invalid-player-tag" });
+    if (!targetRosterId) return Object.assign({}, base, { status: "missing-option", reason: "missing-target-roster" });
+    if (!rosters.length) return Object.assign({}, base, { status: "skipped", reason: "no-rosters-loaded" });
+
+    const sourceLoc = findPlayerLocationByTag(playerTag);
+    if (!sourceLoc) return Object.assign({}, base, { status: "missing-player", reason: "missing-player" });
+
+    const targetIndex = rosters.findIndex((r) => toStr(r && r.id).trim() === targetRosterId);
+    if (targetIndex < 0) return Object.assign({}, base, { status: "missing-option", reason: "missing-target-roster" });
+
+    const sourceRoster = rosters[sourceLoc.rosterIndex];
+    const targetRoster = rosters[targetIndex];
+    const sourceRosterId = toStr(sourceRoster && sourceRoster.id).trim();
+    const sourceRole = sourceLoc.role;
+    const withLocation = Object.assign({}, base, {
+      fromRosterId: sourceRosterId,
+      fromRole: sourceRole,
+      targetRosterId,
+    });
+    if (targetIndex === sourceLoc.rosterIndex) {
+      return Object.assign({}, withLocation, { status: "already-correct", reason: "already-correct" });
+    }
+
+    ensureRosterArrays(sourceRoster);
+    ensureRosterArrays(targetRoster);
+    const lockState = getCwlPreferenceApplyLockStateLocal_(sourceRoster, playerTag);
+    if (lockState) {
+      return Object.assign({}, withLocation, {
+        status: "locked-player",
+        reason: "locked-player",
+        lockState,
+      });
+    }
+
+    const sourceSnapshot = cloneJson(sourceRoster);
+    const targetSnapshot = cloneJson(targetRoster);
+    const sourceList =
+      sourceLoc.role === "main" ? sourceRoster.main : (sourceLoc.role === "sub" ? sourceRoster.subs : sourceRoster.missing);
+    const targetList = sourceLoc.role === "main" ? targetRoster.main : targetRoster.subs;
+    try {
+      const removed = sourceList.splice(sourceLoc.index, 1);
+      const player = removed[0];
+      if (!player) throw new Error("Failed to move player: " + playerTag);
+      targetList.push(player);
+
+      transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
+      rebalanceRosterIfPreparationActiveLocal_(sourceRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      rebalanceRosterIfPreparationActiveLocal_(targetRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
+      reindexRoster(sourceRoster);
+      reindexRoster(targetRoster);
+    } catch (err) {
+      rosters[sourceLoc.rosterIndex] = sourceSnapshot;
+      rosters[targetIndex] = targetSnapshot;
+      throw err;
+    }
+    return Object.assign({}, withLocation, { status: "moved" });
+  };
+
+  // Apply loaded CWL league preferences to the preview roster data only.
+  const applyCwlLeaguePreferencesToPreview_ = () => {
+    if (state.bulkRefreshBusy) throw new Error("Refresh all is already running.");
+    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    const planner = window.RosterGenerator && typeof window.RosterGenerator.planCwlLeaguePreferenceMoves === "function"
+      ? window.RosterGenerator.planCwlLeaguePreferenceMoves
+      : null;
+    if (!planner) throw new Error("CWL preference planner is unavailable.");
+
+    const plan = planner({ rosterData: state.lastRosterData });
+    rebuildCwlPreferenceApplyPlanSummaryLocal_(plan);
+    state.lastCwlPreferenceApplyPlan = plan;
+    if (!plan.summary.preferenceCount) {
+      renderCwlPreferenceApplySummary_(plan, 0);
+      setStatus("No CWL preferences loaded.");
+      return plan;
+    }
+
+    const plannedMoves = plan.moves.slice();
+    plan.moves = [];
+    let appliedMoveCount = 0;
+    const previewSnapshot = cloneJson(state.lastRosterData);
+    try {
+      for (let i = 0; i < plannedMoves.length; i++) {
+        const result = movePlayerToRosterForCwlPreferenceApply_(plannedMoves[i]);
+        if (result.status === "moved") {
+          plan.moves.push(result);
+          appliedMoveCount++;
+        } else if (result.status === "already-correct") {
+          plan.alreadyCorrect.push(result);
+        } else if (result.status === "locked-player") {
+          plan.conflicts.push(result);
+        } else if (result.status === "missing-player") {
+          plan.missingPlayers.push(result);
+        } else if (result.status === "missing-option") {
+          plan.missingOptions.push(result);
+        } else {
+          plan.skipped.push(result);
+        }
+      }
+      rebuildCwlPreferenceApplyPlanSummaryLocal_(plan);
+      if (appliedMoveCount > 0) {
+        applyPreviewMutation("Applied CWL preferences: " + appliedMoveCount + " preview move" + (appliedMoveCount === 1 ? "" : "s") + ".");
+      } else {
+        renderPreviewFromState();
+      }
+      state.lastCwlPreferenceApplyPlan = plan;
+      renderCwlPreferenceApplySummary_(plan, appliedMoveCount);
+      refreshCwlPreferenceApplyUi_();
+      if (appliedMoveCount > 0) {
+        setStatus("Applied CWL preferences to preview: " + appliedMoveCount + " move" + (appliedMoveCount === 1 ? "" : "s") + ".");
+      } else {
+        setStatus("CWL preferences checked: no preview moves needed.");
+      }
+      return plan;
+    } catch (err) {
+      state.lastRosterData = previewSnapshot;
+      state.lastCwlPreferenceApplyPlan = null;
+      renderPreviewFromState();
+      throw err;
+    }
   };
 
   // Remove player from preview.
@@ -6241,6 +6537,7 @@
   // Refresh admin workflow UI.
   const refreshAdminWorkflowUi = () => {
     refreshRefreshAllUi();
+    refreshCwlPreferenceApplyUi_();
     renderConnectedRostersTable();
     renderImportUi();
     applyBenchMarks_();
@@ -6358,6 +6655,7 @@
       state.benchMarksByRoster = {};
       state.swapInMarksByRoster = {};
       state.suggestionNotesByRoster = {};
+      clearCwlPreferenceApplySummary_();
       reindexAllRosters();
       normalizeAllRosterPublicLineupProjectionsLocal_();
       setAddPreviewRosterStatus("", false);
@@ -6526,6 +6824,19 @@
         } catch (err) {
           setStatus("");
           alert("Refresh all failed: " + toErrorMessage(err));
+        }
+      };
+    }
+
+    const applyCwlPreferencesBtn = $("#applyCwlPreferencesBtn");
+    if (applyCwlPreferencesBtn) {
+      applyCwlPreferencesBtn.onclick = () => {
+        if (applyCwlPreferencesBtn.disabled) return;
+        try {
+          applyCwlLeaguePreferencesToPreview_();
+        } catch (err) {
+          setStatus("");
+          alert("Apply CWL preferences failed: " + toErrorMessage(err));
         }
       };
     }

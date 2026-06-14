@@ -577,6 +577,50 @@
       user-select: none;
     }
 
+    .cwl-preference-apply-summary {
+      border: 1px solid #334155;
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.58);
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.4;
+      padding: 9px 10px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .cwl-preference-apply-summary strong {
+      color: #e5e7eb;
+    }
+
+    .cwl-preference-apply-summary details {
+      border-top: 1px solid #1f2937;
+      padding-top: 6px;
+    }
+
+    .cwl-preference-apply-summary summary {
+      cursor: pointer;
+      color: #cbd5e1;
+      font-weight: 700;
+      user-select: none;
+    }
+
+    .cwl-preference-apply-details {
+      margin-top: 6px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .cwl-preference-apply-details-group {
+      display: grid;
+      gap: 3px;
+    }
+
+    .cwl-preference-apply-details-group ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
     @media (max-width: 640px) {
       .player-admin-summary {
         align-items: flex-start;
@@ -2119,12 +2163,16 @@
             <h2>Rosters</h2>
           </div>
           <div class="admin-section-actions">
+            <button id="applyCwlPreferencesBtn" class="btn secondary" type="button" disabled>
+              Apply CWL prefs
+            </button>
             <button id="toggleAddPlayerPanelBtn" class="btn secondary" type="button" disabled aria-expanded="false"
               aria-controls="addPlayerPanel">
               Add member
             </button>
           </div>
         </div>
+        <div id="cwlPreferenceApplySummary" class="cwl-preference-apply-summary hidden"></div>
 
         <div id="loading" class="card preview-mount-card">
           <div class="empty">No rosters loaded.</div>

@@ -1953,6 +1953,214 @@ test("CWL league preference saves from the message snapshot without rebuilding o
   assert.equal(rosterSnapshotReads, 0);
 });
 
+test("CWL league preferences lookup returns only the requesting Discord user's votes", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+
+  backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "champion-i",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret");
+  backend.setCwlLeaguePreference({
+    playerTag: "#9PYLQG",
+    playerName: "Bravo",
+    signupId: signup.signupId,
+    leagueKey: "master-ii",
+    discordId: "222",
+    discordUsername: "bravo",
+    discordDisplayName: "Bravo",
+  }, "secret");
+
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("user preference lookup should not read roster snapshots");
+  };
+  backend.cocFetch_ = () => {
+    throw new Error("user preference lookup should not call Clash API");
+  };
+
+  const result = backend.getCwlLeaguePreferencesForDiscordUser({
+    signupId: signup.signupId,
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.signupId, signup.signupId);
+  assert.equal(result.preferenceCount, 1);
+  assert.equal(JSON.stringify(result.preferences.map((pref) => pref.playerTag)), JSON.stringify(["#2LUCULP"]));
+  assert.equal(result.preferences[0].playerName, "Alpha");
+  assert.equal(result.preferences[0].leagueKey, "champion-i");
+  assert.equal(result.preferences[0].leagueName, "Champion I");
+  assert.equal(result.preferences[0].discordId, "111");
+});
+
+test("CWL league preference clear removes only the clicking user's one vote and writes audit", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "champion-i",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret");
+  backend.setCwlLeaguePreference({
+    playerTag: "#9PYLQG",
+    playerName: "Bravo",
+    signupId: signup.signupId,
+    leagueKey: "master-ii",
+    discordId: "222",
+    discordUsername: "bravo",
+    discordDisplayName: "Bravo",
+  }, "secret");
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("user preference clear should not read roster snapshots");
+  };
+  backend.cocFetch_ = () => {
+    throw new Error("user preference clear should not call Clash API");
+  };
+
+  const result = backend.clearCwlLeaguePreference({
+    signupId: signup.signupId,
+    discordId: "111",
+    discordUsername: "alpha",
+    playerTag: "#2LUCULP",
+    source: "discord-user-clear",
+    messageId: "message-1",
+    channelId: "channel-1",
+    guildId: "guild-1",
+  }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+  const auditEntries = Object.values(signups.audit || {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "cleared");
+  assert.equal(result.cleared, true);
+  assert.equal(result.playerTag, "#2LUCULP");
+  assert.equal(result.preferenceCount, 1);
+  assert.equal(signups.preferencesByTag["#2LUCULP"], undefined);
+  assert.equal(signups.preferencesByTag["#9PYLQG"].discordId, "222");
+  assert.ok(auditEntries.some((entry) =>
+    entry.action === "cleared" &&
+    entry.playerTag === "#2LUCULP" &&
+    entry.discordId === "111" &&
+    entry.source === "discord-user-clear"
+  ));
+});
+
+test("CWL league preference clear is a no-op when the vote belongs to another Discord user", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "champion-i",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret");
+
+  const result = backend.clearCwlLeaguePreference({
+    signupId: signup.signupId,
+    discordId: "222",
+    discordUsername: "bravo",
+    playerTag: "#2LUCULP",
+  }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+  const auditEntries = Object.values(signups.audit || {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "not-owner");
+  assert.equal(result.cleared, false);
+  assert.equal(signups.preferencesByTag["#2LUCULP"].discordId, "111");
+  assert.ok(auditEntries.some((entry) =>
+    entry.action === "clear_noop" &&
+    entry.status === "not-owner" &&
+    entry.playerTag === "#2LUCULP" &&
+    entry.discordId === "222"
+  ));
+});
+
+test("CWL league preference lookup and clear handle a no-vote state without broad reads", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("user preference no-vote actions should not read roster snapshots");
+  };
+  backend.cocFetch_ = () => {
+    throw new Error("user preference no-vote actions should not call Clash API");
+  };
+
+  const lookup = backend.getCwlLeaguePreferencesForDiscordUser({
+    signupId: signup.signupId,
+    discordId: "111",
+  }, "secret");
+  const clear = backend.clearCwlLeaguePreference({
+    signupId: signup.signupId,
+    discordId: "111",
+    playerTag: "#2LUCULP",
+  }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+  const auditEntries = Object.values(signups.audit || {});
+
+  assert.equal(lookup.ok, true);
+  assert.equal(lookup.preferenceCount, 0);
+  assert.equal(JSON.stringify(lookup.preferences), JSON.stringify([]));
+  assert.equal(clear.ok, true);
+  assert.equal(clear.status, "not-found");
+  assert.equal(clear.cleared, false);
+  assert.equal(clear.preferenceCount, 0);
+  assert.equal(JSON.stringify(signups.preferencesByTag || {}), JSON.stringify({}));
+  assert.ok(auditEntries.some((entry) =>
+    entry.action === "clear_noop" &&
+    entry.status === "not-found" &&
+    entry.playerTag === "#2LUCULP" &&
+    entry.discordId === "111"
+  ));
+});
+
+test("CWL user preference methods reject invalid Discord bot secrets", () => {
+  const backend = installMemoryFirebase(loadBackend());
+
+  assert.throws(() => backend.getCwlLeaguePreferencesForDiscordUser({
+    discordId: "111",
+  }, "wrong-secret"), /Authentication failed for Discord bot API/i);
+  assert.throws(() => backend.clearCwlLeaguePreference({
+    discordId: "111",
+    playerTag: "#2LUCULP",
+  }, "wrong-secret"), /Authentication failed for Discord bot API/i);
+});
+
+test("CWL user preference methods reject stale signup ids through the admin API dispatcher", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  backend.resetCwlLeaguePreferences({ source: "test", reason: "new-message" }, "secret");
+
+  assert.throws(() => backend.runAdminApiMethod_("getCwlLeaguePreferencesForDiscordUser", [{
+    signupId: signup.signupId,
+    discordId: "111",
+  }, "secret"]), /no longer active/i);
+  assert.throws(() => backend.runAdminApiMethod_("clearCwlLeaguePreference", [{
+    signupId: signup.signupId,
+    discordId: "111",
+    playerTag: "#2LUCULP",
+  }, "secret"]), /no longer active/i);
+});
+
 test("stale CWL league signup messages reject before rebuilding options", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });

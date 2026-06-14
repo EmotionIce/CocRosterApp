@@ -442,6 +442,114 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 	});
 }
 
+function getCwlLeaguePreferencesForDiscordUser(payloadRaw, secretOrPasswordRaw) {
+	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPasswordRaw);
+	assertDiscordBotApiSecret_(parsed.secretOrPassword);
+	const payload = parsed.payload;
+	const discordId = sanitizeDiscordIdValue_(payload.discordId);
+	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
+	const signups = readActiveCwlLeagueSignups_();
+	const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
+	if (signupId && signupId !== signups.signupId) {
+		throw createRosterBackendError_("CWL_SIGNUP_NOT_ACTIVE", "This CWL league signup message is no longer active. Please use the latest signup message.");
+	}
+	const preferences = [];
+	const preferencesByTag = signups.preferencesByTag || {};
+	const tags = Object.keys(preferencesByTag).sort();
+	for (let i = 0; i < tags.length; i++) {
+		const preference = preferencesByTag[tags[i]] && typeof preferencesByTag[tags[i]] === "object" ? preferencesByTag[tags[i]] : {};
+		if (sanitizeDiscordIdValue_(preference.discordId) !== discordId) continue;
+		preferences.push({
+			playerTag: normalizeTag_(preference.playerTag || tags[i]),
+			playerName: sanitizeCwlSignupText_(preference.playerName, 80),
+			leagueKey: normalizeCwlSignupLeagueKey_(preference.leagueKey || preference.leagueName),
+			leagueName: sanitizeCwlSignupText_(preference.leagueName, 80),
+			discordId: sanitizeDiscordIdValue_(preference.discordId),
+			discordUsername: sanitizeDiscordUsernameValue_(preference.discordUsername),
+			discordDisplayName: sanitizeCwlSignupText_(preference.discordDisplayName, 120),
+			messageId: sanitizeCwlSignupText_(preference.messageId, 80),
+			channelId: sanitizeCwlSignupText_(preference.channelId, 80),
+			guildId: sanitizeCwlSignupText_(preference.guildId, 80),
+			createdAt: sanitizeCwlSignupText_(preference.createdAt, 40),
+			updatedAt: sanitizeCwlSignupText_(preference.updatedAt, 40),
+		});
+	}
+	preferences.sort((left, right) => {
+		const leftLeague = String(left && left.leagueName || "");
+		const rightLeague = String(right && right.leagueName || "");
+		const leagueCompare = leftLeague.localeCompare(rightLeague);
+		if (leagueCompare) return leagueCompare;
+		return String(left && (left.playerName || left.playerTag) || "").localeCompare(String(right && (right.playerName || right.playerTag) || ""));
+	});
+	return {
+		ok: true,
+		signupId: signups.signupId,
+		preferences: preferences,
+		preferenceCount: preferences.length,
+		updatedAt: signups.updatedAt || "",
+	};
+}
+
+function clearCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
+	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPasswordRaw);
+	assertDiscordBotApiSecret_(parsed.secretOrPassword);
+	const payload = parsed.payload;
+	const discordId = sanitizeDiscordIdValue_(payload.discordId);
+	const playerTag = normalizeTag_(payload.playerTag);
+	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
+	if (!playerTag || !isValidPlayerTag_(playerTag)) throw createRosterBackendError_("INVALID_PLAYER_TAG", "Invalid player tag.");
+	return withCwlLeagueSignupWriteLock_(function () {
+		const nowIso = new Date().toISOString();
+		const signups = readActiveCwlLeagueSignups_();
+		const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
+		if (signupId && signupId !== signups.signupId) {
+			throw createRosterBackendError_("CWL_SIGNUP_NOT_ACTIVE", "This CWL league signup message is no longer active. Please use the latest signup message.");
+		}
+		const existing = signups.preferencesByTag[playerTag] && typeof signups.preferencesByTag[playerTag] === "object"
+			? signups.preferencesByTag[playerTag]
+			: null;
+		let status = "not-found";
+		let cleared = false;
+		let removedPreference = null;
+		if (existing) {
+			if (sanitizeDiscordIdValue_(existing.discordId) === discordId) {
+				removedPreference = existing;
+				delete signups.preferencesByTag[playerTag];
+				status = "cleared";
+				cleared = true;
+			} else {
+				status = "not-owner";
+			}
+		}
+		signups.updatedAt = nowIso;
+		signups.audit[buildCwlSignupAuditKey_(nowIso)] = {
+			action: cleared ? "cleared" : "clear_noop",
+			status: status,
+			playerTag: playerTag,
+			leagueKey: sanitizeCwlSignupText_(existing && existing.leagueKey, 80),
+			leagueName: sanitizeCwlSignupText_(existing && existing.leagueName, 80),
+			discordId: discordId,
+			discordUsername: sanitizeDiscordUsernameValue_(payload.discordUsername),
+			messageId: sanitizeCwlSignupText_(payload.messageId, 80),
+			channelId: sanitizeCwlSignupText_(payload.channelId, 80),
+			guildId: sanitizeCwlSignupText_(payload.guildId, 80),
+			source: sanitizeCwlSignupText_(payload.source || "discord-user-clear", 120),
+			createdAt: nowIso,
+		};
+		const saved = writeActiveCwlLeagueSignups_(signups);
+		return {
+			ok: true,
+			status: status,
+			cleared: cleared,
+			playerTag: playerTag,
+			signupId: saved.signupId,
+			preference: cleared ? null : (existing || null),
+			removedPreference: cleared ? removedPreference : null,
+			preferenceCount: Object.keys(saved.preferencesByTag || {}).length,
+		};
+	});
+}
+
 function archiveAndResetCwlLeagueSignups_(reasonRaw, sourceRaw) {
 	return withCwlLeagueSignupWriteLock_(function () {
 		const signups = readActiveCwlLeagueSignups_();
