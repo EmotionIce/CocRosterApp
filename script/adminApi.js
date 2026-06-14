@@ -21,8 +21,12 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return publishRosterData(args[0], args[1]);
 		case "getPlayerProfile":
 			return getPlayerProfile(args[0], args[1]);
+		case "deleteDiscordIdentityLink":
+			return deleteDiscordIdentityLink.apply(null, args);
 		case "deleteDiscordIdentityForPlayerTag":
 			return deleteDiscordIdentityForPlayerTag.apply(null, args);
+		case "linkDiscordIdentityForPlayerTag":
+			return linkDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordIdentityForPlayerTag":
 			return syncDiscordIdentityForPlayerTag.apply(null, args);
 		case "syncDiscordUsernameForPlayerTag":
@@ -137,7 +141,7 @@ function normalizeDiscordSyncPlayerTag_(playerTagRaw) {
 		.replace(/O/g, "0");
 	const normalizedTag = normalizeTag_(compact);
 	if (!isValidPlayerTag_(normalizedTag)) {
-		throw new Error("Invalid player tag.");
+		throw createRosterBackendError_("INVALID_PLAYER_TAG", "Invalid player tag.");
 	}
 	return normalizedTag;
 }
@@ -208,7 +212,7 @@ function cleanupFirebaseStorageRetention(password) {
 }
 
 // Parse old and new Discord bot sync argument shapes.
-function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3) {
+function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3, arg4) {
 	if (arg0 && typeof arg0 === "object" && !Array.isArray(arg0)) {
 		const payload = arg0;
 		return {
@@ -216,6 +220,7 @@ function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3) {
 			discordId: payload.discordId,
 			discordUsername: payload.discordUsername != null ? payload.discordUsername : payload.username,
 			botSecret: payload.botSecret != null ? payload.botSecret : arg1,
+			force: payload.force === true,
 		};
 	}
 	if (arg3 != null) {
@@ -224,6 +229,7 @@ function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3) {
 			discordId: arg1,
 			discordUsername: arg2,
 			botSecret: arg3,
+			force: arg4 === true,
 		};
 	}
 	return {
@@ -231,6 +237,7 @@ function parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3) {
 		discordId: "",
 		discordUsername: arg1,
 		botSecret: arg2,
+		force: false,
 	};
 }
 
@@ -247,6 +254,44 @@ function parseDiscordIdentityDeleteArgs_(arg0, arg1) {
 		playerTag: arg0,
 		botSecret: arg1,
 	};
+}
+
+// Parse Discord bot manual-link delete argument shapes.
+function parseDiscordIdentityLinkDeleteArgs_(arg0, arg1) {
+	if (arg0 && typeof arg0 === "object" && !Array.isArray(arg0)) {
+		const payload = arg0;
+		const discordUser = payload.discordUser && typeof payload.discordUser === "object" ? payload.discordUser : {};
+		return {
+			playerTag: payload.playerTag || payload.tag,
+			discordId: payload.discordId != null ? payload.discordId : discordUser.id || discordUser.discordId,
+			discordUsername: payload.discordUsername != null ? payload.discordUsername : payload.username != null ? payload.username : discordUser.username || discordUser.discordUsername,
+			botSecret: payload.botSecret != null ? payload.botSecret : arg1,
+		};
+	}
+	return {
+		playerTag: arg0,
+		discordId: "",
+		discordUsername: "",
+		botSecret: arg1,
+	};
+}
+
+// Fetch and normalize a player profile for manual Discord link creation.
+function fetchDiscordLinkPlayerProfile_(normalizedTag) {
+	try {
+		const player = cocFetch_("/players/" + encodeTagForPath_(normalizedTag));
+		return {
+			tag: normalizeTag_(player && player.tag) || normalizedTag,
+			name: String(player && player.name != null ? player.name : "").trim(),
+			th: readTownHallLevel_(player),
+		};
+	} catch (err) {
+		if (err && Number(err.statusCode) === 404) {
+			throw createRosterBackendError_("PLAYER_NOT_FOUND", "Player not found for tag " + normalizedTag + ".");
+		}
+		const normalized = normalizePlayerProfileError_(normalizedTag, err);
+		throw createRosterBackendError_("PLAYER_LOOKUP_FAILED", errorMessage_(normalized));
+	}
 }
 
 // Sync canonical Discord identity for a player tag.
@@ -282,6 +327,46 @@ function syncDiscordIdentityForPlayerTag(arg0, arg1, arg2, arg3) {
 	});
 }
 
+// Create or update a canonical Discord identity link with conflict handling for staff commands.
+function linkDiscordIdentityForPlayerTag(arg0, arg1, arg2, arg3, arg4) {
+	const parsed = parseDiscordIdentitySyncArgs_(arg0, arg1, arg2, arg3, arg4);
+	assertDiscordBotApiSecret_(parsed.botSecret);
+	const normalizedTag = normalizeDiscordSyncPlayerTag_(parsed.playerTag);
+	const discordId = sanitizeDiscordIdValue_(parsed.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(parsed.discordUsername);
+	if (!discordId && !discordUsername) {
+		throw new Error("Discord username or Discord ID is required.");
+	}
+	const playerProfile = fetchDiscordLinkPlayerProfile_(normalizedTag);
+
+	return withActiveRosterJobLock_("discord-manual-link", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		const updatedAt = new Date().toISOString();
+		const result = linkDiscordIdentityIntoActiveRoster_(
+			{
+				playerTag: normalizedTag,
+				name: playerProfile.name,
+				th: playerProfile.th,
+				discordId: discordId,
+				discordUsername: discordUsername,
+				discordSource: "discord-manual-link",
+				force: parsed.force === true,
+			},
+			{
+				updatedAt: updatedAt,
+				source: "discord-manual-link",
+				createMissing: true,
+				force: parsed.force === true,
+			},
+		);
+		if (result && result.updated) {
+			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
+		}
+		return Object.assign({}, result, {
+			playerName: playerProfile.name,
+		});
+	});
+}
+
 // Delete canonical Discord identity for a player tag.
 function deleteDiscordIdentityForPlayerTag(arg0, arg1) {
 	const parsed = parseDiscordIdentityDeleteArgs_(arg0, arg1);
@@ -300,6 +385,66 @@ function deleteDiscordIdentityForPlayerTag(arg0, arg1) {
 			},
 		);
 		if (result && result.updated) {
+			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
+		}
+		return result;
+	});
+}
+
+// Delete canonical Discord identity by exactly one manual lookup: player tag or Discord user.
+function deleteDiscordIdentityLink(arg0, arg1) {
+	const parsed = parseDiscordIdentityLinkDeleteArgs_(arg0, arg1);
+	assertDiscordBotApiSecret_(parsed.botSecret);
+	const hasPlayerTag = !!String(parsed.playerTag == null ? "" : parsed.playerTag).trim();
+	const discordId = sanitizeDiscordIdValue_(parsed.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(parsed.discordUsername);
+	const hasDiscordUser = !!(discordId || discordUsername);
+	if (hasPlayerTag === hasDiscordUser) {
+		throw createRosterBackendError_("DISCORD_LINK_LOOKUP_REQUIRED", "Provide exactly one of playerTag or Discord user.");
+	}
+
+	return withActiveRosterJobLock_("discord-manual-link-delete", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		const updatedAt = new Date().toISOString();
+		let result;
+		if (hasPlayerTag) {
+			const normalizedTag = normalizeDiscordSyncPlayerTag_(parsed.playerTag);
+			result = deleteDiscordIdentityFromActiveRoster_(
+				{
+					playerTag: normalizedTag,
+				},
+				{
+					updatedAt: updatedAt,
+					source: "discord-manual-link-delete",
+				},
+			);
+			result.lookupType = "playerTag";
+			result.deletedCount = result.found ? 1 : 0;
+			result.removedPlayerTags = result.found ? [normalizedTag] : [];
+			result.removedLinks = result.found
+				? [{
+					tag: normalizedTag,
+					playerTag: normalizedTag,
+					discordId: result.removedDiscordId || "",
+					discordUsername: result.removedDiscordUsername || "",
+				}]
+				: [];
+		} else {
+			result = deleteDiscordIdentityFromActiveRosterByDiscordUser_(
+				{
+					discordId: discordId,
+					discordUsername: discordUsername,
+				},
+				{
+					updatedAt: updatedAt,
+					source: "discord-manual-link-delete",
+				},
+			);
+		}
+
+		if (!result || !result.found) {
+			throw createRosterBackendError_("DISCORD_LINK_MISSING", "No backend Discord link was found for that lookup.");
+		}
+		if (result.updated) {
 			markActiveDataWriteSuccess_(updatedAt, ACTIVE_DATA_WRITE_SOURCE_DISCORD_SYNC);
 		}
 		return result;

@@ -60,10 +60,12 @@ function doPost(e) {
 			result: result == null ? null : result,
 		});
 	} catch (err) {
-		return createAdminApiJsonResponse_({
+		const errorPayload = {
 			ok: false,
 			error: errorMessage_(err),
-		});
+		};
+		if (err && err.code) errorPayload.code = String(err.code);
+		return createAdminApiJsonResponse_(errorPayload);
 	}
 }
 

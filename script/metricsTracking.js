@@ -68,6 +68,15 @@ function sanitizeDiscordIdentitySource_(sourceRaw) {
 		.slice(0, 80);
 }
 
+// Build a coded backend error that API callers can map to user-facing messages.
+function createRosterBackendError_(codeRaw, messageRaw) {
+	const code = String(codeRaw == null ? "" : codeRaw).trim();
+	const message = String(messageRaw == null ? "" : messageRaw).trim() || "Roster backend request failed.";
+	const err = new Error(message);
+	if (code) err.code = code;
+	return err;
+}
+
 // Sanitize the metrics identity block, including canonical Discord identity fields.
 function sanitizePlayerMetricsIdentity_(identityRaw, tagRaw, nameRaw) {
 	const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};

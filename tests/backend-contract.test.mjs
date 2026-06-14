@@ -13,12 +13,14 @@ const appScriptFiles = [
   "script/metricsTracking.js",
   "script/rosterSchema.js",
   "script/refreshEngine.js",
+  "script/rosterSync.js",
   "script/seasonEvents.js",
   "script/publishAndTriggers.js",
   "script/authAndLocks.js",
   "script/assets.js",
   "script/cwlLeagueSignups.js",
   "script/adminApi.js",
+  "script/entrypoints.js",
 ];
 
 const loadBackend = () => {
@@ -90,6 +92,27 @@ const loadBackend = () => {
 };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+const captureError = (fn) => {
+  try {
+    fn();
+  } catch (err) {
+    return err;
+  }
+  assert.fail("Expected function to throw.");
+};
+
+const installActiveRosterWriteHarness = (backend, activeDataRaw) => {
+  let activeData = clone(activeDataRaw);
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: activeData, text: JSON.stringify(activeData) });
+  backend.replaceActiveRosterData_ = (payload) => {
+    activeData = backend.validateRosterData_(payload);
+    return { validatedRosterData: activeData, text: JSON.stringify(activeData) };
+  };
+  return {
+    getActiveData: () => activeData,
+  };
+};
 
 const installMemoryFirebase = (backend, initial = {}) => {
   let db = clone(initial);
@@ -959,6 +982,306 @@ test("bot sync username-only works and does not erase existing Discord ID", () =
   assert.equal(identity.discordId, "123456789012345678");
   assert.equal(identity.discordUsername, "newname");
   assert.equal(activeData.rosters[0].main[0].discord, "newname");
+});
+
+const buildManualDiscordLinkRosterData = () => {
+  const data = buildValidRosterData();
+  data.rosters[0].main[0] = {
+    slot: 1,
+    name: "Alpha",
+    discord: "alpha",
+    th: 16,
+    tag: "#2LUCULP",
+    notes: [],
+    excludeAsSwapTarget: false,
+    excludeAsSwapSource: false,
+  };
+  data.rosters[0].subs = [
+    {
+      slot: null,
+      name: "Bravo",
+      discord: "bravo",
+      th: 15,
+      tag: "#9PYLQG",
+      notes: [],
+      excludeAsSwapTarget: false,
+      excludeAsSwapSource: false,
+    },
+  ];
+  data.playerMetrics.byTag = {
+    "#2LUCULP": {
+      identity: {
+        tag: "#2LUCULP",
+        name: "Alpha",
+        discordId: "111111111111111111",
+        discordUsername: "alpha",
+        discordLinkedAt: "2026-05-19T00:00:00.000Z",
+        discordUpdatedAt: "2026-05-19T00:00:00.000Z",
+        discordSource: "discord-sync",
+      },
+      trophyHistoryDaily: [],
+    },
+    "#9PYLQG": {
+      identity: {
+        tag: "#9PYLQG",
+        name: "Bravo",
+        discordId: "222222222222222222",
+        discordUsername: "bravo",
+        discordLinkedAt: "2026-05-19T00:00:00.000Z",
+        discordUpdatedAt: "2026-05-19T00:00:00.000Z",
+        discordSource: "discord-sync",
+      },
+      trophyHistoryDaily: [],
+    },
+  };
+  return data;
+};
+
+test("manual link refuses player and Discord-user conflicts without force", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+  backend.cocFetch_ = () => ({ tag: "#2LUCULP", name: "Alpha" });
+
+  const playerConflict = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "2LUCULP",
+    discordId: "333333333333333333",
+    discordUsername: "charlie",
+    botSecret: "secret",
+  }));
+
+  assert.equal(playerConflict.code, "DISCORD_LINK_CONFLICT");
+  assert.match(playerConflict.message, /already linked/);
+  assert.equal(harness.getActiveData().playerMetrics.byTag["#2LUCULP"].identity.discordId, "111111111111111111");
+
+  backend.cocFetch_ = () => ({ tag: "#PYYQQ", name: "Charlie" });
+  const userConflict = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#PYYQQ",
+    discordId: "222222222222222222",
+    discordUsername: "bravo",
+    botSecret: "secret",
+  }));
+
+  assert.equal(userConflict.code, "DISCORD_LINK_CONFLICT");
+  assert.match(userConflict.message, /#9PYLQG/);
+  assert.equal(harness.getActiveData().playerMetrics.byTag["#PYYQQ"], undefined);
+});
+
+test("manual link force overwrites target player and clears the Discord user's old player", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+  backend.cocFetch_ = () => ({ tag: "#2LUCULP", name: "Alpha" });
+
+  const result = backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "2LUCULP",
+    discordId: "222222222222222222",
+    discordUsername: "bravo",
+    force: true,
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.force, true);
+  assert.equal(result.conflictsResolvedCount, 2);
+  assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordUsername, "bravo");
+  assert.equal(activeData.rosters[0].main[0].discord, "bravo");
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
+  assert.equal(activeData.rosters[0].subs[0].discord, "");
+});
+
+test("manual link-created missing player survives refresh-all when absent from the clan", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = buildManualDiscordLinkRosterData();
+  data.rosters[0].trackingMode = "regularWar";
+  data.rosters[0].connectedClanTag = "#CLAN";
+  const harness = installActiveRosterWriteHarness(backend, data);
+  backend.cocFetch_ = () => ({ tag: "#PYYQQ", name: "Charlie", townHallLevel: 14 });
+
+  const linkResult = backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "PYYQQ",
+    discordId: "333333333333333333",
+    discordUsername: "charlie",
+    botSecret: "secret",
+  });
+  const linkedData = harness.getActiveData();
+  const linkedMissing = linkedData.rosters[0].missing.find((player) => player.tag === "#PYYQQ");
+
+  assert.equal(linkResult.ok, true);
+  assert.equal(linkResult.created, true);
+  assert.equal(linkedMissing.name, "Charlie");
+  assert.equal(linkedMissing.th, 14);
+  assert.equal(linkedMissing.discord, "charlie");
+  assert.equal(linkedData.playerMetrics.byTag["#PYYQQ"].identity.discordId, "333333333333333333");
+
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    const errorByKey = {};
+    for (const entry of entries) {
+      const key = String(entry && entry.key ? entry.key : "");
+      const path = String(entry && entry.path ? entry.path : "");
+      if (key === "members:#CLAN") {
+        dataByKey[key] = {
+          items: [{ tag: "#2LUCULP", name: "Alpha", townHallLevel: 16 }],
+        };
+      } else if (key === "regularWar:#CLAN") {
+        const err = new Error("not found");
+        err.statusCode = 404;
+        errorByKey[key] = err;
+      } else {
+        throw new Error(`Unexpected Clash batch request ${key} ${path}`);
+      }
+    }
+    return {
+      dataByKey,
+      errorByKey,
+      requestCount: entries.length,
+      batchCount: entries.length ? 1 : 0,
+    };
+  };
+
+  const refreshResult = backend.runRefreshAllRostersCore_(linkedData, {
+    allowRegularWarHistoryRepair: false,
+    allowRegularWarProvisionalFallback: false,
+  });
+  const refreshedRoster = refreshResult.rosterData.rosters[0];
+  const refreshedMissing = refreshedRoster.missing.find((player) => player.tag === "#PYYQQ");
+
+  assert.equal(refreshResult.processedRosters, 1);
+  assert.ok(refreshedMissing);
+  assert.equal(refreshedMissing.discord, "charlie");
+  assert.equal(refreshResult.rosterData.playerMetrics.byTag["#PYYQQ"].identity.discordId, "333333333333333333");
+});
+
+test("manual link rejects invalid tags and missing Clash players", () => {
+  const backend = loadBackend();
+  installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+  backend.cocFetch_ = () => {
+    throw new Error("Clash should not be called for invalid tags");
+  };
+
+  const invalid = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#ABC",
+    discordId: "333333333333333333",
+    discordUsername: "charlie",
+    botSecret: "secret",
+  }));
+
+  assert.equal(invalid.code, "INVALID_PLAYER_TAG");
+
+  backend.cocFetch_ = () => {
+    const err = new Error("not found");
+    err.statusCode = 404;
+    throw err;
+  };
+  const missing = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#PYYQQ",
+    discordId: "333333333333333333",
+    discordUsername: "charlie",
+    botSecret: "secret",
+  }));
+
+  assert.equal(missing.code, "PLAYER_NOT_FOUND");
+});
+
+test("manual delete removes a link by player tag", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+
+  const result = backend.deleteDiscordIdentityLink({
+    playerTag: "9PYLQG",
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.lookupType, "playerTag");
+  assert.equal(result.deletedCount, 1);
+  assert.equal(result.removedPlayerTags[0], "#9PYLQG");
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
+  assert.equal(activeData.rosters[0].subs[0].discord, "");
+  assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordId, "111111111111111111");
+});
+
+test("manual delete removes a link by Discord user", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+
+  const result = backend.deleteDiscordIdentityLink({
+    discordId: "222222222222222222",
+    discordUsername: "bravo",
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.lookupType, "discordUser");
+  assert.equal(JSON.stringify(result.removedPlayerTags), JSON.stringify(["#9PYLQG"]));
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
+  assert.equal(activeData.rosters[0].subs[0].discord, "");
+});
+
+test("manual delete by Discord user does not delete a different stored Discord ID with the same username", () => {
+  const backend = loadBackend();
+  const data = buildManualDiscordLinkRosterData();
+  data.rosters[0].missing.push({
+    slot: null,
+    name: "Charlie",
+    discord: "bravo",
+    th: 14,
+    tag: "#8CCVV",
+    notes: [],
+    excludeAsSwapTarget: false,
+    excludeAsSwapSource: false,
+  });
+  data.playerMetrics.byTag["#8CCVV"] = {
+    identity: {
+      tag: "#8CCVV",
+      name: "Charlie",
+      discordId: "333333333333333333",
+      discordUsername: "bravo",
+    },
+    trophyHistoryDaily: [],
+  };
+  const harness = installActiveRosterWriteHarness(backend, data);
+
+  const result = backend.deleteDiscordIdentityLink({
+    discordId: "222222222222222222",
+    discordUsername: "bravo",
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(JSON.stringify(result.removedPlayerTags), JSON.stringify(["#9PYLQG"]));
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
+  assert.equal(activeData.playerMetrics.byTag["#8CCVV"].identity.discordId, "333333333333333333");
+  assert.equal(activeData.rosters[0].missing[0].discord, "bravo");
+});
+
+test("manual delete rejects ambiguous lookup and missing links", () => {
+  const backend = loadBackend();
+  installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+
+  const ambiguous = captureError(() => backend.deleteDiscordIdentityLink({
+    playerTag: "#2LUCULP",
+    discordId: "111111111111111111",
+    botSecret: "secret",
+  }));
+  assert.equal(ambiguous.code, "DISCORD_LINK_LOOKUP_REQUIRED");
+
+  const missingByTag = captureError(() => backend.deleteDiscordIdentityLink({
+    playerTag: "#PYYQQ",
+    botSecret: "secret",
+  }));
+  assert.equal(missingByTag.code, "DISCORD_LINK_MISSING");
+
+  const missingByUser = captureError(() => backend.deleteDiscordIdentityLink({
+    discordId: "999999999999999999",
+    discordUsername: "missing",
+    botSecret: "secret",
+  }));
+  assert.equal(missingByUser.code, "DISCORD_LINK_MISSING");
 });
 
 test("bot delete clears Discord identity and roster cache for a player tag", () => {

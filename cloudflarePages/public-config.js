@@ -20,7 +20,7 @@
 (function initRosterPublicConfig(globalScope) {
     if (!globalScope || typeof globalScope !== "object") return;
     var DEFAULT_FIREBASE_DB_URL = "https://turtlecoc-37f22-default-rtdb.firebaseio.com";
-    var DEFAULT_APPS_SCRIPT_BASE_URL = "https://script.google.com/macros/s/AKfycbyIrN6gBS2DkhJwO6NzdtnHPEBQJCCkOtiPOM9EslkQ6AaQjXmFFDGGVn_sENGKxEwuhg/exec";
+    var DEFAULT_APPS_SCRIPT_BASE_URL = "https://script.google.com/macros/s/AKfycbyA5QJUW3Lb2QVyVRKKTWMS9zyBBm82ubtYLGEQU-eoKuC4pRY4PA-oYraYWGaxDCBdFg/exec";
 
     // Handle as trimmed text.
     function asTrimmedText(valueRaw) {

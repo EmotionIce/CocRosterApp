@@ -1,7 +1,7 @@
 // Cloudflare Worker routing and Apps Script fallback helpers.
 
 const FALLBACK_APPS_SCRIPT_EXEC_URL =
-  "https://script.google.com/macros/s/AKfycbyIrN6gBS2DkhJwO6NzdtnHPEBQJCCkOtiPOM9EslkQ6AaQjXmFFDGGVn_sENGKxEwuhg/exec";
+  "https://script.google.com/macros/s/AKfycbyA5QJUW3Lb2QVyVRKKTWMS9zyBBm82ubtYLGEQU-eoKuC4pRY4PA-oYraYWGaxDCBdFg/exec";
 
 // Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
@@ -151,14 +151,36 @@ const buildDiscordBotSyncUpstreamCall = (body, secret) => {
         playerTag: typeof first.playerTag === "string" ? first.playerTag : typeof first.tag === "string" ? first.tag : "",
         discordId: typeof first.discordId === "string" ? first.discordId : "",
         discordUsername: typeof first.discordUsername === "string" ? first.discordUsername : typeof first.username === "string" ? first.username : "",
+        force: first.force === true,
       };
     }
     return {
       playerTag: typeof args[0] === "string" ? args[0] : "",
       discordId: typeof args[1] === "string" ? args[1] : "",
       discordUsername: typeof args[2] === "string" ? args[2] : "",
+      force: args[3] === true || args[4] === true,
     };
   };
+
+  if (requestedMethod === "linkDiscordIdentityForPlayerTag") {
+    const parsed = readObjectOrPositional();
+    if (!parsed.playerTag.trim() || (!parsed.discordId.trim() && !parsed.discordUsername.trim())) {
+      return {
+        errorStatus: 400,
+        error: "playerTag and discordUsername or discordId are required.",
+      };
+    }
+    return {
+      method: "linkDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        discordId: parsed.discordId,
+        discordUsername: parsed.discordUsername,
+        force: parsed.force === true,
+        botSecret: secret,
+      }],
+    };
+  }
 
   if (requestedMethod === "syncDiscordIdentityForPlayerTag") {
     const parsed = readObjectOrPositional();
@@ -170,6 +192,27 @@ const buildDiscordBotSyncUpstreamCall = (body, secret) => {
     }
     return {
       method: "syncDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        discordId: parsed.discordId,
+        discordUsername: parsed.discordUsername,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (requestedMethod === "deleteDiscordIdentityLink") {
+    const parsed = readObjectOrPositional();
+    const hasPlayerTag = !!parsed.playerTag.trim();
+    const hasDiscordUser = !!(parsed.discordId.trim() || parsed.discordUsername.trim());
+    if (hasPlayerTag === hasDiscordUser) {
+      return {
+        errorStatus: 400,
+        error: "Provide exactly one of playerTag or Discord user.",
+      };
+    }
+    return {
+      method: "deleteDiscordIdentityLink",
       args: [{
         playerTag: parsed.playerTag,
         discordId: parsed.discordId,
