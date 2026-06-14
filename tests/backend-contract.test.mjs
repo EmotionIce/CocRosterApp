@@ -1948,9 +1948,76 @@ test("CWL league preference saves from the message snapshot without rebuilding o
   }, "secret");
 
   assert.equal(result.ok, true);
+  assert.equal(result.status, "created");
+  assert.equal(result.created, true);
   assert.equal(result.preference.leagueName, "Champion I");
   assert.equal(result.preferenceCount, 1);
   assert.equal(rosterSnapshotReads, 0);
+});
+
+test("CWL league preference changes require owner confirmation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "champion-i",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret");
+
+  assert.throws(() => backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "master-ii",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret"), /already has an active CWL league preference/i);
+
+  assert.throws(() => backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "master-ii",
+    discordId: "222",
+    discordUsername: "bravo",
+    discordDisplayName: "Bravo",
+    allowChange: true,
+  }, "secret"), /belongs to another Discord user/i);
+
+  const result = backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    leagueKey: "master-ii",
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+    allowChange: true,
+  }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+  const auditEntries = Object.values(signups.audit || {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "changed");
+  assert.equal(result.changed, true);
+  assert.equal(result.previousPreference.leagueName, "Champion I");
+  assert.equal(result.preference.leagueName, "Master II");
+  assert.equal(result.preferenceCount, 1);
+  assert.equal(signups.preferencesByTag["#2LUCULP"].discordId, "111");
+  assert.equal(signups.preferencesByTag["#2LUCULP"].leagueName, "Master II");
+  assert.ok(auditEntries.some((entry) =>
+    entry.action === "changed" &&
+    entry.playerTag === "#2LUCULP" &&
+    entry.previousLeagueName === "Champion I" &&
+    entry.leagueName === "Master II" &&
+    entry.discordId === "111"
+  ));
 });
 
 test("CWL league preferences lookup returns only the requesting Discord user's votes", () => {

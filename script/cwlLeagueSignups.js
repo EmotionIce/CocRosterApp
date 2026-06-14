@@ -389,9 +389,20 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		if (!signupId || signupId !== signups.signupId) {
 			throw new Error("This CWL league signup message is no longer active. Please use the latest signup message.");
 		}
-		const existing = signups.preferencesByTag[playerTag] || {};
-		if (existing && existing.leagueKey) {
-			throw new Error("This player tag already has an active CWL league preference.");
+		const existing = signups.preferencesByTag[playerTag] && typeof signups.preferencesByTag[playerTag] === "object"
+			? signups.preferencesByTag[playerTag]
+			: null;
+		const existingLeagueKey = normalizeCwlSignupLeagueKey_(existing && (existing.leagueKey || existing.leagueName));
+		const discordId = sanitizeDiscordIdValue_(payload.discordId);
+		const existingDiscordId = sanitizeDiscordIdValue_(existing && existing.discordId);
+		const allowChange = payload.allowChange === true || payload.changeExisting === true;
+		if (existing && existingLeagueKey) {
+			if (!existingDiscordId || existingDiscordId !== discordId) {
+				throw createRosterBackendError_("CWL_PREFERENCE_NOT_OWNER", "This CWL league preference belongs to another Discord user.");
+			}
+			if (!allowChange) {
+				throw createRosterBackendError_("CWL_PREFERENCE_EXISTS", "This player tag already has an active CWL league preference.");
+			}
 		}
 		const storedOptionKeys = Object.keys(signups.optionsByLeagueKey || {});
 		const storedOptions = [];
@@ -406,28 +417,42 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			selected = findCwlSignupOptionByKey_(options, payload.leagueKey || payload.leagueName);
 		}
 		if (!selected) throw new Error("Selected CWL league is not available.");
+		if (existing && existingLeagueKey && selected.leagueKey === existingLeagueKey) {
+			return {
+				ok: true,
+				status: "unchanged",
+				created: false,
+				changed: false,
+				preference: existing,
+				previousPreference: existing,
+				preferenceCount: Object.keys(signups.preferencesByTag || {}).length,
+			};
+		}
+		const action = existing && existingLeagueKey ? "changed" : "created";
 		const pref = {
 			playerTag: playerTag,
-			playerName: sanitizeCwlSignupText_(payload.playerName || existing.playerName, 80),
+			playerName: sanitizeCwlSignupText_(payload.playerName || (existing && existing.playerName), 80),
 			leagueKey: selected.leagueKey,
 			leagueName: selected.leagueName,
-			discordId: sanitizeDiscordIdValue_(payload.discordId),
+			discordId: discordId,
 			discordUsername: sanitizeDiscordUsernameValue_(payload.discordUsername),
 			discordDisplayName: sanitizeCwlSignupText_(payload.discordDisplayName || payload.discordUsername, 120),
 			messageId: sanitizeCwlSignupText_(payload.messageId, 80),
 			channelId: sanitizeCwlSignupText_(payload.channelId, 80),
 			guildId: sanitizeCwlSignupText_(payload.guildId, 80),
-			createdAt: existing.createdAt || nowIso,
+			createdAt: (existing && existing.createdAt) || nowIso,
 			updatedAt: nowIso,
 		};
 		signups.preferencesByTag[playerTag] = pref;
 		signups.updatedAt = nowIso;
 		signups.status = "open";
 		signups.audit[buildCwlSignupAuditKey_(nowIso)] = {
-			action: "created",
+			action: action,
 			playerTag: playerTag,
 			leagueKey: selected.leagueKey,
 			leagueName: selected.leagueName,
+			previousLeagueKey: sanitizeCwlSignupText_(existing && existing.leagueKey, 80),
+			previousLeagueName: sanitizeCwlSignupText_(existing && existing.leagueName, 80),
 			discordId: pref.discordId,
 			discordUsername: pref.discordUsername,
 			messageId: pref.messageId,
@@ -436,7 +461,11 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		const saved = writeActiveCwlLeagueSignups_(signups);
 		return {
 			ok: true,
+			status: action,
+			created: action === "created",
+			changed: action === "changed",
 			preference: saved.preferencesByTag[playerTag],
+			previousPreference: action === "changed" ? existing : null,
 			preferenceCount: Object.keys(saved.preferencesByTag).length,
 		};
 	});
