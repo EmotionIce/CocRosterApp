@@ -1037,6 +1037,65 @@ const buildManualDiscordLinkRosterData = () => {
   return data;
 };
 
+test("bot sync clears the same Discord ID from another player without clearing username collisions", () => {
+  const backend = loadBackend();
+  const data = buildManualDiscordLinkRosterData();
+  data.rosters[0].missing.push({
+    slot: null,
+    name: "Charlie",
+    discord: "bravo",
+    th: 14,
+    tag: "#8CCVV",
+    notes: [],
+    excludeAsSwapTarget: false,
+    excludeAsSwapSource: false,
+  });
+  data.playerMetrics.byTag["#8CCVV"] = {
+    identity: {
+      tag: "#8CCVV",
+      name: "Charlie",
+      discordId: "333333333333333333",
+      discordUsername: "bravo",
+    },
+    trophyHistoryDaily: [],
+  };
+  const harness = installActiveRosterWriteHarness(backend, data);
+
+  const result = backend.syncDiscordIdentityForPlayerTag("#2LUCULP", "222222222222222222", "bravo", "secret");
+  const activeData = harness.getActiveData();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.conflictsResolvedCount, 1);
+  assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
+  assert.equal(activeData.rosters[0].subs[0].discord, "");
+  assert.equal(activeData.playerMetrics.byTag["#8CCVV"].identity.discordId, "333333333333333333");
+  assert.equal(activeData.rosters[0].missing[0].discord, "bravo");
+});
+
+test("manual link writes Discord ID and player tag as the canonical identity", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+  backend.cocFetch_ = () => ({ tag: "#9PYLQG", name: "Bravo" });
+
+  const result = backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "9PYLQG",
+    discordId: "222222222222222222",
+    discordUsername: "bravo_new",
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+  const identity = activeData.playerMetrics.byTag["#9PYLQG"].identity;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.tag, "#9PYLQG");
+  assert.equal(result.discordId, "222222222222222222");
+  assert.equal(identity.tag, "#9PYLQG");
+  assert.equal(identity.discordId, "222222222222222222");
+  assert.equal(identity.discordUsername, "bravo_new");
+  assert.equal(activeData.rosters[0].subs[0].discord, "bravo_new");
+});
+
 test("manual link refuses player and Discord-user conflicts without force", () => {
   const backend = loadBackend();
   const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
@@ -1088,6 +1147,76 @@ test("manual link force overwrites target player and clears the Discord user's o
   assert.equal(activeData.rosters[0].main[0].discord, "bravo");
   assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
   assert.equal(activeData.rosters[0].subs[0].discord, "");
+});
+
+test("manual link does not overwrite a different Discord ID only because the username matches", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+  backend.cocFetch_ = () => ({ tag: "#PYYQQ", name: "Same Username" });
+
+  const result = backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#PYYQQ",
+    discordId: "333333333333333333",
+    discordUsername: "bravo",
+    force: true,
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.conflictsResolvedCount, 0);
+  assert.equal(activeData.playerMetrics.byTag["#PYYQQ"].identity.discordId, "333333333333333333");
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.rosters[0].subs[0].discord, "bravo");
+});
+
+test("manual link treats legacy username-only identities as conflicts until forced", () => {
+  const backend = loadBackend();
+  const data = buildManualDiscordLinkRosterData();
+  data.rosters[0].missing.push({
+    slot: null,
+    name: "Legacy",
+    discord: "legacy_user",
+    th: 14,
+    tag: "#8CCVV",
+    notes: [],
+    excludeAsSwapTarget: false,
+    excludeAsSwapSource: false,
+  });
+  data.playerMetrics.byTag["#8CCVV"] = {
+    identity: {
+      tag: "#8CCVV",
+      name: "Legacy",
+      discordUsername: "legacy_user",
+    },
+    trophyHistoryDaily: [],
+  };
+  const harness = installActiveRosterWriteHarness(backend, data);
+  backend.cocFetch_ = () => ({ tag: "#PYYQQ", name: "Delta" });
+
+  const conflict = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#PYYQQ",
+    discordId: "333333333333333333",
+    discordUsername: "legacy_user",
+    botSecret: "secret",
+  }));
+  assert.equal(conflict.code, "DISCORD_LINK_CONFLICT");
+  assert.match(conflict.message, /#8CCVV/);
+
+  const forced = backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#PYYQQ",
+    discordId: "333333333333333333",
+    discordUsername: "legacy_user",
+    force: true,
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(forced.ok, true);
+  assert.equal(forced.conflictsResolvedCount, 1);
+  assert.equal(activeData.playerMetrics.byTag["#PYYQQ"].identity.discordId, "333333333333333333");
+  assert.equal(activeData.playerMetrics.byTag["#8CCVV"], undefined);
+  assert.equal(activeData.rosters[0].missing[0].discord, "");
 });
 
 test("manual link-created missing player survives refresh-all when absent from the clan", () => {
@@ -1257,6 +1386,78 @@ test("manual delete by Discord user does not delete a different stored Discord I
   assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
   assert.equal(activeData.playerMetrics.byTag["#8CCVV"].identity.discordId, "333333333333333333");
   assert.equal(activeData.rosters[0].missing[0].discord, "bravo");
+});
+
+test("manual delete by Discord user prefers ID matches over legacy username-only matches", () => {
+  const backend = loadBackend();
+  const data = buildManualDiscordLinkRosterData();
+  data.rosters[0].missing.push({
+    slot: null,
+    name: "Legacy Bravo",
+    discord: "bravo",
+    th: 14,
+    tag: "#8CCVV",
+    notes: [],
+    excludeAsSwapTarget: false,
+    excludeAsSwapSource: false,
+  });
+  data.playerMetrics.byTag["#8CCVV"] = {
+    identity: {
+      tag: "#8CCVV",
+      name: "Legacy Bravo",
+      discordUsername: "bravo",
+    },
+    trophyHistoryDaily: [],
+  };
+  const harness = installActiveRosterWriteHarness(backend, data);
+
+  const result = backend.deleteDiscordIdentityLink({
+    discordId: "222222222222222222",
+    discordUsername: "bravo",
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(JSON.stringify(result.removedPlayerTags), JSON.stringify(["#9PYLQG"]));
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
+  assert.equal(activeData.playerMetrics.byTag["#8CCVV"].identity.discordUsername, "bravo");
+  assert.equal(activeData.rosters[0].missing[0].discord, "bravo");
+});
+
+test("manual delete by Discord user falls back to legacy username-only identities when no ID match exists", () => {
+  const backend = loadBackend();
+  const data = buildManualDiscordLinkRosterData();
+  data.rosters[0].missing.push({
+    slot: null,
+    name: "Legacy",
+    discord: "legacy_user",
+    th: 14,
+    tag: "#8CCVV",
+    notes: [],
+    excludeAsSwapTarget: false,
+    excludeAsSwapSource: false,
+  });
+  data.playerMetrics.byTag["#8CCVV"] = {
+    identity: {
+      tag: "#8CCVV",
+      name: "Legacy",
+      discordUsername: "legacy_user",
+    },
+    trophyHistoryDaily: [],
+  };
+  const harness = installActiveRosterWriteHarness(backend, data);
+
+  const result = backend.deleteDiscordIdentityLink({
+    discordId: "333333333333333333",
+    discordUsername: "legacy_user",
+    botSecret: "secret",
+  });
+  const activeData = harness.getActiveData();
+
+  assert.equal(JSON.stringify(result.removedPlayerTags), JSON.stringify(["#8CCVV"]));
+  assert.equal(activeData.playerMetrics.byTag["#8CCVV"], undefined);
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.rosters[0].missing[0].discord, "");
 });
 
 test("manual delete rejects ambiguous lookup and missing links", () => {
@@ -1590,6 +1791,54 @@ test("season event signup enforces linked accounts and account limits", () => {
   }, "secret");
 
   assert.equal(notLinked.status, "not-linked");
+});
+
+test("season event signup does not match an ID-linked account by username collision", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+
+  const result = backend.registerSeasonEventSignup({
+    eventId: "push-2026-05",
+    discordUser: { id: "999", username: "alpha", globalName: "Other Alpha", displayName: "Other Alpha" },
+    source: { type: "discord-button" },
+  }, "secret");
+
+  assert.equal(result.status, "not-linked");
+});
+
+test("season event signup still accepts a single legacy username-only identity", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = buildSeasonEventRosterData();
+  rosterData.playerMetrics.byTag["#2PPYQQ"] = {
+    identity: {
+      tag: "#2PPYQQ",
+      name: "Legacy",
+      discordUsername: "legacy_user",
+    },
+    latestSnapshot: {
+      tag: "#2PPYQQ",
+      name: "Legacy",
+      townHallLevel: 14,
+      trophies: 4800,
+      donations: 0,
+      donationsReceived: 0,
+      capturedAt: "2026-05-19T00:00:00.000Z",
+    },
+    trophyHistoryDaily: [],
+  };
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData, text: "" });
+
+  const result = backend.registerSeasonEventSignup({
+    eventId: "push-2026-05",
+    discordUser: { id: "999", username: "legacy_user", globalName: "Legacy", displayName: "Legacy" },
+    source: { type: "discord-button" },
+  }, "secret");
+
+  assert.equal(result.status, "signed-up");
+  assert.equal(result.participant.accounts[0].tag, "#2PPYQQ");
+  assert.equal(result.participant.accounts[0].matchType, "discordUsername");
 });
 
 test("season event signup distinguishes duplicate, unlinked, already-signed, and differing accounts", () => {

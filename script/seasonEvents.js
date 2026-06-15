@@ -905,7 +905,7 @@ function findLinkedAccountsForDiscordUser_(rosterDataRaw, discordUserRaw) {
 			idMatches.push(account);
 			continue;
 		}
-		if (wantedUsername && identityUsername && identityUsername === wantedUsername) {
+		if (wantedUsername && !identityDiscordId && identityUsername && identityUsername === wantedUsername) {
 			const usernameAccount = Object.assign({}, account, { matchType: "discordUsername" });
 			usernameMatches.push(usernameAccount);
 		}
