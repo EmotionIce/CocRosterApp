@@ -72,93 +72,284 @@
     discordInviteUrl: "https://discord.gg/turtlecoc",
   };
   const PUBLIC_PROFILE_EDITOR_DEFAULTS = {
-    brand: {
-      eyebrow: "200+ Members \u2022 Discord-Based",
-    },
-    nav: {
-      homeLabel: "Home",
-      rostersLabel: "Rosters",
-      leaderboardLabel: "Leaderboard",
-      discordLabel: "Discord",
-      adminLabel: "Admin Panel",
-    },
-    hero: {
-      eyebrow: "Recruiting active players",
-      title: "TURTLE: active, organized, improving.",
-      body: "A place for every Town Hall, from steady progress to high-level wars and the Project Se7ven path.",
-      primaryCtaLabel: "Join Discord now!",
-      secondaryCtaLabel: "See Current Rosters",
-    },
-    journey: {
-      eyebrow: "How joining works",
-      title: "You bring the player tag. We handle the setup and path forward.",
-      steps: [
-        { label: "Step 1", title: "Open a ticket", body: "Share your player tag and basic playstyle." },
-        { label: "Step 2", title: "Get linked and placed", body: "Your account gets linked to Discord and you set your self-roles." },
-        { label: "Step 3", title: "War, learn, move up", body: "Join the clan, opt into war through the pinned message and move up, in the TURTLE-family, as your Town Hall and performance improve." },
-      ],
-    },
-    family: {
-      eyebrow: "Clan family lineup",
-      title: "From early growth to Legends-level play, the family gives every Town Hall a real home and room to keep climbing.",
-      metaTemplate: "{clanCount} clans, {playerCount} tracked players across the family.",
-      loadingMetaText: "Syncing the latest family snapshot. Live lineup stats will appear shortly.",
-      playersLabel: "Players in roster",
-      cwlLabel: "CWL",
-      regularWarLabel: "Regular war",
-    },
-    war: {
-      eyebrow: "Main clan focus",
-      title: "TURTLE Main is built for strong TH17 and TH18 players who want serious wars and the relaxed community vibe.",
-      body: "Reliable hits matter missed attacks and long-term performance are tracked. Planning help is there when you want it, and players who ask for coaching can get it.",
-      highlights: [
-        { label: "War style", value: "Relaxed, but reliable" },
-        { label: "Core TH range", value: "TH17-18" },
-      ],
-    },
-    cwl: {
-      eyebrow: "CWL structure",
-      title: "Every active member gets a CWL spot, and regular wars keep running even during league week.",
-      body: "Rosters are set before CWL starts, based on Town Hall strength and the best overall lineup fit. Subs are rotated so everyone still earns full rewards, and the family keeps side wars and back-to-back wars running year-round.",
-      highlights: [
-        { label: "Access", value: "All active members" },
-        { label: "During CWL", value: "Side wars running" },
-        { label: "Coordination", value: "Always optimized" },
-      ],
-    },
-    network: {
-      eyebrow: "ProjectSE7VEN",
-      title: "For the strongest players, TURTLE also opens a path into Project 7's fully competitive environment.",
-      body: "Confident Legends League players can move into P7 for a sharper competitive setting, high-level push play, and prize-backed push events worth multiple hundreds $$! It is the elite lane, but still part of the wider TURTLE ecosystem.",
-      highlights: [
-        { label: "Entry bar", value: "Legends + confident hits" },
-        { label: "Events", value: "$$$ push events" },
-        { label: "Connection", value: "Shared leadership" },
-      ],
-    },
-    proof: {
-      eyebrow: "Why it works",
-      title: "Discord is required. Pressure isn't.",
-      body: "The expectations are simple: stay active, see your notifications, use your hits, and be willing to improve. EU and US staff coverage keeps replies fast, while the family stays organized without becoming overly strict.",
-    },
-    finalCta: {
-      eyebrow: "Ready to join",
-      title: "Join the Discord and Open a Ticket.",
-      steps: [
-        "Join the server and open a Ticket.",
-        "Share your player tag and playstyle",
-        "Get placed in the right clan and opt into war when ready",
-      ],
-      primaryCtaLabel: "Join TURTLE on Discord",
-      secondaryCtaLabel: "View Leaderboard",
-    },
-    media: {
-      bannerLabel: "TURTLE banner animation",
-      squareLabel: "TURTLE icon animation",
-      bannerPlaceholderLabel: "TURTLE banner preview",
-      squarePlaceholderLabel: "TURTLE icon preview",
-    },
-  };
+
+  brand: {
+
+    eyebrow: "200+ Members \u2022 Discord-Based",
+
+  },
+
+  cwl: {
+
+    body: "Every active CWL player gets planned before league week starts.",
+
+    eyebrow: "CWL",
+
+    highlights: [
+
+      {
+
+        label: "Placement",
+
+        value: "All active players",
+
+      },
+
+      {
+
+        label: "Rosters",
+
+        value: "Set before CWL",
+
+      },
+
+      {
+
+        label: "Rewards",
+
+        value: "Full-reward goal",
+
+      },
+
+      {
+
+        label: "Extra wars",
+
+        value: "Regular wars continue",
+
+      },
+
+    ],
+
+    title: "CWL plans for every active player.",
+
+  },
+
+  family: {
+
+    cwlLabel: "CWL status",
+
+    eyebrow: "Clan family",
+
+    loadingMetaText: "Syncing live roster data.",
+
+    metaTemplate: "{clanCount} clans • {playerCount} rostered players",
+
+    playersLabel: "Rostered players",
+
+    regularWarLabel: "War status",
+
+    title: "A clan path for every active player.",
+
+  },
+
+  finalCta: {
+
+    eyebrow: "Ready",
+
+    primaryCtaLabel: "Join Discord",
+
+    secondaryCtaLabel: "View Leaderboard",
+
+    steps: [
+
+      "Join the server.",
+
+      "Send your player tag.",
+
+      "Get matched to a clan.",
+
+    ],
+
+    title: "Join now and get placed.",
+
+  },
+
+  hero: {
+
+    body: "Every active player gets matched to a clan. CWL is planned. Strong attackers can move up.",
+
+    eyebrow: "Clan Family • War • CWL",
+
+    primaryCtaLabel: "Join Discord",
+
+    secondaryCtaLabel: "View Rosters",
+
+    title: "TURTLE",
+
+  },
+
+  journey: {
+
+    eyebrow: "Joining",
+
+    steps: [
+
+      {
+
+        body: "Send your tag and playstyle.",
+
+        label: "01",
+
+        title: "Open ticket",
+
+      },
+
+      {
+
+        body: "Matched by TH, activity, and goals.",
+
+        label: "02",
+
+        title: "Get placed",
+
+      },
+
+      {
+
+        body: "Join the clan and play when ready.",
+
+        label: "03",
+
+        title: "Start playing",
+
+      },
+
+    ],
+
+    title: "Join Discord. Get matched. Start playing.",
+
+  },
+
+  media: {
+
+    bannerLabel: "TURTLE banner animation",
+
+    bannerPlaceholderLabel: "TURTLE banner preview",
+
+    squareLabel: "TURTLE icon animation",
+
+    squarePlaceholderLabel: "TURTLE icon preview",
+
+  },
+
+  nav: {
+
+    adminLabel: "Admin Panel",
+
+    discordLabel: "Discord",
+
+    homeLabel: "Home",
+
+    leaderboardLabel: "Leaderboard",
+
+    rostersLabel: "Rosters",
+
+  },
+
+  network: {
+
+    body: "Consistent attackers can earn stronger lineups.",
+
+    eyebrow: "Competitive path",
+
+    highlights: [
+
+      {
+
+        label: "Entry",
+
+        value: "Earned by results",
+
+      },
+
+      {
+
+        label: "Lineups",
+
+        value: "Stronger CWL rosters",
+
+      },
+
+      {
+
+        label: "Practice",
+
+        value: "Friendly war hub",
+
+      },
+
+      {
+
+        label: "Progression",
+
+        value: "Move up over time",
+
+      },
+
+    ],
+
+    title: "Strong players get harder wars.",
+
+  },
+
+  proof: {
+
+    body: "Active means reachable on Discord, using attacks, and staying involved.",
+
+    eyebrow: "Standards",
+
+    title: "Discord required.\nActive players placed.\nReliable hits expected.",
+
+  },
+
+  war: {
+
+    body: "Serious enough to stay reliable, relaxed enough to enjoy.",
+
+    eyebrow: "War system",
+
+    highlights: [
+
+      {
+
+        label: "War rhythm",
+
+        value: "Back-to-back",
+
+      },
+
+      {
+
+        label: "Attacks",
+
+        value: "Both hits expected",
+
+      },
+
+      {
+
+        label: "Reliability",
+
+        value: "Missed hits tracked",
+
+      },
+
+      {
+
+        label: "Support",
+
+        value: "Planning help available",
+
+      },
+
+    ],
+
+    title: "Reliable wars, chill atmosphere.",
+
+  },
+
+};
   const LANDING_URL_ALIASES_BY_KEY_ = {
     discordInviteUrl: ["discordInviteUrl"],
     bannerMediaUrl: ["bannerMediaUrl", "bannerUrl", "bannerGifUrl"],

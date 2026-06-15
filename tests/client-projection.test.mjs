@@ -15,11 +15,11 @@ const loadClientInternals = (overrides = {}) => {
       "    window.__ROSTER_CLIENT_TEST_INTERNALS__ = {",
       "        buildRosterPublicDisplayModel,",
       "        getDisplayDiscordUsernameForPlayer,",
-      "        buildLeaderboardEntriesModel,",
       "        buildSeasonEventLeaderboardModel,",
       "        buildSeasonEventsPublicModel,",
       "        loadRosterDataViaFirebasePublic,",
       "        loadCurrentSeasonEventsViaFirebasePublic,",
+      "        loadPreviousSeasonEventsViaFirebasePublic,",
       "        readCachedRosterSnapshot,",
       "        readDurableCachedRosterSnapshot,",
       "        writeCachedRosterSnapshot,",
@@ -273,6 +273,77 @@ test("loads current season event payloads from public Firebase and decodes keys"
   assert.equal(loaded.current.push.eventId, pushId);
   assert.equal(loaded.byId[pushId].participantsByTag["#2LUCULP"].tag, "#2LUCULP");
   assert.equal(loaded.loadErrors.length, 0);
+});
+
+test("loads previous season event payloads directly from public Firebase bySeason", async () => {
+  const previousSeasonId = "ranked-legend-i-2026-05-18";
+  const pushId = "push-ranked-legend-i-2026-05-18";
+  const donationId = "donation-ranked-legend-i-2026-05-18";
+  const responses = new Map([
+    ["https://firebase.test/events/seasonEvents/bySeason/" + previousSeasonId + ".json", {
+      push: {
+        eventId: pushId,
+        seasonId: previousSeasonId,
+        startsAt: "2026-05-18T05:00:00.000Z",
+        endsAt: "2026-06-15T05:00:00.000Z",
+      },
+      donation: {
+        eventId: donationId,
+        seasonId: previousSeasonId,
+        startsAt: "2026-05-18T05:00:00.000Z",
+        endsAt: "2026-06-15T05:00:00.000Z",
+      },
+    }],
+    ["https://firebase.test/events/seasonEvents/byId/" + pushId + ".json", {
+      eventId: pushId,
+      type: "push",
+      seasonId: previousSeasonId,
+      status: "archived",
+    }],
+    ["https://firebase.test/events/seasonEvents/byId/" + donationId + ".json", {
+      eventId: donationId,
+      type: "donation",
+      seasonId: previousSeasonId,
+      status: "archived",
+    }],
+  ]);
+  const requested = [];
+  const { loadPreviousSeasonEventsViaFirebasePublic } = loadClientInternals({
+    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await loadPreviousSeasonEventsViaFirebasePublic({
+    seasonEvents: {
+      current: {
+        push: {
+          eventId: "push-ranked-legend-i-2026-06-15",
+          seasonId: "ranked-legend-i-2026-06-15",
+          startsAt: "2026-06-15T05:00:00.000Z",
+          endsAt: "2026-07-13T05:00:00.000Z",
+        },
+      },
+      seasonState: {
+        seasonId: "ranked-legend-i-2026-06-15",
+        startsAt: "2026-06-15T05:00:00.000Z",
+        endsAt: "2026-07-13T05:00:00.000Z",
+      },
+    },
+  });
+
+  assert.equal(loaded.seasonState.seasonId, previousSeasonId);
+  assert.equal(loaded.current.push.eventId, pushId);
+  assert.equal(loaded.byId[donationId].status, "archived");
+  assert.equal(requested.includes("https://firebase.test/events/seasonEvents/bySeason/" + previousSeasonId + ".json"), true);
 });
 
 test("loads published active version shards before falling back to legacy active", async () => {
@@ -797,41 +868,6 @@ test("push event leaderboard ranks by current league bucket then current trophie
   assert.equal(model.rows[1].bestLeagueName, "Legends II");
   assert.equal(model.rows[2].displayName, "Bravo");
   assert.equal(model.rows[2].score, 5600);
-});
-
-test("general leaderboard still uses donationCycles for current cycle totals", () => {
-  const { buildLeaderboardEntriesModel, resolveLeaderboardRankedSeasonCycle } = loadClientInternals();
-  const cycle = resolveLeaderboardRankedSeasonCycle(new Date());
-  const model = buildLeaderboardEntriesModel({
-    rosters: [
-      {
-        id: "main",
-        title: "Main",
-        main: [{ name: "Alpha", tag: "#AAA", th: 16 }],
-        subs: [],
-        missing: [],
-      },
-    ],
-    playerMetrics: {
-      byTag: {
-        "#AAA": {
-          latestSnapshot: { tag: "#AAA", name: "Alpha", trophies: 5000 },
-          donationCycles: {
-            [cycle.seasonId]: {
-              seasonId: cycle.seasonId,
-              startsAt: cycle.startsAt,
-              endsAt: cycle.endsAt,
-              cycleTotalDonations: 64,
-              cycleTotalDonationsReceived: 12,
-            },
-          },
-        },
-      },
-    },
-  });
-
-  assert.equal(model.entries[0].donationCycleTotals.current.donations, 64);
-  assert.equal(model.entries[0].donationCycleTotals.current.donationsReceived, 12);
 });
 
 test("public client does not use month donation ledgers or protected event leaderboard methods", () => {

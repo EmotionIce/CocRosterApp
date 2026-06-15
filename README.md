@@ -28,7 +28,7 @@ This project demonstrates end-to-end product engineering in a real production se
 ### Public website
 - Landing page with modular content blocks driven by `publicConfig.profile`.
 - Roster view with search and sectioned player lists.
-- Leaderboard view with multiple sort modes and month toggles.
+- Leaderboard view focused on current and previous seasonal event standings.
 - Runtime fallback hydration (Firebase active snapshot first, asset route fallback second).
 
 ### Admin console (`/console`)

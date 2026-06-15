@@ -17,6 +17,7 @@
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
     const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
+    const SEASON_EVENTS_BY_SEASON_PATH = SEASON_EVENTS_BASE_PATH + "/bySeason";
     const SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/seasonState/current";
     const SEASON_EVENT_COLLAPSED_ROW_COUNT = 3;
     const FIREBASE_PUBLIC_SOURCE = "firebase-public";
@@ -37,6 +38,8 @@
     let publicViewUiBound = false;
     let profileUiBound = false;
     let seasonEventCardExpandedByType = Object.create(null);
+    let previousSeasonEventsLoadInFlight = false;
+    let previousSeasonEventsLoadRequestId = 0;
     let globalLastUpdatedTimerId = 0;
     let globalLastUpdatedTimerValue = "";
     let warCountdownTimerId = 0;
@@ -93,9 +96,9 @@
         },
         leaderboard: {
             loadingTitle: "Preparing leaderboard",
-            loadingText: "Assembling live ranking controls and cards.",
+            loadingText: "Assembling current season event standings.",
             refreshTitle: "Refreshing leaderboard",
-            refreshText: "Current rankings stay visible while the latest stats sync in.",
+            refreshText: "Season event standings stay visible while fresh data syncs.",
         },
         landing: {
             loadingTitle: "Preparing clan overview",
@@ -225,30 +228,13 @@
             "assets/images/square.png",
         ],
     };
-    const LEADERBOARD_SORT_MODE_VALUES = {
-        trophiesLeague: "trophiesLeague",
-        donations: "donations",
-        donationsReceived: "donationsReceived",
-        townHall: "townHall",
-    };
     const LEADERBOARD_RANKED_SEASON_ANCHOR_ISO = "2026-05-18T05:00:00.000Z";
     const LEADERBOARD_RANKED_SEASON_CYCLE_MS = 28 * 24 * 60 * 60 * 1000;
-    const LEADERBOARD_CYCLE_MODE_VALUES = {
+    const SEASON_EVENT_RESULT_MODE_VALUES = {
         current: "current",
-        last: "last",
+        previous: "previous",
     };
     const LEADERBOARD_LEAGUE_FALLBACK_RANK = 999;
-    const LEADERBOARD_SORT_MODE_OPTIONS = [
-        { key: LEADERBOARD_SORT_MODE_VALUES.trophiesLeague, label: "Trophies / League" },
-        { key: LEADERBOARD_SORT_MODE_VALUES.donations, label: "Donations" },
-        { key: LEADERBOARD_SORT_MODE_VALUES.donationsReceived, label: "Donations received" },
-        { key: LEADERBOARD_SORT_MODE_VALUES.townHall, label: "Town Hall" },
-    ];
-    const ROLE_PRIORITY = {
-        main: 0,
-        sub: 1,
-        missing: 2,
-    };
     const LEADERBOARD_EXACT_LEAGUE_ORDER = [
         "Legends I",
         "Legends II",
@@ -745,9 +731,7 @@
     const buildDefaultPublicViewState = () => ({
         view: PUBLIC_VIEW_VALUES.landing,
         leaderboard: {
-            rosterFilter: "all",
-            sortMode: LEADERBOARD_SORT_MODE_VALUES.trophiesLeague,
-            cycleMode: LEADERBOARD_CYCLE_MODE_VALUES.current,
+            seasonEventResultsMode: SEASON_EVENT_RESULT_MODE_VALUES.current,
         },
     });
 
@@ -760,29 +744,11 @@
         return PUBLIC_VIEW_VALUES.rosters;
     };
 
-    // Sanitize leaderboard sort mode.
-    const sanitizeLeaderboardSortMode = (valueRaw) => {
+    // Sanitize season event results mode.
+    const sanitizeSeasonEventResultsMode = (valueRaw) => {
         const value = toStr(valueRaw).trim();
-        if (Object.prototype.hasOwnProperty.call(LEADERBOARD_SORT_MODE_VALUES, value)) {
-            return LEADERBOARD_SORT_MODE_VALUES[value];
-        }
-        if (value === LEADERBOARD_SORT_MODE_VALUES.donations) return LEADERBOARD_SORT_MODE_VALUES.donations;
-        if (value === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) return LEADERBOARD_SORT_MODE_VALUES.donationsReceived;
-        if (value === LEADERBOARD_SORT_MODE_VALUES.townHall) return LEADERBOARD_SORT_MODE_VALUES.townHall;
-        return LEADERBOARD_SORT_MODE_VALUES.trophiesLeague;
-    };
-
-    // Sanitize leaderboard cycle mode.
-    const sanitizeLeaderboardCycleMode = (valueRaw) => {
-        const value = toStr(valueRaw).trim();
-        if (value === LEADERBOARD_CYCLE_MODE_VALUES.last) return LEADERBOARD_CYCLE_MODE_VALUES.last;
-        return LEADERBOARD_CYCLE_MODE_VALUES.current;
-    };
-
-    // Sanitize leaderboard roster filter.
-    const sanitizeLeaderboardRosterFilter = (valueRaw) => {
-        const value = toStr(valueRaw).trim();
-        return value ? value : "all";
+        if (value === SEASON_EVENT_RESULT_MODE_VALUES.previous) return SEASON_EVENT_RESULT_MODE_VALUES.previous;
+        return SEASON_EVENT_RESULT_MODE_VALUES.current;
     };
 
     // Sanitize public view state.
@@ -793,9 +759,7 @@
         return {
             view: sanitizePublicViewValue(state.view),
             leaderboard: {
-                rosterFilter: sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter || defaults.leaderboard.rosterFilter),
-                sortMode: sanitizeLeaderboardSortMode(leaderboard.sortMode || defaults.leaderboard.sortMode),
-                cycleMode: sanitizeLeaderboardCycleMode(leaderboard.cycleMode || defaults.leaderboard.cycleMode),
+                seasonEventResultsMode: sanitizeSeasonEventResultsMode(leaderboard.seasonEventResultsMode || defaults.leaderboard.seasonEventResultsMode),
             },
         };
     };
@@ -882,12 +846,6 @@
         }
         publicViewState.view = resolveLoadTimePublicView();
         persistPublicViewState();
-    };
-
-    // Return whether donation sort mode.
-    const isDonationSortMode = (sortModeRaw) => {
-        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        return sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived;
     };
 
     // Resolve deterministic Legend I ranked season cycle.
@@ -5009,43 +4967,6 @@
         return null;
     };
 
-    // Handle read ranked-season donation ledger.
-    const readDonationCycleLedger = (entryRaw, cycleRaw) => {
-        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-        const cycle = cycleRaw && typeof cycleRaw === "object" ? cycleRaw : {};
-        const seasonId = toStr(cycle.seasonId).trim();
-        if (!seasonId) return null;
-        const donationCycles = entry.donationCycles && typeof entry.donationCycles === "object" ? entry.donationCycles : null;
-        if (!donationCycles) return null;
-        if (donationCycles[seasonId] && typeof donationCycles[seasonId] === "object") return donationCycles[seasonId];
-        const keys = Object.keys(donationCycles);
-        for (let i = 0; i < keys.length; i++) {
-            const candidate = donationCycles[keys[i]];
-            if (!candidate || typeof candidate !== "object") continue;
-            if (toStr(keys[i]).trim() === seasonId) return candidate;
-            if (toStr(candidate.seasonId).trim() === seasonId) return candidate;
-            if (toStr(candidate.startsAt).trim() === toStr(cycle.startsAt).trim() && toStr(candidate.endsAt).trim() === toStr(cycle.endsAt).trim()) return candidate;
-        }
-        return null;
-    };
-
-    // Handle read ranked-season donation totals.
-    const readDonationCycleTotals = (entryRaw, cycleRaw) => {
-        const ledger = readDonationCycleLedger(entryRaw, cycleRaw);
-        if (!ledger) {
-            return {
-                hasData: false,
-                donations: 0,
-                donationsReceived: 0,
-            };
-        }
-        return {
-            hasData: true,
-            donations: toNonNegativeInt(ledger.cycleTotalDonations),
-            donationsReceived: toNonNegativeInt(ledger.cycleTotalDonationsReceived),
-        };
-    };
-
     // Handle read snapshot town hall level.
     const readSnapshotTownHallLevel = (snapshotRaw) => {
         const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
@@ -5054,345 +4975,35 @@
         return 0;
     };
 
-    // Handle read snapshot trophies.
-    const readSnapshotTrophies = (snapshotRaw) => {
-        const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
-        if (snapshot.trophies != null) return toNonNegativeInt(snapshot.trophies);
-        return 0;
-    };
-
-    // Compare affiliation priority.
-    const compareAffiliationPriority = (leftRaw, rightRaw) => {
-        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
-        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
-        const leftRoleRank = Object.prototype.hasOwnProperty.call(ROLE_PRIORITY, left.role) ? ROLE_PRIORITY[left.role] : 99;
-        const rightRoleRank = Object.prototype.hasOwnProperty.call(ROLE_PRIORITY, right.role) ? ROLE_PRIORITY[right.role] : 99;
-        if (leftRoleRank !== rightRoleRank) return leftRoleRank - rightRoleRank;
-        const leftRosterIndex = Number.isFinite(left.rosterIndex) ? left.rosterIndex : Number.POSITIVE_INFINITY;
-        const rightRosterIndex = Number.isFinite(right.rosterIndex) ? right.rosterIndex : Number.POSITIVE_INFINITY;
-        if (leftRosterIndex !== rightRosterIndex) return leftRosterIndex - rightRosterIndex;
-        const leftTitle = toStr(left.rosterTitle).trim();
-        const rightTitle = toStr(right.rosterTitle).trim();
-        return leftTitle.localeCompare(rightTitle);
-    };
-
-    // Format affiliation role label.
-    const formatAffiliationRoleLabel = (roleRaw) => {
-        const role = toStr(roleRaw).trim().toLowerCase();
-        if (role === "main") return "Main";
-        if (role === "missing") return "Temporarily missing";
-        return "Sub";
-    };
-
-    // Compare leaderboard name.
-    const compareLeaderboardName = (leftRaw, rightRaw) => {
-        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
-        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
-        const leftName = toStr(left.displayName).trim().toLowerCase();
-        const rightName = toStr(right.displayName).trim().toLowerCase();
-        if (leftName !== rightName) return leftName.localeCompare(rightName);
-        return toStr(left.tag).localeCompare(toStr(right.tag));
-    };
-
-    // Build leaderboard entries model.
-    const buildLeaderboardEntriesModel = (dataRaw) => {
-        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
-        const rosters = getOrderedRostersFromData(data);
-        const entryByTag = Object.create(null);
-        const currentCycle = resolveLeaderboardRankedSeasonCycle(new Date());
-        const lastCycle = resolvePreviousLeaderboardRankedSeasonCycle(new Date());
-        let hasLastCycleData = false;
-
-        // Handle upsert affiliation.
-        const upsertAffiliation = (entry, roster, rosterIndex, roleRaw) => {
-            const rosterId = toStr(roster && roster.id).trim();
-            const rosterTitle = toStr(roster && roster.title).trim() || (rosterId || "Roster");
-            const role = toStr(roleRaw).trim().toLowerCase() || "sub";
-            const key = (rosterId || rosterTitle) + "|" + role;
-            if (entry.affiliationKeys[key]) return;
-            entry.affiliationKeys[key] = true;
-            entry.affiliations.push({
-                rosterId: rosterId,
-                rosterTitle: rosterTitle,
-                role: role,
-                rosterIndex: rosterIndex,
-            });
-            if (rosterId) entry.rosterIdSet[rosterId] = true;
-        };
-
-        // Handle collect players.
-        const collectPlayers = (playersRaw, roster, rosterIndex, role) => {
-            const players = Array.isArray(playersRaw) ? playersRaw : [];
-            for (let i = 0; i < players.length; i++) {
-                const player = normalizePlayer(players[i]);
-                const tag = normalizeClanTag(player.tag);
-                if (!tag) continue;
-                let entry = entryByTag[tag];
-                if (!entry) {
-                    entry = {
-                        tag: tag,
-                        displayName: toStr(player.name).trim() || tag,
-                        th: toNonNegativeInt(player.th),
-                        affiliations: [],
-                        affiliationKeys: Object.create(null),
-                        rosterIdSet: Object.create(null),
-                    };
-                    entryByTag[tag] = entry;
-                }
-                if ((!entry.displayName || entry.displayName === "(no name)") && toStr(player.name).trim()) {
-                    entry.displayName = toStr(player.name).trim();
-                }
-                const playerTh = toNonNegativeInt(player.th);
-                if (playerTh > entry.th) entry.th = playerTh;
-                upsertAffiliation(entry, roster, rosterIndex, role);
-            }
-        };
-
-        for (let i = 0; i < rosters.length; i++) {
-            const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-            collectPlayers(roster.main, roster, i, "main");
-            collectPlayers(roster.subs, roster, i, "sub");
-            collectPlayers(roster.missing, roster, i, "missing");
-        }
-
-        const tags = Object.keys(entryByTag);
-        const entries = [];
-        for (let i = 0; i < tags.length; i++) {
-            const tag = tags[i];
-            const base = entryByTag[tag];
-            const affiliations = Array.isArray(base.affiliations) ? base.affiliations.slice().sort(compareAffiliationPriority) : [];
-            const primaryAffiliation = affiliations.length ? affiliations[0] : null;
-            const metricsEntry = getPlayerMetricsEntry(tag, data);
-            const latestSnapshot = readMetricsLatestSnapshot(metricsEntry);
-            const snapshotName = toStr(latestSnapshot && latestSnapshot.name).trim();
-            const baseDisplayName = toStr(base.displayName).trim();
-            const displayName = (baseDisplayName && baseDisplayName !== "(no name)") ? baseDisplayName : (snapshotName || tag);
-            const snapshotTh = readSnapshotTownHallLevel(latestSnapshot);
-            const th = base.th > 0 ? base.th : snapshotTh;
-            let trophies = readSnapshotTrophies(latestSnapshot);
-            if (trophies <= 0) {
-                const history = getLocalTrophyHistoryForTag(tag, data);
-                if (history.length) trophies = toNonNegativeInt(history[history.length - 1].trophies);
-            }
-            const leagueSource = resolveLeaderboardLeagueDescriptorFromSnapshot(latestSnapshot);
-            const leagueSort = parseLeaderboardLeagueSortKey(leagueSource);
-            const currentCycleTotals = readDonationCycleTotals(metricsEntry, currentCycle);
-            const lastCycleTotals = readDonationCycleTotals(metricsEntry, lastCycle);
-            if (lastCycleTotals.hasData) hasLastCycleData = true;
-
-            entries.push({
-                tag: tag,
-                displayName: displayName,
-                th: th,
-                trophies: trophies,
-                leagueName: toStr(leagueSource.name).trim(),
-                leagueSort: leagueSort,
-                primaryAffiliation: primaryAffiliation,
-                primaryAffiliationLabel: primaryAffiliation
-                    ? (primaryAffiliation.rosterTitle + " • " + formatAffiliationRoleLabel(primaryAffiliation.role))
-                    : "No roster",
-                affiliations: affiliations,
-                rosterIdSet: base.rosterIdSet,
-                donationCycleTotals: {
-                    current: currentCycleTotals,
-                    last: lastCycleTotals,
-                },
-            });
-        }
-
-        return {
-            entries: entries,
-            rosters: rosters,
-            currentCycle: currentCycle,
-            lastCycle: lastCycle,
-            hasLastCycleData: hasLastCycleData,
-        };
-    };
-
-    // Handle filter leaderboard entries by roster.
-    const filterLeaderboardEntriesByRoster = (entriesRaw, rosterFilterRaw) => {
-        const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
-        const rosterFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
-        if (!rosterFilter || rosterFilter === "all") return entries.slice();
-        return entries.filter((entry) => !!(entry && entry.rosterIdSet && entry.rosterIdSet[rosterFilter]));
-    };
-
-    // Format leaderboard affiliation label.
-    const formatLeaderboardAffiliationLabel = (affiliationRaw) => {
-        const affiliation = affiliationRaw && typeof affiliationRaw === "object" ? affiliationRaw : null;
-        if (!affiliation) return "No roster";
-        const rosterTitle = toStr(affiliation.rosterTitle).trim() || toStr(affiliation.rosterId).trim() || "Roster";
-        return rosterTitle + " • " + formatAffiliationRoleLabel(affiliation.role);
-    };
-
-    // Resolve leaderboard card affiliation.
-    const resolveLeaderboardCardAffiliation = (entryRaw, rosterFilterRaw) => {
-        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-        const rosterFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
-        const sortedAffiliations = Array.isArray(entry.affiliations)
-            ? entry.affiliations.slice().sort(compareAffiliationPriority)
-            : [];
-        if (rosterFilter && rosterFilter !== "all") {
-            for (let i = 0; i < sortedAffiliations.length; i++) {
-                const affiliation = sortedAffiliations[i] && typeof sortedAffiliations[i] === "object"
-                    ? sortedAffiliations[i]
-                    : null;
-                const rosterId = toStr(affiliation && affiliation.rosterId).trim();
-                if (rosterId && rosterId === rosterFilter) return affiliation;
-            }
-        }
-        if (entry.primaryAffiliation && typeof entry.primaryAffiliation === "object") return entry.primaryAffiliation;
-        return sortedAffiliations.length ? sortedAffiliations[0] : null;
-    };
-
-    // Compare leaderboard fallback.
-    const compareLeaderboardFallback = (leftRaw, rightRaw) => {
-        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
-        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
-        const trophiesDiff = toNonNegativeInt(right.trophies) - toNonNegativeInt(left.trophies);
-        if (trophiesDiff !== 0) return trophiesDiff;
-        return compareLeaderboardName(left, right);
-    };
-
-    // Sort leaderboard entries.
-    const sortLeaderboardEntries = (entriesRaw, sortModeRaw, cycleModeRaw) => {
-        const entries = Array.isArray(entriesRaw) ? entriesRaw.slice() : [];
-        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        const cycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
-        const cycleKey = cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last ? "last" : "current";
-
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.trophiesLeague) {
-            entries.sort((left, right) => {
-                const leftLeagueRank = Number.isFinite(left && left.leagueSort && left.leagueSort.rank) ? left.leagueSort.rank : 99;
-                const rightLeagueRank = Number.isFinite(right && right.leagueSort && right.leagueSort.rank) ? right.leagueSort.rank : 99;
-                if (leftLeagueRank !== rightLeagueRank) return leftLeagueRank - rightLeagueRank;
-                return compareLeaderboardFallback(left, right);
-            });
-            return entries;
-        }
-
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations || sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
-            entries.sort((left, right) => {
-                const leftCycle = left && left.donationCycleTotals && left.donationCycleTotals[cycleKey] ? left.donationCycleTotals[cycleKey] : {};
-                const rightCycle = right && right.donationCycleTotals && right.donationCycleTotals[cycleKey] ? right.donationCycleTotals[cycleKey] : {};
-                const leftValue = sortMode === LEADERBOARD_SORT_MODE_VALUES.donations
-                    ? toNonNegativeInt(leftCycle.donations)
-                    : toNonNegativeInt(leftCycle.donationsReceived);
-                const rightValue = sortMode === LEADERBOARD_SORT_MODE_VALUES.donations
-                    ? toNonNegativeInt(rightCycle.donations)
-                    : toNonNegativeInt(rightCycle.donationsReceived);
-                if (rightValue !== leftValue) return rightValue - leftValue;
-                return compareLeaderboardFallback(left, right);
-            });
-            return entries;
-        }
-
-        entries.sort((left, right) => {
-            const leftTh = toNonNegativeInt(left && left.th);
-            const rightTh = toNonNegativeInt(right && right.th);
-            if (rightTh !== leftTh) return rightTh - leftTh;
-            return compareLeaderboardFallback(left, right);
-        });
-        return entries;
-    };
-
-    // Build leaderboard primary metric label.
-    const buildLeaderboardPrimaryMetricLabel = (entryRaw, sortModeRaw, cycleModeRaw) => {
-        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        const cycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
-        const cycleKey = cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last ? "last" : "current";
-        const cycleTotals = entry.donationCycleTotals && entry.donationCycleTotals[cycleKey] ? entry.donationCycleTotals[cycleKey] : {};
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations) {
-            return formatNumber(cycleTotals.donations) + " donations";
-        }
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
-            return formatNumber(cycleTotals.donationsReceived) + " received";
-        }
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.townHall) {
-            return "TH " + (toNonNegativeInt(entry.th) > 0 ? toStr(toNonNegativeInt(entry.th)) : "-");
-        }
-        return formatNumber(entry.trophies) + " trophies";
-    };
-
-    // Build leaderboard secondary metric label.
-    const buildLeaderboardSecondaryMetricLabel = (entryRaw, sortModeRaw, cycleModeRaw) => {
-        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-        const sortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        const cycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
-        const cycleKey = cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last ? "last" : "current";
-        const cycleTotals = entry.donationCycleTotals && entry.donationCycleTotals[cycleKey] ? entry.donationCycleTotals[cycleKey] : {};
-        const leagueLabel = toStr(entry.leagueSort && entry.leagueSort.tierLabel).trim() || toStr(entry.leagueName).trim() || "Unranked";
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donations) {
-            return "Received: " + formatNumber(cycleTotals.donationsReceived);
-        }
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.donationsReceived) {
-            return "Donations: " + formatNumber(cycleTotals.donations);
-        }
-        if (sortMode === LEADERBOARD_SORT_MODE_VALUES.townHall) {
-            return formatNumber(entry.trophies) + " trophies • " + leagueLabel;
-        }
-        return leagueLabel;
-    };
-
-    // Render leaderboard card.
-    const renderLeaderboardCard = (entryRaw, optionsRaw) => {
-        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-        const sortMode = sanitizeLeaderboardSortMode(options.sortMode);
-        const cycleMode = sanitizeLeaderboardCycleMode(options.cycleMode);
-        const rosterFilter = sanitizeLeaderboardRosterFilter(options.rosterFilter);
-        const displayAffiliation = resolveLeaderboardCardAffiliation(entry, rosterFilter);
-        const wrap = el("div", "player leaderboard-player");
-        wrap.dataset.tag = normalizeClanTag(entry.tag);
-        wrap.dataset.rosterId = toStr(displayAffiliation && displayAffiliation.rosterId).trim();
-        wrap.dataset.playerProfileTrigger = "1";
-        wrap.setAttribute("role", "button");
-        wrap.setAttribute("tabindex", "0");
-
-        const top = el("div", "player-top");
-
-        const left = el("div", "player-left");
-        const ident = el("div", "player-ident");
-        ident.appendChild(el("div", "leaderboard-player__name", toStr(entry.displayName).trim() || toStr(entry.tag)));
-        ident.appendChild(el("div", "leaderboard-player__affiliation", formatLeaderboardAffiliationLabel(displayAffiliation)));
-        left.appendChild(ident);
-        top.appendChild(left);
-
-        const right = el("div", "player-right");
-        right.appendChild(el("span", "player-th", "TH " + (toNonNegativeInt(entry.th) > 0 ? toStr(toNonNegativeInt(entry.th)) : "-")));
-        top.appendChild(right);
-
-        const metric = el("div", "leaderboard-player__metric", buildLeaderboardPrimaryMetricLabel(entry, sortMode, cycleMode));
-        const secondary = el("div", "leaderboard-player__secondary", buildLeaderboardSecondaryMetricLabel(entry, sortMode, cycleMode));
-        const bottom = el("div", "player-bottom");
-        bottom.appendChild(el("span", "player-tag", toStr(entry.tag)));
-        if (Array.isArray(entry.affiliations) && entry.affiliations.length > 1) {
-            bottom.appendChild(el("span", "badge", entry.affiliations.length + " rosters"));
-        }
-
-        wrap.appendChild(top);
-        wrap.appendChild(metric);
-        wrap.appendChild(secondary);
-        wrap.appendChild(bottom);
-        return wrap;
-    };
-
     // Normalize season event type for public display.
     const normalizeSeasonEventType = (typeRaw) => {
         const type = toStr(typeRaw).trim().toLowerCase();
         return type === "push" || type === "donation" ? type : "";
     };
 
+    // Read the selected season-event results mode from public view state.
+    const getSeasonEventResultsMode = () => {
+        const leaderboard = publicViewState && publicViewState.leaderboard && typeof publicViewState.leaderboard === "object"
+            ? publicViewState.leaderboard
+            : {};
+        return sanitizeSeasonEventResultsMode(leaderboard.seasonEventResultsMode);
+    };
+
     // Return season events bundle from render data.
-    const getSeasonEventsBundle = (dataRaw) => {
+    const getSeasonEventsBundle = (dataRaw, modeRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        const mode = sanitizeSeasonEventResultsMode(modeRaw);
+        const source = mode === SEASON_EVENT_RESULT_MODE_VALUES.previous && seasonEvents.previous && typeof seasonEvents.previous === "object"
+            ? seasonEvents.previous
+            : seasonEvents;
         return {
-            current: seasonEvents.current && typeof seasonEvents.current === "object" ? seasonEvents.current : {},
-            seasonState: seasonEvents.seasonState && typeof seasonEvents.seasonState === "object" ? seasonEvents.seasonState : {},
-            byId: seasonEvents.byId && typeof seasonEvents.byId === "object" ? seasonEvents.byId : {},
-            loadErrors: Array.isArray(seasonEvents.loadErrors) ? seasonEvents.loadErrors : [],
+            current: source.current && typeof source.current === "object" ? source.current : {},
+            seasonState: source.seasonState && typeof source.seasonState === "object" ? source.seasonState : {},
+            byId: source.byId && typeof source.byId === "object" ? source.byId : {},
+            loadErrors: Array.isArray(source.loadErrors) ? source.loadErrors : [],
+            loadedAt: toStr(source.loadedAt).trim(),
+            mode: mode,
         };
     };
 
@@ -5406,10 +5017,10 @@
     });
 
     // Resolve current event object for an event type.
-    const getCurrentSeasonEventForType = (dataRaw, eventTypeRaw) => {
+    const getCurrentSeasonEventForType = (dataRaw, eventTypeRaw, modeRaw) => {
         const eventType = normalizeSeasonEventType(eventTypeRaw);
         if (!eventType) return null;
-        const bundle = getSeasonEventsBundle(dataRaw);
+        const bundle = getSeasonEventsBundle(dataRaw, modeRaw);
         const pointer = bundle.current[eventType] && typeof bundle.current[eventType] === "object" ? bundle.current[eventType] : {};
         const eventId = toStr(pointer.eventId).trim();
         const event = eventId && bundle.byId[eventId] && typeof bundle.byId[eventId] === "object" ? bundle.byId[eventId] : null;
@@ -5907,12 +5518,13 @@
         return dateRange + " \u00b7 Discord signups";
     };
 
-    // Build public model for current push and donation events.
-    const buildSeasonEventsPublicModel = (dataRaw) => {
+    // Build public model for selected push and donation event results.
+    const buildSeasonEventsPublicModel = (dataRaw, modeRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
-        const bundle = getSeasonEventsBundle(data);
+        const mode = sanitizeSeasonEventResultsMode(modeRaw);
+        const bundle = getSeasonEventsBundle(data, mode);
         const cards = ["push", "donation"].map((type) => {
-            const event = getCurrentSeasonEventForType(data, type);
+            const event = getCurrentSeasonEventForType(data, type, mode);
             const leaderboard = buildSeasonEventLeaderboardModel(event, data);
             return {
                 type: type,
@@ -5933,6 +5545,7 @@
             loadErrors: bundle.loadErrors,
             sharedMetaLine: sharedMetaLine,
             unavailable: cards.every((card) => card.unavailable),
+            mode: mode,
         };
     };
 
@@ -6043,73 +5656,97 @@
         return wrap;
     };
 
-    // Render current season events section.
-    const renderSeasonEventsSection = (dataRaw) => {
-        const model = buildSeasonEventsPublicModel(dataRaw);
-        const section = el("section", "season-events-section");
-        const header = el("div", "season-events-section__header");
-        const copy = el("div", "season-events-section__copy");
-        copy.appendChild(el("h2", "season-events-section__title", "Season Events"));
-        if (toStr(model.sharedMetaLine).trim()) {
-            copy.appendChild(el("div", "season-events-section__meta", model.sharedMetaLine));
-        }
-        header.appendChild(copy);
-        if (model.loadErrors.length) {
-            header.appendChild(el("div", "season-events-section__status", "Event data unavailable"));
-        }
-        section.appendChild(header);
-        const grid = el("div", "season-events-grid");
-        for (let i = 0; i < model.cards.length; i++) grid.appendChild(renderSeasonEventCard(model.cards[i], { sharedMetaLine: model.sharedMetaLine }));
-        section.appendChild(grid);
-        return section;
+    // Return whether previous season event data has been fetched for this render payload.
+    const hasPreviousSeasonEventsBundle = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        return !!(seasonEvents.previous && typeof seasonEvents.previous === "object" && !Array.isArray(seasonEvents.previous));
     };
 
-    // Create a chip button.
-    const createChipButton = (labelRaw, active, onClick, disabled) => {
-        const button = document.createElement("button");
+    // Render one season-events result mode button.
+    const renderSeasonEventsModeButton = (modeRaw, labelRaw, activeModeRaw, loading) => {
+        const mode = sanitizeSeasonEventResultsMode(modeRaw);
+        const activeMode = sanitizeSeasonEventResultsMode(activeModeRaw);
+        const active = mode === activeMode;
+        const button = el("button", "season-events-mode-btn" + (active ? " is-active" : ""));
         button.type = "button";
-        button.className = "chip-btn" + (active ? " is-active" : "");
         button.textContent = toStr(labelRaw);
-        if (disabled) button.disabled = true;
-        if (typeof onClick === "function" && !disabled) {
-            button.addEventListener("click", onClick);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+        if (loading) {
+            button.disabled = true;
+            button.classList.add("is-loading");
+        }
+        if (!active && !loading) {
+            button.addEventListener("click", () => setSeasonEventResultsMode(mode));
         }
         return button;
     };
 
-    // Ensure leaderboard state validity.
-    const ensureLeaderboardStateValidity = (modelRaw) => {
-        const model = modelRaw && typeof modelRaw === "object" ? modelRaw : {};
-        const rosters = Array.isArray(model.rosters) ? model.rosters : [];
-        const rosterIds = Object.create(null);
-        for (let i = 0; i < rosters.length; i++) {
-            const rosterId = toStr(rosters[i] && rosters[i].id).trim();
-            if (!rosterId) continue;
-            rosterIds[rosterId] = true;
+    // Render previous-season loading placeholders.
+    const renderSeasonEventsLoadingGrid = () => {
+        const grid = el("div", "season-events-grid season-events-grid--loading");
+        for (let cardIndex = 0; cardIndex < 2; cardIndex++) {
+            const card = el("article", "card season-event-card season-event-card--loading view-loading-skeleton");
+            card.appendChild(createViewLoadingSkeletonLine("title"));
+            for (let rowIndex = 0; rowIndex < SEASON_EVENT_COLLAPSED_ROW_COUNT; rowIndex++) {
+                const row = el("div", "season-event-loading-row");
+                row.appendChild(createViewLoadingSkeletonLine("rank"));
+                const body = el("div", "season-event-loading-row__body");
+                body.appendChild(createViewLoadingSkeletonLine("name"));
+                body.appendChild(createViewLoadingSkeletonLine("meta"));
+                row.appendChild(body);
+                row.appendChild(createViewLoadingSkeletonLine("score"));
+                card.appendChild(row);
+            }
+            grid.appendChild(card);
         }
-        let changed = false;
-        if (!publicViewState || typeof publicViewState !== "object") {
-            publicViewState = buildDefaultPublicViewState();
-            changed = true;
+        return grid;
+    };
+
+    // Render selected season events section.
+    const renderSeasonEventsSection = (dataRaw) => {
+        const mode = getSeasonEventResultsMode();
+        const loadingPrevious = mode === SEASON_EVENT_RESULT_MODE_VALUES.previous
+            && previousSeasonEventsLoadInFlight
+            && !hasPreviousSeasonEventsBundle(dataRaw);
+        const model = buildSeasonEventsPublicModel(dataRaw, mode);
+        const section = el("section", "season-events-section season-events-section--" + mode);
+        const header = el("div", "season-events-section__header");
+        const copy = el("div", "season-events-section__copy");
+        copy.appendChild(el(
+            "h2",
+            "season-events-section__title",
+            mode === SEASON_EVENT_RESULT_MODE_VALUES.previous ? "Previous Season Results" : "Current Season Events"
+        ));
+        const metaLine = toStr(model.sharedMetaLine).trim();
+        if (metaLine) {
+            copy.appendChild(el("div", "season-events-section__meta", (mode === SEASON_EVENT_RESULT_MODE_VALUES.previous ? "Previous results" : "Current season") + " · " + metaLine));
         }
-        const leaderboard = publicViewState.leaderboard && typeof publicViewState.leaderboard === "object"
-            ? publicViewState.leaderboard
-            : (publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard);
-        const rosterFilter = sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter);
-        if (rosterFilter !== "all" && !rosterIds[rosterFilter]) {
-            leaderboard.rosterFilter = "all";
-            changed = true;
+        header.appendChild(copy);
+        const controls = el("div", "season-events-mode-toggle", "");
+        controls.setAttribute("aria-label", "Season event results");
+        controls.appendChild(renderSeasonEventsModeButton(SEASON_EVENT_RESULT_MODE_VALUES.current, "Current season", mode, false));
+        controls.appendChild(renderSeasonEventsModeButton(
+            SEASON_EVENT_RESULT_MODE_VALUES.previous,
+            loadingPrevious ? "Loading previous" : "Previous season",
+            mode,
+            loadingPrevious
+        ));
+        header.appendChild(controls);
+        if (loadingPrevious) {
+            header.appendChild(el("div", "season-events-section__status", "Loading previous results"));
+        } else if (model.loadErrors.length) {
+            header.appendChild(el("div", "season-events-section__status", "Event data unavailable"));
         }
-        leaderboard.cycleMode = sanitizeLeaderboardCycleMode(leaderboard.cycleMode);
-        if (leaderboard.cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last && !model.hasLastCycleData) {
-            leaderboard.cycleMode = LEADERBOARD_CYCLE_MODE_VALUES.current;
-            changed = true;
+        section.appendChild(header);
+        if (loadingPrevious) {
+            section.appendChild(renderSeasonEventsLoadingGrid());
+        } else {
+            const grid = el("div", "season-events-grid");
+            for (let i = 0; i < model.cards.length; i++) grid.appendChild(renderSeasonEventCard(model.cards[i], { sharedMetaLine: model.sharedMetaLine }));
+            section.appendChild(grid);
         }
-        leaderboard.sortMode = sanitizeLeaderboardSortMode(leaderboard.sortMode);
-        leaderboard.cycleMode = sanitizeLeaderboardCycleMode(leaderboard.cycleMode);
-        leaderboard.rosterFilter = sanitizeLeaderboardRosterFilter(leaderboard.rosterFilter);
-        publicViewState.leaderboard = leaderboard;
-        if (changed) persistPublicViewState();
+        return section;
     };
 
     // Render roster suggestion banner.
@@ -7884,30 +7521,19 @@
         const target = $("#leaderboard");
         if (!target) return;
         target.textContent = "";
-
-        const controlsCard = el("div", "card leaderboard-loading-controls view-loading-skeleton");
-        for (let rowIndex = 0; rowIndex < 2; rowIndex++) {
-            const row = el("div", "leaderboard-loading-controls__row");
-            row.appendChild(createViewLoadingSkeletonLine("label"));
-            const chips = el("div", "leaderboard-loading-controls__chips");
-            for (let chipIndex = 0; chipIndex < 4; chipIndex++) {
-                chips.appendChild(createViewLoadingSkeletonLine("chip"));
-            }
-            row.appendChild(chips);
-            controlsCard.appendChild(row);
-        }
-        target.appendChild(controlsCard);
-
-        const list = el("div", "leaderboard-list leaderboard-loading-list");
-        for (let i = 0; i < 9; i++) {
-            const card = el("article", "player leaderboard-player leaderboard-loading-player view-loading-skeleton");
-            card.appendChild(createViewLoadingSkeletonLine("name"));
-            card.appendChild(createViewLoadingSkeletonLine("meta"));
-            card.appendChild(createViewLoadingSkeletonLine("metric"));
-            card.appendChild(createViewLoadingSkeletonLine("submetric"));
-            list.appendChild(card);
-        }
-        target.appendChild(list);
+        const section = el("section", "season-events-section");
+        const header = el("div", "season-events-section__header view-loading-skeleton");
+        const copy = el("div", "season-events-section__copy");
+        copy.appendChild(createViewLoadingSkeletonLine("title"));
+        copy.appendChild(createViewLoadingSkeletonLine("meta"));
+        header.appendChild(copy);
+        const controls = el("div", "season-events-mode-toggle");
+        controls.appendChild(createViewLoadingSkeletonLine("chip"));
+        controls.appendChild(createViewLoadingSkeletonLine("chip"));
+        header.appendChild(controls);
+        section.appendChild(header);
+        section.appendChild(renderSeasonEventsLoadingGrid());
+        target.appendChild(section);
     };
 
     // Render data pending view state.
@@ -7958,42 +7584,63 @@
         scrollPublicViewToTop();
     };
 
-    // Set leaderboard roster filter.
-    const setLeaderboardRosterFilter = (rosterFilterRaw) => {
-        const nextFilter = sanitizeLeaderboardRosterFilter(rosterFilterRaw);
+    // Ensure the leaderboard view state uses the season-event results schema.
+    const ensureSeasonEventResultsViewState = () => {
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
-        if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
-            publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
-        }
-        if (publicViewState.leaderboard.rosterFilter === nextFilter) return;
-        publicViewState.leaderboard.rosterFilter = nextFilter;
-        persistPublicViewState();
-        if (lastRenderedData) render(lastRenderedData);
+        const current = publicViewState.leaderboard && typeof publicViewState.leaderboard === "object"
+            ? publicViewState.leaderboard
+            : {};
+        publicViewState.leaderboard = {
+            seasonEventResultsMode: sanitizeSeasonEventResultsMode(current.seasonEventResultsMode),
+        };
+        return publicViewState.leaderboard;
     };
 
-    // Set leaderboard sort mode.
-    const setLeaderboardSortMode = (sortModeRaw) => {
-        const nextSortMode = sanitizeLeaderboardSortMode(sortModeRaw);
-        if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
-        if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
-            publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
+    // Attach previous season event data to the current render payload.
+    const attachPreviousSeasonEventsBundle = (dataRaw, bundleRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
+        if (!data) return;
+        if (!data.seasonEvents || typeof data.seasonEvents !== "object" || Array.isArray(data.seasonEvents)) {
+            data.seasonEvents = buildEmptySeasonEventsBundle([]);
         }
-        if (publicViewState.leaderboard.sortMode === nextSortMode) return;
-        publicViewState.leaderboard.sortMode = nextSortMode;
-        persistPublicViewState();
-        if (lastRenderedData) render(lastRenderedData);
+        data.seasonEvents.previous = bundleRaw && typeof bundleRaw === "object" && !Array.isArray(bundleRaw)
+            ? bundleRaw
+            : buildEmptySeasonEventsBundle([]);
     };
 
-    // Set leaderboard cycle mode.
-    const setLeaderboardCycleMode = (cycleModeRaw) => {
-        const nextCycleMode = sanitizeLeaderboardCycleMode(cycleModeRaw);
-        if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
-        if (!publicViewState.leaderboard || typeof publicViewState.leaderboard !== "object") {
-            publicViewState.leaderboard = buildDefaultPublicViewState().leaderboard;
-        }
-        if (publicViewState.leaderboard.cycleMode === nextCycleMode) return;
-        publicViewState.leaderboard.cycleMode = nextCycleMode;
-        persistPublicViewState();
+    // Load previous season event data when requested.
+    const startPreviousSeasonEventsLoad = () => {
+        if (previousSeasonEventsLoadInFlight || !lastRenderedData || hasPreviousSeasonEventsBundle(lastRenderedData)) return;
+        previousSeasonEventsLoadInFlight = true;
+        const requestId = ++previousSeasonEventsLoadRequestId;
+        render(lastRenderedData);
+        loadPreviousSeasonEventsViaFirebasePublic(lastRenderedData)
+            .then((bundle) => {
+                if (requestId !== previousSeasonEventsLoadRequestId) return;
+                attachPreviousSeasonEventsBundle(lastRenderedData, bundle);
+            })
+            .catch((err) => {
+                if (requestId !== previousSeasonEventsLoadRequestId) return;
+                attachPreviousSeasonEventsBundle(lastRenderedData, buildEmptySeasonEventsBundle([{
+                    path: "/" + SEASON_EVENTS_BY_SEASON_PATH,
+                    message: err && err.message ? err.message : toStr(err),
+                }]));
+            })
+            .finally(() => {
+                if (requestId !== previousSeasonEventsLoadRequestId) return;
+                previousSeasonEventsLoadInFlight = false;
+                if (lastRenderedData) render(lastRenderedData);
+            });
+    };
+
+    // Set selected season event results mode.
+    const setSeasonEventResultsMode = (modeRaw) => {
+        const nextMode = sanitizeSeasonEventResultsMode(modeRaw);
+        const leaderboard = ensureSeasonEventResultsViewState();
+        const changed = leaderboard.seasonEventResultsMode !== nextMode;
+        leaderboard.seasonEventResultsMode = nextMode;
+        if (changed) persistPublicViewState();
+        if (nextMode === SEASON_EVENT_RESULT_MODE_VALUES.previous) startPreviousSeasonEventsLoad();
         if (lastRenderedData) render(lastRenderedData);
     };
 
@@ -8052,94 +7699,9 @@
         const target = $("#leaderboard");
         if (!target) return;
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
-        const model = buildLeaderboardEntriesModel(data);
-        ensureLeaderboardStateValidity(model);
-
-        const leaderboardState = publicViewState && publicViewState.leaderboard && typeof publicViewState.leaderboard === "object"
-            ? publicViewState.leaderboard
-            : buildDefaultPublicViewState().leaderboard;
-        const rosterFilter = sanitizeLeaderboardRosterFilter(leaderboardState.rosterFilter);
-        const sortMode = sanitizeLeaderboardSortMode(leaderboardState.sortMode);
-        const isDonationSort = isDonationSortMode(sortMode);
-        const cycleMode = isDonationSort
-            ? sanitizeLeaderboardCycleMode(leaderboardState.cycleMode)
-            : LEADERBOARD_CYCLE_MODE_VALUES.current;
-
-        const filteredEntries = filterLeaderboardEntriesByRoster(model.entries, rosterFilter);
-        const sortedEntries = sortLeaderboardEntries(filteredEntries, sortMode, cycleMode);
-
+        ensureSeasonEventResultsViewState();
         target.textContent = "";
         target.appendChild(renderSeasonEventsSection(data));
-
-        const controlsCard = el("div", "card leaderboard-controls");
-
-        const filterRow = el("div", "leaderboard-controls__row");
-        filterRow.appendChild(el("div", "leaderboard-controls__label", "Roster filter"));
-        const filterChipRow = el("div", "chip-scroll");
-        filterChipRow.appendChild(createChipButton("All", rosterFilter === "all", () => {
-            setLeaderboardRosterFilter("all");
-        }));
-        for (let i = 0; i < model.rosters.length; i++) {
-            const roster = model.rosters[i] && typeof model.rosters[i] === "object" ? model.rosters[i] : {};
-            const rosterId = toStr(roster.id).trim();
-            if (!rosterId) continue;
-            const rosterTitle = toStr(roster.title).trim() || rosterId;
-            filterChipRow.appendChild(createChipButton(rosterTitle, rosterFilter === rosterId, () => {
-                setLeaderboardRosterFilter(rosterId);
-            }));
-        }
-        filterRow.appendChild(filterChipRow);
-        controlsCard.appendChild(filterRow);
-
-        const sortRow = el("div", "leaderboard-controls__row");
-        sortRow.appendChild(el("div", "leaderboard-controls__label", "Sort"));
-        const sortChipRow = el("div", "chip-scroll");
-        for (let i = 0; i < LEADERBOARD_SORT_MODE_OPTIONS.length; i++) {
-            const option = LEADERBOARD_SORT_MODE_OPTIONS[i];
-            sortChipRow.appendChild(createChipButton(option.label, sortMode === option.key, () => {
-                setLeaderboardSortMode(option.key);
-            }));
-        }
-        sortRow.appendChild(sortChipRow);
-        controlsCard.appendChild(sortRow);
-
-        if (isDonationSort) {
-            const cycleRow = el("div", "leaderboard-controls__row");
-            cycleRow.appendChild(el("div", "leaderboard-controls__label", "Season"));
-            const cycleChipRow = el("div", "chip-scroll");
-            cycleChipRow.appendChild(createChipButton(
-                "Current season",
-                cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.current,
-                () => setLeaderboardCycleMode(LEADERBOARD_CYCLE_MODE_VALUES.current),
-            ));
-            cycleChipRow.appendChild(createChipButton(
-                "Show last season",
-                cycleMode === LEADERBOARD_CYCLE_MODE_VALUES.last,
-                () => setLeaderboardCycleMode(LEADERBOARD_CYCLE_MODE_VALUES.last),
-                !model.hasLastCycleData,
-            ));
-            cycleRow.appendChild(cycleChipRow);
-            controlsCard.appendChild(cycleRow);
-        }
-
-        target.appendChild(controlsCard);
-
-        if (!sortedEntries.length) {
-            const emptyCard = el("div", "card");
-            emptyCard.appendChild(el("div", "empty", rosterFilter === "all" ? "No players available for leaderboard." : "No players found for this roster filter."));
-            target.appendChild(emptyCard);
-            return;
-        }
-
-        const list = el("div", "leaderboard-list");
-        for (let i = 0; i < sortedEntries.length; i++) {
-            list.appendChild(renderLeaderboardCard(sortedEntries[i], {
-                sortMode: sortMode,
-                cycleMode: cycleMode,
-                rosterFilter: rosterFilter,
-            }));
-        }
-        target.appendChild(list);
     };
 
     // Render public app.
@@ -8763,6 +8325,13 @@
         return SEASON_EVENTS_BY_ID_PATH + "/" + encodeFirebaseObjectKey(eventId);
     };
 
+    // Return public Firebase event pointers path by season id.
+    const buildSeasonEventsBySeasonPublicPath = (seasonIdRaw) => {
+        const seasonId = toStr(seasonIdRaw).trim();
+        if (!seasonId) return "";
+        return SEASON_EVENTS_BY_SEASON_PATH + "/" + encodeFirebaseObjectKey(seasonId);
+    };
+
     // Fetch optional decoded Firebase public JSON without failing roster hydration.
     const fetchOptionalDecodedFirebaseJsonPublic = async (pathRaw, loadErrors) => {
         const path = normalizeFirebasePath(pathRaw);
@@ -8786,12 +8355,9 @@
         }
     };
 
-    // Load current season event data from public Firebase.
-    const loadCurrentSeasonEventsViaFirebasePublic = async () => {
-        const loadErrors = [];
-        const current = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_PATH, loadErrors);
-        const seasonState = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
-        const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+    // Collect unique event ids from season event pointers.
+    const collectSeasonEventIdsFromPointers = (pointersRaw) => {
+        const pointers = pointersRaw && typeof pointersRaw === "object" && !Array.isArray(pointersRaw) ? pointersRaw : {};
         const eventIds = [];
         const seen = Object.create(null);
         const collectEventId = (pointerRaw) => {
@@ -8801,10 +8367,15 @@
             seen[eventId] = true;
             eventIds.push(eventId);
         };
-        collectEventId(currentObj.push);
-        collectEventId(currentObj.donation);
+        collectEventId(pointers.push);
+        collectEventId(pointers.donation);
+        return eventIds;
+    };
 
+    // Load full season event objects for a pointer map.
+    const loadSeasonEventObjectsByPointerMapViaFirebasePublic = async (pointersRaw, loadErrors) => {
         const byId = {};
+        const eventIds = collectSeasonEventIdsFromPointers(pointersRaw);
         await Promise.all(eventIds.map(async (eventId) => {
             const path = buildSeasonEventByIdPublicPath(eventId);
             const event = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
@@ -8812,6 +8383,69 @@
                 byId[eventId] = event;
             }
         }));
+        return byId;
+    };
+
+    // Resolve the current season descriptor from loaded event data.
+    const resolveLoadedSeasonEventsCurrentSeason = (dataRaw) => {
+        const bundle = getSeasonEventsBundle(dataRaw, SEASON_EVENT_RESULT_MODE_VALUES.current);
+        const seasonState = bundle.seasonState && typeof bundle.seasonState === "object" ? bundle.seasonState : {};
+        const pointers = bundle.current && typeof bundle.current === "object" ? bundle.current : {};
+        const push = pointers.push && typeof pointers.push === "object" ? pointers.push : {};
+        const donation = pointers.donation && typeof pointers.donation === "object" ? pointers.donation : {};
+        const seasonId = toStr(seasonState.seasonId).trim() || toStr(push.seasonId).trim() || toStr(donation.seasonId).trim();
+        const startsAt = toStr(seasonState.startsAt).trim() || toStr(push.startsAt).trim() || toStr(donation.startsAt).trim();
+        const endsAt = toStr(seasonState.endsAt).trim() || toStr(push.endsAt).trim() || toStr(donation.endsAt).trim();
+        return {
+            seasonId: seasonId,
+            startsAt: startsAt,
+            endsAt: endsAt,
+        };
+    };
+
+    // Resolve previous ranked season descriptor for public event loading.
+    const resolvePreviousSeasonEventsSeason = (dataRaw) => {
+        const current = resolveLoadedSeasonEventsCurrentSeason(dataRaw);
+        const startsMs = parseTimeMs(current.startsAt);
+        if (startsMs > 0) return resolveLeaderboardRankedSeasonCycle(new Date(startsMs - 1));
+        const match = /^ranked-legend-i-(\d{4}-\d{2}-\d{2})$/.exec(toStr(current.seasonId).trim());
+        if (match) return resolveLeaderboardRankedSeasonCycle(new Date(match[1] + "T04:59:59.999Z"));
+        return resolvePreviousLeaderboardRankedSeasonCycle(new Date());
+    };
+
+    // Load a season events bundle through /bySeason and /byId.
+    const loadSeasonEventsBySeasonViaFirebasePublic = async (seasonRaw) => {
+        const loadErrors = [];
+        const season = seasonRaw && typeof seasonRaw === "object" ? seasonRaw : { seasonId: toStr(seasonRaw).trim() };
+        const seasonId = toStr(season.seasonId).trim();
+        const path = buildSeasonEventsBySeasonPublicPath(seasonId);
+        const pointers = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+        const current = pointers && typeof pointers === "object" && !Array.isArray(pointers) ? pointers : {};
+        const byId = await loadSeasonEventObjectsByPointerMapViaFirebasePublic(current, loadErrors);
+        return {
+            current: current,
+            seasonState: {
+                seasonId: seasonId,
+                startsAt: toStr(season.startsAt).trim(),
+                endsAt: toStr(season.endsAt).trim(),
+            },
+            byId: byId,
+            loadErrors: loadErrors,
+            loadedAt: new Date().toISOString(),
+        };
+    };
+
+    // Load previous season event data from public Firebase.
+    const loadPreviousSeasonEventsViaFirebasePublic = async (dataRaw) =>
+        loadSeasonEventsBySeasonViaFirebasePublic(resolvePreviousSeasonEventsSeason(dataRaw));
+
+    // Load current season event data from public Firebase.
+    const loadCurrentSeasonEventsViaFirebasePublic = async () => {
+        const loadErrors = [];
+        const current = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_PATH, loadErrors);
+        const seasonState = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
+        const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+        const byId = await loadSeasonEventObjectsByPointerMapViaFirebasePublic(currentObj, loadErrors);
 
         return {
             current: currentObj,
