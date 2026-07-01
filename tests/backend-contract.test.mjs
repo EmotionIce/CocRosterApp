@@ -1037,7 +1037,7 @@ const buildManualDiscordLinkRosterData = () => {
   return data;
 };
 
-test("bot sync clears the same Discord ID from another player without clearing username collisions", () => {
+test("bot sync allows the same Discord ID on multiple players without clearing username collisions", () => {
   const backend = loadBackend();
   const data = buildManualDiscordLinkRosterData();
   data.rosters[0].missing.push({
@@ -1065,10 +1065,10 @@ test("bot sync clears the same Discord ID from another player without clearing u
   const activeData = harness.getActiveData();
 
   assert.equal(result.ok, true);
-  assert.equal(result.conflictsResolvedCount, 1);
+  assert.equal(result.conflictsResolvedCount, 0);
   assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordId, "222222222222222222");
-  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
-  assert.equal(activeData.rosters[0].subs[0].discord, "");
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.rosters[0].subs[0].discord, "bravo");
   assert.equal(activeData.playerMetrics.byTag["#8CCVV"].identity.discordId, "333333333333333333");
   assert.equal(activeData.rosters[0].missing[0].discord, "bravo");
 });
@@ -1096,7 +1096,27 @@ test("manual link writes Discord ID and player tag as the canonical identity", (
   assert.equal(activeData.rosters[0].subs[0].discord, "bravo_new");
 });
 
-test("manual link refuses player and Discord-user conflicts without force", () => {
+test("manual link reports an exact existing link without rewriting active data", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
+  backend.cocFetch_ = () => ({ tag: "#9PYLQG", name: "Bravo" });
+  const before = JSON.stringify(harness.getActiveData());
+
+  const result = backend.linkDiscordIdentityForPlayerTag({
+    playerTag: "#9PYLQG",
+    discordId: "222222222222222222",
+    discordUsername: "bravo",
+    botSecret: "secret",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.alreadyLinked, true);
+  assert.equal(result.updated, false);
+  assert.equal(result.conflictsResolvedCount, 0);
+  assert.equal(JSON.stringify(harness.getActiveData()), before);
+});
+
+test("manual link refuses player conflicts without force", () => {
   const backend = loadBackend();
   const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
   backend.cocFetch_ = () => ({ tag: "#2LUCULP", name: "Alpha" });
@@ -1111,21 +1131,32 @@ test("manual link refuses player and Discord-user conflicts without force", () =
   assert.equal(playerConflict.code, "DISCORD_LINK_CONFLICT");
   assert.match(playerConflict.message, /already linked/);
   assert.equal(harness.getActiveData().playerMetrics.byTag["#2LUCULP"].identity.discordId, "111111111111111111");
+});
 
+test("manual link allows one Discord user to own multiple player tags", () => {
+  const backend = loadBackend();
+  const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
   backend.cocFetch_ = () => ({ tag: "#PYYQQ", name: "Charlie" });
-  const userConflict = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+
+  const result = backend.linkDiscordIdentityForPlayerTag({
     playerTag: "#PYYQQ",
     discordId: "222222222222222222",
     discordUsername: "bravo",
     botSecret: "secret",
-  }));
+  });
+  const activeData = harness.getActiveData();
+  const linkedMissing = activeData.rosters[0].missing.find((player) => player.tag === "#PYYQQ");
 
-  assert.equal(userConflict.code, "DISCORD_LINK_CONFLICT");
-  assert.match(userConflict.message, /#9PYLQG/);
-  assert.equal(harness.getActiveData().playerMetrics.byTag["#PYYQQ"], undefined);
+  assert.equal(result.ok, true);
+  assert.equal(result.created, true);
+  assert.equal(result.conflictsResolvedCount, 0);
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.playerMetrics.byTag["#PYYQQ"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.rosters[0].subs[0].discord, "bravo");
+  assert.equal(linkedMissing.discord, "bravo");
 });
 
-test("manual link force overwrites target player and clears the Discord user's old player", () => {
+test("manual link force overwrites target player without clearing the Discord user's other players", () => {
   const backend = loadBackend();
   const harness = installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());
   backend.cocFetch_ = () => ({ tag: "#2LUCULP", name: "Alpha" });
@@ -1141,12 +1172,12 @@ test("manual link force overwrites target player and clears the Discord user's o
 
   assert.equal(result.ok, true);
   assert.equal(result.force, true);
-  assert.equal(result.conflictsResolvedCount, 2);
+  assert.equal(result.conflictsResolvedCount, 1);
   assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordId, "222222222222222222");
   assert.equal(activeData.playerMetrics.byTag["#2LUCULP"].identity.discordUsername, "bravo");
   assert.equal(activeData.rosters[0].main[0].discord, "bravo");
-  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"], undefined);
-  assert.equal(activeData.rosters[0].subs[0].discord, "");
+  assert.equal(activeData.playerMetrics.byTag["#9PYLQG"].identity.discordId, "222222222222222222");
+  assert.equal(activeData.rosters[0].subs[0].discord, "bravo");
 });
 
 test("manual link does not overwrite a different Discord ID only because the username matches", () => {
@@ -1170,7 +1201,7 @@ test("manual link does not overwrite a different Discord ID only because the use
   assert.equal(activeData.rosters[0].subs[0].discord, "bravo");
 });
 
-test("manual link treats legacy username-only identities as conflicts until forced", () => {
+test("manual link allows legacy username-only identities on other player tags", () => {
   const backend = loadBackend();
   const data = buildManualDiscordLinkRosterData();
   data.rosters[0].missing.push({
@@ -1194,29 +1225,19 @@ test("manual link treats legacy username-only identities as conflicts until forc
   const harness = installActiveRosterWriteHarness(backend, data);
   backend.cocFetch_ = () => ({ tag: "#PYYQQ", name: "Delta" });
 
-  const conflict = captureError(() => backend.linkDiscordIdentityForPlayerTag({
+  const result = backend.linkDiscordIdentityForPlayerTag({
     playerTag: "#PYYQQ",
     discordId: "333333333333333333",
     discordUsername: "legacy_user",
-    botSecret: "secret",
-  }));
-  assert.equal(conflict.code, "DISCORD_LINK_CONFLICT");
-  assert.match(conflict.message, /#8CCVV/);
-
-  const forced = backend.linkDiscordIdentityForPlayerTag({
-    playerTag: "#PYYQQ",
-    discordId: "333333333333333333",
-    discordUsername: "legacy_user",
-    force: true,
     botSecret: "secret",
   });
   const activeData = harness.getActiveData();
 
-  assert.equal(forced.ok, true);
-  assert.equal(forced.conflictsResolvedCount, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.conflictsResolvedCount, 0);
   assert.equal(activeData.playerMetrics.byTag["#PYYQQ"].identity.discordId, "333333333333333333");
-  assert.equal(activeData.playerMetrics.byTag["#8CCVV"], undefined);
-  assert.equal(activeData.rosters[0].missing[0].discord, "");
+  assert.equal(activeData.playerMetrics.byTag["#8CCVV"].identity.discordUsername, "legacy_user");
+  assert.equal(activeData.rosters[0].missing[0].discord, "legacy_user");
 });
 
 test("manual link-created missing player survives refresh-all when absent from the clan", () => {

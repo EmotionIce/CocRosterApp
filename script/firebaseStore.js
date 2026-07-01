@@ -1492,32 +1492,6 @@ function syncDiscordIdentityIntoActiveRoster_(payloadRaw, optionsRaw) {
 	}
 
 	const updatedAt = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
-	const conflicts = collectDiscordIdentityLinkConflicts_(rosterData, normalizedTag, discordId, discordUsername);
-	const userConflicts = Array.isArray(conflicts.discordUserConflicts) ? conflicts.discordUserConflicts : [];
-	const clearedLinks = [];
-	let clearedUpdated = false;
-	let clearedUpdatedCount = 0;
-	for (let i = 0; i < userConflicts.length; i++) {
-		const tag = normalizeTag_(userConflicts[i] && userConflicts[i].tag);
-		if (!tag || tag === normalizedTag) continue;
-		const existing = collectDiscordIdentityCandidatesByTag_(rosterData)[tag] || { tag: tag };
-		const clearResult = clearDiscordIdentityForPlayerTag_(rosterData, tag, {
-			updatedAt: updatedAt,
-		});
-		if (clearResult && clearResult.updatedCanonical || clearResult && clearResult.updatedRosterCache) {
-			clearedUpdated = true;
-		}
-		clearedUpdatedCount += toNonNegativeInt_(clearResult && clearResult.updatedCount);
-		clearedLinks.push(Object.assign(
-			buildDiscordIdentityLinkSummary_(tag, existing),
-			{
-				removedDiscordId: clearResult && clearResult.removedDiscordId ? clearResult.removedDiscordId : "",
-				removedDiscordUsername: clearResult && clearResult.removedDiscordUsername ? clearResult.removedDiscordUsername : "",
-				updated: !!(clearResult && clearResult.changed),
-			},
-		));
-	}
-
 	const result = applyDiscordIdentityToRosterData_(
 		rosterData,
 		sourceSnapshot.rosterData,
@@ -1528,16 +1502,16 @@ function syncDiscordIdentityIntoActiveRoster_(payloadRaw, optionsRaw) {
 		}),
 		Object.assign({}, options, { updatedAt: updatedAt }),
 	);
-	const updated = clearedUpdated || !!(result && result.updated);
+	const updated = !!(result && result.updated);
 	if (updated) {
 		const validated = withRosterLastUpdatedAt_(rosterData, updatedAt);
 		replaceActiveRosterData_(validated, { sourceSnapshot: sourceSnapshot });
 	}
 	return Object.assign({}, result, {
 		updated: updated,
-		conflictsResolvedCount: clearedLinks.length,
-		conflictsResolved: clearedLinks,
-		updatedCount: toNonNegativeInt_(result && result.updatedCount) + clearedUpdatedCount,
+		conflictsResolvedCount: 0,
+		conflictsResolved: [],
+		updatedCount: toNonNegativeInt_(result && result.updatedCount),
 	});
 }
 
@@ -1624,6 +1598,78 @@ function doesDiscordIdentityMatchUser_(identityRaw, discordIdRaw, discordUsernam
 	if (discordId) return false;
 	if (!discordId && !identityDiscordId && discordUsername && identityDiscordUsername && identityDiscordUsername === discordUsername) return true;
 	return false;
+}
+
+// Return whether an existing identity already stores the same Discord link.
+function isDiscordIdentityExactLinkMatch_(identityRaw, discordIdRaw, discordUsernameRaw) {
+	const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+	const discordId = sanitizeDiscordIdValue_(discordIdRaw);
+	const discordUsername = sanitizeDiscordUsernameValue_(discordUsernameRaw);
+	const identityDiscordId = sanitizeDiscordIdValue_(identity.discordId);
+	const identityDiscordUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
+	if (discordId && identityDiscordId) {
+		if (identityDiscordId !== discordId) return false;
+		return !discordUsername || identityDiscordUsername === discordUsername;
+	}
+	if (!discordId && !identityDiscordId && discordUsername && identityDiscordUsername) {
+		return identityDiscordUsername === discordUsername;
+	}
+	return false;
+}
+
+// Return whether all roster cache rows already mirror the canonical Discord username.
+function areDiscordRosterCacheRowsCurrent_(locationsRaw, discordUsernameRaw) {
+	const locations = Array.isArray(locationsRaw) ? locationsRaw : [];
+	const discordUsername = sanitizeDiscordUsernameValue_(discordUsernameRaw);
+	for (let i = 0; i < locations.length; i++) {
+		const player = locations[i] && locations[i].player && typeof locations[i].player === "object" ? locations[i].player : null;
+		const currentDiscord = sanitizeDiscordUsernameValue_(player && player.discord);
+		if (currentDiscord !== discordUsername) return false;
+	}
+	return true;
+}
+
+// Build no-op response for an already existing Discord link.
+function buildAlreadyLinkedDiscordIdentityResult_(rosterDataRaw, playerTagRaw, identityRaw, forceRaw) {
+	const tag = normalizeTag_(playerTagRaw || (identityRaw && identityRaw.tag));
+	const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+	const locationsRaw = collectRosterPlayerLocationsByTag_(rosterDataRaw, tag);
+	const locations = [];
+	for (let i = 0; i < locationsRaw.length; i++) {
+		const location = locationsRaw[i];
+		const currentDiscord = typeof location.player.discord === "string" ? location.player.discord : "";
+		locations.push({
+			rosterId: location.rosterId,
+			rosterTitle: location.rosterTitle,
+			role: location.role,
+			index: location.index,
+			previousDiscord: currentDiscord,
+			discord: currentDiscord,
+			updatedRosterCache: false,
+			updated: false,
+			created: false,
+		});
+	}
+	return {
+		ok: true,
+		found: locationsRaw.length > 0,
+		created: false,
+		updated: false,
+		alreadyLinked: true,
+		tag: tag,
+		discordId: sanitizeDiscordIdValue_(identity.discordId),
+		discordUsername: sanitizeDiscordUsernameValue_(identity.discordUsername),
+		updatedCanonical: false,
+		updatedRosterCache: false,
+		reason: "already-linked",
+		updatedCount: 0,
+		skippedExistingCount: locationsRaw.length,
+		addedCount: 0,
+		locations: locations,
+		force: forceRaw === true,
+		conflictsResolvedCount: 0,
+		conflictsResolved: [],
+	};
 }
 
 // Find Discord-user identity matches, preferring canonical Discord ID matches
@@ -1724,14 +1770,6 @@ function collectDiscordIdentityLinkConflicts_(rosterDataRaw, playerTagRaw, disco
 		out.playerConflicts.push(buildDiscordIdentityLinkSummary_(playerTag, targetIdentity));
 	}
 
-	const userMatchTags = collectDiscordIdentityUserMatchTags_(candidates, discordId, discordUsername);
-	for (let i = 0; i < userMatchTags.length; i++) {
-		const tag = userMatchTags[i];
-		if (tag === playerTag) continue;
-		const identity = candidates[tag];
-		out.discordUserConflicts.push(buildDiscordIdentityLinkSummary_(tag, identity));
-	}
-
 	return out;
 }
 
@@ -1791,16 +1829,21 @@ function linkDiscordIdentityIntoActiveRoster_(payloadRaw, optionsRaw) {
 		);
 	}
 
+	const existingTargetIdentity = collectDiscordIdentityCandidatesByTag_(rosterData)[normalizedTag];
+	const beforeLocations = collectRosterPlayerLocationsByTag_(rosterData, normalizedTag);
+	if (
+		existingTargetIdentity &&
+		isDiscordIdentityExactLinkMatch_(existingTargetIdentity, discordId, discordUsername) &&
+		areDiscordRosterCacheRowsCurrent_(beforeLocations, existingTargetIdentity.discordUsername)
+	) {
+		return buildAlreadyLinkedDiscordIdentityResult_(rosterData, normalizedTag, existingTargetIdentity, force);
+	}
+
 	const tagsToClear = {};
 	if (force) {
 		const playerConflicts = Array.isArray(conflicts.playerConflicts) ? conflicts.playerConflicts : [];
 		for (let i = 0; i < playerConflicts.length; i++) {
 			const tag = normalizeTag_(playerConflicts[i] && playerConflicts[i].tag);
-			if (tag) tagsToClear[tag] = true;
-		}
-		const userConflicts = Array.isArray(conflicts.discordUserConflicts) ? conflicts.discordUserConflicts : [];
-		for (let i = 0; i < userConflicts.length; i++) {
-			const tag = normalizeTag_(userConflicts[i] && userConflicts[i].tag);
 			if (tag) tagsToClear[tag] = true;
 		}
 	}
