@@ -2899,10 +2899,11 @@
     const player = toStr(item.playerName).trim() || normalizeTag(item.playerTag) || "Unknown player";
     const tag = normalizeTag(item.playerTag);
     const league = toStr(item.leagueName).trim() || toStr(item.leagueKey).trim() || "unknown league";
+    const targetClan = toStr(item.targetClanName || item.clanName || item.targetClanTag || item.clanTag).trim();
     const fromRoster = toStr(item.fromRosterId || item.sourceRosterId || item.rosterId).trim();
     const targetRoster = toStr(item.targetRosterId).trim();
     const reason = toStr(item.reason || item.lockState).trim();
-    const parts = [player + (tag ? " (" + tag + ")" : ""), league];
+    const parts = [player + (tag ? " (" + tag + ")" : ""), targetClan ? (league + " / " + targetClan) : league];
     if (fromRoster && targetRoster) parts.push(fromRoster + " -> " + targetRoster);
     else if (fromRoster) parts.push(fromRoster);
     if (reason) parts.push(reason);
@@ -5231,7 +5232,10 @@
         : {};
       if (prepActive && clanAbsentTagSet[playerTag]) addSummaryPill("not in clan");
       const cwlLeaguePreference = prepActive ? getCwlLeaguePreferenceForTag(playerTag) : null;
-      if (cwlLeaguePreference) addSummaryPill("pref " + toStr(cwlLeaguePreference.leagueName).trim());
+      if (cwlLeaguePreference) {
+        const prefTarget = toStr(cwlLeaguePreference.targetClanName || cwlLeaguePreference.targetClanTag).trim();
+        addSummaryPill("pref " + [toStr(cwlLeaguePreference.leagueName).trim(), prefTarget].filter(Boolean).join("/"));
+      }
       if (!prepActive) {
         if (ctx.player.excludeAsSwapTarget) addSummaryPill("swap target off");
         if (ctx.player.excludeAsSwapSource) addSummaryPill("swap source off");
@@ -5321,7 +5325,10 @@
 
         const signupValue = document.createElement("div");
         signupValue.className = "cwl-signup-pref-value";
-        signupValue.textContent = toStr(cwlLeaguePreference.leagueName).trim();
+        signupValue.textContent = [
+          toStr(cwlLeaguePreference.leagueName).trim(),
+          toStr(cwlLeaguePreference.targetClanName || cwlLeaguePreference.targetClanTag).trim(),
+        ].filter(Boolean).join(" / ");
         signupPanel.appendChild(signupValue);
 
         const signupMeta = document.createElement("div");

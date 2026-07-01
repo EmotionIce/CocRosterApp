@@ -1069,7 +1069,38 @@
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
 
+  const normalizeCwlLeaguePreferenceOptionKey = (raw) => normalizeCwlLeaguePreferenceKey(raw);
+
   const collectCwlLeaguePreferenceOptionsByKey = (cwlLeagueSignups) => {
+    const source = isObj(cwlLeagueSignups) && isObj(cwlLeagueSignups.optionsByKey)
+      ? cwlLeagueSignups.optionsByKey
+      : (isObj(cwlLeagueSignups) && isObj(cwlLeagueSignups.optionsByLeagueKey) ? cwlLeagueSignups.optionsByLeagueKey : {});
+    const out = {};
+    const keys = Object.keys(source);
+    for (const rawKey of keys) {
+      const option = isObj(source[rawKey]) ? source[rawKey] : {};
+      const leagueName = normalizeWhitespace(option.leagueName);
+      const leagueKey = normalizeCwlLeaguePreferenceKey(option.leagueKey || rawKey || leagueName);
+      const optionKey = normalizeCwlLeaguePreferenceOptionKey(option.optionKey || rawKey || leagueKey);
+      if (!optionKey || !leagueKey || !leagueName) continue;
+      const rosterIds = Array.isArray(option.rosterIds)
+        ? option.rosterIds.map((value) => normalizeWhitespace(value)).filter(Boolean)
+        : [];
+      const targetRosterId = normalizeWhitespace(option.targetRosterId || option.rosterId || rosterIds[0]);
+      out[optionKey] = {
+        optionKey,
+        leagueKey,
+        leagueName,
+        targetRosterId,
+        targetClanTag: normalizeTag(option.targetClanTag || option.clanTag),
+        targetClanName: normalizeWhitespace(option.targetClanName || option.clanName),
+        rosterIds,
+      };
+    }
+    return out;
+  };
+
+  const collectCwlLeaguePreferenceOptionsByLeagueKey = (cwlLeagueSignups) => {
     const source = isObj(cwlLeagueSignups) && isObj(cwlLeagueSignups.optionsByLeagueKey)
       ? cwlLeagueSignups.optionsByLeagueKey
       : {};
@@ -1084,8 +1115,12 @@
         ? option.rosterIds.map((value) => normalizeWhitespace(value)).filter(Boolean)
         : [];
       out[leagueKey] = {
+        optionKey: normalizeCwlLeaguePreferenceOptionKey(option.optionKey || leagueKey),
         leagueKey,
         leagueName,
+        targetRosterId: normalizeWhitespace(option.targetRosterId || option.rosterId || rosterIds[0]),
+        targetClanTag: normalizeTag(option.targetClanTag || option.clanTag),
+        targetClanName: normalizeWhitespace(option.targetClanName || option.clanName),
         rosterIds,
       };
     }
@@ -1106,8 +1141,12 @@
       out.push({
         playerTag,
         playerName: normalizeWhitespace(preference.playerName),
+        optionKey: normalizeCwlLeaguePreferenceOptionKey(preference.optionKey || preference.optionId || preference.choiceKey),
         leagueKey,
         leagueName,
+        targetRosterId: normalizeWhitespace(preference.targetRosterId || preference.rosterId),
+        targetClanTag: normalizeTag(preference.targetClanTag || preference.clanTag),
+        targetClanName: normalizeWhitespace(preference.targetClanName || preference.clanName),
         discordId: normalizeWhitespace(preference.discordId),
       });
     }
@@ -1139,6 +1178,7 @@
       : (isObj(rosterData.cwlLeagueSignups) ? rosterData.cwlLeagueSignups : {});
     const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
     const optionsByKey = collectCwlLeaguePreferenceOptionsByKey(cwlLeagueSignups);
+    const optionsByLeagueKey = collectCwlLeaguePreferenceOptionsByLeagueKey(cwlLeagueSignups);
     const preferences = collectCwlLeaguePreferences(cwlLeagueSignups);
     const rosterById = {};
     const playerLocationByTag = {};
@@ -1185,29 +1225,45 @@
       const base = {
         playerTag,
         playerName: normalizeWhitespace(preference.playerName),
+        optionKey: normalizeCwlLeaguePreferenceOptionKey(preference.optionKey),
         leagueKey: normalizeCwlLeaguePreferenceKey(preference.leagueKey || preference.leagueName),
         leagueName: normalizeWhitespace(preference.leagueName),
+        targetRosterId: normalizeWhitespace(preference.targetRosterId),
+        targetClanTag: normalizeTag(preference.targetClanTag),
+        targetClanName: normalizeWhitespace(preference.targetClanName),
       };
-      if (!playerTag || !base.leagueKey) {
+      if (!playerTag || (!base.optionKey && !base.leagueKey && !base.targetRosterId)) {
         plan.skipped.push(Object.assign({}, base, {
           reason: !playerTag ? "invalid-player-tag" : "missing-league",
         }));
         continue;
       }
 
-      const option = optionsByKey[base.leagueKey];
-      if (!option) {
+      const keyedOption = base.optionKey && optionsByKey[base.optionKey] ? optionsByKey[base.optionKey] : null;
+      const leagueOption = !keyedOption && base.leagueKey && optionsByLeagueKey[base.leagueKey]
+        ? optionsByLeagueKey[base.leagueKey]
+        : null;
+      const option = keyedOption || leagueOption;
+      if (option && !base.leagueKey) base.leagueKey = option.leagueKey;
+      if (option && !base.leagueName) base.leagueName = option.leagueName;
+      if (keyedOption && !base.targetRosterId) base.targetRosterId = normalizeWhitespace(option.targetRosterId);
+      if (keyedOption && !base.targetClanTag) base.targetClanTag = normalizeTag(option.targetClanTag);
+      if (keyedOption && !base.targetClanName) base.targetClanName = normalizeWhitespace(option.targetClanName);
+
+      if (!option && !base.targetRosterId) {
         plan.missingOptions.push(Object.assign({}, base, {
           reason: "missing-option",
         }));
         continue;
       }
 
-      const targetRosterIds = option.rosterIds.filter((rosterId) => !!rosterById[rosterId]);
+      const optionRosterIds = option && Array.isArray(option.rosterIds) ? option.rosterIds : [];
+      const rawTargetRosterIds = base.targetRosterId ? [base.targetRosterId] : optionRosterIds;
+      const targetRosterIds = rawTargetRosterIds.filter((rosterId) => !!rosterById[rosterId]);
       if (!targetRosterIds.length) {
         plan.missingOptions.push(Object.assign({}, base, {
           reason: "missing-target-roster",
-          targetRosterIds: option.rosterIds.slice(),
+          targetRosterIds: rawTargetRosterIds.slice(),
         }));
         continue;
       }
@@ -1241,11 +1297,15 @@
       }
 
       let targetRosterId = "";
-      for (const roster of rosters) {
-        const candidateId = normalizeWhitespace(roster && roster.id);
-        if (targetRosterIds.indexOf(candidateId) >= 0) {
-          targetRosterId = candidateId;
-          break;
+      if (base.targetRosterId && targetRosterIds.indexOf(base.targetRosterId) >= 0) {
+        targetRosterId = base.targetRosterId;
+      } else {
+        for (const roster of rosters) {
+          const candidateId = normalizeWhitespace(roster && roster.id);
+          if (targetRosterIds.indexOf(candidateId) >= 0) {
+            targetRosterId = candidateId;
+            break;
+          }
         }
       }
       if (!targetRosterId) {
@@ -1287,7 +1347,9 @@
       normalizeLookupKey,
       buildSafeMatchedUpdates,
       normalizeCwlLeaguePreferenceKey,
+      normalizeCwlLeaguePreferenceOptionKey,
       collectCwlLeaguePreferenceOptionsByKey,
+      collectCwlLeaguePreferenceOptionsByLeagueKey,
       collectCwlLeaguePreferences,
     },
   };

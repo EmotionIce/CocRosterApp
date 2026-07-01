@@ -32,6 +32,43 @@ function normalizeCwlSignupLeagueKey_(leagueNameRaw) {
 		.slice(0, 48);
 }
 
+function normalizeCwlSignupOptionKey_(optionKeyRaw) {
+	return normalizeCwlSignupLeagueKey_(optionKeyRaw);
+}
+
+function buildCwlSignupOptionKeyCandidate_(rosterIdRaw, clanTagRaw, clanNameRaw, leagueKeyRaw) {
+	const candidates = [
+		rosterIdRaw,
+		clanTagRaw,
+		clanNameRaw,
+		leagueKeyRaw,
+	];
+	for (let i = 0; i < candidates.length; i++) {
+		const key = normalizeCwlSignupOptionKey_(candidates[i]);
+		if (key) return key;
+	}
+	return "option";
+}
+
+function ensureUniqueCwlSignupOptionKey_(candidateRaw, usedRaw) {
+	const used = usedRaw && typeof usedRaw === "object" ? usedRaw : {};
+	let key = normalizeCwlSignupOptionKey_(candidateRaw) || "option";
+	if (!used[key]) {
+		used[key] = true;
+		return key;
+	}
+	for (let i = 2; i < 1000; i++) {
+		const suffix = "-" + i;
+		const base = key.slice(0, Math.max(1, 48 - suffix.length)).replace(/-+$/g, "") || "option";
+		const candidate = base + suffix;
+		if (!used[candidate]) {
+			used[candidate] = true;
+			return candidate;
+		}
+	}
+	throw new Error("Unable to build a unique CWL signup option key.");
+}
+
 function buildCwlLeagueSignupId_() {
 	return Utilities.getUuid().replace(/-/g, "").slice(0, 12);
 }
@@ -148,7 +185,7 @@ function buildCwlLeagueSignupOptionsFromRosterData_(rosterDataRaw, optionsRaw) {
 
 function sanitizeCwlLeagueSignupOption_(optionRaw) {
 	const option = optionRaw && typeof optionRaw === "object" ? optionRaw : {};
-	const leagueName = sanitizeCwlSignupText_(option.leagueName, 80);
+	const leagueName = sanitizeCwlSignupText_(option.leagueName || option.leagueLabel, 80);
 	const leagueKey = normalizeCwlSignupLeagueKey_(option.leagueKey || leagueName);
 	if (!leagueKey || !leagueName) return null;
 	const sanitizeList = function (valuesRaw) {
@@ -164,31 +201,114 @@ function sanitizeCwlLeagueSignupOption_(optionRaw) {
 		}
 		return out;
 	};
+	const rosterIds = sanitizeList(
+		option.rosterIds || (option.rosterId || option.targetRosterId ? [option.rosterId || option.targetRosterId] : []),
+	);
+	const clanTags = sanitizeList(
+		option.clanTags || (option.clanTag || option.targetClanTag ? [option.clanTag || option.targetClanTag] : []),
+	).map((tag) => normalizeTag_(tag)).filter((tag) => tag);
+	const clanNames = sanitizeList(
+		option.clanNames || (option.clanName || option.targetClanName ? [option.clanName || option.targetClanName] : []),
+	);
+	const targetRosterId = sanitizeCwlSignupText_(option.targetRosterId || option.rosterId || rosterIds[0], 80);
+	const targetRosterTitle = sanitizeCwlSignupText_(option.targetRosterTitle || option.rosterTitle, 80);
+	const targetClanTag = normalizeTag_(option.targetClanTag || option.clanTag || clanTags[0]);
+	const targetClanName = sanitizeCwlSignupText_(option.targetClanName || option.clanName || clanNames[0], 80);
+	const optionKey = normalizeCwlSignupOptionKey_(
+		option.optionKey ||
+			option.optionId ||
+			option.key ||
+			buildCwlSignupOptionKeyCandidate_(targetRosterId, targetClanTag, targetClanName, leagueKey),
+	);
+	if (!optionKey) return null;
 	return {
+		optionKey: optionKey,
 		leagueKey: leagueKey,
 		leagueName: leagueName,
-		rosterIds: sanitizeList(option.rosterIds),
-		clanTags: sanitizeList(option.clanTags).map((tag) => normalizeTag_(tag)).filter((tag) => tag),
-		clanNames: sanitizeList(option.clanNames),
+		rosterId: targetRosterId,
+		rosterTitle: targetRosterTitle,
+		clanTag: targetClanTag,
+		clanName: targetClanName,
+		targetRosterId: targetRosterId,
+		targetRosterTitle: targetRosterTitle,
+		targetClanTag: targetClanTag,
+		targetClanName: targetClanName,
+		rosterIds: rosterIds,
+		clanTags: clanTags,
+		clanNames: clanNames,
 		playerCount: toNonNegativeInt_(option.playerCount),
 	};
 }
 
-function buildCwlLeagueSignupOptionsByKey_(optionsRaw) {
+function buildCwlLeagueSignupOptionList_(optionsRaw) {
 	let options = [];
 	if (Array.isArray(optionsRaw)) {
 		options = optionsRaw;
 	} else if (optionsRaw && typeof optionsRaw === "object") {
 		const keys = Object.keys(optionsRaw);
 		for (let i = 0; i < keys.length; i++) {
-			options.push(optionsRaw[keys[i]]);
+			const option = optionsRaw[keys[i]];
+			if (option && typeof option === "object" && !option.optionKey) {
+				option.optionKey = keys[i];
+			}
+			options.push(option);
 		}
 	}
-	const byKey = {};
+	const out = [];
 	for (let i = 0; i < options.length; i++) {
 		const option = sanitizeCwlLeagueSignupOption_(options[i]);
 		if (!option) continue;
-		byKey[option.leagueKey] = option;
+		out.push(option);
+	}
+	return out;
+}
+
+function buildCwlLeagueSignupOptionsByOptionKey_(optionsRaw) {
+	const options = buildCwlLeagueSignupOptionList_(optionsRaw);
+	const byKey = {};
+	for (let i = 0; i < options.length; i++) {
+		byKey[options[i].optionKey] = options[i];
+	}
+	return byKey;
+}
+
+function buildCwlLeagueSignupOptionsByLeagueKey_(optionsRaw) {
+	const options = buildCwlLeagueSignupOptionList_(optionsRaw);
+	const byKey = {};
+	for (let i = 0; i < options.length; i++) {
+		const option = options[i];
+		if (!byKey[option.leagueKey]) {
+			byKey[option.leagueKey] = {
+				optionKey: option.leagueKey,
+				leagueKey: option.leagueKey,
+				leagueName: option.leagueName,
+				rosterIds: [],
+				clanTags: [],
+				clanNames: [],
+				playerCount: 0,
+			};
+		}
+		const aggregate = byKey[option.leagueKey];
+		if (option.targetRosterId) aggregate.rosterIds.push(option.targetRosterId);
+		else aggregate.rosterIds = aggregate.rosterIds.concat(option.rosterIds || []);
+		if (option.targetClanTag) aggregate.clanTags.push(option.targetClanTag);
+		else aggregate.clanTags = aggregate.clanTags.concat(option.clanTags || []);
+		if (option.targetClanName) aggregate.clanNames.push(option.targetClanName);
+		else aggregate.clanNames = aggregate.clanNames.concat(option.clanNames || []);
+		aggregate.playerCount += toNonNegativeInt_(option.playerCount);
+	}
+	const keys = Object.keys(byKey);
+	for (let i = 0; i < keys.length; i++) {
+		const option = byKey[keys[i]];
+		option.rosterIds = option.rosterIds.filter((value, index, list) => value && list.indexOf(value) === index);
+		option.clanTags = option.clanTags.filter((value, index, list) => value && list.indexOf(value) === index);
+		option.clanNames = option.clanNames.filter((value, index, list) => value && list.indexOf(value) === index);
+		option.targetRosterId = option.rosterIds[0] || "";
+		option.targetClanTag = option.clanTags[0] || "";
+		option.targetClanName = option.clanNames[0] || "";
+		option.rosterId = option.targetRosterId;
+		option.clanTag = option.targetClanTag;
+		option.clanName = option.targetClanName;
 	}
 	return byKey;
 }
@@ -199,7 +319,8 @@ function buildCwlLeagueSignupOptionsResultFromRosterData_(rosterDataRaw, options
 	const clanDetailsCache = {};
 	const resolveOptions = Object.assign({}, options, { clanDetailsCache: clanDetailsCache });
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-	const byKey = {};
+	const signupOptions = [];
+	const usedOptionKeys = {};
 	const skippedRosters = [];
 	let representedRosterCount = 0;
 	let connectedRosterCount = 0;
@@ -231,30 +352,42 @@ function buildCwlLeagueSignupOptionsResultFromRosterData_(rosterDataRaw, options
 			continue;
 		}
 		const clanName = resolveCwlSignupClanNameForRoster_(roster, resolveOptions);
-		if (!byKey[leagueKey]) {
-			byKey[leagueKey] = {
-				leagueKey: leagueKey,
-				leagueName: leagueName,
-				rosterIds: [],
-				clanTags: [],
-				clanNames: [],
-				playerCount: 0,
-			};
-		}
-		byKey[leagueKey].rosterIds.push(rosterId);
-		if (clanTag) byKey[leagueKey].clanTags.push(clanTag);
-		if (clanName) byKey[leagueKey].clanNames.push(clanName);
-		byKey[leagueKey].playerCount += getCwlSignupRosterPlayers_(roster).length;
+		const optionKey = ensureUniqueCwlSignupOptionKey_(
+			buildCwlSignupOptionKeyCandidate_(rosterId, clanTag, clanName, leagueKey),
+			usedOptionKeys,
+		);
+		signupOptions.push({
+			optionKey: optionKey,
+			leagueKey: leagueKey,
+			leagueName: leagueName,
+			rosterId: rosterId,
+			rosterTitle: rosterTitle,
+			clanTag: clanTag,
+			clanName: clanName,
+			targetRosterId: rosterId,
+			targetRosterTitle: rosterTitle,
+			targetClanTag: clanTag,
+			targetClanName: clanName,
+			rosterIds: [rosterId],
+			clanTags: clanTag ? [clanTag] : [],
+			clanNames: clanName ? [clanName] : [],
+			playerCount: getCwlSignupRosterPlayers_(roster).length,
+		});
 		representedRosterCount++;
 	}
-	const keys = Object.keys(byKey).sort((a, b) => byKey[a].leagueName.localeCompare(byKey[b].leagueName));
-	const signupOptions = keys.map((key) => {
-		const option = byKey[key];
+	signupOptions.sort((left, right) => {
+		const leagueCompare = left.leagueName.localeCompare(right.leagueName);
+		if (leagueCompare) return leagueCompare;
+		const leftClan = left.clanName || left.rosterTitle || left.rosterId;
+		const rightClan = right.clanName || right.rosterTitle || right.rosterId;
+		return leftClan.localeCompare(rightClan);
+	});
+	for (let i = 0; i < signupOptions.length; i++) {
+		const option = signupOptions[i];
 		option.rosterIds = option.rosterIds.filter((value, index, list) => list.indexOf(value) === index);
 		option.clanTags = option.clanTags.filter((value, index, list) => list.indexOf(value) === index);
 		option.clanNames = option.clanNames.filter((value, index, list) => list.indexOf(value) === index);
-		return option;
-	});
+	}
 	return {
 		options: signupOptions,
 		diagnostics: {
@@ -274,14 +407,24 @@ function sanitizeCwlLeagueSignupsPayload_(payloadRaw) {
 	for (let i = 0; i < tags.length; i++) {
 		const tag = normalizeTag_(tags[i]);
 		const prefRaw = preferencesRaw[tags[i]] && typeof preferencesRaw[tags[i]] === "object" ? preferencesRaw[tags[i]] : {};
-		const leagueName = sanitizeCwlSignupText_(prefRaw.leagueName, 80);
+		const leagueName = sanitizeCwlSignupText_(prefRaw.leagueName || prefRaw.leagueLabel || prefRaw.leagueKey, 80);
 		const leagueKey = normalizeCwlSignupLeagueKey_(prefRaw.leagueKey || leagueName);
 		if (!tag || !leagueKey || !leagueName) continue;
+		const optionKey = normalizeCwlSignupOptionKey_(prefRaw.optionKey || prefRaw.optionId || prefRaw.choiceKey);
+		const targetRosterId = sanitizeCwlSignupText_(prefRaw.targetRosterId || prefRaw.rosterId, 80);
+		const targetRosterTitle = sanitizeCwlSignupText_(prefRaw.targetRosterTitle || prefRaw.rosterTitle, 80);
+		const targetClanTag = normalizeTag_(prefRaw.targetClanTag || prefRaw.clanTag);
+		const targetClanName = sanitizeCwlSignupText_(prefRaw.targetClanName || prefRaw.clanName, 80);
 		preferencesByTag[tag] = {
 			playerTag: tag,
 			playerName: sanitizeCwlSignupText_(prefRaw.playerName, 80),
+			optionKey: optionKey,
 			leagueKey: leagueKey,
 			leagueName: leagueName,
+			targetRosterId: targetRosterId,
+			targetRosterTitle: targetRosterTitle,
+			targetClanTag: targetClanTag,
+			targetClanName: targetClanName,
 			discordId: sanitizeDiscordIdValue_(prefRaw.discordId),
 			discordUsername: sanitizeDiscordUsernameValue_(prefRaw.discordUsername),
 			discordDisplayName: sanitizeCwlSignupText_(prefRaw.discordDisplayName, 120),
@@ -301,7 +444,11 @@ function sanitizeCwlLeagueSignupsPayload_(payloadRaw) {
 		if (!key) continue;
 		audit[key] = entryRaw;
 	}
-	const optionsByLeagueKey = buildCwlLeagueSignupOptionsByKey_(payload.optionsByLeagueKey);
+	const optionSource = payload.optionsByKey && typeof payload.optionsByKey === "object"
+		? payload.optionsByKey
+		: payload.optionsByLeagueKey;
+	const optionsByKey = buildCwlLeagueSignupOptionsByOptionKey_(optionSource);
+	const optionsByLeagueKey = buildCwlLeagueSignupOptionsByLeagueKey_(Object.keys(optionsByKey).map((key) => optionsByKey[key]));
 	return {
 		schemaVersion: CWL_LEAGUE_SIGNUPS_SCHEMA_VERSION,
 		signupId: sanitizeCwlSignupText_(payload.signupId, 40),
@@ -309,6 +456,7 @@ function sanitizeCwlLeagueSignupsPayload_(payloadRaw) {
 		createdAt: sanitizeCwlSignupText_(payload.createdAt, 40) || new Date().toISOString(),
 		updatedAt: sanitizeCwlSignupText_(payload.updatedAt, 40),
 		optionSnapshotUpdatedAt: sanitizeCwlSignupText_(payload.optionSnapshotUpdatedAt, 40),
+		optionsByKey: optionsByKey,
 		optionsByLeagueKey: optionsByLeagueKey,
 		preferencesByTag: preferencesByTag,
 		audit: audit,
@@ -342,13 +490,49 @@ function buildCwlSignupAuditKey_(timestampRaw) {
 	return Utilities.formatDate(safeDate, "Etc/UTC", "yyyyMMdd'T'HHmmss_SSS'Z'") + "_" + Utilities.getUuid().slice(0, 8);
 }
 
-function findCwlSignupOptionByKey_(optionsRaw, leagueKeyRaw) {
+function findCwlSignupOptionBySelection_(optionsRaw, optionKeyRaw, leagueKeyRaw) {
+	const optionKey = normalizeCwlSignupOptionKey_(optionKeyRaw);
 	const leagueKey = normalizeCwlSignupLeagueKey_(leagueKeyRaw);
 	const options = Array.isArray(optionsRaw) ? optionsRaw : [];
 	for (let i = 0; i < options.length; i++) {
-		if (options[i] && options[i].leagueKey === leagueKey) return options[i];
+		if (optionKey && options[i] && options[i].optionKey === optionKey) return options[i];
+	}
+	for (let i = 0; i < options.length; i++) {
+		if (leagueKey && options[i] && options[i].leagueKey === leagueKey) return options[i];
 	}
 	return null;
+}
+
+function getCwlSignupOptionTargetRosterId_(optionRaw) {
+	const option = optionRaw && typeof optionRaw === "object" ? optionRaw : {};
+	const rosterIds = Array.isArray(option.rosterIds) ? option.rosterIds : [];
+	return sanitizeCwlSignupText_(option.targetRosterId || option.rosterId || rosterIds[0], 80);
+}
+
+function getCwlSignupOptionTargetClanTag_(optionRaw) {
+	const option = optionRaw && typeof optionRaw === "object" ? optionRaw : {};
+	const clanTags = Array.isArray(option.clanTags) ? option.clanTags : [];
+	return normalizeTag_(option.targetClanTag || option.clanTag || clanTags[0]);
+}
+
+function getCwlSignupOptionTargetClanName_(optionRaw) {
+	const option = optionRaw && typeof optionRaw === "object" ? optionRaw : {};
+	const clanNames = Array.isArray(option.clanNames) ? option.clanNames : [];
+	return sanitizeCwlSignupText_(option.targetClanName || option.clanName || clanNames[0], 80);
+}
+
+function cwlSignupPreferenceMatchesOption_(preferenceRaw, optionRaw) {
+	const preference = preferenceRaw && typeof preferenceRaw === "object" ? preferenceRaw : {};
+	const option = optionRaw && typeof optionRaw === "object" ? optionRaw : {};
+	const existingOptionKey = normalizeCwlSignupOptionKey_(preference.optionKey || preference.optionId || preference.choiceKey);
+	const selectedOptionKey = normalizeCwlSignupOptionKey_(option.optionKey);
+	if (existingOptionKey || selectedOptionKey) return !!(existingOptionKey && selectedOptionKey && existingOptionKey === selectedOptionKey);
+	const existingRosterId = sanitizeCwlSignupText_(preference.targetRosterId || preference.rosterId, 80);
+	const selectedRosterId = getCwlSignupOptionTargetRosterId_(option);
+	if (existingRosterId || selectedRosterId) return !!(existingRosterId && selectedRosterId && existingRosterId === selectedRosterId);
+	const existingLeagueKey = normalizeCwlSignupLeagueKey_(preference.leagueKey || preference.leagueName);
+	const selectedLeagueKey = normalizeCwlSignupLeagueKey_(option.leagueKey || option.leagueName);
+	return !!(existingLeagueKey && selectedLeagueKey && existingLeagueKey === selectedLeagueKey);
 }
 
 function getCwlLeagueSignupOptions(payloadRaw, secretOrPasswordRaw) {
@@ -361,7 +545,8 @@ function getCwlLeagueSignupOptions(payloadRaw, secretOrPasswordRaw) {
 		const current = readActiveCwlLeagueSignups_();
 		const nowIso = new Date().toISOString();
 		if (!current.signupId) current.signupId = buildCwlLeagueSignupId_();
-		current.optionsByLeagueKey = buildCwlLeagueSignupOptionsByKey_(signupOptionsResult.options);
+		current.optionsByKey = buildCwlLeagueSignupOptionsByOptionKey_(signupOptionsResult.options);
+		current.optionsByLeagueKey = buildCwlLeagueSignupOptionsByLeagueKey_(signupOptionsResult.options);
 		current.optionSnapshotUpdatedAt = nowIso;
 		if (!current.updatedAt) current.updatedAt = nowIso;
 		return writeActiveCwlLeagueSignups_(current);
@@ -392,11 +577,15 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		const existing = signups.preferencesByTag[playerTag] && typeof signups.preferencesByTag[playerTag] === "object"
 			? signups.preferencesByTag[playerTag]
 			: null;
-		const existingLeagueKey = normalizeCwlSignupLeagueKey_(existing && (existing.leagueKey || existing.leagueName));
+		const existingHasPreference = !!(existing && (
+			normalizeCwlSignupOptionKey_(existing.optionKey) ||
+			sanitizeCwlSignupText_(existing.targetRosterId, 80) ||
+			normalizeCwlSignupLeagueKey_(existing.leagueKey || existing.leagueName)
+		));
 		const discordId = sanitizeDiscordIdValue_(payload.discordId);
 		const existingDiscordId = sanitizeDiscordIdValue_(existing && existing.discordId);
 		const allowChange = payload.allowChange === true || payload.changeExisting === true;
-		if (existing && existingLeagueKey) {
+		if (existing && existingHasPreference) {
 			if (!existingDiscordId || existingDiscordId !== discordId) {
 				throw createRosterBackendError_("CWL_PREFERENCE_NOT_OWNER", "This CWL league preference belongs to another Discord user.");
 			}
@@ -404,20 +593,22 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 				throw createRosterBackendError_("CWL_PREFERENCE_EXISTS", "This player tag already has an active CWL league preference.");
 			}
 		}
-		const storedOptionKeys = Object.keys(signups.optionsByLeagueKey || {});
+		const storedOptionKeys = Object.keys(signups.optionsByKey || {});
 		const storedOptions = [];
 		for (let i = 0; i < storedOptionKeys.length; i++) {
-			storedOptions.push(signups.optionsByLeagueKey[storedOptionKeys[i]]);
+			storedOptions.push(signups.optionsByKey[storedOptionKeys[i]]);
 		}
-		let selected = findCwlSignupOptionByKey_(storedOptions, payload.leagueKey || payload.leagueName);
+		const selectedOptionKey = payload.optionKey || payload.optionId || payload.choiceKey;
+		const selectedLeagueKey = payload.leagueKey || payload.leagueName;
+		let selected = findCwlSignupOptionBySelection_(storedOptions, selectedOptionKey, selectedLeagueKey);
 		if (!selected) {
 			const snapshot = readActiveRosterSnapshot_();
 			const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
 			const options = buildCwlLeagueSignupOptionsFromRosterData_(rosterData, { fetchMissing: true });
-			selected = findCwlSignupOptionByKey_(options, payload.leagueKey || payload.leagueName);
+			selected = findCwlSignupOptionBySelection_(options, selectedOptionKey, selectedLeagueKey);
 		}
 		if (!selected) throw new Error("Selected CWL league is not available.");
-		if (existing && existingLeagueKey && selected.leagueKey === existingLeagueKey) {
+		if (existing && existingHasPreference && cwlSignupPreferenceMatchesOption_(existing, selected)) {
 			return {
 				ok: true,
 				status: "unchanged",
@@ -428,12 +619,20 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 				preferenceCount: Object.keys(signups.preferencesByTag || {}).length,
 			};
 		}
-		const action = existing && existingLeagueKey ? "changed" : "created";
+		const action = existing && existingHasPreference ? "changed" : "created";
+		const targetRosterId = getCwlSignupOptionTargetRosterId_(selected);
+		const targetClanTag = getCwlSignupOptionTargetClanTag_(selected);
+		const targetClanName = getCwlSignupOptionTargetClanName_(selected);
 		const pref = {
 			playerTag: playerTag,
 			playerName: sanitizeCwlSignupText_(payload.playerName || (existing && existing.playerName), 80),
+			optionKey: selected.optionKey,
 			leagueKey: selected.leagueKey,
 			leagueName: selected.leagueName,
+			targetRosterId: targetRosterId,
+			targetRosterTitle: sanitizeCwlSignupText_(selected.targetRosterTitle || selected.rosterTitle, 80),
+			targetClanTag: targetClanTag,
+			targetClanName: targetClanName,
 			discordId: discordId,
 			discordUsername: sanitizeDiscordUsernameValue_(payload.discordUsername),
 			discordDisplayName: sanitizeCwlSignupText_(payload.discordDisplayName || payload.discordUsername, 120),
@@ -449,10 +648,18 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		signups.audit[buildCwlSignupAuditKey_(nowIso)] = {
 			action: action,
 			playerTag: playerTag,
+			optionKey: selected.optionKey,
 			leagueKey: selected.leagueKey,
 			leagueName: selected.leagueName,
+			targetRosterId: targetRosterId,
+			targetClanTag: targetClanTag,
+			targetClanName: targetClanName,
+			previousOptionKey: sanitizeCwlSignupText_(existing && existing.optionKey, 80),
 			previousLeagueKey: sanitizeCwlSignupText_(existing && existing.leagueKey, 80),
 			previousLeagueName: sanitizeCwlSignupText_(existing && existing.leagueName, 80),
+			previousTargetRosterId: sanitizeCwlSignupText_(existing && existing.targetRosterId, 80),
+			previousTargetClanTag: normalizeTag_(existing && existing.targetClanTag),
+			previousTargetClanName: sanitizeCwlSignupText_(existing && existing.targetClanName, 80),
 			discordId: pref.discordId,
 			discordUsername: pref.discordUsername,
 			messageId: pref.messageId,
@@ -491,8 +698,13 @@ function getCwlLeaguePreferencesForDiscordUser(payloadRaw, secretOrPasswordRaw) 
 		preferences.push({
 			playerTag: normalizeTag_(preference.playerTag || tags[i]),
 			playerName: sanitizeCwlSignupText_(preference.playerName, 80),
+			optionKey: normalizeCwlSignupOptionKey_(preference.optionKey || preference.optionId || preference.choiceKey),
 			leagueKey: normalizeCwlSignupLeagueKey_(preference.leagueKey || preference.leagueName),
 			leagueName: sanitizeCwlSignupText_(preference.leagueName, 80),
+			targetRosterId: sanitizeCwlSignupText_(preference.targetRosterId || preference.rosterId, 80),
+			targetRosterTitle: sanitizeCwlSignupText_(preference.targetRosterTitle || preference.rosterTitle, 80),
+			targetClanTag: normalizeTag_(preference.targetClanTag || preference.clanTag),
+			targetClanName: sanitizeCwlSignupText_(preference.targetClanName || preference.clanName, 80),
 			discordId: sanitizeDiscordIdValue_(preference.discordId),
 			discordUsername: sanitizeDiscordUsernameValue_(preference.discordUsername),
 			discordDisplayName: sanitizeCwlSignupText_(preference.discordDisplayName, 120),
@@ -555,8 +767,12 @@ function clearCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			action: cleared ? "cleared" : "clear_noop",
 			status: status,
 			playerTag: playerTag,
+			optionKey: sanitizeCwlSignupText_(existing && existing.optionKey, 80),
 			leagueKey: sanitizeCwlSignupText_(existing && existing.leagueKey, 80),
 			leagueName: sanitizeCwlSignupText_(existing && existing.leagueName, 80),
+			targetRosterId: sanitizeCwlSignupText_(existing && existing.targetRosterId, 80),
+			targetClanTag: normalizeTag_(existing && existing.targetClanTag),
+			targetClanName: sanitizeCwlSignupText_(existing && existing.targetClanName, 80),
 			discordId: discordId,
 			discordUsername: sanitizeDiscordUsernameValue_(payload.discordUsername),
 			messageId: sanitizeCwlSignupText_(payload.messageId, 80),
@@ -607,6 +823,7 @@ function archiveAndResetCwlLeagueSignups_(reasonRaw, sourceRaw) {
 			createdAt: nowIso,
 			updatedAt: nowIso,
 			optionSnapshotUpdatedAt: "",
+			optionsByKey: {},
 			optionsByLeagueKey: {},
 			preferencesByTag: {},
 			audit: {},

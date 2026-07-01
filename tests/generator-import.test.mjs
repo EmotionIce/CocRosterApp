@@ -474,6 +474,69 @@ test("CWL preference planner reports moves and skipped cases without mutating ro
   assert.equal(plan.skipped[0].reason, "missing-league");
 });
 
+test("CWL preference planner targets the selected same-league roster", () => {
+  const generator = loadGenerator();
+  const rosterData = {
+    rosterOrder: ["source", "first", "selected"],
+    rosters: [
+      {
+        id: "source",
+        title: "Source",
+        trackingMode: "cwl",
+        main: [{ slot: 1, name: "Move Me", tag: "#MOVE1", th: 16, notes: [] }],
+        subs: [],
+        missing: [],
+      },
+      { id: "first", title: "First Champion", trackingMode: "cwl", main: [], subs: [], missing: [] },
+      { id: "selected", title: "Selected Champion", trackingMode: "cwl", main: [], subs: [], missing: [] },
+    ],
+    cwlLeagueSignups: {
+      optionsByKey: {
+        "first-champion": {
+          optionKey: "first-champion",
+          leagueKey: "champion-i",
+          leagueName: "Champion I",
+          targetRosterId: "first",
+          targetClanName: "First Champion",
+          rosterIds: ["first"],
+        },
+        "selected-champion": {
+          optionKey: "selected-champion",
+          leagueKey: "champion-i",
+          leagueName: "Champion I",
+          targetRosterId: "selected",
+          targetClanName: "Selected Champion",
+          rosterIds: ["selected"],
+        },
+      },
+      optionsByLeagueKey: {
+        "champion-i": {
+          leagueKey: "champion-i",
+          leagueName: "Champion I",
+          rosterIds: ["first", "selected"],
+        },
+      },
+      preferencesByTag: {
+        "#MOVE1": {
+          playerTag: "#MOVE1",
+          playerName: "Move Me",
+          optionKey: "selected-champion",
+          leagueKey: "champion-i",
+          leagueName: "Champion I",
+          targetRosterId: "selected",
+          targetClanName: "Selected Champion",
+        },
+      },
+    },
+  };
+
+  const plan = generator.planCwlLeaguePreferenceMoves({ rosterData });
+
+  assert.equal(plan.summary.validMoveCount, 1);
+  assert.equal(plan.moves[0].targetRosterId, "selected");
+  assert.equal(plan.moves[0].targetClanName, "Selected Champion");
+});
+
 test("CWL preference planner is idempotent after preferences are already satisfied", () => {
   const generator = loadGenerator();
   const rosterData = buildCwlPreferencePlanRosterData();

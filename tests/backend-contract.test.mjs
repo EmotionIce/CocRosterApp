@@ -288,6 +288,37 @@ const buildCwlLeagueSignupRosterData = () => ({
   },
 });
 
+const buildSameLeagueCwlSignupRosterData = () => ({
+  schemaVersion: 1,
+  pageTitle: "Roster",
+  rosterOrder: ["main", "second"],
+  rosters: [
+    {
+      id: "main",
+      title: "Turtle Main",
+      connectedClanTag: "#2LUCULP",
+      trackingMode: "cwl",
+      cwlLeagueName: "Champion I",
+      clanName: "Turtle Main",
+      main: [{ slot: 1, name: "Alpha", discord: "alpha", th: 16, tag: "#2LUCULP", notes: [] }],
+      subs: [],
+      missing: [],
+    },
+    {
+      id: "second",
+      title: "Turtle Second",
+      connectedClanTag: "#9PYLQG",
+      trackingMode: "cwl",
+      cwlLeagueName: "Champion I",
+      clanName: "Turtle Second",
+      main: [],
+      subs: [],
+      missing: [],
+    },
+  ],
+  playerMetrics: { schemaVersion: 1, updatedAt: "2026-05-19T00:00:00.000Z", byTag: {} },
+});
+
 const buildSeasonEventRosterData = () => ({
   schemaVersion: 1,
   pageTitle: "Roster",
@@ -2191,6 +2222,51 @@ test("CWL league signup options store the active message snapshot", () => {
   assert.ok(signups.optionSnapshotUpdatedAt);
 });
 
+test("CWL signup options keep same-league rosters distinct", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSameLeagueCwlSignupRosterData(), text: "" });
+
+  const result = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.options.length, 2);
+  assert.equal(JSON.stringify(result.options.map((option) => option.leagueKey)), JSON.stringify(["champion-i", "champion-i"]));
+  assert.equal(JSON.stringify(result.options.map((option) => option.clanName)), JSON.stringify(["Turtle Main", "Turtle Second"]));
+  assert.deepEqual(new Set(result.options.map((option) => option.optionKey)).size, 2);
+  assert.ok(signups.optionsByKey[result.options[0].optionKey]);
+  assert.ok(signups.optionsByKey[result.options[1].optionKey]);
+  assert.equal(JSON.stringify(signups.optionsByLeagueKey["champion-i"].rosterIds), JSON.stringify(["main", "second"]));
+});
+
+test("CWL league preference stores selected clan target metadata", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSameLeagueCwlSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  const secondOption = signup.options.find((option) => option.targetRosterId === "second");
+
+  const result = backend.setCwlLeaguePreference({
+    playerTag: "#2LUCULP",
+    playerName: "Alpha",
+    signupId: signup.signupId,
+    optionKey: secondOption.optionKey,
+    leagueKey: secondOption.leagueKey,
+    discordId: "111",
+    discordUsername: "alpha",
+    discordDisplayName: "Alpha",
+  }, "secret");
+  const signups = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("active/cwlLeagueSignups", "GET"));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.preference.optionKey, secondOption.optionKey);
+  assert.equal(result.preference.leagueKey, "champion-i");
+  assert.equal(result.preference.leagueName, "Champion I");
+  assert.equal(result.preference.targetRosterId, "second");
+  assert.equal(result.preference.targetClanTag, "#9PYLQG");
+  assert.equal(result.preference.targetClanName, "Turtle Second");
+  assert.equal(signups.preferencesByTag["#2LUCULP"].targetRosterId, "second");
+});
+
 test("CWL league preference saves from the message snapshot without rebuilding options", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
@@ -2336,6 +2412,44 @@ test("CWL league preferences lookup returns only the requesting Discord user's v
   assert.equal(result.preferences[0].leagueKey, "champion-i");
   assert.equal(result.preferences[0].leagueName, "Champion I");
   assert.equal(result.preferences[0].discordId, "111");
+});
+
+test("CWL league-only preference data remains readable", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    active: {
+      cwlLeagueSignups: {
+        signupId: "legacy-signup",
+        status: "open",
+        optionsByLeagueKey: {
+          "champion-i": {
+            leagueKey: "champion-i",
+            leagueName: "Champion I",
+            rosterIds: ["main"],
+          },
+        },
+        preferencesByTag: {
+          "#2LUCULP": {
+            playerTag: "#2LUCULP",
+            playerName: "Alpha",
+            leagueKey: "champion-i",
+            leagueName: "Champion I",
+            discordId: "111",
+          },
+        },
+      },
+    },
+  });
+
+  const result = backend.getCwlLeaguePreferencesForDiscordUser({
+    signupId: "legacy-signup",
+    discordId: "111",
+  }, "secret");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.preferenceCount, 1);
+  assert.equal(result.preferences[0].leagueKey, "champion-i");
+  assert.equal(result.preferences[0].optionKey, "");
+  assert.equal(result.preferences[0].targetRosterId, "");
 });
 
 test("CWL league preference clear removes only the clicking user's one vote and writes audit", () => {
