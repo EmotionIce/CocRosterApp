@@ -483,6 +483,104 @@ test("reuses cached roster and player metrics when active published version is u
   assert.equal(requested.includes("https://firebase.test/active.json"), false);
 });
 
+test("cached active version still hydrates detached donation overlay", async () => {
+  const seasonId = "ranked-legend-i-2026-05-18";
+  const donationId = "donation-ranked-legend-i-2026-05-18";
+  const responses = new Map([
+    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
+    ["https://firebase.test/events/seasonEvents/current.json", {
+      donation: {
+        eventId: donationId,
+        seasonId,
+        startsAt: "2026-05-18T05:00:00.000Z",
+        endsAt: "2026-06-15T05:00:00.000Z",
+      },
+    }],
+    ["https://firebase.test/events/seasonEvents/seasonState/current.json", {
+      seasonId,
+      startsAt: "2026-05-18T05:00:00.000Z",
+      endsAt: "2026-06-15T05:00:00.000Z",
+    }],
+    ["https://firebase.test/events/seasonEvents/byId/" + donationId + ".json", {
+      eventId: donationId,
+      type: "donation",
+      seasonId,
+      status: "open",
+      signupsOpen: true,
+      startsAt: "2026-05-18T05:00:00.000Z",
+      endsAt: "2026-06-15T05:00:00.000Z",
+      participantsByDiscordId: {
+        "111": { discordDisplayName: "Alpha", status: "signed_up", accounts: [{ tag: "#AAA", name: "Alpha" }] },
+      },
+    }],
+    ["https://firebase.test/donationRefresh/bySeason/" + seasonId + ".json", {
+      meta: { seasonId, updatedAt: "2026-05-25T00:00:00.000Z" },
+      byTag: {
+        ["__FB64__" + Buffer.from("#AAA", "utf8").toString("base64url")]: {
+          tag: "#AAA",
+          seasonId,
+          donationCycle: {
+            seasonId,
+            startsAt: "2026-05-18T05:00:00.000Z",
+            endsAt: "2026-06-15T05:00:00.000Z",
+            cycleTotalDonations: 66,
+            lastSeenAt: "2026-05-25T00:00:00.000Z",
+          },
+        },
+      },
+    }],
+  ]);
+  const requested = [];
+  const { loadRosterDataViaFirebasePublic, buildSeasonEventsPublicModel } = loadClientInternals({
+    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await loadRosterDataViaFirebasePublic({
+    cachedSnapshot: {
+      activeVersionId: "version-1",
+      data: {
+        schemaVersion: 1,
+        pageTitle: "Cached Version",
+        rosterOrder: ["main"],
+        rosters: [{ id: "main", title: "Cached Main", main: [], subs: [], missing: [] }],
+        playerMetrics: {
+          schemaVersion: 1,
+          updatedAt: "2026-05-25T00:00:00.000Z",
+          byTag: {
+            "#AAA": {
+              identity: { tag: "#AAA", name: "Alpha" },
+              donationCycles: {
+                [seasonId]: {
+                  seasonId,
+                  startsAt: "2026-05-18T05:00:00.000Z",
+                  endsAt: "2026-06-15T05:00:00.000Z",
+                  cycleTotalDonations: 10,
+                  lastSeenAt: "2026-05-20T00:00:00.000Z",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const model = buildSeasonEventsPublicModel(loaded.data);
+
+  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/playerMetrics.json"), false);
+  assert.equal(requested.includes("https://firebase.test/donationRefresh/bySeason/" + seasonId + ".json"), true);
+  assert.equal(model.cards[1].rows[0].score, 66);
+});
+
 test("uses IndexedDB cached snapshot when localStorage cannot store the full active payload", async () => {
   const responses = new Map([
     ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
@@ -772,6 +870,58 @@ test("donation event leaderboard sums two registered accounts from event season 
 
   assert.equal(model.rows[0].score, 275);
   assert.equal(model.rows[0].accounts.length, 2);
+});
+
+test("donation event leaderboard prefers newer detached donation overlay", () => {
+  const { buildSeasonEventLeaderboardModel } = loadClientInternals();
+  const seasonId = "ranked-legend-i-2026-05-18";
+  const event = {
+    eventId: "donation-ranked-legend-i-2026-05-18",
+    type: "donation",
+    seasonId,
+    startsAt: "2026-05-18T05:00:00.000Z",
+    endsAt: "2026-06-15T05:00:00.000Z",
+    participantsByDiscordId: {
+      "111": { discordDisplayName: "Alpha", status: "signed_up", accounts: [{ tag: "#AAA", name: "A" }] },
+    },
+  };
+  const data = {
+    playerMetrics: {
+      byTag: {
+        "#AAA": {
+          donationCycles: {
+            [seasonId]: {
+              cycleTotalDonations: 10,
+              startsAt: event.startsAt,
+              endsAt: event.endsAt,
+              lastSeenAt: "2026-05-20T00:00:00.000Z",
+            },
+          },
+        },
+      },
+    },
+    donationRefresh: {
+      bySeason: {
+        [seasonId]: {
+          byTag: {
+            "#AAA": {
+              donationCycle: {
+                seasonId,
+                cycleTotalDonations: 45,
+                startsAt: event.startsAt,
+                endsAt: event.endsAt,
+                lastSeenAt: "2026-05-25T00:00:00.000Z",
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventLeaderboardModel(event, data);
+
+  assert.equal(model.rows[0].score, 45);
 });
 
 test("archived donation event uses its own seasonId instead of current season", () => {

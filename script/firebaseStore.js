@@ -713,9 +713,16 @@ function buildActiveVersionManifestFromValidatedData_(versionIdRaw, validatedRos
 	const rosterData = validatedRosterData && typeof validatedRosterData === "object" ? validatedRosterData : {};
 	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const rosterIds = [];
+	const connectedClanTags = [];
+	const connectedClanSeen = {};
 	for (let i = 0; i < rosters.length; i++) {
 		const rosterId = String(rosters[i] && rosters[i].id ? rosters[i].id : "").trim();
 		if (rosterId) rosterIds.push(rosterId);
+		const clanTag = normalizeTag_(rosters[i] && rosters[i].connectedClanTag);
+		if (clanTag && !connectedClanSeen[clanTag]) {
+			connectedClanSeen[clanTag] = true;
+			connectedClanTags.push(clanTag);
+		}
 	}
 	const manifest = {
 		versionId: versionId,
@@ -727,6 +734,7 @@ function buildActiveVersionManifestFromValidatedData_(versionIdRaw, validatedRos
 		pageTitle: typeof rosterData.pageTitle === "string" ? rosterData.pageTitle : "",
 		rosterOrder: Array.isArray(rosterData.rosterOrder) ? rosterData.rosterOrder.slice() : rosterIds.slice(),
 		rosterIds: rosterIds,
+		connectedClanTags: connectedClanTags,
 		lastUpdatedAt: String(rosterData.lastUpdatedAt || ""),
 		playerMetricsSchemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
 		playerMetricEntryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),

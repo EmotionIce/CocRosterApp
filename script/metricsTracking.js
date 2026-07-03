@@ -932,6 +932,7 @@ function captureConnectedClanMetrics_(rosterDataRaw, optionsRaw) {
 				deferStoreSanitize: deferStoreSanitize,
 				assumeStoreAlreadySanitized: assumeStoreAlreadySanitized,
 				collectTags: true,
+				skipDonationCycles: options.skipDonationCycles === true,
 			});
 			capturedClans++;
 			recorded += toNonNegativeInt_(result && result.recorded);
@@ -997,6 +998,7 @@ function captureMemberTrackingForRoster_(rosterDataRaw, rosterIdRaw, optionsRaw)
 		autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
 		deferStoreSanitize: true,
 		assumeStoreAlreadySanitized: true,
+		skipDonationCycles: options.skipDonationCycles === true,
 	});
 	const primaryDurationMs = Math.max(0, Date.now() - primaryStartMs);
 	const finalErrors = [].concat(primary && Array.isArray(primary.errors) ? primary.errors : []);
@@ -1181,9 +1183,11 @@ function updateDonationCycleLedgerForSnapshot_(entry, snapshotRaw, captureCtx) {
 }
 
 // Update player metrics entry from snapshot.
-function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw) {
+function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw, optionsRaw) {
 	const entryObj = entry && typeof entry === "object" ? entry : {};
 	const captureCtx = captureCtxRaw && typeof captureCtxRaw === "object" ? captureCtxRaw : buildMetricsCaptureContext_("");
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const skipDonationCycles = options.skipDonationCycles === true;
 	const snapshot = sanitizeMetricsSnapshotPayload_(snapshotRaw, "");
 	if (!snapshot) return false;
 
@@ -1221,19 +1225,23 @@ function updatePlayerMetricsEntryFromSnapshot_(entry, snapshotRaw, captureCtxRaw
 		leagueTier: sanitizeMetricsLeagueSnapshot_(snapshot.leagueTier),
 	};
 	const trophyChanged = upsertDailyTrophyHistoryPoint_(entryObj, point, captureCtx.capturedDate);
-	const donationCycleChanged = updateDonationCycleLedgerForSnapshot_(entryObj, snapshot, captureCtx);
-	const donationCycle = resolveDonationCycleForMetricsCapture_(captureCtx);
+	const donationCycleChanged = skipDonationCycles ? false : updateDonationCycleLedgerForSnapshot_(entryObj, snapshot, captureCtx);
+	const donationCycle = skipDonationCycles ? null : resolveDonationCycleForMetricsCapture_(captureCtx);
 
 	const lastSeen = entryObj.lastSeen && typeof entryObj.lastSeen === "object" ? entryObj.lastSeen : {};
 	const lastSeenDayKey = sanitizeMetricsDayKey_(lastSeen.dayKey);
 	const shouldUpdateLastSeen = lastSeenDayKey !== captureCtx.dayKey || latestChanged || trophyChanged || donationCycleChanged || !lastSeen.dayKey;
 	if (shouldUpdateLastSeen) {
-		entryObj.lastSeen = {
+		const nextLastSeen = {
 			at: captureCtx.capturedAt,
 			dayKey: captureCtx.dayKey,
-			donationCycleKey: sanitizeDonationCycleKey_(donationCycle && donationCycle.seasonId),
 			clanTag: normalizeTag_(snapshot.clanTag) || "",
 		};
+		const donationCycleKey = skipDonationCycles
+			? sanitizeDonationCycleKey_(lastSeen.donationCycleKey)
+			: sanitizeDonationCycleKey_(donationCycle && donationCycle.seasonId);
+		if (donationCycleKey) nextLastSeen.donationCycleKey = donationCycleKey;
+		entryObj.lastSeen = nextLastSeen;
 	}
 
 	if (!Array.isArray(entryObj.trophyHistoryDaily)) entryObj.trophyHistoryDaily = [];
@@ -1297,7 +1305,9 @@ function recordClanMemberMetricsSnapshot_(rosterData, clanTagRaw, membersRaw, op
 		} else {
 			currentEntry = sanitizePlayerMetricsEntry_(tag, byTag[tag], captureCtx.capturedDate.getTime(), captureCtx.capturedDate) || createEmptyPlayerMetricsEntry_(tag, baseSnapshot.name || "");
 		}
-		const changed = updatePlayerMetricsEntryFromSnapshot_(currentEntry, baseSnapshot, captureCtx);
+		const changed = updatePlayerMetricsEntryFromSnapshot_(currentEntry, baseSnapshot, captureCtx, {
+			skipDonationCycles: options.skipDonationCycles === true,
+		});
 		byTag[tag] = currentEntry;
 		recorded++;
 		if (changed) updated++;

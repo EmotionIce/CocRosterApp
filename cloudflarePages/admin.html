@@ -2070,6 +2070,16 @@
             <div class="small muted">Every 2 hours</div>
             <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
           </div>
+          <div class="auto-refresh-panel">
+            <label class="auto-refresh-toggle-row" for="donationRefreshToggle">
+              <input id="donationRefreshToggle" type="checkbox" disabled />
+              <span>Refresh donations separately</span>
+            </label>
+            <div class="small muted">Every 15 minutes</div>
+            <button id="runDonationRefreshNowBtn" class="btn secondary" type="button" disabled>Run now</button>
+            <button id="reloadDonationRefreshStatusBtn" class="btn secondary" type="button" disabled>Refresh status</button>
+            <div id="donationRefreshStatus" class="auto-refresh-status">Disabled</div>
+          </div>
         </div>
       </section>
 
@@ -2341,7 +2351,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="./generator.js?v=20260408c"></script>
   <script src="./client.js?v=20260429a"></script>
-  <script src="./admin.js?v=20260430a"></script>
+  <script src="./admin.js?v=20260703a"></script>
 </body>
 
 </html>

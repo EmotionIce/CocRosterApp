@@ -1397,6 +1397,23 @@ function buildSeasonEventPlayerMetricsByTag_(rosterDataRaw) {
 	return out;
 }
 
+function buildSeasonEventPlayerMetricsByTagWithDonationRefresh_(eventRaw, rosterDataRaw) {
+	const byTag = buildSeasonEventPlayerMetricsByTag_(rosterDataRaw);
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	if (normalizeSeasonEventType_(event.type) !== "donation") return byTag;
+	const seasonId = sanitizeDonationCycleKey_(event.seasonId);
+	if (!seasonId || typeof readDonationRefreshOverlayBySeason_ !== "function" || typeof mergeDonationRefreshOverlayIntoPlayerMetricsByTag_ !== "function") {
+		return byTag;
+	}
+	try {
+		const overlay = readDonationRefreshOverlayBySeason_(seasonId);
+		return mergeDonationRefreshOverlayIntoPlayerMetricsByTag_(byTag, overlay && overlay.byTag, seasonId);
+	} catch (err) {
+		Logger.log("Season event donation overlay unavailable for %s: %s", seasonId, errorMessage_(err));
+		return byTag;
+	}
+}
+
 // Return a preferred display label for a metrics entry or signup account.
 function getSeasonEventAccountDisplayName_(metricsEntryRaw, accountRaw) {
 	const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
@@ -2241,7 +2258,7 @@ function buildSeasonEventLeaderboard_(eventRaw, rosterDataRaw, optionsRaw) {
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.now || options.nowIso) || new Date().toISOString();
 	const includeDebug = options.includeDebug === true;
 	const limit = normalizeSeasonEventLeaderboardLimit_(options.limit);
-	const playerMetricsByTag = buildSeasonEventPlayerMetricsByTag_(rosterDataRaw);
+	const playerMetricsByTag = buildSeasonEventPlayerMetricsByTagWithDonationRefresh_(event, rosterDataRaw);
 	const participantsByDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
 	const participantIds = Object.keys(participantsByDiscordId).sort();
 	const rows = [];

@@ -14,6 +14,7 @@
     const FIREBASE_ACTIVE_PATH = "active";
     const FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";
     const FIREBASE_ACTIVE_VERSIONS_PATH = "activeVersions";
+    const DONATION_REFRESH_BASE_PATH = "donationRefresh";
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
     const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
@@ -5329,24 +5330,80 @@
         };
     };
 
+    const sanitizeDonationCycleKey = (valueRaw) => {
+        const value = toStr(valueRaw).trim();
+        return /^[A-Za-z0-9_-]{1,120}$/.test(value) ? value : "";
+    };
+
+    const sanitizeDonationLedger = (ledgerRaw, seasonIdRaw) => {
+        const ledger = ledgerRaw && typeof ledgerRaw === "object" ? ledgerRaw : {};
+        const seasonId = sanitizeDonationCycleKey(seasonIdRaw || ledger.seasonId);
+        const startsMs = parseTimeMs(ledger.startsAt);
+        const endsMs = parseTimeMs(ledger.endsAt);
+        if (!seasonId || startsMs <= 0 || endsMs <= startsMs) return null;
+        return {
+            seasonId: seasonId,
+            startsAt: new Date(startsMs).toISOString(),
+            endsAt: new Date(endsMs).toISOString(),
+            rawDonationsLastSeen: toNonNegativeInt(ledger.rawDonationsLastSeen),
+            rawDonationsReceivedLastSeen: toNonNegativeInt(ledger.rawDonationsReceivedLastSeen),
+            cycleTotalDonations: toNonNegativeInt(ledger.cycleTotalDonations),
+            cycleTotalDonationsReceived: toNonNegativeInt(ledger.cycleTotalDonationsReceived),
+            firstSeenAt: parseTimeMs(ledger.firstSeenAt) > 0 ? new Date(parseTimeMs(ledger.firstSeenAt)).toISOString() : "",
+            lastSeenAt: parseTimeMs(ledger.lastSeenAt) > 0 ? new Date(parseTimeMs(ledger.lastSeenAt)).toISOString() : "",
+            lastClanTag: normalizeClanTag(ledger.lastClanTag),
+            resetCount: toNonNegativeInt(ledger.resetCount),
+            receivedResetCount: toNonNegativeInt(ledger.receivedResetCount),
+        };
+    };
+
+    const getDonationLedgerLastSeenMs = (ledgerRaw) => {
+        const ledger = ledgerRaw && typeof ledgerRaw === "object" ? ledgerRaw : {};
+        return parseTimeMs(ledger.lastSeenAt) || parseTimeMs(ledger.firstSeenAt) || 0;
+    };
+
+    const chooseLatestDonationLedger = (baseLedgerRaw, overlayLedgerRaw, seasonIdRaw) => {
+        const base = sanitizeDonationLedger(baseLedgerRaw, seasonIdRaw);
+        const overlay = sanitizeDonationLedger(overlayLedgerRaw, seasonIdRaw);
+        if (!base) return overlay;
+        if (!overlay) return base;
+        return getDonationLedgerLastSeenMs(overlay) >= getDonationLedgerLastSeenMs(base) ? overlay : base;
+    };
+
+    const readDonationRefreshOverlayLedger = (dataRaw, seasonIdRaw, tagRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const seasonId = sanitizeDonationCycleKey(seasonIdRaw);
+        const tag = normalizeClanTag(tagRaw);
+        const donationRefresh = data.donationRefresh && typeof data.donationRefresh === "object" ? data.donationRefresh : {};
+        const bySeason = donationRefresh.bySeason && typeof donationRefresh.bySeason === "object" ? donationRefresh.bySeason : {};
+        const seasonOverlay = seasonId && bySeason[seasonId] && typeof bySeason[seasonId] === "object" ? bySeason[seasonId] : {};
+        const byTag = seasonOverlay.byTag && typeof seasonOverlay.byTag === "object" ? seasonOverlay.byTag : {};
+        const entry = tag && byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : null;
+        if (!entry) return null;
+        const donationCycles = entry.donationCycles && typeof entry.donationCycles === "object" ? entry.donationCycles : {};
+        return sanitizeDonationLedger(entry.donationCycle || entry.ledger || donationCycles[seasonId], seasonId);
+    };
+
     // Read donation cycle ledger for event scoring.
-    const readDonationCycleLedgerForSeasonEvent = (eventRaw, dataRaw, metricsEntryRaw) => {
+    const readDonationCycleLedgerForSeasonEvent = (eventRaw, dataRaw, metricsEntryRaw, accountRaw) => {
         const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
         const donationCycles = metricsEntry.donationCycles && typeof metricsEntry.donationCycles === "object" ? metricsEntry.donationCycles : {};
         const seasonId = resolveSeasonEventScoringSeasonId(eventRaw, dataRaw);
-        if (seasonId && donationCycles[seasonId] && typeof donationCycles[seasonId] === "object") return donationCycles[seasonId];
-        return null;
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        const identity = metricsEntry.identity && typeof metricsEntry.identity === "object" ? metricsEntry.identity : {};
+        const tag = normalizeClanTag(account.tag || identity.tag);
+        const baseLedger = seasonId && donationCycles[seasonId] && typeof donationCycles[seasonId] === "object" ? donationCycles[seasonId] : null;
+        const overlayLedger = readDonationRefreshOverlayLedger(dataRaw, seasonId, tag);
+        return chooseLatestDonationLedger(baseLedger, overlayLedger, seasonId);
     };
 
     // Calculate donation event account score.
-    const calculateDonationSeasonEventAccountScore = (eventRaw, dataRaw, metricsEntryRaw) => {
+    const calculateDonationSeasonEventAccountScore = (eventRaw, dataRaw, metricsEntryRaw, accountRaw) => {
         const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : null;
-        if (!metricsEntry) {
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-cycle-ledger", warnings: ["missing-player-metrics", "missing-donation-cycle-ledger"] };
-        }
-        const ledger = readDonationCycleLedgerForSeasonEvent(eventRaw, dataRaw, metricsEntry);
+        const ledger = readDonationCycleLedgerForSeasonEvent(eventRaw, dataRaw, metricsEntry, accountRaw);
         if (!ledger) {
-            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-cycle-ledger", warnings: ["missing-donation-cycle-ledger"] };
+            const warnings = metricsEntry ? ["missing-donation-cycle-ledger"] : ["missing-player-metrics", "missing-donation-cycle-ledger"];
+            return { score: 0, startValue: 0, currentValue: 0, coverage: "missing-cycle-ledger", warnings: warnings };
         }
         const score = toNonNegativeInt(ledger.cycleTotalDonations);
         return { score: score, startValue: 0, currentValue: score, coverage: "full", warnings: [] };
@@ -5361,7 +5418,7 @@
         const type = normalizeSeasonEventType(event.type);
         const score = type === "push"
             ? calculatePushSeasonEventAccountScore(event, metricsEntry, nowMsRaw, account)
-            : calculateDonationSeasonEventAccountScore(event, dataRaw, metricsEntry);
+            : calculateDonationSeasonEventAccountScore(event, dataRaw, metricsEntry, account);
         const out = {
             tag: tag,
             name: getSeasonEventAccountDisplayName(account, metricsEntry),
@@ -7615,9 +7672,10 @@
         const requestId = ++previousSeasonEventsLoadRequestId;
         render(lastRenderedData);
         loadPreviousSeasonEventsViaFirebasePublic(lastRenderedData)
-            .then((bundle) => {
+            .then(async (bundle) => {
                 if (requestId !== previousSeasonEventsLoadRequestId) return;
                 attachPreviousSeasonEventsBundle(lastRenderedData, bundle);
+                await hydrateDonationRefreshForLoadedSeasonEvents(lastRenderedData);
             })
             .catch((err) => {
                 if (requestId !== previousSeasonEventsLoadRequestId) return;
@@ -7969,6 +8027,16 @@
         if (lastUpdatedAt) parts.push("lastUpdatedAt:" + lastUpdatedAt);
         if (pushId) parts.push("push:" + pushId + "@" + pushUpdatedAt);
         if (donationId) parts.push("donation:" + donationId + "@" + donationUpdatedAt);
+        const donationRefresh = data.donationRefresh && typeof data.donationRefresh === "object" ? data.donationRefresh : {};
+        const bySeason = donationRefresh.bySeason && typeof donationRefresh.bySeason === "object" ? donationRefresh.bySeason : {};
+        const seasonIds = Object.keys(bySeason).sort();
+        for (let i = 0; i < seasonIds.length; i++) {
+            const seasonId = sanitizeDonationCycleKey(seasonIds[i]);
+            const overlay = bySeason[seasonIds[i]] && typeof bySeason[seasonIds[i]] === "object" ? bySeason[seasonIds[i]] : {};
+            const meta = overlay.meta && typeof overlay.meta === "object" ? overlay.meta : {};
+            const updatedAt = toStr(meta.updatedAt || overlay.updatedAt).trim();
+            if (seasonId) parts.push("donationRefresh:" + seasonId + "@" + updatedAt);
+        }
         return parts.join("|");
     };
 
@@ -8355,6 +8423,117 @@
         }
     };
 
+    const buildDonationRefreshSeasonPublicPath = (seasonIdRaw) => {
+        const seasonId = sanitizeDonationCycleKey(seasonIdRaw);
+        if (!seasonId) return "";
+        return DONATION_REFRESH_BASE_PATH + "/bySeason/" + encodeFirebaseObjectKey(seasonId);
+    };
+
+    const normalizeDonationRefreshSeasonOverlay = (seasonIdRaw, payloadRaw) => {
+        const seasonId = sanitizeDonationCycleKey(seasonIdRaw);
+        const payload = payloadRaw && typeof payloadRaw === "object" && !Array.isArray(payloadRaw) ? payloadRaw : {};
+        const byTagRaw = payload.byTag && typeof payload.byTag === "object" && !Array.isArray(payload.byTag) ? payload.byTag : {};
+        const byTag = {};
+        const keys = Object.keys(byTagRaw);
+        for (let i = 0; i < keys.length; i++) {
+            const tag = normalizeClanTag(keys[i]);
+            const entry = byTagRaw[keys[i]] && typeof byTagRaw[keys[i]] === "object" ? byTagRaw[keys[i]] : null;
+            if (!tag || !entry) continue;
+            const ledger = sanitizeDonationLedger(entry.donationCycle || entry.ledger, seasonId);
+            if (!ledger) continue;
+            byTag[tag] = {
+                tag: tag,
+                name: toStr(entry.name).trim(),
+                seasonId: seasonId,
+                donationCycle: ledger,
+                updatedAt: toStr(entry.updatedAt).trim() || toStr(ledger.lastSeenAt).trim(),
+                clanTag: normalizeClanTag(entry.clanTag || ledger.lastClanTag),
+            };
+        }
+        return {
+            seasonId: seasonId,
+            byTag: byTag,
+            meta: payload.meta && typeof payload.meta === "object" && !Array.isArray(payload.meta) ? payload.meta : null,
+        };
+    };
+
+    const attachDonationRefreshSeasonOverlay = (dataRaw, overlayRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
+        const overlay = overlayRaw && typeof overlayRaw === "object" ? overlayRaw : null;
+        const seasonId = sanitizeDonationCycleKey(overlay && overlay.seasonId);
+        if (!data || !seasonId) return;
+        if (!data.donationRefresh || typeof data.donationRefresh !== "object" || Array.isArray(data.donationRefresh)) {
+            data.donationRefresh = { bySeason: {} };
+        }
+        if (!data.donationRefresh.bySeason || typeof data.donationRefresh.bySeason !== "object" || Array.isArray(data.donationRefresh.bySeason)) {
+            data.donationRefresh.bySeason = {};
+        }
+        data.donationRefresh.bySeason[seasonId] = overlay;
+    };
+
+    const collectDonationRefreshSeasonIdsFromBundle = (bundleRaw) => {
+        const bundle = bundleRaw && typeof bundleRaw === "object" ? bundleRaw : {};
+        const ids = [];
+        const seen = Object.create(null);
+        const collect = (valueRaw) => {
+            const value = sanitizeDonationCycleKey(valueRaw);
+            if (!value || seen[value]) return;
+            seen[value] = true;
+            ids.push(value);
+        };
+        const current = bundle.current && typeof bundle.current === "object" ? bundle.current : {};
+        const donationPointer = current.donation && typeof current.donation === "object" ? current.donation : {};
+        collect(donationPointer.seasonId);
+        const byId = bundle.byId && typeof bundle.byId === "object" ? bundle.byId : {};
+        const eventIds = Object.keys(byId);
+        for (let i = 0; i < eventIds.length; i++) {
+            const event = byId[eventIds[i]] && typeof byId[eventIds[i]] === "object" ? byId[eventIds[i]] : {};
+            if (normalizeSeasonEventType(event.type) === "donation") collect(event.seasonId);
+        }
+        const seasonState = bundle.seasonState && typeof bundle.seasonState === "object" ? bundle.seasonState : {};
+        collect(seasonState.seasonId);
+        return ids;
+    };
+
+    const collectDonationRefreshSeasonIdsForData = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        const ids = [];
+        const seen = Object.create(null);
+        const collectMany = (valuesRaw) => {
+            const values = Array.isArray(valuesRaw) ? valuesRaw : [];
+            for (let i = 0; i < values.length; i++) {
+                const seasonId = sanitizeDonationCycleKey(values[i]);
+                if (!seasonId || seen[seasonId]) continue;
+                seen[seasonId] = true;
+                ids.push(seasonId);
+            }
+        };
+        collectMany(collectDonationRefreshSeasonIdsFromBundle(seasonEvents));
+        if (seasonEvents.previous && typeof seasonEvents.previous === "object") {
+            collectMany(collectDonationRefreshSeasonIdsFromBundle(seasonEvents.previous));
+        }
+        return ids;
+    };
+
+    const hydrateDonationRefreshForLoadedSeasonEvents = async (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
+        if (!data) return dataRaw;
+        const seasonIds = collectDonationRefreshSeasonIdsForData(data);
+        if (!seasonIds.length) return data;
+        const loadErrors = [];
+        await Promise.all(seasonIds.map(async (seasonId) => {
+            const path = buildDonationRefreshSeasonPublicPath(seasonId);
+            const payload = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+            attachDonationRefreshSeasonOverlay(data, normalizeDonationRefreshSeasonOverlay(seasonId, payload));
+        }));
+        if (loadErrors.length) {
+            if (!data.donationRefresh || typeof data.donationRefresh !== "object") data.donationRefresh = { bySeason: {} };
+            data.donationRefresh.loadErrors = loadErrors;
+        }
+        return data;
+    };
+
     // Collect unique event ids from season event pointers.
     const collectSeasonEventIdsFromPointers = (pointersRaw) => {
         const pointers = pointersRaw && typeof pointersRaw === "object" && !Array.isArray(pointersRaw) ? pointersRaw : {};
@@ -8466,6 +8645,7 @@
         const data = cloneJsonValue(cachedSnapshot.data);
         try {
             data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
+            await hydrateDonationRefreshForLoadedSeasonEvents(data);
         } catch (err) {
             if (!data.seasonEvents || typeof data.seasonEvents !== "object" || Array.isArray(data.seasonEvents)) {
                 data.seasonEvents = buildEmptySeasonEventsBundle([{
@@ -8515,6 +8695,7 @@
         }
         try {
             data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
+            await hydrateDonationRefreshForLoadedSeasonEvents(data);
         } catch (err) {
             data.seasonEvents = buildEmptySeasonEventsBundle([{
                 path: "/" + SEASON_EVENTS_BASE_PATH,

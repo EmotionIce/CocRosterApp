@@ -86,6 +86,7 @@ function writePublishedRosterData_(rosterDataRaw) {
 					try {
 						const capture = captureMemberTrackingForRoster_(validated, rosterId, {
 							continueOnError: true,
+							skipDonationCycles: true,
 						});
 						if (capture) {
 							capturedClans += toNonNegativeInt_(capture.capturedClans) > 0 ? 1 : 0;
@@ -669,6 +670,8 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 	const sourceMetrics = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : createEmptyPlayerMetricsStore_();
 	const connectedClanTagByRosterId = {};
 	const connectedRosterIds = [];
+	const connectedClanTags = [];
+	const connectedClanSeen = {};
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 		const rosterId = String(roster.id || "").trim();
@@ -676,6 +679,10 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		if (!rosterId || !clanTag) continue;
 		connectedClanTagByRosterId[rosterId] = clanTag;
 		connectedRosterIds.push(rosterId);
+		if (!connectedClanSeen[clanTag]) {
+			connectedClanSeen[clanTag] = true;
+			connectedClanTags.push(clanTag);
+		}
 	}
 	const meta = {
 		runId: runId,
@@ -685,6 +692,7 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		rosterIds: Array.isArray(runPlan.rosterIds) ? runPlan.rosterIds.slice() : [],
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
 		connectedRosterIds: connectedRosterIds,
+		connectedClanTags: connectedClanTags,
 		sourceFingerprint: String(sourceFingerprintRaw || ""),
 		sourceVersionId: sourceVersionId,
 		sourceShardMode: sourceVersionId ? "activeVersion" : "runCopy",
@@ -1957,6 +1965,7 @@ function buildAutoRefreshActiveVersionManifestFromSourceMeta_(runIdRaw, sourceMe
 		pageTitle: typeof sourceMeta.pageTitle === "string" ? sourceMeta.pageTitle : "",
 		rosterOrder: Array.isArray(sourceMeta.rosterOrder) ? sourceMeta.rosterOrder.slice() : rosterIds.slice(),
 		rosterIds: rosterIds,
+		connectedClanTags: Array.isArray(sourceMeta.connectedClanTags) ? sourceMeta.connectedClanTags.slice() : [],
 		lastUpdatedAt: String(options.lastUpdatedAt || publishedAt),
 		playerMetricsSchemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
 		playerMetricEntryCount: toNonNegativeInt_(options.playerMetricEntryCount),

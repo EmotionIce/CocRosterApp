@@ -11,6 +11,7 @@ const appScriptFiles = [
   "script/warDomain.js",
   "script/firebaseStore.js",
   "script/metricsTracking.js",
+  "script/donationRefresh.js",
   "script/rosterSchema.js",
   "script/refreshEngine.js",
   "script/rosterSync.js",
@@ -2039,6 +2040,96 @@ test("donation cycle ledger is keyed by ranked Legend I season", () => {
 
   const sanitized = backend.sanitizePlayerMetricsEntry_("#2LUCULP", entry, Date.parse("2026-05-20T15:00:00.000Z"), new Date("2026-05-20T15:00:00.000Z"));
   assert.equal(sanitized.donationCycles["ranked-legend-i-2026-05-18"].cycleTotalDonations, 150);
+});
+
+test("donation overlay merge prefers the freshest season ledger", () => {
+  const backend = loadBackend();
+  const seasonId = "ranked-legend-i-2026-05-18";
+  const baseByTag = {
+    "#PLAYER": {
+      identity: { tag: "#PLAYER", name: "Player" },
+      donationCycles: {
+        [seasonId]: {
+          seasonId,
+          startsAt: "2026-05-18T05:00:00.000Z",
+          endsAt: "2026-06-15T05:00:00.000Z",
+          rawDonationsLastSeen: 100,
+          rawDonationsReceivedLastSeen: 20,
+          cycleTotalDonations: 100,
+          cycleTotalDonationsReceived: 20,
+          firstSeenAt: "2026-05-20T00:00:00.000Z",
+          lastSeenAt: "2026-05-22T00:00:00.000Z",
+          lastClanTag: "#CLAN",
+          resetCount: 0,
+          receivedResetCount: 0,
+        },
+      },
+    },
+    "#FRESHBASE": {
+      identity: { tag: "#FRESHBASE", name: "Fresh Base" },
+      donationCycles: {
+        [seasonId]: {
+          seasonId,
+          startsAt: "2026-05-18T05:00:00.000Z",
+          endsAt: "2026-06-15T05:00:00.000Z",
+          rawDonationsLastSeen: 200,
+          rawDonationsReceivedLastSeen: 20,
+          cycleTotalDonations: 200,
+          cycleTotalDonationsReceived: 20,
+          firstSeenAt: "2026-05-20T00:00:00.000Z",
+          lastSeenAt: "2026-05-26T00:00:00.000Z",
+          lastClanTag: "#CLAN",
+          resetCount: 0,
+          receivedResetCount: 0,
+        },
+      },
+    },
+  };
+  const overlayByTag = {
+    "#PLAYER": {
+      tag: "#PLAYER",
+      name: "Player",
+      seasonId,
+      donationCycle: {
+        seasonId,
+        startsAt: "2026-05-18T05:00:00.000Z",
+        endsAt: "2026-06-15T05:00:00.000Z",
+        rawDonationsLastSeen: 175,
+        rawDonationsReceivedLastSeen: 30,
+        cycleTotalDonations: 175,
+        cycleTotalDonationsReceived: 30,
+        firstSeenAt: "2026-05-20T00:00:00.000Z",
+        lastSeenAt: "2026-05-25T00:00:00.000Z",
+        lastClanTag: "#CLAN",
+        resetCount: 0,
+        receivedResetCount: 0,
+      },
+    },
+    "#FRESHBASE": {
+      tag: "#FRESHBASE",
+      name: "Fresh Base",
+      seasonId,
+      donationCycle: {
+        seasonId,
+        startsAt: "2026-05-18T05:00:00.000Z",
+        endsAt: "2026-06-15T05:00:00.000Z",
+        rawDonationsLastSeen: 150,
+        rawDonationsReceivedLastSeen: 20,
+        cycleTotalDonations: 150,
+        cycleTotalDonationsReceived: 20,
+        firstSeenAt: "2026-05-20T00:00:00.000Z",
+        lastSeenAt: "2026-05-24T00:00:00.000Z",
+        lastClanTag: "#CLAN",
+        resetCount: 0,
+        receivedResetCount: 0,
+      },
+    },
+  };
+
+  const merged = backend.mergeDonationRefreshOverlayIntoPlayerMetricsByTag_(baseByTag, overlayByTag, seasonId);
+
+  assert.equal(merged["#PLAYER"].donationCycles[seasonId].cycleTotalDonations, 175);
+  assert.equal(merged["#FRESHBASE"].donationCycles[seasonId].cycleTotalDonations, 200);
 });
 
 test("season event leaderboards score push and donation events from event-cycle metrics", () => {

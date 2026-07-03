@@ -1602,6 +1602,16 @@
             <div class="small muted">Every 2 hours</div>
             <div id="autoRefreshStatus" class="auto-refresh-status">Disabled</div>
           </div>
+          <div class="auto-refresh-panel">
+            <label class="auto-refresh-toggle-row" for="donationRefreshToggle">
+              <input id="donationRefreshToggle" type="checkbox" disabled />
+              <span>Refresh donations separately</span>
+            </label>
+            <div class="small muted">Every 15 minutes</div>
+            <button id="runDonationRefreshNowBtn" class="btn secondary" type="button" disabled>Run now</button>
+            <button id="reloadDonationRefreshStatusBtn" class="btn secondary" type="button" disabled>Refresh status</button>
+            <div id="donationRefreshStatus" class="auto-refresh-status">Disabled</div>
+          </div>
         </div>
       </section>
 
@@ -1850,4 +1860,3 @@
 </body>
 
 </html>
-

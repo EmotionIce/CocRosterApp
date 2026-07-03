@@ -11,6 +11,7 @@ const appScriptFiles = [
   "script/warDomain.js",
   "script/firebaseStore.js",
   "script/metricsTracking.js",
+  "script/donationRefresh.js",
   "script/rosterSchema.js",
   "script/refreshEngine.js",
   "script/rosterSync.js",
@@ -209,6 +210,28 @@ test("captureMemberTrackingForRoster keeps manual final sanitize fallback", () =
   assert.equal(result.recorded, 1);
 });
 
+test("refresh tracking metrics capture does not mutate donation cycles", () => {
+  const backend = loadBackend();
+  const data = buildRosterData();
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-25T00:00:00.000Z",
+    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5100, donations: 120, donationsReceived: 30 }],
+  });
+
+  const result = backend.captureMemberTrackingForRoster_(data, "main", {
+    runState: { seenClanTags: {}, metricsStorePrepared: true },
+    skipDonationCycles: true,
+  });
+  const entry = data.playerMetrics.byTag["#PLAYER"];
+
+  assert.equal(result.recorded, 1);
+  assert.equal(entry.latestSnapshot.donations, 120);
+  assert.equal(JSON.stringify(entry.donationCycles), "{}");
+  assert.equal(entry.lastSeen.donationCycleKey, undefined);
+});
+
 test("refreshTrackingStatsCore fast mode preserves captured metrics without post-capture validate", () => {
   const backend = loadBackend();
   const data = buildRosterData();
@@ -217,7 +240,8 @@ test("refreshTrackingStatsCore fast mode preserves captured metrics without post
     validateCalls++;
     throw new Error("unexpected validate in fast mode");
   };
-  backend.captureMemberTrackingForRoster_ = (rosterData) => {
+  backend.captureMemberTrackingForRoster_ = (rosterData, rosterId, options) => {
+    assert.equal(options.skipDonationCycles, true);
     addMetricEntry(backend, rosterData, "#NEW");
     return {
       attemptedClans: 1,

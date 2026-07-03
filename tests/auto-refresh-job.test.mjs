@@ -12,6 +12,7 @@ const appScriptFiles = [
   "script/warDomain.js",
   "script/firebaseStore.js",
   "script/metricsTracking.js",
+  "script/donationRefresh.js",
   "script/rosterSchema.js",
   "script/refreshEngine.js",
   "script/rosterSync.js",
@@ -78,6 +79,7 @@ const loadBackend = () => {
             return {
               after: () => ({ create }),
               at: () => ({ create }),
+              everyMinutes: () => ({ create }),
               everyHours: () => ({ create }),
             };
           },
@@ -1154,6 +1156,109 @@ test("firebaseBatchPutJson uses one multi-location root patch for exact child wr
     "activeVersions/run-1/rosters/main": { id: "main" },
     "internal/autoRefresh/runs/run-1/warResults/main": { rosterId: "main" },
   });
+});
+
+test("detached donation refresh writes season overlay without mutating active metrics", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const seasonId = "ranked-legend-i-2026-05-18";
+  data.playerMetrics.byTag["#PLAYER"] = {
+    identity: { tag: "#PLAYER", name: "Player" },
+    trophyHistoryDaily: [],
+    donationCycles: {
+      [seasonId]: {
+        seasonId,
+        startsAt: "2026-05-18T05:00:00.000Z",
+        endsAt: "2026-06-15T05:00:00.000Z",
+        rawDonationsLastSeen: 100,
+        rawDonationsReceivedLastSeen: 20,
+        cycleTotalDonations: 100,
+        cycleTotalDonationsReceived: 20,
+        firstSeenAt: "2026-05-20T00:00:00.000Z",
+        lastSeenAt: "2026-05-20T00:00:00.000Z",
+        lastClanTag: "#CLAN",
+        resetCount: 0,
+        receivedResetCount: 0,
+      },
+    },
+  };
+  const versionId = "source-1";
+  const manifest = backend.buildActiveVersionManifestFromValidatedData_(versionId, data, {
+    publishedAt: "2026-05-20T00:00:00.000Z",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", versionId);
+  backend.firebaseRequestJson_("activeVersions/source-1/manifest", "PUT", backend.encodeFirebaseObjectKeysRecursive_(manifest));
+  for (const roster of data.rosters) {
+    backend.firebaseRequestJson_(
+      "activeVersions/source-1/rosters/" + backend.encodeFirebaseObjectKey_(roster.id),
+      "PUT",
+      backend.encodeFirebaseObjectKeysRecursive_(roster),
+    );
+  }
+  backend.firebaseRequestJson_("activeVersions/source-1/playerMetrics", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.playerMetrics));
+
+  const batchWrites = [];
+  backend.firebaseBatchPutJson_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    batchWrites.push(entries.map((entry) => ({ path: entry.path, payload: clone(entry.payload) })));
+    for (const entry of entries) backend.firebaseRequestJson_(entry.path, "PUT", entry.payload);
+    return null;
+  };
+  backend.prefetchClanMembersSnapshotsByTag_ = (clanTags) => {
+    assert.equal(JSON.stringify(clanTags.slice().sort()), JSON.stringify(["#CLAN", "#CLAN2"]));
+    return {
+      snapshotByClanTag: {
+        "#CLAN": {
+          clanTag: "#CLAN",
+          capturedAt: "2026-05-25T00:00:00.000Z",
+          metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000, donations: 125, donationsReceived: 25 }],
+        },
+        "#CLAN2": {
+          clanTag: "#CLAN2",
+          capturedAt: "2026-05-25T00:00:00.000Z",
+          metricsMembers: [{ tag: "#SECOND", name: "Second", trophies: 4900, donations: 5, donationsReceived: 1 }],
+        },
+      },
+      errorByClanTag: {},
+      requestCount: 2,
+      batchCount: 1,
+    };
+  };
+
+  const result = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  const playerOverlay = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_(
+      "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"),
+      "GET",
+    ),
+  );
+  const activeLedger = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_(
+      "activeVersions/source-1/playerMetrics/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER") + "/donationCycles/" + seasonId,
+      "GET",
+    ),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.playerCount, 2);
+  assert.equal(batchWrites.length, 1);
+  assert.equal(playerOverlay.donationCycle.cycleTotalDonations, 125);
+  assert.equal(playerOverlay.donationCycle.rawDonationsLastSeen, 125);
+  assert.equal(activeLedger.cycleTotalDonations, 100);
+  assert.equal(backend.__properties.has("ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT"), false);
+
+  const originalBatchGet = backend.firebaseBatchGetJson_;
+  let activeBaseLedgerReadCount = 0;
+  backend.firebaseBatchGetJson_ = (pathsRaw) => {
+    const paths = Array.isArray(pathsRaw) ? pathsRaw : [];
+    activeBaseLedgerReadCount += paths.filter((path) => String(path || "").includes("activeVersions/source-1/playerMetrics/byTag")).length;
+    return originalBatchGet(pathsRaw);
+  };
+
+  const secondResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+
+  assert.equal(secondResult.status, "ok");
+  assert.equal(activeBaseLedgerReadCount, 0);
 });
 
 test("queue worker treats existing roster result shards as an idempotent retry", () => {

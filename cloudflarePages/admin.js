@@ -20,6 +20,8 @@
     pendingProfileReopen: null,
     autoRefreshSettings: null,
     autoRefreshBusy: false,
+    donationRefreshSettings: null,
+    donationRefreshBusy: false,
     importSession: null,
     importCompareBusy: false,
     importApplyBusy: false,
@@ -3007,6 +3009,32 @@
     return parts.join(" | ");
   };
 
+  const buildDonationRefreshStatusText = (settings) => {
+    const cfg = settings && typeof settings === "object" ? settings : null;
+    if (!cfg) return "Disabled";
+    const enabled = !!cfg.enabled;
+    const parts = [enabled ? "Enabled" : "Disabled"];
+    parts.push(enabled ? (cfg.hasTrigger ? "Trigger active" : "Trigger missing") : "Trigger off");
+    const intervalMinutes = Number.isFinite(Number(cfg.intervalMinutes)) ? Math.max(0, Math.floor(Number(cfg.intervalMinutes))) : 0;
+    if (intervalMinutes > 0) parts.push("Every " + intervalMinutes + " min");
+    const runStatus = toStr(cfg.lastRunStatus).trim().toLowerCase() || "unknown";
+    const lastRunAt = formatLocalTimestamp(cfg.lastRunFinishedAt);
+    if (lastRunAt) {
+      parts.push("Last run " + runStatus + " at " + lastRunAt);
+    } else if (runStatus !== "unknown") {
+      parts.push("Last run " + runStatus);
+    }
+    const lastWriteAt = formatLocalTimestamp(cfg.lastWriteAt);
+    if (lastWriteAt) parts.push("Last write " + lastWriteAt);
+    const seasonId = toStr(cfg.lastSeasonId).trim();
+    if (seasonId) parts.push(seasonId);
+    const summary = toStr(cfg.lastRunSummary).trim();
+    if (summary) parts.push(summary.length > 180 ? summary.slice(0, 177) + "..." : summary);
+    const error = toStr(cfg.lastRunError).trim();
+    if (error) parts.push("Error: " + (error.length > 180 ? error.slice(0, 177) + "..." : error));
+    return parts.join(" | ");
+  };
+
   // Render auto refresh UI.
   const renderAutoRefreshUi = () => {
     const toggle = $("#autoRefreshToggle");
@@ -3030,6 +3058,37 @@
     }
   };
 
+  const renderDonationRefreshUi = () => {
+    const toggle = $("#donationRefreshToggle");
+    const runBtn = $("#runDonationRefreshNowBtn");
+    const reloadBtn = $("#reloadDonationRefreshStatusBtn");
+    const statusEl = $("#donationRefreshStatus");
+
+    if (toggle) {
+      const enabled = !!(state.donationRefreshSettings && state.donationRefreshSettings.enabled);
+      toggle.checked = enabled;
+      toggle.disabled = !state.password || state.donationRefreshBusy;
+    }
+    if (runBtn) {
+      runBtn.disabled = !state.password || state.donationRefreshBusy;
+      runBtn.textContent = state.donationRefreshBusy ? "Working..." : "Run now";
+    }
+    if (reloadBtn) {
+      reloadBtn.disabled = !state.password || state.donationRefreshBusy;
+    }
+
+    if (statusEl) {
+      if (state.donationRefreshBusy) {
+        statusEl.textContent = "Updating...";
+        statusEl.style.color = "#94a3b8";
+        return;
+      }
+      statusEl.textContent = buildDonationRefreshStatusText(state.donationRefreshSettings);
+      const runStatus = toStr(state.donationRefreshSettings && state.donationRefreshSettings.lastRunStatus).trim().toLowerCase();
+      statusEl.style.color = runStatus === "error" ? "#fca5a5" : "#94a3b8";
+    }
+  };
+
   // Load auto refresh settings.
   const loadAutoRefreshSettings = async () => {
     if (!state.password) {
@@ -3049,6 +3108,24 @@
     }
   };
 
+  const loadDonationRefreshSettings = async () => {
+    if (!state.password) {
+      state.donationRefreshSettings = null;
+      renderDonationRefreshUi();
+      return null;
+    }
+    state.donationRefreshBusy = true;
+    renderDonationRefreshUi();
+    try {
+      const settings = await runServerMethod("getDonationRefreshSettings", [state.password]);
+      state.donationRefreshSettings = settings && typeof settings === "object" ? settings : null;
+      return state.donationRefreshSettings;
+    } finally {
+      state.donationRefreshBusy = false;
+      renderDonationRefreshUi();
+    }
+  };
+
   // Update auto refresh enabled.
   const updateAutoRefreshEnabled = async (enabled) => {
     if (!state.password) {
@@ -3064,6 +3141,49 @@
     } finally {
       state.autoRefreshBusy = false;
       renderAutoRefreshUi();
+    }
+  };
+
+  const updateDonationRefreshEnabled = async (enabled) => {
+    if (!state.password) {
+      throw new Error("Unlock admin first.");
+    }
+    state.donationRefreshBusy = true;
+    renderDonationRefreshUi();
+    try {
+      const settings = await runServerMethod("setDonationRefreshEnabled", [!!enabled, state.password]);
+      state.donationRefreshSettings = settings && typeof settings === "object" ? settings : null;
+      setStatus(enabled ? "Donation refresh enabled." : "Donation refresh disabled.");
+      return state.donationRefreshSettings;
+    } finally {
+      state.donationRefreshBusy = false;
+      renderDonationRefreshUi();
+    }
+  };
+
+  const runDonationRefreshNowFromUi = async () => {
+    if (!state.password) {
+      throw new Error("Unlock admin first.");
+    }
+    state.donationRefreshBusy = true;
+    renderDonationRefreshUi();
+    setStatus("Donation refresh running...");
+    try {
+      const result = await runServerMethod("runDonationRefreshNow", [state.password]);
+      const settings = await runServerMethod("getDonationRefreshSettings", [state.password]);
+      state.donationRefreshSettings = settings && typeof settings === "object" ? settings : null;
+      const status = toStr(result && result.status).trim() || "ok";
+      const playerCount = Number.isFinite(Number(result && result.playerCount)) ? Math.max(0, Math.floor(Number(result.playerCount))) : 0;
+      const clanCount = Number.isFinite(Number(result && result.capturedClanCount)) ? Math.max(0, Math.floor(Number(result.capturedClanCount))) : 0;
+      if (result && result.skipped) {
+        setStatus("Donation refresh skipped: " + (toStr(result.reason).trim() || "no work") + ".");
+      } else {
+        setStatus("Donation refresh " + status + ": " + playerCount + " player(s), " + clanCount + " clan(s).");
+      }
+      return result;
+    } finally {
+      state.donationRefreshBusy = false;
+      renderDonationRefreshUi();
     }
   };
 
@@ -6931,6 +7051,7 @@
       if (!state.password) {
         setLoginStatus("Password is empty.");
         renderAutoRefreshUi();
+        renderDonationRefreshUi();
         return;
       }
 
@@ -6956,12 +7077,13 @@
         }
         if (pwInput) pwInput.disabled = true;
         refreshAdminWorkflowUi();
-        setLoginStatus("Unlocked. Syncing auto-refresh settings...");
-        refreshStartupLoader_("Step 2 of 3", "Syncing auto-refresh schedule...");
+        setLoginStatus("Unlocked. Syncing refresh settings...");
+        refreshStartupLoader_("Step 2 of 3", "Syncing refresh schedules...");
         try {
           await loadAutoRefreshSettings();
+          await loadDonationRefreshSettings();
         } catch (settingsErr) {
-          alert("Unlocked, but failed to load auto-refresh settings: " + toErrorMessage(settingsErr));
+          alert("Unlocked, but failed to load refresh settings: " + toErrorMessage(settingsErr));
         }
         setLoginStatus("Unlocked. Loading active config...");
         refreshStartupLoader_("Step 3 of 3", "Loading rosters...");
@@ -6983,7 +7105,10 @@
         state.password = "";
         state.autoRefreshSettings = null;
         state.autoRefreshBusy = false;
+        state.donationRefreshSettings = null;
+        state.donationRefreshBusy = false;
         renderAutoRefreshUi();
+        renderDonationRefreshUi();
         alert("Unlock failed: " + toErrorMessage(err));
       } finally {
         await hideStartupLoader_({ skipMinimumDelay: !unlockSucceeded });
@@ -7052,6 +7177,46 @@
       });
     }
     renderAutoRefreshUi();
+
+    const donationRefreshToggle = $("#donationRefreshToggle");
+    if (donationRefreshToggle) {
+      donationRefreshToggle.addEventListener("change", async () => {
+        const desired = !!donationRefreshToggle.checked;
+        try {
+          await updateDonationRefreshEnabled(desired);
+        } catch (err) {
+          renderDonationRefreshUi();
+          alert("Donation refresh update failed: " + toErrorMessage(err));
+        }
+      });
+    }
+    const runDonationRefreshNowBtn = $("#runDonationRefreshNowBtn");
+    if (runDonationRefreshNowBtn) {
+      runDonationRefreshNowBtn.addEventListener("click", async () => {
+        if (runDonationRefreshNowBtn.disabled) return;
+        try {
+          await runDonationRefreshNowFromUi();
+        } catch (err) {
+          setStatus("");
+          renderDonationRefreshUi();
+          alert("Donation refresh failed: " + toErrorMessage(err));
+        }
+      });
+    }
+    const reloadDonationRefreshStatusBtn = $("#reloadDonationRefreshStatusBtn");
+    if (reloadDonationRefreshStatusBtn) {
+      reloadDonationRefreshStatusBtn.addEventListener("click", async () => {
+        if (reloadDonationRefreshStatusBtn.disabled) return;
+        try {
+          await loadDonationRefreshSettings();
+          setStatus("Donation refresh status updated.");
+        } catch (err) {
+          renderDonationRefreshUi();
+          alert("Donation refresh status update failed: " + toErrorMessage(err));
+        }
+      });
+    }
+    renderDonationRefreshUi();
 
     bindWebsiteEditorUi_();
     syncPublicConfigEditorFromState_();

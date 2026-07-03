@@ -13,6 +13,12 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getAutoRefreshSettings(args[0]);
 		case "setAutoRefreshEnabled":
 			return setAutoRefreshEnabled(args[0], args[1]);
+		case "getDonationRefreshSettings":
+			return getDonationRefreshSettings(args[0]);
+		case "setDonationRefreshEnabled":
+			return setDonationRefreshEnabled(args[0], args[1]);
+		case "runDonationRefreshNow":
+			return runDonationRefreshNow(args[0]);
 		case "testClanConnection":
 			return testClanConnection(args[0], args[1], args[2]);
 		case "refreshAllRosters":
@@ -487,6 +493,36 @@ function setAutoRefreshEnabled(enabledRaw, password) {
 		reconcileAutoRefreshTriggerState_();
 		reconcileRegularWarFinalizationTriggerState_();
 		return readAutoRefreshSettings_();
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
+// Get detached donation refresh settings.
+function getDonationRefreshSettings(password) {
+	assertAdminPassword_(password);
+	const scriptLock = LockService.getScriptLock();
+	scriptLock.waitLock(30000);
+	try {
+		reconcileDonationRefreshTriggerState_();
+		return readDonationRefreshSettings_();
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
+// Set detached donation refresh enabled.
+function setDonationRefreshEnabled(enabledRaw, password) {
+	assertAdminPassword_(password);
+	const enabled = toBooleanFlag_(enabledRaw);
+	const scriptLock = LockService.getScriptLock();
+	scriptLock.waitLock(30000);
+	try {
+		const props = PropertiesService.getScriptProperties();
+		if (enabled) props.setProperty(DONATION_REFRESH_ENABLED_PROPERTY, "1");
+		else props.deleteProperty(DONATION_REFRESH_ENABLED_PROPERTY);
+		reconcileDonationRefreshTriggerState_();
+		return readDonationRefreshSettings_();
 	} finally {
 		scriptLock.releaseLock();
 	}

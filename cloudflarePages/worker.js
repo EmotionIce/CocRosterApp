@@ -1,7 +1,7 @@
 // Cloudflare Worker routing and Apps Script fallback helpers.
 
 const FALLBACK_APPS_SCRIPT_EXEC_URL =
-  "https://script.google.com/macros/s/AKfycbyA5QJUW3Lb2QVyVRKKTWMS9zyBBm82ubtYLGEQU-eoKuC4pRY4PA-oYraYWGaxDCBdFg/exec";
+  "https://script.google.com/macros/s/AKfycbw6ASmNd5Ajn8p8dfN1d0I0GwG5agjMWjDCaa25umExFmV1_fxhvV3kcDLmoKNoC8Lnlw/exec";
 
 // Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
@@ -11,16 +11,34 @@ const normalizeHttpUrl = (valueRaw) => {
   return value.replace(/[\/\\]+$/, "");
 };
 
+// Ensure Apps Script exec path.
+const withAppsScriptExecPath = (baseRaw) => {
+  const base = normalizeHttpUrl(baseRaw);
+  if (!base) return "";
+  if (/\/exec$/i.test(base)) return base;
+  return base + "/exec";
+};
+
 // Resolve Apps Script exec URL.
 const resolveAppsScriptExecUrl = (envRaw) => {
   const env = envRaw && typeof envRaw === "object" ? envRaw : {};
   const configured = normalizeHttpUrl(
     env.ROSTER_APPS_SCRIPT_URL || env.ROSTER_BASE_URL || ""
   );
-  const base = configured || normalizeHttpUrl(FALLBACK_APPS_SCRIPT_EXEC_URL);
-  if (!base) return "";
-  if (/\/exec$/i.test(base)) return base;
-  return base + "/exec";
+  return withAppsScriptExecPath(configured || FALLBACK_APPS_SCRIPT_EXEC_URL);
+};
+
+// Resolve fallback Apps Script exec URL.
+const resolveFallbackAppsScriptExecUrl = () =>
+  withAppsScriptExecPath(FALLBACK_APPS_SCRIPT_EXEC_URL);
+
+// Return whether upstream returned a Google HTML miss instead of Apps Script JSON.
+const shouldRetryAppsScriptFallback = (response, textRaw, contentTypeRaw) => {
+  const status = Number(response && response.status);
+  if (status !== 404 && status !== 405) return false;
+  const contentType = String(contentTypeRaw || "").toLowerCase();
+  const text = String(textRaw || "").trim();
+  return contentType.includes("text/html") || /^<!doctype\b/i.test(text) || /^<html[\s>]/i.test(text);
 };
 
 // Handle JSON response.
@@ -105,7 +123,7 @@ const handleAdminApi = async (request, env) => {
   }
 
   try {
-    const upstream = await fetch(execUrl, {
+    const buildUpstreamRequest = (url) => fetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -113,9 +131,20 @@ const handleAdminApi = async (request, env) => {
       body: bodyText || "{}",
     });
 
-    const text = await upstream.text();
-    const contentType =
+    let upstream = await buildUpstreamRequest(execUrl);
+    let text = await upstream.text();
+    let contentType =
       upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    const fallbackExecUrl = resolveFallbackAppsScriptExecUrl();
+    if (
+      fallbackExecUrl &&
+      fallbackExecUrl !== execUrl &&
+      shouldRetryAppsScriptFallback(upstream, text, contentType)
+    ) {
+      upstream = await buildUpstreamRequest(fallbackExecUrl);
+      text = await upstream.text();
+      contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    }
 
     return new Response(text, {
       status: upstream.status,
@@ -334,20 +363,32 @@ const handleDiscordBotSyncApi = async (request, env) => {
   }
 
   try {
-    const upstream = await fetch(execUrl, {
+    const upstreamBody = JSON.stringify({
+      method: upstreamCall.method,
+      args: upstreamCall.args,
+    });
+    const buildUpstreamRequest = (url) => fetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        method: upstreamCall.method,
-        args: upstreamCall.args,
-      }),
+      body: upstreamBody,
     });
 
-    const text = await upstream.text();
-    const contentType =
+    let upstream = await buildUpstreamRequest(execUrl);
+    let text = await upstream.text();
+    let contentType =
       upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    const fallbackExecUrl = resolveFallbackAppsScriptExecUrl();
+    if (
+      fallbackExecUrl &&
+      fallbackExecUrl !== execUrl &&
+      shouldRetryAppsScriptFallback(upstream, text, contentType)
+    ) {
+      upstream = await buildUpstreamRequest(fallbackExecUrl);
+      text = await upstream.text();
+      contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    }
 
     return new Response(text, {
       status: upstream.status,

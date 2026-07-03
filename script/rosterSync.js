@@ -2414,6 +2414,7 @@ function refreshTrackingStatsCore_(rosterData, rosterId, optionsRaw) {
 			prefetchedClanErrorsByTag: prefetchedClanErrorsByTag,
 			autoRefreshSnapshotMode: options.autoRefreshSnapshotMode === true,
 			deferFinalStoreSanitize: autoRefreshFinalValidationMode,
+			skipDonationCycles: true,
 		});
 		if (capture && capture.errors && capture.errors.length) {
 			Logger.log(

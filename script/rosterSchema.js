@@ -11,6 +11,8 @@
 // - /activeVersions/{versionId}/manifest: small version manifest.
 // - /activePublished/currentVersionId: small pointer that atomically publishes
 //   a completed version.
+// - /donationRefresh/bySeason/{seasonId}/byTag/{normalizedPlayerTag}: detached
+//   season-scoped donation ledger overlay written independently of refresh-all.
 // - /archive/publish: publish backups.
 // - /archive/autorefreshDaily: daily auto-refresh backups.
 // - /meta: operational metadata.
@@ -90,6 +92,7 @@ function getActiveRosterDatabaseContract_() {
 			activeVersionManifest: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/manifest",
 			activeVersionRosters: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/rosters/{rosterId}",
 			canonicalMetrics: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/playerMetrics/byTag[normalizedPlayerTag]",
+			donationRefreshOverlay: FIREBASE_DONATION_REFRESH_PATH + "/bySeason/{seasonId}/byTag[normalizedPlayerTag]",
 			canonicalDiscordIdentity: FIREBASE_ACTIVE_VERSIONS_PATH + "/{versionId}/playerMetrics/byTag[normalizedPlayerTag]/identity",
 			legacyCanonicalMetrics: FIREBASE_ACTIVE_PATH + "/playerMetrics/byTag[normalizedPlayerTag]",
 			publishArchive: FIREBASE_ARCHIVE_PUBLISH_PATH,
