@@ -510,6 +510,15 @@ function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 		changed = true;
 		regularHistoryOrBaselineChanged = true;
 	}
+	if (
+		warPerformance &&
+		warPerformance.cwlPreSeasonBaselineByTag &&
+		typeof warPerformance.cwlPreSeasonBaselineByTag === "object" &&
+		Object.prototype.hasOwnProperty.call(warPerformance.cwlPreSeasonBaselineByTag, tag)
+	) {
+		delete warPerformance.cwlPreSeasonBaselineByTag[tag];
+		changed = true;
+	}
 	if (warPerformance && warPerformance.regularWarHistoryByKey && typeof warPerformance.regularWarHistoryByKey === "object") {
 		const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
 		const warKeys = Object.keys(historyByKey);
@@ -1917,6 +1926,12 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 
 	const warPerformance = prepareWarPerformanceForRefresh_(ctx.roster, nowIso);
+	ensureCwlPreSeasonBaselineForSeason_(
+		warPerformance,
+		typeof leaguegroup.season === "string" ? leaguegroup.season : "",
+		ctx.roster.cwlStats,
+		nowIso,
+	);
 	const statsTrackedTagSet = buildRosterStatsTrackedTagSet_(ctx.roster);
 	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
 	const byTag = {};

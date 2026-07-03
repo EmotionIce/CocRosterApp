@@ -199,7 +199,10 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 		if (typeof pair.shortReason === "string") pairOut.shortReason = pair.shortReason;
 		const scoreDelta = toFiniteNumberOrNull(pair.scoreDelta);
 		if (scoreDelta != null) pairOut.scoreDelta = scoreDelta;
+		const reliabilityDelta = toFiniteNumberOrNull(pair.reliabilityDelta);
+		if (reliabilityDelta != null) pairOut.reliabilityDelta = reliabilityDelta;
 		if (typeof pair.rewardImpact === "string") pairOut.rewardImpact = pair.rewardImpact;
+		if (pair.optional === true) pairOut.optional = true;
 		pairs.push(pairOut);
 	}
 
@@ -216,15 +219,43 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	const plannerSummaryRaw = suggestions.plannerSummary && typeof suggestions.plannerSummary === "object" ? suggestions.plannerSummary : null;
 	let plannerSummary = null;
 	if (plannerSummaryRaw) {
+		const rewardStatusByTagRaw = plannerSummaryRaw.rewardStatusByTag && typeof plannerSummaryRaw.rewardStatusByTag === "object" ? plannerSummaryRaw.rewardStatusByTag : {};
+		const rewardStatusByTag = {};
+		const rewardStatusTags = Object.keys(rewardStatusByTagRaw);
+		for (let i = 0; i < rewardStatusTags.length; i++) {
+			const tag = normalizeTag_(rewardStatusTags[i]);
+			if (!tag || !allowedTags[tag]) continue;
+			const status = String(rewardStatusByTagRaw[rewardStatusTags[i]] == null ? "" : rewardStatusByTagRaw[rewardStatusTags[i]])
+				.trim()
+				.slice(0, 80);
+			if (!status) continue;
+			rewardStatusByTag[tag] = status;
+		}
+		const roundStatesRaw = Array.isArray(plannerSummaryRaw.roundStates) ? plannerSummaryRaw.roundStates : [];
+		const roundStates = [];
+		for (let i = 0; i < roundStatesRaw.length && i < 10; i++) {
+			const state = String(roundStatesRaw[i] == null ? "" : roundStatesRaw[i]).trim();
+			if (state === "completed" || state === "locked" || state === "editable") roundStates.push(state);
+		}
 		const next = {
 			remainingEditableDays: toNonNegativeInt_(plannerSummaryRaw.remainingEditableDays),
-			optimalTotalSlack: toNonNegativeInt_(plannerSummaryRaw.optimalTotalSlack),
-			rewardFeasiblePlayerCount: toNonNegativeInt_(plannerSummaryRaw.rewardFeasiblePlayerCount),
-			rewardCriticalPlayerTags: sanitizeTagList(plannerSummaryRaw.rewardCriticalPlayerTags),
-			impossibleRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.impossibleRewardPlayerTags),
-			blockedByExclusions: toBooleanFlag_(plannerSummaryRaw.blockedByExclusions),
-			blockedByExclusionOutTags: sanitizeTagList(plannerSummaryRaw.blockedByExclusionOutTags),
-			blockedByExclusionInTags: sanitizeTagList(plannerSummaryRaw.blockedByExclusionInTags),
+			nextEditableDayIndex: toFiniteNumberOrNull(plannerSummaryRaw.nextEditableDayIndex) == null ? -1 : Math.floor(Number(plannerSummaryRaw.nextEditableDayIndex)),
+			contextSource: String(plannerSummaryRaw.contextSource == null ? "" : plannerSummaryRaw.contextSource).trim(),
+			estimatedContext: toBooleanFlag_(plannerSummaryRaw.estimatedContext),
+			roundStates: roundStates,
+			historyStatus: String(plannerSummaryRaw.historyStatus == null ? "" : plannerSummaryRaw.historyStatus).trim(),
+			selectedRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.selectedRewardPlayerTags),
+			projectedRewardCompletePlayerTags: sanitizeTagList(plannerSummaryRaw.projectedRewardCompletePlayerTags),
+			securedRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.securedRewardPlayerTags),
+			requiredNextRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.requiredNextRewardPlayerTags),
+			capacityNextRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.capacityNextRewardPlayerTags),
+			selectedLaterRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.selectedLaterRewardPlayerTags),
+			rewardStatusByTag: rewardStatusByTag,
+			rewardAppearancesReserved: toNonNegativeInt_(plannerSummaryRaw.rewardAppearancesReserved),
+			rewardCapacity: toNonNegativeInt_(plannerSummaryRaw.rewardCapacity),
+			optionalSwapCount: toNonNegativeInt_(plannerSummaryRaw.optionalSwapCount),
+			invalidConstraints: toBooleanFlag_(plannerSummaryRaw.invalidConstraints),
+			invalidReason: String(plannerSummaryRaw.invalidReason == null ? "" : plannerSummaryRaw.invalidReason).trim(),
 		};
 		const solverMode = String(plannerSummaryRaw.solverMode == null ? "" : plannerSummaryRaw.solverMode).trim();
 		if (solverMode) next.solverMode = solverMode;
@@ -236,7 +267,36 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	let configSnapshot = null;
 	if (configSnapshotRaw) {
 		const next = {};
-		const numericConfigKeys = ["defaultSeasonDays", "priorMeanStarsPerStart", "priorWeightAttacks", "minExpectedStarsPerStart", "maxExpectedStarsPerStart", "weightTH", "weightStarsPerf", "weightDestructionPerf", "weightThreeStarRate", "weightHitUpAbility", "weightHitEvenAbility", "weightReliabilityPenalty", "churnPenalty"];
+		const numericConfigKeys = [
+			"defaultSeasonDays",
+			"priorMeanStarsPerStart",
+			"priorWeightAttacks",
+			"minExpectedStarsPerStart",
+			"maxExpectedStarsPerStart",
+			"weightTH",
+			"weightStarsPerf",
+			"weightDestructionPerf",
+			"weightThreeStarRate",
+			"weightHitUpAbility",
+			"weightHitEvenAbility",
+			"weightReliabilityPenalty",
+			"churnPenalty",
+			"supportedTownHallMin",
+			"supportedTownHallMax",
+			"qualityPriorMeanStarsWhenUsed",
+			"qualityPriorMeanDestruction",
+			"qualityPriorMeanThreeStarProbability",
+			"qualityPriorWeightAttacks",
+			"reliabilityPriorMean",
+			"reliabilityPriorWeight",
+			"benchWeightTownHall",
+			"benchWeightStarsWhenUsed",
+			"benchWeightDestructionWhenUsed",
+			"benchWeightThreeStarProbability",
+			"benchReliabilityExponent",
+			"optionalSwapMinScoreDelta",
+			"maxOptionalSwaps",
+		];
 		for (let i = 0; i < numericConfigKeys.length; i++) {
 			const key = numericConfigKeys[i];
 			const value = toFiniteNumberOrNull(configSnapshotRaw[key]);

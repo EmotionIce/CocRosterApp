@@ -434,6 +434,121 @@ function sanitizeRegularWarLegacyBaselineByTag_(baselineRaw) {
 	return out;
 }
 
+// Sanitize CWL pre-season baseline by tag.
+function sanitizeCwlPreSeasonBaselineByTag_(baselineRaw) {
+	const baseline = baselineRaw && typeof baselineRaw === "object" ? baselineRaw : {};
+	const out = {};
+	const keys = Object.keys(baseline);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]);
+		if (!tag) continue;
+		const stats = sanitizeWarPerformanceStatsEntry_(baseline[keys[i]]);
+		if (!hasWarPerformanceStatsData_(stats)) continue;
+		out[tag] = stats;
+	}
+	return out;
+}
+
+// Normalize CWL history status.
+function normalizeCwlHistoryStatus_(statusRaw) {
+	const status = String(statusRaw == null ? "" : statusRaw)
+		.trim()
+		.toLowerCase();
+	if (status === "cleanpreseason" || status === "clean_preseason") return "cleanPreSeason";
+	if (status === "activeseasoncontaminated" || status === "active_season_contaminated" || status === "contaminated") {
+		return "activeSeasonContaminated";
+	}
+	if (status === "none" || status === "missing") return "none";
+	return "";
+}
+
+// Build a CWL aggregate baseline from the existing war-performance aggregate.
+function buildCwlPreSeasonBaselineFromWarPerformanceByTag_(warPerformanceRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
+	const byTagRaw = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
+	const out = {};
+	const tags = Object.keys(byTagRaw);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const entry = byTagRaw[tags[i]] && typeof byTagRaw[tags[i]] === "object" ? byTagRaw[tags[i]] : {};
+		const cwlStats = sanitizeWarPerformanceStatsEntry_(entry.cwl);
+		if (!hasWarPerformanceStatsData_(cwlStats)) continue;
+		out[tag] = cwlStats;
+	}
+	return out;
+}
+
+// Return whether roster CWL stats prove that the current season is already active.
+function hasCurrentSeasonCwlStatsData_(cwlStatsRaw, seasonRaw) {
+	const season = String(seasonRaw == null ? "" : seasonRaw).trim();
+	const cwlStats = cwlStatsRaw && typeof cwlStatsRaw === "object" ? cwlStatsRaw : {};
+	if (!season || String(cwlStats.season == null ? "" : cwlStats.season).trim() !== season) return false;
+	const byTagRaw = cwlStats.byTag && typeof cwlStats.byTag === "object" ? cwlStats.byTag : {};
+	const tags = Object.keys(byTagRaw);
+	for (let i = 0; i < tags.length; i++) {
+		const entry = sanitizeCwlStatEntry_(byTagRaw[tags[i]]);
+		if (
+			entry.starsTotal > 0 ||
+			entry.daysInLineup > 0 ||
+			entry.resolvedWarDays > 0 ||
+			entry.attacksMade > 0 ||
+			entry.missedAttacks > 0 ||
+			entry.countedAttacks > 0 ||
+			entry.currentWarAttackPending > 0
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Ensure a season-aware CWL history baseline exists before current-season wars are ingested.
+function ensureCwlPreSeasonBaselineForSeason_(warPerformanceRaw, seasonRaw, currentCwlStatsRaw, nowIsoRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	const season = String(seasonRaw == null ? "" : seasonRaw).trim();
+	if (!warPerformance || !season) {
+		return { changed: false, status: "", season: season, warning: "cwl-history-missing-season" };
+	}
+
+	const existingSeason = String(warPerformance.cwlPreSeasonBaselineSeason == null ? "" : warPerformance.cwlPreSeasonBaselineSeason).trim();
+	const existingStatus = normalizeCwlHistoryStatus_(warPerformance.cwlHistoryStatus);
+	if (existingSeason === season && (existingStatus === "cleanPreSeason" || existingStatus === "activeSeasonContaminated")) {
+		warPerformance.cwlPreSeasonBaselineByTag = sanitizeCwlPreSeasonBaselineByTag_(warPerformance.cwlPreSeasonBaselineByTag);
+		warPerformance.cwlHistoryStatus = existingStatus;
+		return { changed: false, status: existingStatus, season: season, warning: "" };
+	}
+
+	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
+	const nowText = typeof nowIsoRaw === "string" && nowIsoRaw ? nowIsoRaw : new Date().toISOString();
+	warPerformance.cwlPreSeasonBaselineSeason = season;
+	warPerformance.cwlPreSeasonBaselineCapturedAt = nowText;
+
+	if (hasCurrentSeasonCwlStatsData_(currentCwlStatsRaw, season)) {
+		warPerformance.cwlPreSeasonBaselineByTag = {};
+		warPerformance.cwlHistoryStatus = "activeSeasonContaminated";
+		meta.cwlHistoryStatus = "activeSeasonContaminated";
+		meta.cwlHistorySeason = season;
+		meta.cwlHistoryWarning = "current-season CWL stats existed before a clean pre-season baseline was captured; previous-CWL aggregate ignored for bench planning.";
+		warPerformance.meta = meta;
+		return {
+			changed: true,
+			status: "activeSeasonContaminated",
+			season: season,
+			warning: "cwl-history-active-season-contaminated",
+		};
+	}
+
+	const baselineByTag = buildCwlPreSeasonBaselineFromWarPerformanceByTag_(warPerformance);
+	warPerformance.cwlPreSeasonBaselineByTag = baselineByTag;
+	warPerformance.cwlHistoryStatus = "cleanPreSeason";
+	meta.cwlHistoryStatus = "cleanPreSeason";
+	meta.cwlHistorySeason = season;
+	meta.cwlHistoryWarning = "";
+	warPerformance.meta = meta;
+	return { changed: true, status: "cleanPreSeason", season: season, warning: "" };
+}
+
 // Sanitize regular war snapshot.
 function sanitizeRegularWarSnapshot_(rawSnapshot) {
 	const snapshot = rawSnapshot && typeof rawSnapshot === "object" ? rawSnapshot : null;
@@ -517,6 +632,10 @@ function sanitizeRosterWarPerformance_(rawWarPerformance) {
 	const regularWarLegacyBaselineByTagRaw =
 		warPerformance.regularWarLegacyBaselineByTag && typeof warPerformance.regularWarLegacyBaselineByTag === "object" ? warPerformance.regularWarLegacyBaselineByTag : {};
 	const regularWarLegacyBaselineByTag = sanitizeRegularWarLegacyBaselineByTag_(regularWarLegacyBaselineByTagRaw);
+	const cwlPreSeasonBaselineByTagRaw =
+		warPerformance.cwlPreSeasonBaselineByTag && typeof warPerformance.cwlPreSeasonBaselineByTag === "object" ? warPerformance.cwlPreSeasonBaselineByTag : {};
+	const cwlPreSeasonBaselineByTag = sanitizeCwlPreSeasonBaselineByTag_(cwlPreSeasonBaselineByTagRaw);
+	const cwlHistoryStatus = normalizeCwlHistoryStatus_(warPerformance.cwlHistoryStatus || (warPerformance.meta && warPerformance.meta.cwlHistoryStatus));
 
 	const meta = sanitizeWarPerformanceMeta_(warPerformance.meta);
 	if (!meta.lastFinalizationReason && typeof warPerformance.lastFinalizationReason === "string") {
@@ -545,6 +664,10 @@ function sanitizeRosterWarPerformance_(rawWarPerformance) {
 		processedRegularWarKeys: processedRegularWarKeys,
 		processedCwlWarTags: processedCwlWarTags,
 		regularWarLegacyBaselineByTag: regularWarLegacyBaselineByTag,
+		cwlPreSeasonBaselineByTag: cwlPreSeasonBaselineByTag,
+		cwlPreSeasonBaselineSeason: typeof warPerformance.cwlPreSeasonBaselineSeason === "string" ? warPerformance.cwlPreSeasonBaselineSeason : "",
+		cwlPreSeasonBaselineCapturedAt: typeof warPerformance.cwlPreSeasonBaselineCapturedAt === "string" ? warPerformance.cwlPreSeasonBaselineCapturedAt : "",
+		cwlHistoryStatus: cwlHistoryStatus,
 		regularWarHistoryByKey: regularWarHistoryByKey,
 		byTag: byTag,
 		membershipByTag: membershipByTag,
@@ -564,6 +687,10 @@ function createEmptyRosterWarPerformance_() {
 		processedRegularWarKeys: {},
 		processedCwlWarTags: {},
 		regularWarLegacyBaselineByTag: {},
+		cwlPreSeasonBaselineByTag: {},
+		cwlPreSeasonBaselineSeason: "",
+		cwlPreSeasonBaselineCapturedAt: "",
+		cwlHistoryStatus: "",
 		regularWarHistoryByKey: {},
 		lastRegularWarSnapshot: null,
 		byTag: {},
@@ -580,6 +707,10 @@ function ensureWarPerformance_(roster) {
 	if (!next.processedRegularWarKeys || typeof next.processedRegularWarKeys !== "object") next.processedRegularWarKeys = {};
 	if (!next.processedCwlWarTags || typeof next.processedCwlWarTags !== "object") next.processedCwlWarTags = {};
 	if (!next.regularWarLegacyBaselineByTag || typeof next.regularWarLegacyBaselineByTag !== "object") next.regularWarLegacyBaselineByTag = {};
+	if (!next.cwlPreSeasonBaselineByTag || typeof next.cwlPreSeasonBaselineByTag !== "object") next.cwlPreSeasonBaselineByTag = {};
+	next.cwlHistoryStatus = normalizeCwlHistoryStatus_(next.cwlHistoryStatus);
+	if (typeof next.cwlPreSeasonBaselineSeason !== "string") next.cwlPreSeasonBaselineSeason = "";
+	if (typeof next.cwlPreSeasonBaselineCapturedAt !== "string") next.cwlPreSeasonBaselineCapturedAt = "";
 	if (!next.regularWarHistoryByKey || typeof next.regularWarHistoryByKey !== "object") next.regularWarHistoryByKey = {};
 	if (!next.byTag || typeof next.byTag !== "object") next.byTag = {};
 	if (!next.membershipByTag || typeof next.membershipByTag !== "object") next.membershipByTag = {};
@@ -2265,6 +2396,12 @@ function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, re
 
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	addMembership(warPerformance.membershipByTag);
+	const cwlBaselineByTag = sanitizeCwlPreSeasonBaselineByTag_(warPerformance.cwlPreSeasonBaselineByTag);
+	const cwlBaselineTags = Object.keys(cwlBaselineByTag);
+	for (let i = 0; i < cwlBaselineTags.length; i++) {
+		const tag = normalizeTag_(cwlBaselineTags[i]);
+		if (tag) out[tag] = true;
+	}
 	const regularWar = regularWarRaw && typeof regularWarRaw === "object" ? regularWarRaw : {};
 	addMembership(regularWar.membershipByTag);
 	return out;

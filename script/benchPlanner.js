@@ -1,4 +1,4 @@
-// Bench planner scoring and optimization logic.
+﻿// Bench planner scoring and optimization logic.
 
 // Get bench planner config.
 function getBenchPlannerConfig_() {
@@ -234,14 +234,17 @@ function buildCwlSeasonContext_(roster, config, optionsRaw) {
 	const lockedDaysEstimate = clampNumber_(maxResolvedWarDays + (hasPendingCurrentWarAttack ? 1 : 0), 0, defaultSeasonDays);
 	const seasonFromRoster = rosterSafe && rosterSafe.cwlStats && typeof rosterSafe.cwlStats.season === "string" ? rosterSafe.cwlStats.season : "";
 	const fallbackContext = {
-		source: "stats_fallback",
+		source: "stats_estimate",
+		contextSource: "stats_estimate",
+		estimated: true,
 		season: seasonFromRoster || "",
 		totalSeasonDays: defaultSeasonDays,
 		completedDays: clampNumber_(maxResolvedWarDays, 0, defaultSeasonDays),
 		lockedDays: lockedDaysEstimate,
 		remainingEditableDays: Math.max(0, defaultSeasonDays - lockedDaysEstimate),
-		nextEditableDayIndex: defaultSeasonDays - lockedDaysEstimate > 0 ? 0 : -1,
-		warnings: [],
+		nextEditableDayIndex: defaultSeasonDays - lockedDaysEstimate > 0 ? lockedDaysEstimate : -1,
+		roundStates: [],
+		warnings: ["season-context-estimated"],
 	};
 
 	const clanTag = normalizeTag_(rosterSafe.connectedClanTag);
@@ -328,12 +331,15 @@ function buildCwlSeasonContext_(roster, config, optionsRaw) {
 
 		return {
 			source: "leaguegroup",
+			contextSource: "leaguegroup",
+			estimated: false,
 			season: leaguegroup && typeof leaguegroup.season === "string" ? leaguegroup.season : seasonFromRoster || "",
 			totalSeasonDays: totalSeasonDays,
 			completedDays: completedDays,
 			lockedDays: lockedDays,
 			remainingEditableDays: remainingEditableDays,
-			nextEditableDayIndex: remainingEditableDays > 0 ? 0 : -1,
+			nextEditableDayIndex: remainingEditableDays > 0 ? roundStates.indexOf("editable") : -1,
+			roundStates: roundStates,
 			warnings: [],
 		};
 	} catch (err) {
@@ -457,467 +463,264 @@ function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
 	};
 }
 
-// Parse planner state key.
-function parsePlannerStateKey_(stateKey) {
-	const parts = String(stateKey == null ? "" : stateKey).split("|");
-	const starts = Math.max(0, parseInt(parts[0] || "0", 10) || 0);
-	const coverage = Math.max(0, parseInt(parts[1] || "0", 10) || 0);
-	return { starts: starts, coverage: coverage };
-}
-
-// Compare planner state keys.
-function comparePlannerStateKeys_(a, b) {
-	const pa = parsePlannerStateKey_(a);
-	const pb = parsePlannerStateKey_(b);
-	if (pa.starts !== pb.starts) return pa.starts - pb.starts;
-	if (pa.coverage !== pb.coverage) return pa.coverage - pb.coverage;
-	return compareTagsAsc_(String(a), String(b));
-}
-
-// Handle calculate covered starts.
-function calculateCoveredStarts_(players, startCountsByTag) {
-	const list = Array.isArray(players) ? players : [];
-	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
-	let covered = 0;
-	for (let i = 0; i < list.length; i++) {
-		const p = list[i] && typeof list[i] === "object" ? list[i] : {};
-		const starts = toNonNegativeInt_(startsByTag[p.tag]);
-		const startsNeeded = toNonNegativeInt_(p.startsNeeded);
-		covered += Math.min(starts, startsNeeded);
-	}
-	return covered;
-}
-
-// Build day zero target lineup.
-function buildDayZeroTargetLineup_(snapshot, remainingByTag) {
-	const remaining = remainingByTag && typeof remainingByTag === "object" ? remainingByTag : {};
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const daysLeftIncludingToday = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
-	const seen = {};
-	const candidates = [];
-
-	for (let i = 0; i < players.length; i++) {
-		const player = players[i] && typeof players[i] === "object" ? players[i] : {};
-		const tag = normalizeTag_(player.tag);
-		if (!tag || seen[tag]) continue;
-		seen[tag] = true;
-
-		const remainingAssignedStarts = toNonNegativeInt_(remaining[tag]);
-		if (remainingAssignedStarts <= 0) continue;
-
-		const rewardSlackRaw = Number(player.rewardSlackMargin);
-		candidates.push({
-			tag: tag,
-			mustPlayToday: remainingAssignedStarts >= daysLeftIncludingToday,
-			rewardSlackMargin: isFinite(rewardSlackRaw) ? rewardSlackRaw : Number.MAX_SAFE_INTEGER,
-			strengthScore: Number(player.strengthScore) || 0,
-			startsNeeded: toNonNegativeInt_(player.startsNeeded),
-			isCurrentMain: !!currentMainSet[tag],
-		});
-	}
-
-	candidates.sort((a, b) => {
-		if (a.mustPlayToday !== b.mustPlayToday) return a.mustPlayToday ? -1 : 1;
-		if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
-		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-		if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
-		if (a.isCurrentMain !== b.isCurrentMain) return a.isCurrentMain ? -1 : 1;
-		return compareTagsAsc_(a.tag, b.tag);
-	});
-
-	return candidates.slice(0, mainSize).map((p) => p.tag);
-}
-
-// Build day assignments from start counts.
-function buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag) {
-	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
-	const remainingByTag = {};
-	for (let i = 0; i < players.length; i++) {
-		const tag = players[i].tag;
-		remainingByTag[tag] = toNonNegativeInt_(startsByTag[tag]);
-	}
-
-	const assignments = [];
-	for (let day = 0; day < days; day++) {
-		let selectedTags = [];
-		if (day === 0) {
-			selectedTags = buildDayZeroTargetLineup_(snapshot, remainingByTag);
-		} else {
-			selectedTags = players
-				.filter((p) => toNonNegativeInt_(remainingByTag[p.tag]) > 0)
-				.sort((a, b) => {
-					const aRemaining = toNonNegativeInt_(remainingByTag[a.tag]);
-					const bRemaining = toNonNegativeInt_(remainingByTag[b.tag]);
-					if (aRemaining !== bRemaining) return bRemaining - aRemaining;
-					if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-					if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
-					return compareTagsAsc_(a.tag, b.tag);
-				})
-				.slice(0, mainSize)
-				.map((p) => p.tag);
-		}
-
-		if (selectedTags.length < mainSize) return null;
-		assignments.push(selectedTags);
-		for (let i = 0; i < selectedTags.length; i++) {
-			const tag = selectedTags[i];
-			remainingByTag[tag] = Math.max(0, toNonNegativeInt_(remainingByTag[tag]) - 1);
-		}
-	}
-
-	for (let i = 0; i < players.length; i++) {
-		if (toNonNegativeInt_(remainingByTag[players[i].tag]) > 0) return null;
-	}
-	return assignments;
-}
-
-// Handle optimize season plan by dynamic programming.
-function optimizeSeasonPlanByDynamicProgramming_(snapshot, coverageTarget, config) {
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const totalStarts = days * mainSize;
-	const targetCoverage = Math.max(0, toNonNegativeInt_(coverageTarget));
-	const scale = Math.max(1, toNonNegativeInt_((config && config.optimizerScoreScale) || 100000));
-	const retentionBonus = Math.max(0, Number(config && config.churnPenalty) || 0) * 2;
-
-	let currentLayer = {
-		"0|0": {
-			value: 0,
-			prevKey: "",
-			starts: 0,
-		},
-	};
-	const layers = [currentLayer];
-
-	for (let i = 0; i < players.length; i++) {
-		const player = players[i];
-		const nextLayer = {};
-		const stateKeys = Object.keys(currentLayer).sort(comparePlannerStateKeys_);
-		const startsNeeded = Math.max(0, toNonNegativeInt_(player.startsNeeded));
-
-		for (let j = 0; j < stateKeys.length; j++) {
-			const key = stateKeys[j];
-			const state = currentLayer[key];
-			const parsed = parsePlannerStateKey_(key);
-			const currentStarts = parsed.starts;
-			const currentCoverage = parsed.coverage;
-
-			for (let starts = 0; starts <= days; starts++) {
-				const nextStarts = currentStarts + starts;
-				if (nextStarts > totalStarts) continue;
-				const nextCoverage = Math.min(targetCoverage, currentCoverage + Math.min(starts, startsNeeded));
-				const bonus = player.isCurrentMain && starts > 0 ? retentionBonus : 0;
-				const contribution = starts * player.strengthScore + bonus;
-				const scoreInt = state.value + Math.round(contribution * scale);
-				const nextKey = nextStarts + "|" + nextCoverage;
-				const existing = nextLayer[nextKey];
-				if (!existing || scoreInt > existing.value || (scoreInt === existing.value && starts < existing.starts)) {
-					nextLayer[nextKey] = {
-						value: scoreInt,
-						prevKey: key,
-						starts: starts,
-					};
-				}
-			}
-		}
-
-		currentLayer = nextLayer;
-		layers.push(currentLayer);
-	}
-
-	const finalKey = totalStarts + "|" + targetCoverage;
-	if (!currentLayer[finalKey]) return null;
-
-	const startCountsByTag = {};
-	let backtrackKey = finalKey;
-	for (let i = players.length - 1; i >= 0; i--) {
-		const layer = layers[i + 1];
-		const entry = layer[backtrackKey];
-		if (!entry) return null;
-		startCountsByTag[players[i].tag] = entry.starts;
-		backtrackKey = entry.prevKey;
-	}
-
-	const dayAssignments = buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag);
-	if (!dayAssignments) return null;
-
-	let totalStrength = 0;
-	for (let i = 0; i < players.length; i++) {
-		const starts = toNonNegativeInt_(startCountsByTag[players[i].tag]);
-		totalStrength += starts * players[i].strengthScore;
-	}
-	const coveredStarts = calculateCoveredStarts_(players, startCountsByTag);
+// Create bench evidence accumulator.
+function createBenchEvidenceAccumulator_() {
 	return {
-		mode: "optimizer",
-		startCountsByTag: startCountsByTag,
-		dayAssignments: dayAssignments,
-		totalStrength: totalStrength,
-		coveredStarts: coveredStarts,
+		qualityWeight: 0,
+		weightedStars: 0,
+		weightedDestruction: 0,
+		weightedTriples: 0,
+		reliabilityWeight: 0,
+		weightedUsedAttacks: 0,
+		weightedOpportunities: 0,
 	};
 }
 
-// Handle boost fallback coverage toward target.
-function boostFallbackCoverageTowardTarget_(players, startCountsByTag, coverageTarget, days) {
-	const list = Array.isArray(players) ? players : [];
-	const startsByTag = startCountsByTag && typeof startCountsByTag === "object" ? startCountsByTag : {};
-	const target = Math.max(0, toNonNegativeInt_(coverageTarget));
-	let covered = calculateCoveredStarts_(list, startsByTag);
-	let guard = 0;
-	const maxGuard = 5000;
-
-	while (covered < target && guard < maxGuard) {
-		guard++;
-		const needers = list
-			.filter((p) => toNonNegativeInt_(startsByTag[p.tag]) < days && toNonNegativeInt_(startsByTag[p.tag]) < toNonNegativeInt_(p.startsNeeded))
-			.sort((a, b) => {
-				if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
-				if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
-				if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-				return compareTagsAsc_(a.tag, b.tag);
-			});
-		if (!needers.length) break;
-
-		const donors = list
-			.filter((p) => toNonNegativeInt_(startsByTag[p.tag]) > 0)
-			.sort((a, b) => {
-				const aStarts = toNonNegativeInt_(startsByTag[a.tag]);
-				const bStarts = toNonNegativeInt_(startsByTag[b.tag]);
-				const aExcess = Math.max(0, aStarts - toNonNegativeInt_(a.startsNeeded));
-				const bExcess = Math.max(0, bStarts - toNonNegativeInt_(b.startsNeeded));
-				if (aExcess !== bExcess) return bExcess - aExcess;
-				if (a.strengthScore !== b.strengthScore) return a.strengthScore - b.strengthScore;
-				return compareTagsAsc_(a.tag, b.tag);
-			});
-		if (!donors.length) break;
-
-		let improved = false;
-		for (let i = 0; i < needers.length && !improved; i++) {
-			const needy = needers[i];
-			for (let j = 0; j < donors.length && !improved; j++) {
-				const donor = donors[j];
-				if (donor.tag === needy.tag) continue;
-				const donorStarts = toNonNegativeInt_(startsByTag[donor.tag]);
-				const needyStarts = toNonNegativeInt_(startsByTag[needy.tag]);
-				if (donorStarts <= 0 || needyStarts >= days) continue;
-
-				const donorCoverageBefore = Math.min(donorStarts, toNonNegativeInt_(donor.startsNeeded));
-				const needyCoverageBefore = Math.min(needyStarts, toNonNegativeInt_(needy.startsNeeded));
-				const donorCoverageAfter = Math.min(Math.max(0, donorStarts - 1), toNonNegativeInt_(donor.startsNeeded));
-				const needyCoverageAfter = Math.min(needyStarts + 1, toNonNegativeInt_(needy.startsNeeded));
-				const deltaCoverage = donorCoverageAfter + needyCoverageAfter - (donorCoverageBefore + needyCoverageBefore);
-				if (deltaCoverage <= 0) continue;
-
-				startsByTag[donor.tag] = donorStarts - 1;
-				startsByTag[needy.tag] = needyStarts + 1;
-				covered += deltaCoverage;
-				improved = true;
-			}
-		}
-		if (!improved) break;
-	}
+// Return a cap multiplier for weighted samples.
+function benchSampleCapMultiplier_(sampleCountRaw, capRaw) {
+	const sampleCount = Math.max(0, Number(sampleCountRaw) || 0);
+	const cap = Math.max(0, Number(capRaw) || 0);
+	if (sampleCount <= 0 || cap <= 0 || sampleCount <= cap) return 1;
+	return cap / sampleCount;
 }
 
-// Build fallback season lineup plan.
-function buildFallbackSeasonLineupPlan_(snapshot, coverageTarget) {
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const totalStarts = days * mainSize;
-	const startCountsByTag = {};
-	for (let i = 0; i < players.length; i++) startCountsByTag[players[i].tag] = 0;
+// Add weighted conditional attack-quality evidence.
+function addBenchQualityEvidence_(acc, statsRaw, sourceWeightRaw, capAttacksRaw) {
+	const stats = sanitizeWarPerformanceStatsEntry_(statsRaw);
+	const attacks = Math.max(0, Number(stats.countedAttacks) || 0);
+	if (!(attacks > 0)) return;
+	const sourceWeight = Math.max(0, Number(sourceWeightRaw) || 0);
+	if (!(sourceWeight > 0)) return;
+	const multiplier = sourceWeight * benchSampleCapMultiplier_(attacks, capAttacksRaw);
+	const sampleWeight = attacks * multiplier;
+	acc.qualityWeight += sampleWeight;
+	acc.weightedStars += (Number(stats.starsTotal) || 0) * multiplier;
+	acc.weightedDestruction += (Number(stats.totalDestruction) || 0) * multiplier;
+	acc.weightedTriples += (Number(stats.threeStarCount) || 0) * multiplier;
+}
 
-	let slotsRemaining = totalStarts;
-	const rewardOrder = players.slice().sort((a, b) => {
-		if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
-		if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
-		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-		return compareTagsAsc_(a.tag, b.tag);
-	});
+// Add weighted attack-use reliability evidence.
+function addBenchReliabilityEvidence_(acc, usedRaw, opportunitiesRaw, sourceWeightRaw, capOpportunitiesRaw) {
+	const opportunities = Math.max(0, Number(opportunitiesRaw) || 0);
+	if (!(opportunities > 0)) return;
+	const sourceWeight = Math.max(0, Number(sourceWeightRaw) || 0);
+	if (!(sourceWeight > 0)) return;
+	const multiplier = sourceWeight * benchSampleCapMultiplier_(opportunities, capOpportunitiesRaw);
+	const used = clampNumber_(usedRaw, 0, opportunities);
+	const sampleWeight = opportunities * multiplier;
+	acc.reliabilityWeight += sampleWeight;
+	acc.weightedUsedAttacks += used * multiplier;
+	acc.weightedOpportunities += opportunities * multiplier;
+}
 
-	let progressed = true;
-	while (slotsRemaining > 0 && progressed) {
-		progressed = false;
-		for (let i = 0; i < rewardOrder.length; i++) {
-			const p = rewardOrder[i];
-			const currentStarts = toNonNegativeInt_(startCountsByTag[p.tag]);
-			if (currentStarts >= days) continue;
-			if (currentStarts >= toNonNegativeInt_(p.startsNeeded)) continue;
-			startCountsByTag[p.tag] = currentStarts + 1;
-			slotsRemaining--;
-			progressed = true;
-			if (slotsRemaining <= 0) break;
+// Convert current CWL stats to war-performance-shaped stats.
+function mapCurrentCwlStatsToWarPerformanceStats_(entryRaw) {
+	const entry = sanitizeCwlStatEntry_(entryRaw);
+	const out = createEmptyWarPerformanceStats_();
+	out.daysInLineup = entry.daysInLineup;
+	out.resolvedWarDays = entry.resolvedWarDays;
+	out.possibleAttacks = entry.resolvedWarDays;
+	out.usedAttacks = entry.attacksMade;
+	out.attacksMade = entry.attacksMade;
+	out.attacksMissed = entry.missedAttacks;
+	out.starsTotal = entry.starsTotal;
+	out.totalDestruction = entry.totalDestruction;
+	out.countedAttacks = entry.countedAttacks;
+	out.formEligibleAttacks = entry.countedAttacks;
+	out.threeStarCount = entry.threeStarCount;
+	out.hitUpCount = entry.hitUpCount;
+	out.sameThHitCount = entry.sameThHitCount;
+	out.hitDownCount = entry.hitDownCount;
+	return out;
+}
+
+// Return the best regular-war conditional-quality stats available.
+function getRegularWarQualityStatsForBench_(entryRaw) {
+	const entry = sanitizeWarPerformanceEntry_(entryRaw);
+	const formStats = entry.formStats && typeof entry.formStats === "object" ? sanitizeWarPerformanceStatsEntry_(entry.formStats.regular) : null;
+	if (formStats && hasWarPerformanceStatsData_(formStats) && toNonNegativeInt_(formStats.countedAttacks) > 0) return formStats;
+	return sanitizeWarPerformanceStatsEntry_(entry.regular);
+}
+
+// Build bench history context.
+function buildBenchHistoryContext_(rosterRaw, seasonRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const season = String(seasonRaw == null ? "" : seasonRaw).trim();
+	const warPerformance = sanitizeRosterWarPerformance_(roster.warPerformance) || createEmptyRosterWarPerformance_();
+	const status = normalizeCwlHistoryStatus_(warPerformance.cwlHistoryStatus || (warPerformance.meta && warPerformance.meta.cwlHistoryStatus));
+	const baselineSeason = String(warPerformance.cwlPreSeasonBaselineSeason || (warPerformance.meta && warPerformance.meta.cwlHistorySeason) || "").trim();
+	const baselineByTag = sanitizeCwlPreSeasonBaselineByTag_(warPerformance.cwlPreSeasonBaselineByTag);
+	const cleanPreviousCwlAvailable = !!(season && status === "cleanPreSeason" && baselineSeason === season);
+	const warnings = [];
+	let historyStatus = cleanPreviousCwlAvailable ? "clean_preseason_cwl" : "previous_cwl_ignored";
+	if (!cleanPreviousCwlAvailable) {
+		const hasCwlAggregate = Object.keys(buildCwlPreSeasonBaselineFromWarPerformanceByTag_(warPerformance)).length > 0;
+		if (status === "activeSeasonContaminated") {
+			warnings.push("cwl-history-active-season-contaminated");
+			historyStatus = "active_season_cwl_history_ignored";
+		} else if (hasCwlAggregate) {
+			warnings.push("cwl-history-unproven-ignored");
+			historyStatus = "unproven_cwl_history_ignored";
 		}
-	}
-
-	const strengthOrder = players.slice().sort((a, b) => {
-		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-		if (a.rewardSlackMargin !== b.rewardSlackMargin) return a.rewardSlackMargin - b.rewardSlackMargin;
-		return compareTagsAsc_(a.tag, b.tag);
-	});
-
-	while (slotsRemaining > 0) {
-		let assigned = false;
-		for (let i = 0; i < strengthOrder.length; i++) {
-			const p = strengthOrder[i];
-			const currentStarts = toNonNegativeInt_(startCountsByTag[p.tag]);
-			if (currentStarts >= days) continue;
-			startCountsByTag[p.tag] = currentStarts + 1;
-			slotsRemaining--;
-			assigned = true;
-			if (slotsRemaining <= 0) break;
-		}
-		if (!assigned) break;
-	}
-
-	boostFallbackCoverageTowardTarget_(players, startCountsByTag, coverageTarget, days);
-	const dayAssignments = buildDayAssignmentsFromStartCounts_(snapshot, startCountsByTag);
-	if (!dayAssignments) return null;
-
-	let totalStrength = 0;
-	for (let i = 0; i < players.length; i++) {
-		const starts = toNonNegativeInt_(startCountsByTag[players[i].tag]);
-		totalStrength += starts * players[i].strengthScore;
 	}
 	return {
-		mode: "fallback",
-		startCountsByTag: startCountsByTag,
-		dayAssignments: dayAssignments,
-		totalStrength: totalStrength,
-		coveredStarts: calculateCoveredStarts_(players, startCountsByTag),
+		warPerformance: warPerformance,
+		cleanPreviousCwlAvailable: cleanPreviousCwlAvailable,
+		previousCwlByTag: cleanPreviousCwlAvailable ? baselineByTag : {},
+		historyStatus: historyStatus,
+		warnings: warnings,
 	};
 }
 
-// Build emergency season plan.
-function buildEmergencySeasonPlan_(snapshot) {
-	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const currentMainSet = listToTagSet_(currentMainTags);
-	const sortedPlayers = players.slice().sort((a, b) => {
-		const aCurrent = !!currentMainSet[a.tag];
-		const bCurrent = !!currentMainSet[b.tag];
-		if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
-		if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-		return compareTagsAsc_(a.tag, b.tag);
-	});
-	const targetMain = sortedPlayers.slice(0, mainSize).map((p) => p.tag);
-	const dayAssignments = [];
-	for (let d = 0; d < days; d++) dayAssignments.push(targetMain.slice());
-	const startCountsByTag = {};
-	for (let i = 0; i < players.length; i++) startCountsByTag[players[i].tag] = 0;
-	for (let d = 0; d < dayAssignments.length; d++) {
-		for (let i = 0; i < dayAssignments[d].length; i++) {
-			const tag = dayAssignments[d][i];
-			startCountsByTag[tag] = toNonNegativeInt_(startCountsByTag[tag]) + 1;
-		}
-	}
-	let totalStrength = 0;
-	for (let i = 0; i < players.length; i++) {
-		totalStrength += toNonNegativeInt_(startCountsByTag[players[i].tag]) * players[i].strengthScore;
-	}
+// Compute bench attack model for one player.
+function computeBenchAttackModel_(tagRaw, currentCwlStatsRaw, warPerformanceEntryRaw, previousCwlStatsRaw, configRaw) {
+	const config = configRaw && typeof configRaw === "object" ? configRaw : {};
+	const currentStats = mapCurrentCwlStatsToWarPerformanceStats_(currentCwlStatsRaw);
+	const previousCwlStats = sanitizeWarPerformanceStatsEntry_(previousCwlStatsRaw);
+	const warPerformanceEntry = sanitizeWarPerformanceEntry_(warPerformanceEntryRaw);
+	const regularQualityStats = getRegularWarQualityStatsForBench_(warPerformanceEntry);
+	const regularReliabilityStats = sanitizeWarPerformanceStatsEntry_(warPerformanceEntry.regular);
+	const acc = createBenchEvidenceAccumulator_();
+
+	addBenchQualityEvidence_(acc, currentStats, Number(config.currentCwlQualityWeight) || 1, 0);
+	addBenchReliabilityEvidence_(
+		acc,
+		currentStats.usedAttacks,
+		currentStats.possibleAttacks,
+		Number(config.currentCwlReliabilityWeight) || 1,
+		0,
+	);
+	addBenchQualityEvidence_(acc, previousCwlStats, Number(config.previousCwlQualityWeight) || 0, config.previousCwlMaxAttacks);
+	addBenchReliabilityEvidence_(
+		acc,
+		previousCwlStats.usedAttacks != null ? previousCwlStats.usedAttacks : previousCwlStats.attacksMade,
+		previousCwlStats.possibleAttacks || previousCwlStats.resolvedWarDays || previousCwlStats.daysInLineup,
+		Number(config.previousCwlReliabilityWeight) || 0,
+		config.previousCwlMaxOpportunities,
+	);
+	addBenchQualityEvidence_(acc, regularQualityStats, Number(config.regularWarQualityWeight) || 0, config.regularWarMaxAttacks);
+	addBenchReliabilityEvidence_(
+		acc,
+		regularReliabilityStats.usedAttacks != null ? regularReliabilityStats.usedAttacks : regularReliabilityStats.attacksMade,
+		regularReliabilityStats.possibleAttacks,
+		Number(config.regularWarReliabilityWeight) || 0,
+		config.regularWarMaxOpportunities,
+	);
+
+	const qualityPriorWeight = Math.max(0, Number(config.qualityPriorWeightAttacks) || 0);
+	const starsPrior = isFinite(Number(config.qualityPriorMeanStarsWhenUsed)) ? Number(config.qualityPriorMeanStarsWhenUsed) : 3;
+	const destructionPrior = isFinite(Number(config.qualityPriorMeanDestruction)) ? Number(config.qualityPriorMeanDestruction) : 100;
+	const triplePrior = isFinite(Number(config.qualityPriorMeanThreeStarProbability)) ? Number(config.qualityPriorMeanThreeStarProbability) : 1;
+	const qualityDenom = qualityPriorWeight + acc.qualityWeight;
+	const expectedStarsWhenUsed =
+		qualityDenom > 0 ? (qualityPriorWeight * starsPrior + acc.weightedStars) / qualityDenom : starsPrior;
+	const expectedDestructionWhenUsed =
+		qualityDenom > 0 ? (qualityPriorWeight * destructionPrior + acc.weightedDestruction) / qualityDenom : destructionPrior;
+	const threeStarProbability =
+		qualityDenom > 0 ? (qualityPriorWeight * triplePrior + acc.weightedTriples) / qualityDenom : triplePrior;
+
+	const reliabilityPriorWeight = Math.max(0, Number(config.reliabilityPriorWeight) || 0);
+	const reliabilityPriorMean = normalizeUnitMetric_(config.reliabilityPriorMean, 0.98);
+	const reliabilityDenom = reliabilityPriorWeight + acc.reliabilityWeight;
+	const attackUseProbability =
+		reliabilityDenom > 0
+			? (reliabilityPriorWeight * reliabilityPriorMean + acc.weightedUsedAttacks) / reliabilityDenom
+			: reliabilityPriorMean;
+
 	return {
-		mode: "emergency",
-		startCountsByTag: startCountsByTag,
-		dayAssignments: dayAssignments,
-		totalStrength: totalStrength,
-		coveredStarts: calculateCoveredStarts_(players, startCountsByTag),
+		tag: normalizeTag_(tagRaw),
+		expectedStarsWhenUsed: clampNumber_(expectedStarsWhenUsed, 0, 3),
+		expectedDestructionWhenUsed: clampNumber_(expectedDestructionWhenUsed, 0, 100),
+		threeStarProbability: normalizeUnitMetric_(threeStarProbability, 1),
+		attackUseProbability: normalizeUnitMetric_(attackUseProbability, reliabilityPriorMean),
+		expectedStarsPerAppearance: normalizeUnitMetric_(attackUseProbability, reliabilityPriorMean) * clampNumber_(expectedStarsWhenUsed, 0, 3),
+		qualitySampleWeight: acc.qualityWeight,
+		reliabilitySampleWeight: acc.reliabilityWeight,
+		currentCwlAttacks: currentStats.countedAttacks,
+		currentCwlOpportunities: currentStats.possibleAttacks,
+		regularWarOpportunities: regularReliabilityStats.possibleAttacks,
 	};
 }
 
-// Handle solve season lineup plan.
-function solveSeasonLineupPlan_(snapshot, config) {
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const remainingEditableDays = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const totalStarts = remainingEditableDays * mainSize;
-	const plan = {
-		dayAssignments: [],
-		targetMainTags: [],
-		startCountsByTag: {},
-		optimalTotalSlack: 0,
-		totalSlack: 0,
-		coveredStarts: 0,
-		solverMode: "none",
-		warnings: [],
+// Compute bench-specific player value.
+function computeBenchPlayerValue_(playerRaw, attackModelRaw, configRaw) {
+	const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+	const attackModel = attackModelRaw && typeof attackModelRaw === "object" ? attackModelRaw : {};
+	const config = configRaw && typeof configRaw === "object" ? configRaw : {};
+	const th = Number(player.th);
+	const thMin = Math.max(1, toNonNegativeInt_(config.supportedTownHallMin) || 1);
+	const thMax = Math.max(thMin + 1, toNonNegativeInt_(config.supportedTownHallMax) || 18);
+	const unknownTh = normalizeUnitMetric_(config.unknownTownHallNormalized, 0.5);
+	const normTH = isFinite(th) && th > 0 ? clampNumber_((Math.floor(th) - thMin) / (thMax - thMin), 0, 1) : unknownTh;
+	const starsNorm = clampNumber_(Number(attackModel.expectedStarsWhenUsed) / 3, 0, 1);
+	const destructionNorm = clampNumber_(Number(attackModel.expectedDestructionWhenUsed) / 100, 0, 1);
+	const tripleNorm = normalizeUnitMetric_(attackModel.threeStarProbability, 1);
+	const reliability = normalizeUnitMetric_(attackModel.attackUseProbability, normalizeUnitMetric_(config.reliabilityPriorMean, 0.98));
+	const base =
+		(Number(config.benchWeightTownHall) || 0) * normTH +
+		(Number(config.benchWeightStarsWhenUsed) || 0) * starsNorm +
+		(Number(config.benchWeightDestructionWhenUsed) || 0) * destructionNorm +
+		(Number(config.benchWeightThreeStarProbability) || 0) * tripleNorm;
+	const exponent = Math.max(0.1, Number(config.benchReliabilityExponent) || 1);
+	const value = base * Math.pow(reliability, exponent);
+	return {
+		score: value,
+		normTH: normTH,
+		starsNorm: starsNorm,
+		destructionNorm: destructionNorm,
+		threeStarProbability: tripleNorm,
+		attackUseProbability: reliability,
+		baseScoreBeforeReliability: base,
 	};
+}
 
-	if (remainingEditableDays <= 0 || mainSize <= 0 || players.length <= 0) {
-		plan.solverMode = "none";
-		return plan;
+// Compute reward projection for bench planning.
+function computeBenchRewardProjection_(currentCwlStatsRaw, attackModelRaw, remainingDaysRaw, neverInRaw) {
+	const stats = sanitizeCwlStatEntry_(currentCwlStatsRaw);
+	const attackModel = attackModelRaw && typeof attackModelRaw === "object" ? attackModelRaw : {};
+	const remainingDays = Math.max(0, toNonNegativeInt_(remainingDaysRaw));
+	const currentStars = toNonNegativeInt_(stats.starsTotal);
+	const pending = toNonNegativeInt_(stats.currentWarAttackPending) > 0;
+	const base = {
+		currentStars: currentStars,
+		starsNeeded: Math.max(0, 8 - currentStars),
+		pendingCurrentAttack: pending,
+		expectedStarsPerAppearance: Math.max(0, Number(attackModel.expectedStarsPerAppearance) || 0),
+		appearancesNeeded: 0,
+		rewardStatus: "secured",
+		individuallyFeasible: false,
+		projectedComplete: currentStars >= 8,
+	};
+	if (neverInRaw === true) {
+		base.rewardStatus = "restricted_out";
+		base.projectedComplete = false;
+		return base;
 	}
-
-	let totalStartsNeeded = 0;
-	let coverageCapacity = 0;
-	for (let i = 0; i < players.length; i++) {
-		const startsNeeded = toNonNegativeInt_(players[i].startsNeeded);
-		totalStartsNeeded += startsNeeded;
-		coverageCapacity += Math.min(remainingEditableDays, startsNeeded);
+	if (base.starsNeeded <= 0) return base;
+	if (pending && currentStars + 3 >= 8) {
+		base.rewardStatus = "pending_current_attack";
+		base.projectedComplete = false;
+		return base;
 	}
-	const coverageTarget = Math.min(totalStarts, coverageCapacity);
-	plan.optimalTotalSlack = Math.max(0, totalStartsNeeded - coverageTarget);
-
-	const estimatedStateCells = players.length * (totalStarts + 1) * (coverageTarget + 1);
-	const exceedsGuards = players.length > toNonNegativeInt_(config && config.optimizerMaxPlayers) || remainingEditableDays > toNonNegativeInt_(config && config.optimizerMaxDays) || estimatedStateCells > toNonNegativeInt_(config && config.optimizerMaxStateCells);
-
-	let solved = null;
-	if (!exceedsGuards) {
-		try {
-			solved = optimizeSeasonPlanByDynamicProgramming_(snapshot, coverageTarget, config);
-		} catch (err) {
-			Logger.log("optimizeSeasonPlanByDynamicProgramming_ failed: %s", err && err.message ? err.message : String(err));
-			plan.warnings.push("optimizer-error-fallback");
-		}
+	const starsNeededAfterPending = Math.max(0, 8 - (currentStars + (pending ? 3 : 0)));
+	const expected = base.expectedStarsPerAppearance;
+	if (!(expected > 0)) {
+		base.rewardStatus = pending ? "pending_current_attack_individually_impossible" : "individually_impossible";
+		return base;
+	}
+	const appearancesNeeded = Math.max(0, Math.ceil(starsNeededAfterPending / expected));
+	base.appearancesNeeded = appearancesNeeded;
+	base.individuallyFeasible = appearancesNeeded > 0 && appearancesNeeded <= remainingDays;
+	base.projectedComplete = base.individuallyFeasible;
+	if (base.individuallyFeasible) {
+		base.rewardStatus = pending ? "pending_current_attack_individually_feasible" : "individually_feasible";
 	} else {
-		plan.warnings.push("optimizer-guard-fallback");
+		base.rewardStatus = pending ? "pending_current_attack_individually_impossible" : "individually_impossible";
 	}
-
-	if (!solved) {
-		solved = buildFallbackSeasonLineupPlan_(snapshot, coverageTarget);
-	}
-	if (!solved) {
-		plan.warnings.push("fallback-scheduler-failed-emergency-plan");
-		solved = buildEmergencySeasonPlan_(snapshot);
-	}
-
-	plan.solverMode = solved && solved.mode ? solved.mode : "unknown";
-	plan.startCountsByTag = solved && solved.startCountsByTag ? solved.startCountsByTag : {};
-	plan.dayAssignments = solved && Array.isArray(solved.dayAssignments) ? solved.dayAssignments : [];
-	plan.targetMainTags = plan.dayAssignments.length ? plan.dayAssignments[0].slice() : [];
-	plan.coveredStarts = toNonNegativeInt_(solved && solved.coveredStarts);
-	plan.totalSlack = Math.max(0, totalStartsNeeded - plan.coveredStarts);
-	plan.totalStrength = Number(solved && solved.totalStrength) || 0;
-	return plan;
+	return base;
 }
 
-// Compare actionable removal priority.
-function compareActionableRemovalPriority_(tagA, tagB, snapshot, forcedKeepSet) {
-	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
-	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
-	const playerA = playersByTag[tagA] || {};
-	const playerB = playersByTag[tagB] || {};
-	const aForced = !!(forcedKeepSet && forcedKeepSet[tagA]);
-	const bForced = !!(forcedKeepSet && forcedKeepSet[tagB]);
-	if (aForced !== bForced) return aForced ? 1 : -1;
-	const aCurrent = !!currentMainSet[tagA];
-	const bCurrent = !!currentMainSet[tagB];
-	if (aCurrent !== bCurrent) return aCurrent ? 1 : -1;
-	const aNeeded = toNonNegativeInt_(playerA.startsNeeded);
-	const bNeeded = toNonNegativeInt_(playerB.startsNeeded);
-	if (aNeeded !== bNeeded) return aNeeded - bNeeded;
-	const aScore = Number(playerA.strengthScore) || 0;
-	const bScore = Number(playerB.strengthScore) || 0;
-	if (aScore !== bScore) return aScore - bScore;
-	return compareTagsAsc_(tagA, tagB);
-}
-
-// Handle order target main tags.
+// Order a selected target lineup deterministically, retaining current main order first.
 function orderTargetMainTags_(selectedSet, snapshot) {
 	const set = selectedSet && typeof selectedSet === "object" ? selectedSet : {};
 	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
@@ -925,308 +728,793 @@ function orderTargetMainTags_(selectedSet, snapshot) {
 	const out = [];
 	const seen = {};
 	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-
-	for (let i = 0; i < currentMainTags.length; i++) {
+	for (let i = 0; i < currentMainTags.length && out.length < mainSize; i++) {
 		const tag = normalizeTag_(currentMainTags[i]);
 		if (!tag || !set[tag] || seen[tag]) continue;
 		seen[tag] = true;
 		out.push(tag);
-		if (out.length >= mainSize) return out;
 	}
-
 	const rest = players
-		.filter((p) => set[p.tag] && !seen[p.tag])
+		.filter((p) => p && set[p.tag] && !seen[p.tag])
 		.sort((a, b) => {
-			if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-			if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
+			if ((Number(a.lineupValue) || 0) !== (Number(b.lineupValue) || 0)) return (Number(b.lineupValue) || 0) - (Number(a.lineupValue) || 0);
 			return compareTagsAsc_(a.tag, b.tag);
 		});
 	for (let i = 0; i < rest.length && out.length < mainSize; i++) {
+		seen[rest[i].tag] = true;
 		out.push(rest[i].tag);
 	}
 	return out;
 }
 
-// Build actionable target main tags.
-function buildActionableTargetMainTags_(snapshot, idealTargetTagsRaw) {
-	const idealTargetTags = dedupeTagList_(idealTargetTagsRaw);
-	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
-	const currentMainTags = Array.isArray(snapshot && snapshot.currentMainTags) ? snapshot.currentMainTags : [];
-	const currentMainSet = snapshot && snapshot.currentMainTagSet && typeof snapshot.currentMainTagSet === "object" ? snapshot.currentMainTagSet : {};
-	const selectedSet = {};
+// Build CWL planning snapshot (v2).
+function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
+	const rosterSafe = roster && typeof roster === "object" ? roster : {};
+	const season = seasonContext && typeof seasonContext === "object" ? seasonContext : {};
+	const rosterStatsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object" ? rosterSafe.cwlStats.byTag : {};
+	const currentMainRaw = Array.isArray(rosterSafe.main) ? rosterSafe.main : [];
+	const poolPlayersRaw = collectRosterUsablePlayers_(rosterSafe);
+	let requestedMainSize = Number(rosterSafe && rosterSafe.badges && rosterSafe.badges.main);
+	if (!isFinite(requestedMainSize)) requestedMainSize = currentMainRaw.length;
+	requestedMainSize = Math.max(0, Math.floor(requestedMainSize));
 
-	for (let i = 0; i < idealTargetTags.length; i++) {
-		const tag = idealTargetTags[i];
-		if (!playersByTag[tag]) continue;
-		selectedSet[tag] = true;
+	const currentMainTags = [];
+	const currentMainSeen = {};
+	for (let i = 0; i < currentMainRaw.length; i++) {
+		const tag = normalizeTag_(currentMainRaw[i] && currentMainRaw[i].tag);
+		if (!tag || currentMainSeen[tag]) continue;
+		currentMainSeen[tag] = true;
+		currentMainTags.push(tag);
+	}
+	const currentMainTagSet = listToTagSet_(currentMainTags);
+	const historyContext = buildBenchHistoryContext_(rosterSafe, season.season);
+	const warPerformance = historyContext.warPerformance || {};
+	const warPerformanceByTag = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
+	const previousCwlByTag = historyContext.previousCwlByTag && typeof historyContext.previousCwlByTag === "object" ? historyContext.previousCwlByTag : {};
+
+	const players = [];
+	const playersByTag = {};
+	for (let i = 0; i < poolPlayersRaw.length; i++) {
+		const player = poolPlayersRaw[i] && typeof poolPlayersRaw[i] === "object" ? poolPlayersRaw[i] : {};
+		const tag = normalizeTag_(player.tag);
+		if (!tag || playersByTag[tag]) continue;
+		const th = typeof player.th === "number" && isFinite(player.th) ? Math.floor(player.th) : 0;
+		const alwaysIn = toBooleanFlag_(player.excludeAsSwapSource);
+		const neverIn = toBooleanFlag_(player.excludeAsSwapTarget);
+		const currentStats = sanitizeCwlStatEntry_(rosterStatsByTag[tag]);
+		const attackModel = computeBenchAttackModel_(tag, currentStats, warPerformanceByTag[tag], previousCwlByTag[tag], config);
+		const value = computeBenchPlayerValue_({ th: th }, attackModel, config);
+		const reward = computeBenchRewardProjection_(currentStats, attackModel, season.remainingEditableDays, neverIn);
+		const next = {
+			tag: tag,
+			name: String(player.name == null ? "" : player.name),
+			th: th,
+			isCurrentMain: !!currentMainTagSet[tag],
+			alwaysIn: alwaysIn,
+			neverIn: neverIn,
+			excludeAsSwapSource: alwaysIn,
+			excludeAsSwapTarget: neverIn,
+			starsTotal: currentStats.starsTotal,
+			currentWarAttackPending: currentStats.currentWarAttackPending,
+			missedAttacks: currentStats.missedAttacks,
+			countedAttacks: currentStats.countedAttacks,
+			resolvedWarDays: currentStats.resolvedWarDays,
+			attacksMade: currentStats.attacksMade,
+			attackModel: attackModel,
+			expectedStarsPerStart: attackModel.expectedStarsPerAppearance,
+			expectedStarsPerAppearance: attackModel.expectedStarsPerAppearance,
+			attackUseProbability: attackModel.attackUseProbability,
+			expectedStarsWhenUsed: attackModel.expectedStarsWhenUsed,
+			expectedDestructionWhenUsed: attackModel.expectedDestructionWhenUsed,
+			threeStarProbability: attackModel.threeStarProbability,
+			starsNeeded: reward.starsNeeded,
+			startsNeeded: reward.appearancesNeeded,
+			appearancesNeeded: reward.appearancesNeeded,
+			rewardStatus: reward.rewardStatus,
+			rewardProjection: reward,
+			lineupValue: value.score,
+			strengthScore: value.score,
+			strengthComponents: value,
+			hasMissedAttackHistory: currentStats.missedAttacks > 0 || (warPerformanceByTag[tag] && sanitizeWarPerformanceEntry_(warPerformanceByTag[tag]).regular.attacksMissed > 0),
+		};
+		players.push(next);
+		playersByTag[tag] = next;
 	}
 
-	const forcedKeepSet = {};
+	const dedupedCurrentMainTags = [];
 	for (let i = 0; i < currentMainTags.length; i++) {
-		const tag = currentMainTags[i];
-		const player = playersByTag[tag];
-		if (!player || !player.excludeAsSwapSource) continue;
-		forcedKeepSet[tag] = true;
-		selectedSet[tag] = true;
+		if (!playersByTag[currentMainTags[i]]) continue;
+		dedupedCurrentMainTags.push(currentMainTags[i]);
 	}
-
-	const blockedInSet = {};
-	const selectedTagsForCheck = Object.keys(selectedSet);
-	for (let i = 0; i < selectedTagsForCheck.length; i++) {
-		const tag = selectedTagsForCheck[i];
-		const player = playersByTag[tag];
-		if (!player) continue;
-		if (!currentMainSet[tag] && player.excludeAsSwapTarget) {
-			blockedInSet[tag] = true;
-			delete selectedSet[tag];
-		}
-	}
-
-	while (Object.keys(selectedSet).length > mainSize) {
-		const removable = Object.keys(selectedSet).filter((tag) => !forcedKeepSet[tag]);
-		if (!removable.length) break;
-		removable.sort((a, b) => compareActionableRemovalPriority_(a, b, snapshot, forcedKeepSet));
-		delete selectedSet[removable[0]];
-	}
-
-	if (Object.keys(selectedSet).length < mainSize) {
-		for (let i = 0; i < currentMainTags.length && Object.keys(selectedSet).length < mainSize; i++) {
-			const tag = currentMainTags[i];
-			if (!playersByTag[tag] || selectedSet[tag]) continue;
-			selectedSet[tag] = true;
-		}
-	}
-
-	if (Object.keys(selectedSet).length < mainSize) {
-		const fillCandidates = players.slice().sort((a, b) => {
-			if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
-			if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
-			return compareTagsAsc_(a.tag, b.tag);
-		});
-		for (let i = 0; i < fillCandidates.length && Object.keys(selectedSet).length < mainSize; i++) {
-			const p = fillCandidates[i];
-			if (selectedSet[p.tag]) continue;
-			if (!currentMainSet[p.tag] && p.excludeAsSwapTarget) continue;
-			selectedSet[p.tag] = true;
-		}
-	}
-
-	const blockedOutTags = [];
-	const idealSet = listToTagSet_(idealTargetTags);
-	for (let i = 0; i < currentMainTags.length; i++) {
-		const tag = currentMainTags[i];
-		if (idealSet[tag]) continue;
-		const player = playersByTag[tag];
-		if (player && player.excludeAsSwapSource) blockedOutTags.push(tag);
-	}
-
-	const targetTags = orderTargetMainTags_(selectedSet, snapshot);
+	const needsRewardsCount = players.filter((p) => p.starsNeeded > 0 && p.rewardStatus !== "restricted_out").length;
 	return {
-		targetTags: targetTags,
-		blockedOutTags: dedupeTagList_(blockedOutTags),
-		blockedInTags: dedupeTagList_(Object.keys(blockedInSet)),
+		players: players,
+		playersByTag: playersByTag,
+		rosterPoolSize: players.length,
+		requestedMainSize: requestedMainSize,
+		mainSize: requestedMainSize,
+		currentMainTags: dedupedCurrentMainTags,
+		currentMainTagSet: listToTagSet_(dedupedCurrentMainTags),
+		remainingEditableDays: Math.max(0, toNonNegativeInt_(season.remainingEditableDays)),
+		nextEditableDayIndex: typeof season.nextEditableDayIndex === "number" && isFinite(season.nextEditableDayIndex) ? Math.floor(season.nextEditableDayIndex) : -1,
+		needsRewardsCount: needsRewardsCount,
+		seasonContext: season,
+		historyContext: historyContext,
 	};
 }
 
-// Handle reason rank for code.
-function reasonRankForCode_(code) {
-	const c = String(code == null ? "" : code);
-	if (c === "reward_critical") return 4;
-	if (c === "missed_attack_risk") return 3;
-	if (c === "strength_upgrade") return 2;
-	if (c === "th_upgrade") return 1;
-	if (c === "blocked_by_exclusion") return 0;
-	return -1;
+// Build no-op exact plan.
+function buildBenchNoopPlan_(snapshot, warningsRaw, reasonRaw) {
+	const currentMainTags = dedupeTagList_(snapshot && snapshot.currentMainTags);
+	const warnings = dedupeStringList_(warningsRaw, 30);
+	return {
+		dayAssignments: currentMainTags.length ? [currentMainTags.slice()] : [],
+		targetMainTags: currentMainTags.slice(),
+		actionableTargetMainTags: currentMainTags.slice(),
+		startCountsByTag: {},
+		selectedRewardTags: [],
+		projectedRewardCompleteTags: [],
+		securedRewardTags: [],
+		requiredNextRewardTags: [],
+		capacityNextRewardTags: [],
+		selectedLaterRewardTags: [],
+		rewardStatusByTag: {},
+		solverMode: "none",
+		invalidConstraints: reasonRaw ? true : false,
+		invalidReason: String(reasonRaw || ""),
+		warnings: warnings,
+		optionalSwapCount: 0,
+		optionalSwapByInTag: {},
+		optionalSwapByOutTag: {},
+		mandatoryReasonByTag: {},
+		totalStrength: 0,
+	};
 }
 
-// Build swap explanation.
-function buildSwapExplanation_(swapInPlayer, benchOutPlayer, config) {
-	const inPlayer = swapInPlayer && typeof swapInPlayer === "object" ? swapInPlayer : {};
-	const outPlayer = benchOutPlayer && typeof benchOutPlayer === "object" ? benchOutPlayer : {};
-	const strengthDelta = (Number(inPlayer.strengthScore) || 0) - (Number(outPlayer.strengthScore) || 0);
-	const strengthThreshold = isFinite(Number(config && config.reasonStrengthDeltaThreshold)) ? Number(config.reasonStrengthDeltaThreshold) : 0.05;
-	const rewardCriticalIn = toNonNegativeInt_(inPlayer.startsNeeded) > 0 && Number(inPlayer.rewardSlackMargin) <= 0;
-	const missedAttackRisk = !!(outPlayer.hasMissedAttackHistory && !inPlayer.hasMissedAttackHistory);
-	const thUpgrade = toNonNegativeInt_(inPlayer.th) > toNonNegativeInt_(outPlayer.th);
+// Validate hard bench-planning constraints.
+function validateBenchPlanningConstraints_(snapshot) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const warnings = [];
+	const alwaysTags = [];
+	let eligibleCount = 0;
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i];
+		if (player.alwaysIn && player.neverIn) warnings.push("restriction-conflict:" + player.tag);
+		if (player.alwaysIn) alwaysTags.push(player.tag);
+		if (!player.neverIn) eligibleCount++;
+	}
+	if (mainSize <= 0) warnings.push("invalid-lineup-size");
+	if (mainSize > players.length) warnings.push("lineup-size-exceeds-usable-pool");
+	if (alwaysTags.length > mainSize) warnings.push("too-many-always-in-players");
+	if (eligibleCount < mainSize) warnings.push("too-few-eligible-players");
+	return {
+		valid: warnings.length === 0,
+		warnings: warnings,
+	};
+}
 
-	let reasonCode = "strength_upgrade";
-	let shortReason = "Strength upgrade";
-	if (rewardCriticalIn) {
-		reasonCode = "reward_critical";
-		shortReason = "Reward-critical start allocation";
-	} else if (missedAttackRisk) {
-		reasonCode = "missed_attack_risk";
-		shortReason = "Lower missed-attack risk";
-	} else if (strengthDelta >= strengthThreshold) {
-		reasonCode = "strength_upgrade";
-		shortReason = "Clear strength upgrade";
-	} else if (thUpgrade && strengthDelta >= -0.02) {
-		reasonCode = "th_upgrade";
-		shortReason = "TH upgrade with no major downside";
-	} else {
-		reasonCode = "strength_upgrade";
-		shortReason = "Lineup strength balancing";
+// Return whether reward DP state A is better than B.
+function isBetterRewardDpState_(a, b) {
+	if (!b) return true;
+	if (!a) return false;
+	if (a.completed !== b.completed) return a.completed > b.completed;
+	if (a.used !== b.used) return a.used < b.used;
+	if (a.valueInt !== b.valueInt) return a.valueInt > b.valueInt;
+	if (a.currentMainCount !== b.currentMainCount) return a.currentMainCount > b.currentMainCount;
+	return String(a.sig || "") < String(b.sig || "");
+}
+
+// Optimize reward completions exactly with bounded dynamic programming.
+function optimizeRewardCompletionsExact_(snapshot, config) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const alwaysPlayers = players.filter((p) => p.alwaysIn && !p.neverIn);
+	const perDayCapacity = Math.max(0, mainSize - alwaysPlayers.length);
+	const capacity = perDayCapacity * days;
+	const scale = Math.max(1, toNonNegativeInt_(config && config.rewardSelectionValueScale) || 100000);
+	const selectedSet = {};
+	const requiredAppearancesByTag = {};
+	const projectedRewardCompleteTags = [];
+	const securedRewardTags = [];
+	const rewardStatusByTag = {};
+	const warnings = [];
+
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i];
+		rewardStatusByTag[player.tag] = String(player.rewardStatus || "");
+		if (player.rewardStatus === "secured") securedRewardTags.push(player.tag);
+		if (player.alwaysIn && !player.neverIn && player.starsNeeded > 0 && player.appearancesNeeded > 0 && player.appearancesNeeded <= days) {
+			rewardStatusByTag[player.tag] = "selected_projected_complete";
+			projectedRewardCompleteTags.push(player.tag);
+		}
 	}
 
-	const rewardImpact = "in needs " + toNonNegativeInt_(inPlayer.startsNeeded) + " start(s), out needs " + toNonNegativeInt_(outPlayer.startsNeeded) + ".";
-	const reasonText = shortReason + " (" + rewardImpact + ")";
+	const candidates = players
+		.filter((p) => !p.alwaysIn && !p.neverIn && p.appearancesNeeded > 0 && p.appearancesNeeded <= days && p.rewardProjection && p.rewardProjection.individuallyFeasible)
+		.sort((a, b) => compareTagsAsc_(a.tag, b.tag));
+
+	let dp = [];
+	dp[0] = {
+		completed: 0,
+		used: 0,
+		valueInt: 0,
+		currentMainCount: 0,
+		sig: "",
+		selectedTags: [],
+	};
+
+	for (let i = 0; i < candidates.length; i++) {
+		const player = candidates[i];
+		const need = Math.max(0, toNonNegativeInt_(player.appearancesNeeded));
+		const contribution = Math.round((Number(player.lineupValue) || 0) * need * scale);
+		const next = dp.slice();
+		for (let used = 0; used <= capacity; used++) {
+			const state = dp[used];
+			if (!state) continue;
+			const nextUsed = used + need;
+			if (nextUsed > capacity) continue;
+			const selectedTags = state.selectedTags.concat([player.tag]);
+			const candidateState = {
+				completed: state.completed + 1,
+				used: state.used + need,
+				valueInt: state.valueInt + contribution,
+				currentMainCount: state.currentMainCount + (player.isCurrentMain ? 1 : 0),
+				sig: selectedTags.join(","),
+				selectedTags: selectedTags,
+			};
+			if (isBetterRewardDpState_(candidateState, next[nextUsed])) next[nextUsed] = candidateState;
+		}
+		dp = next;
+	}
+
+	let best = null;
+	for (let used = 0; used <= capacity; used++) {
+		if (isBetterRewardDpState_(dp[used], best)) best = dp[used];
+	}
+	const selectedTags = best && Array.isArray(best.selectedTags) ? best.selectedTags.slice() : [];
+	for (let i = 0; i < selectedTags.length; i++) {
+		const tag = selectedTags[i];
+		const player = snapshot.playersByTag[tag];
+		if (!player) continue;
+		selectedSet[tag] = true;
+		requiredAppearancesByTag[tag] = toNonNegativeInt_(player.appearancesNeeded);
+		rewardStatusByTag[tag] = "selected_projected_complete";
+		projectedRewardCompleteTags.push(tag);
+	}
+
+	for (let i = 0; i < candidates.length; i++) {
+		const player = candidates[i];
+		if (selectedSet[player.tag]) continue;
+		if (rewardStatusByTag[player.tag] === "individually_feasible" || rewardStatusByTag[player.tag] === "pending_current_attack_individually_feasible") {
+			rewardStatusByTag[player.tag] = "feasible_shared_capacity_blocked";
+		}
+	}
+
+	return {
+		selectedSet: selectedSet,
+		selectedRewardTags: selectedTags,
+		requiredAppearancesByTag: requiredAppearancesByTag,
+		projectedRewardCompleteTags: dedupeTagList_(projectedRewardCompleteTags),
+		securedRewardTags: dedupeTagList_(securedRewardTags),
+		rewardStatusByTag: rewardStatusByTag,
+		capacity: capacity,
+		perDayCapacity: perDayCapacity,
+		usedAppearances: best ? best.used : 0,
+		projectedCompletionCount: (best ? best.completed : 0) + projectedRewardCompleteTags.filter((tag) => !selectedSet[tag]).length,
+		warnings: warnings,
+	};
+}
+
+// Return whether baseline DP state A is better than B.
+function isBetterBaselineDpState_(a, b) {
+	if (!b) return true;
+	if (!a) return false;
+	if (a.currentMainCount !== b.currentMainCount) return a.currentMainCount > b.currentMainCount;
+	if (a.rewardPriority !== b.rewardPriority) return a.rewardPriority > b.rewardPriority;
+	if (a.valueInt !== b.valueInt) return a.valueInt > b.valueInt;
+	return String(a.sig || "") < String(b.sig || "");
+}
+
+// Check selected reward schedule feasibility after choosing next lineup.
+function isNextLineupScheduleFeasible_(snapshot, rewardPlan, targetSetRaw) {
+	const targetSet = targetSetRaw && typeof targetSetRaw === "object" ? targetSetRaw : {};
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	let alwaysCount = 0;
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i];
+		if (player.alwaysIn && !player.neverIn) {
+			alwaysCount++;
+			if (!targetSet[player.tag]) return false;
+		}
+		if (player.neverIn && targetSet[player.tag]) return false;
+	}
+	if (Object.keys(targetSet).length !== mainSize) return false;
+	if (days <= 0) return false;
+	const requiredByTag = rewardPlan && rewardPlan.requiredAppearancesByTag && typeof rewardPlan.requiredAppearancesByTag === "object" ? rewardPlan.requiredAppearancesByTag : {};
+	const futureCapacity = Math.max(0, days - 1) * Math.max(0, mainSize - alwaysCount);
+	let futureNeeded = 0;
+	const tags = Object.keys(requiredByTag);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const needed = toNonNegativeInt_(requiredByTag[tag]);
+		const remaining = Math.max(0, needed - (targetSet[tag] ? 1 : 0));
+		if (remaining > Math.max(0, days - 1)) return false;
+		futureNeeded += remaining;
+	}
+	return futureNeeded <= futureCapacity;
+}
+
+// Build exact baseline next lineup.
+function buildExactBaselineLineup_(snapshot, rewardPlan, config) {
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
+	const days = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	const mainSize = Math.max(0, toNonNegativeInt_(snapshot && snapshot.mainSize));
+	const selectedSet = rewardPlan && rewardPlan.selectedSet && typeof rewardPlan.selectedSet === "object" ? rewardPlan.selectedSet : {};
+	const requiredByTag = rewardPlan && rewardPlan.requiredAppearancesByTag && typeof rewardPlan.requiredAppearancesByTag === "object" ? rewardPlan.requiredAppearancesByTag : {};
+	const forcedSet = {};
+	const requiredSet = {};
+	const targetSet = {};
+	const mandatoryReasonByTag = {};
+	let alwaysCount = 0;
+
+	for (let i = 0; i < players.length; i++) {
+		const player = players[i];
+		if (player.alwaysIn && !player.neverIn) {
+			forcedSet[player.tag] = true;
+			requiredSet[player.tag] = true;
+			targetSet[player.tag] = true;
+			mandatoryReasonByTag[player.tag] = "restriction_always_in";
+			alwaysCount++;
+		}
+	}
+
+	const selectedTags = Object.keys(selectedSet).sort(compareTagsAsc_);
+	let selectedRequiredAppearances = 0;
+	for (let i = 0; i < selectedTags.length; i++) selectedRequiredAppearances += toNonNegativeInt_(requiredByTag[selectedTags[i]]);
+	const futureCapacity = Math.max(0, days - 1) * Math.max(0, mainSize - alwaysCount);
+	const minSelectedRewardToday = Math.max(0, selectedRequiredAppearances - futureCapacity);
+	let requiredRewardToday = 0;
+	const requiredNextRewardTags = [];
+
+	for (let i = 0; i < selectedTags.length; i++) {
+		const tag = selectedTags[i];
+		const needed = toNonNegativeInt_(requiredByTag[tag]);
+		if (needed >= days && needed > 0) {
+			requiredSet[tag] = true;
+			targetSet[tag] = true;
+			mandatoryReasonByTag[tag] = "reward_required_next";
+			requiredRewardToday++;
+			requiredNextRewardTags.push(tag);
+		}
+	}
+
+	const requiredTags = Object.keys(requiredSet).sort(compareTagsAsc_);
+	if (requiredTags.length > mainSize) {
+		return { ok: false, warning: "required-next-lineup-exceeds-size" };
+	}
+
+	const remainingSlots = mainSize - requiredTags.length;
+	const additionalRewardNeeded = Math.max(0, minSelectedRewardToday - requiredRewardToday);
+	const rewardCap = additionalRewardNeeded;
+	const scale = Math.max(1, toNonNegativeInt_(config && config.baselineValueScale) || 100000);
+	let dp = {};
+	dp["0|0"] = {
+		currentMainCount: 0,
+		rewardPriority: 0,
+		valueInt: 0,
+		sig: "",
+		tags: [],
+	};
+
+	const candidates = players
+		.filter((p) => !requiredSet[p.tag] && !p.neverIn)
+		.sort((a, b) => compareTagsAsc_(a.tag, b.tag));
+
+	for (let i = 0; i < candidates.length; i++) {
+		const player = candidates[i];
+		const next = {};
+		const keys = Object.keys(dp);
+		for (let j = 0; j < keys.length; j++) next[keys[j]] = dp[keys[j]];
+		for (let j = 0; j < keys.length; j++) {
+			const key = keys[j];
+			const state = dp[key];
+			const parts = key.split("|");
+			const count = toNonNegativeInt_(parts[0]);
+			const rewardCount = toNonNegativeInt_(parts[1]);
+			if (count >= remainingSlots) continue;
+			const isSelectedReward = !!selectedSet[player.tag] && toNonNegativeInt_(requiredByTag[player.tag]) > 0;
+			const nextRewardCount = Math.min(rewardCap, rewardCount + (isSelectedReward ? 1 : 0));
+			const nextCount = count + 1;
+			const rewardSlack = Math.max(0, days - toNonNegativeInt_(requiredByTag[player.tag]));
+			const rewardPriority = isSelectedReward ? 100000 - rewardSlack * 100 + toNonNegativeInt_(requiredByTag[player.tag]) : 0;
+			const tags = state.tags.concat([player.tag]);
+			const candidateState = {
+				currentMainCount: state.currentMainCount + (player.isCurrentMain ? 1 : 0),
+				rewardPriority: state.rewardPriority + rewardPriority,
+				valueInt: state.valueInt + Math.round((Number(player.lineupValue) || 0) * scale),
+				sig: tags.join(","),
+				tags: tags,
+			};
+			const nextKey = nextCount + "|" + nextRewardCount;
+			if (isBetterBaselineDpState_(candidateState, next[nextKey])) next[nextKey] = candidateState;
+		}
+		dp = next;
+	}
+
+	const finalState = dp[remainingSlots + "|" + rewardCap];
+	if (!finalState) return { ok: false, warning: "baseline-lineup-infeasible" };
+	for (let i = 0; i < finalState.tags.length; i++) targetSet[finalState.tags[i]] = true;
+
+	const capacityNextRewardTags = [];
+	const selectedToday = selectedTags.filter((tag) => targetSet[tag] && !requiredSet[tag]).sort((a, b) => {
+		const pa = playersByTag[a] || {};
+		const pb = playersByTag[b] || {};
+		const aNeed = toNonNegativeInt_(requiredByTag[a]);
+		const bNeed = toNonNegativeInt_(requiredByTag[b]);
+		if (aNeed !== bNeed) return bNeed - aNeed;
+		if ((Number(pa.lineupValue) || 0) !== (Number(pb.lineupValue) || 0)) return (Number(pb.lineupValue) || 0) - (Number(pa.lineupValue) || 0);
+		return compareTagsAsc_(a, b);
+	});
+	for (let i = 0; i < selectedToday.length && i < additionalRewardNeeded; i++) {
+		capacityNextRewardTags.push(selectedToday[i]);
+		mandatoryReasonByTag[selectedToday[i]] = "reward_capacity";
+	}
+
+	if (!isNextLineupScheduleFeasible_(snapshot, rewardPlan, targetSet)) return { ok: false, warning: "selected-reward-schedule-infeasible" };
+	const targetMainTags = orderTargetMainTags_(targetSet, snapshot);
+	return {
+		ok: true,
+		targetSet: listToTagSet_(targetMainTags),
+		targetMainTags: targetMainTags,
+		requiredNextRewardTags: dedupeTagList_(requiredNextRewardTags),
+		capacityNextRewardTags: dedupeTagList_(capacityNextRewardTags),
+		mandatoryReasonByTag: mandatoryReasonByTag,
+	};
+}
+
+// Apply capped optional one-for-one upgrades.
+function applyOptionalBenchUpgrades_(snapshot, rewardPlan, baselineRaw, config) {
+	const baseline = baselineRaw && typeof baselineRaw === "object" ? baselineRaw : {};
+	const targetSet = baseline.targetSet && typeof baseline.targetSet === "object" ? Object.assign({}, baseline.targetSet) : {};
+	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
+	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
+	const maxSwaps = Math.max(0, toNonNegativeInt_(config && config.maxOptionalSwaps) || 0);
+	const threshold = Math.max(0, Number(config && config.optionalSwapMinScoreDelta) || 0);
+	const optionalByIn = {};
+	const optionalByOut = {};
+	let optionalCount = 0;
+
+	if (snapshot && snapshot.seasonContext && snapshot.seasonContext.estimated === true) {
+		return {
+			targetSet: targetSet,
+			targetMainTags: orderTargetMainTags_(targetSet, snapshot),
+			optionalSwapCount: 0,
+			optionalSwapByInTag: optionalByIn,
+			optionalSwapByOutTag: optionalByOut,
+			warnings: ["optional-swaps-suppressed-estimated-context"],
+		};
+	}
+
+	while (optionalCount < maxSwaps) {
+		const targetTags = Object.keys(targetSet);
+		const inCandidates = players.filter((p) => !targetSet[p.tag] && !p.neverIn);
+		const outCandidates = targetTags.map((tag) => playersByTag[tag]).filter((p) => p && !p.alwaysIn);
+		let best = null;
+		for (let i = 0; i < inCandidates.length; i++) {
+			const inPlayer = inCandidates[i];
+			for (let j = 0; j < outCandidates.length; j++) {
+				const outPlayer = outCandidates[j];
+				if (!outPlayer || inPlayer.tag === outPlayer.tag) continue;
+				const delta = (Number(inPlayer.lineupValue) || 0) - (Number(outPlayer.lineupValue) || 0);
+				if (!(delta >= threshold)) continue;
+				const nextSet = Object.assign({}, targetSet);
+				delete nextSet[outPlayer.tag];
+				nextSet[inPlayer.tag] = true;
+				if (!isNextLineupScheduleFeasible_(snapshot, rewardPlan, nextSet)) continue;
+				const reliabilityDelta = (Number(inPlayer.attackUseProbability) || 0) - (Number(outPlayer.attackUseProbability) || 0);
+				const candidate = {
+					inTag: inPlayer.tag,
+					outTag: outPlayer.tag,
+					scoreDelta: delta,
+					reliabilityDelta: reliabilityDelta,
+				};
+				if (
+					!best ||
+					candidate.scoreDelta > best.scoreDelta ||
+					(candidate.scoreDelta === best.scoreDelta && candidate.reliabilityDelta > best.reliabilityDelta) ||
+					(candidate.scoreDelta === best.scoreDelta && candidate.reliabilityDelta === best.reliabilityDelta && compareTagsAsc_(candidate.inTag + "|" + candidate.outTag, best.inTag + "|" + best.outTag) < 0)
+				) {
+					best = candidate;
+				}
+			}
+		}
+		if (!best) break;
+		delete targetSet[best.outTag];
+		targetSet[best.inTag] = true;
+		optionalByIn[best.inTag] = best;
+		optionalByOut[best.outTag] = best;
+		optionalCount++;
+	}
+
+	return {
+		targetSet: targetSet,
+		targetMainTags: orderTargetMainTags_(targetSet, snapshot),
+		optionalSwapCount: optionalCount,
+		optionalSwapByInTag: optionalByIn,
+		optionalSwapByOutTag: optionalByOut,
+		warnings: [],
+	};
+}
+
+// Solve season lineup plan (v2).
+function solveSeasonLineupPlan_(snapshot, config) {
+	const warnings = [];
+	const seasonWarnings = snapshot && snapshot.seasonContext && Array.isArray(snapshot.seasonContext.warnings) ? snapshot.seasonContext.warnings : [];
+	for (let i = 0; i < seasonWarnings.length; i++) warnings.push(seasonWarnings[i]);
+	const historyWarnings = snapshot && snapshot.historyContext && Array.isArray(snapshot.historyContext.warnings) ? snapshot.historyContext.warnings : [];
+	for (let i = 0; i < historyWarnings.length; i++) warnings.push(historyWarnings[i]);
+	const remainingEditableDays = Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays));
+	if (remainingEditableDays <= 0) {
+		warnings.push("no-editable-cwl-round");
+		return buildBenchNoopPlan_(snapshot, warnings, "");
+	}
+	const constraints = validateBenchPlanningConstraints_(snapshot);
+	for (let i = 0; i < constraints.warnings.length; i++) warnings.push(constraints.warnings[i]);
+	if (!constraints.valid) {
+		return buildBenchNoopPlan_(snapshot, warnings, "invalid_constraints");
+	}
+
+	const rewardPlan = optimizeRewardCompletionsExact_(snapshot, config);
+	for (let i = 0; i < rewardPlan.warnings.length; i++) warnings.push(rewardPlan.warnings[i]);
+	const baseline = buildExactBaselineLineup_(snapshot, rewardPlan, config);
+	if (!baseline || !baseline.ok) {
+		warnings.push((baseline && baseline.warning) || "baseline-lineup-infeasible");
+		return buildBenchNoopPlan_(snapshot, warnings, "baseline_infeasible");
+	}
+	const optional = applyOptionalBenchUpgrades_(snapshot, rewardPlan, baseline, config);
+	for (let i = 0; i < optional.warnings.length; i++) warnings.push(optional.warnings[i]);
+	const targetMainTags = dedupeTagList_(optional.targetMainTags);
+	const targetSet = listToTagSet_(targetMainTags);
+	const selectedLaterRewardTags = [];
+	const requiredNextSet = listToTagSet_(baseline.requiredNextRewardTags);
+	const capacityNextSet = listToTagSet_(baseline.capacityNextRewardTags);
+	const selectedRewardTags = dedupeTagList_(rewardPlan.selectedRewardTags);
+	for (let i = 0; i < selectedRewardTags.length; i++) {
+		const tag = selectedRewardTags[i];
+		if (requiredNextSet[tag] || capacityNextSet[tag]) continue;
+		selectedLaterRewardTags.push(tag);
+	}
+	const rewardStatusByTag = Object.assign({}, rewardPlan.rewardStatusByTag);
+	for (let i = 0; i < baseline.requiredNextRewardTags.length; i++) rewardStatusByTag[baseline.requiredNextRewardTags[i]] = "required_next_round";
+	for (let i = 0; i < baseline.capacityNextRewardTags.length; i++) rewardStatusByTag[baseline.capacityNextRewardTags[i]] = "required_next_round";
+	for (let i = 0; i < selectedLaterRewardTags.length; i++) {
+		if (rewardStatusByTag[selectedLaterRewardTags[i]] === "selected_projected_complete") rewardStatusByTag[selectedLaterRewardTags[i]] = "selected_schedulable_later";
+	}
+	let totalStrength = 0;
+	for (let i = 0; i < targetMainTags.length; i++) {
+		const player = snapshot.playersByTag[targetMainTags[i]];
+		totalStrength += Number(player && player.lineupValue) || 0;
+	}
+	return {
+		dayAssignments: [targetMainTags.slice()],
+		targetMainTags: targetMainTags,
+		actionableTargetMainTags: targetMainTags.slice(),
+		startCountsByTag: rewardPlan.requiredAppearancesByTag,
+		selectedRewardTags: selectedRewardTags,
+		projectedRewardCompleteTags: dedupeTagList_(rewardPlan.projectedRewardCompleteTags),
+		securedRewardTags: dedupeTagList_(rewardPlan.securedRewardTags),
+		requiredNextRewardTags: dedupeTagList_(baseline.requiredNextRewardTags),
+		capacityNextRewardTags: dedupeTagList_(baseline.capacityNextRewardTags),
+		selectedLaterRewardTags: dedupeTagList_(selectedLaterRewardTags),
+		rewardStatusByTag: rewardStatusByTag,
+		solverMode: "exact_bounded_dp",
+		invalidConstraints: false,
+		invalidReason: "",
+		warnings: dedupeStringList_(warnings, 30),
+		optionalSwapCount: optional.optionalSwapCount,
+		optionalSwapByInTag: optional.optionalSwapByInTag,
+		optionalSwapByOutTag: optional.optionalSwapByOutTag,
+		mandatoryReasonByTag: baseline.mandatoryReasonByTag || {},
+		totalStrength: totalStrength,
+		rewardCapacity: rewardPlan.capacity,
+		rewardAppearancesReserved: rewardPlan.usedAppearances,
+	};
+}
+
+// Build v2 swap explanation.
+function buildSwapExplanationV2_(swapInPlayer, benchOutPlayer, plan, config) {
+	const inPlayer = swapInPlayer && typeof swapInPlayer === "object" ? swapInPlayer : {};
+	const outPlayer = benchOutPlayer && typeof benchOutPlayer === "object" ? benchOutPlayer : {};
+	const mandatoryReasonByTag = plan && plan.mandatoryReasonByTag && typeof plan.mandatoryReasonByTag === "object" ? plan.mandatoryReasonByTag : {};
+	const optionalByIn = plan && plan.optionalSwapByInTag && typeof plan.optionalSwapByInTag === "object" ? plan.optionalSwapByInTag : {};
+	const scoreDelta = (Number(inPlayer.lineupValue) || 0) - (Number(outPlayer.lineupValue) || 0);
+	const reliabilityDelta = (Number(inPlayer.attackUseProbability) || 0) - (Number(outPlayer.attackUseProbability) || 0);
+	let reasonCode = "lineup_upgrade";
+	let shortReason = "Lineup upgrade";
+	if (outPlayer.neverIn) {
+		reasonCode = "restriction_never_in";
+		shortReason = "Never in war";
+	} else if (inPlayer.alwaysIn || mandatoryReasonByTag[inPlayer.tag] === "restriction_always_in") {
+		reasonCode = "restriction_always_in";
+		shortReason = "Always in war";
+	} else if (mandatoryReasonByTag[inPlayer.tag] === "reward_required_next") {
+		reasonCode = "reward_deadline";
+		shortReason = "Reward deadline";
+	} else if (mandatoryReasonByTag[inPlayer.tag] === "reward_capacity") {
+		reasonCode = "reward_capacity";
+		shortReason = "Reward capacity";
+	} else if (optionalByIn[inPlayer.tag]) {
+		if (reliabilityDelta >= Math.max(0, Number(config && config.reasonReliabilityDeltaThreshold) || 0)) {
+			reasonCode = "reliability_upgrade";
+			shortReason = "Reliability upgrade";
+		} else {
+			reasonCode = "lineup_upgrade";
+			shortReason = "Lineup value upgrade";
+		}
+	} else if (reliabilityDelta >= Math.max(0, Number(config && config.reasonReliabilityDeltaThreshold) || 0)) {
+		reasonCode = "reliability_upgrade";
+		shortReason = "Reliability upgrade";
+	}
+	const rewardImpact =
+		"in reward status " +
+		String(inPlayer.rewardStatus || "") +
+		", out reward status " +
+		String(outPlayer.rewardStatus || "") +
+		".";
 	return {
 		reasonCode: reasonCode,
 		shortReason: shortReason,
-		scoreDelta: safeRoundNumber_(strengthDelta, 4),
+		scoreDelta: safeRoundNumber_(scoreDelta, 4),
+		reliabilityDelta: safeRoundNumber_(reliabilityDelta, 4),
 		rewardImpact: rewardImpact,
-		reasonText: reasonText,
-		reasonRank: reasonRankForCode_(reasonCode),
+		reasonText: shortReason + " (" + rewardImpact + ")",
+		optional: !!optionalByIn[inPlayer.tag],
 	};
 }
 
-// Build pairs from delta.
-function buildPairsFromDelta_(swapInTagsRaw, benchOutTagsRaw, snapshot, config) {
+// Build v2 pairs from a final lineup delta.
+function buildPairsFromFinalDeltaV2_(swapInTagsRaw, benchOutTagsRaw, snapshot, plan, config) {
 	const swapInTags = dedupeTagList_(swapInTagsRaw);
 	const benchOutTags = dedupeTagList_(benchOutTagsRaw);
 	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
 	const availableOutByTag = listToTagSet_(benchOutTags);
 	const pairs = [];
-
-	const swapInPlayers = swapInTags
+	const inPlayers = swapInTags
 		.map((tag) => playersByTag[tag])
 		.filter(Boolean)
 		.sort((a, b) => {
-			const aCritical = a.startsNeeded > 0 && Number(a.rewardSlackMargin) <= 0;
-			const bCritical = b.startsNeeded > 0 && Number(b.rewardSlackMargin) <= 0;
-			if (aCritical !== bCritical) return aCritical ? -1 : 1;
-			if (a.startsNeeded !== b.startsNeeded) return b.startsNeeded - a.startsNeeded;
-			if (a.strengthScore !== b.strengthScore) return b.strengthScore - a.strengthScore;
+			const aMandatory = a.alwaysIn || (plan.mandatoryReasonByTag && plan.mandatoryReasonByTag[a.tag]);
+			const bMandatory = b.alwaysIn || (plan.mandatoryReasonByTag && plan.mandatoryReasonByTag[b.tag]);
+			if (!!aMandatory !== !!bMandatory) return aMandatory ? -1 : 1;
+			if ((Number(a.lineupValue) || 0) !== (Number(b.lineupValue) || 0)) return (Number(b.lineupValue) || 0) - (Number(a.lineupValue) || 0);
 			return compareTagsAsc_(a.tag, b.tag);
 		});
-
-	for (let i = 0; i < swapInPlayers.length; i++) {
-		const swapInPlayer = swapInPlayers[i];
+	for (let i = 0; i < inPlayers.length; i++) {
+		const inPlayer = inPlayers[i];
 		const outCandidates = [];
 		for (let j = 0; j < benchOutTags.length; j++) {
 			const outTag = benchOutTags[j];
 			if (!availableOutByTag[outTag]) continue;
 			const outPlayer = playersByTag[outTag];
 			if (!outPlayer) continue;
-			const explanation = buildSwapExplanation_(swapInPlayer, outPlayer, config);
+			const explanation = buildSwapExplanationV2_(inPlayer, outPlayer, plan, config);
 			outCandidates.push({
 				outPlayer: outPlayer,
 				explanation: explanation,
-				thDiff: Math.abs(toNonNegativeInt_(swapInPlayer.th) - toNonNegativeInt_(outPlayer.th)),
+				outRestriction: outPlayer.neverIn ? 1 : 0,
+				thDiff: Math.abs(toNonNegativeInt_(inPlayer.th) - toNonNegativeInt_(outPlayer.th)),
 			});
 		}
 		if (!outCandidates.length) continue;
-
 		outCandidates.sort((a, b) => {
+			if (a.outRestriction !== b.outRestriction) return b.outRestriction - a.outRestriction;
+			if (a.explanation.optional !== b.explanation.optional) return a.explanation.optional ? 1 : -1;
 			if (a.thDiff !== b.thDiff) return a.thDiff - b.thDiff;
-			if (a.explanation.reasonRank !== b.explanation.reasonRank) {
-				return b.explanation.reasonRank - a.explanation.reasonRank;
-			}
-			if (a.explanation.scoreDelta !== b.explanation.scoreDelta) {
-				return b.explanation.scoreDelta - a.explanation.scoreDelta;
-			}
-			if (a.outPlayer.strengthScore !== b.outPlayer.strengthScore) {
-				return a.outPlayer.strengthScore - b.outPlayer.strengthScore;
-			}
+			if (a.explanation.scoreDelta !== b.explanation.scoreDelta) return b.explanation.scoreDelta - a.explanation.scoreDelta;
 			return compareTagsAsc_(a.outPlayer.tag, b.outPlayer.tag);
 		});
-
 		const chosen = outCandidates[0];
 		delete availableOutByTag[chosen.outPlayer.tag];
 		pairs.push({
 			outTag: chosen.outPlayer.tag,
-			inTag: swapInPlayer.tag,
+			inTag: inPlayer.tag,
 			reasonCode: chosen.explanation.reasonCode,
 			reasonText: chosen.explanation.reasonText,
 			shortReason: chosen.explanation.shortReason,
 			scoreDelta: chosen.explanation.scoreDelta,
+			reliabilityDelta: chosen.explanation.reliabilityDelta,
 			rewardImpact: chosen.explanation.rewardImpact,
+			optional: chosen.explanation.optional,
 		});
 	}
-
 	return pairs;
 }
 
-// Derive next day swap suggestions from plan.
+// Derive next day swap suggestions from final v2 plan.
 function deriveNextDaySwapSuggestionsFromPlan_(roster, plan, snapshot, config) {
 	const currentMainTags = dedupeTagList_(snapshot && snapshot.currentMainTags);
 	const currentMainSet = listToTagSet_(currentMainTags);
-	const idealTargetMainTags = dedupeTagList_(plan && plan.targetMainTags);
-	const actionable = buildActionableTargetMainTags_(snapshot, idealTargetMainTags);
-	const actionableTargetMainTags = dedupeTagList_(actionable && actionable.targetTags);
-	const actionableTargetSet = listToTagSet_(actionableTargetMainTags);
-
-	let benchTags = tagListDiff_(currentMainTags, actionableTargetSet);
-	let swapInTags = tagListDiff_(actionableTargetMainTags, currentMainSet);
-
-	const playersByTag = snapshot && snapshot.playersByTag && typeof snapshot.playersByTag === "object" ? snapshot.playersByTag : {};
-	benchTags = benchTags.filter((tag) => !(playersByTag[tag] && playersByTag[tag].excludeAsSwapSource));
-	swapInTags = swapInTags.filter((tag) => !(playersByTag[tag] && playersByTag[tag].excludeAsSwapTarget));
-
-	const pairs = buildPairsFromDelta_(swapInTags, benchTags, snapshot, config);
-	const blockedOutTags = dedupeTagList_(actionable && actionable.blockedOutTags);
-	const blockedInTags = dedupeTagList_(actionable && actionable.blockedInTags);
-	const blockedByExclusions = blockedOutTags.length > 0 || blockedInTags.length > 0;
-
+	const targetMainTags = dedupeTagList_(plan && plan.targetMainTags);
+	const targetSet = listToTagSet_(targetMainTags);
+	const benchTags = tagListDiff_(currentMainTags, targetSet);
+	const swapInTags = tagListDiff_(targetMainTags, currentMainSet);
+	const pairs = buildPairsFromFinalDeltaV2_(swapInTags, benchTags, snapshot, plan, config);
 	return {
-		targetMainTags: idealTargetMainTags,
-		actionableTargetMainTags: actionableTargetMainTags,
+		targetMainTags: targetMainTags,
+		actionableTargetMainTags: targetMainTags.slice(),
 		benchTags: benchTags,
 		swapInTags: swapInTags,
 		pairs: pairs,
-		blockedByExclusions: blockedByExclusions,
-		blockedByExclusionOutTags: blockedOutTags,
-		blockedByExclusionInTags: blockedInTags,
+		blockedByExclusions: false,
+		blockedByExclusionOutTags: [],
+		blockedByExclusionInTags: [],
 	};
 }
 
-// Build bench suggestion summary.
+// Build bench suggestion summary (v2).
 function buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, config) {
-	const players = Array.isArray(snapshot && snapshot.players) ? snapshot.players : [];
-	const rewardCriticalPlayerTags = players.filter((p) => p.rewardCritical).map((p) => p.tag);
-	const impossibleRewardPlayerTags = players.filter((p) => p.impossibleReward).map((p) => p.tag);
-	const rewardFeasiblePlayerCount = players.length - impossibleRewardPlayerTags.length;
+	const rewardStatusByTagRaw = plan && plan.rewardStatusByTag && typeof plan.rewardStatusByTag === "object" ? plan.rewardStatusByTag : {};
+	const rewardStatusByTag = {};
+	const statusTags = Object.keys(rewardStatusByTagRaw).sort(compareTagsAsc_);
+	for (let i = 0; i < statusTags.length; i++) {
+		const tag = normalizeTag_(statusTags[i]);
+		if (!tag || !(snapshot.playersByTag && snapshot.playersByTag[tag])) continue;
+		rewardStatusByTag[tag] = String(rewardStatusByTagRaw[statusTags[i]] || "");
+	}
 	const warnings = [];
-	const seasonWarnings = snapshot && snapshot.seasonContext && Array.isArray(snapshot.seasonContext.warnings) ? snapshot.seasonContext.warnings : [];
-	for (let i = 0; i < seasonWarnings.length; i++) warnings.push(seasonWarnings[i]);
-	if (snapshot && snapshot.requestedMainSize > snapshot.mainSize) warnings.push("active-slots-clamped-to-roster-size");
 	if (plan && Array.isArray(plan.warnings)) {
 		for (let i = 0; i < plan.warnings.length; i++) warnings.push(plan.warnings[i]);
 	}
-	if (snapshot && snapshot.remainingEditableDays <= 0) warnings.push("no-editable-cwl-day");
-
+	if (snapshot && snapshot.requestedMainSize > snapshot.rosterPoolSize) warnings.push("active-slots-exceed-usable-pool");
+	const seasonContext = snapshot && snapshot.seasonContext && typeof snapshot.seasonContext === "object" ? snapshot.seasonContext : {};
 	const plannerSummary = {
 		remainingEditableDays: Math.max(0, toNonNegativeInt_(snapshot && snapshot.remainingEditableDays)),
-		optimalTotalSlack: Math.max(0, toNonNegativeInt_(plan && plan.optimalTotalSlack)),
-		rewardFeasiblePlayerCount: Math.max(0, toNonNegativeInt_(rewardFeasiblePlayerCount)),
-		rewardCriticalPlayerTags: rewardCriticalPlayerTags,
-		impossibleRewardPlayerTags: impossibleRewardPlayerTags,
-		blockedByExclusions: !!(suggestions && suggestions.blockedByExclusions),
-		blockedByExclusionOutTags: dedupeTagList_(suggestions && suggestions.blockedByExclusionOutTags),
-		blockedByExclusionInTags: dedupeTagList_(suggestions && suggestions.blockedByExclusionInTags),
+		nextEditableDayIndex: typeof snapshot.nextEditableDayIndex === "number" && isFinite(snapshot.nextEditableDayIndex) ? Math.floor(snapshot.nextEditableDayIndex) : -1,
+		contextSource: String(seasonContext.contextSource || seasonContext.source || ""),
+		estimatedContext: seasonContext.estimated === true,
+		roundStates: Array.isArray(seasonContext.roundStates) ? seasonContext.roundStates.slice(0, 10).map((state) => String(state || "")) : [],
 		solverMode: String((plan && plan.solverMode) || ""),
+		historyStatus: String((snapshot && snapshot.historyContext && snapshot.historyContext.historyStatus) || ""),
+		selectedRewardPlayerTags: dedupeTagList_(plan && plan.selectedRewardTags),
+		projectedRewardCompletePlayerTags: dedupeTagList_(plan && plan.projectedRewardCompleteTags),
+		securedRewardPlayerTags: dedupeTagList_(plan && plan.securedRewardTags),
+		requiredNextRewardPlayerTags: dedupeTagList_(plan && plan.requiredNextRewardTags),
+		capacityNextRewardPlayerTags: dedupeTagList_(plan && plan.capacityNextRewardTags),
+		selectedLaterRewardPlayerTags: dedupeTagList_(plan && plan.selectedLaterRewardTags),
+		rewardStatusByTag: rewardStatusByTag,
+		rewardAppearancesReserved: toNonNegativeInt_(plan && plan.rewardAppearancesReserved),
+		rewardCapacity: toNonNegativeInt_(plan && plan.rewardCapacity),
+		optionalSwapCount: toNonNegativeInt_(plan && plan.optionalSwapCount),
+		invalidConstraints: !!(plan && plan.invalidConstraints),
+		invalidReason: String((plan && plan.invalidReason) || ""),
 	};
-	const dedupedWarnings = dedupeStringList_(warnings, 20);
+	const dedupedWarnings = dedupeStringList_(warnings, 30);
 	if (dedupedWarnings.length) plannerSummary.warnings = dedupedWarnings;
-
 	return {
 		plannerSummary: plannerSummary,
 		configSnapshot: {
 			defaultSeasonDays: Number(config && config.defaultSeasonDays) || 7,
-			priorMeanStarsPerStart: Number(config && config.priorMeanStarsPerStart) || 2,
-			priorWeightAttacks: Number(config && config.priorWeightAttacks) || 0,
-			minExpectedStarsPerStart: Number(config && config.minExpectedStarsPerStart) || 0,
-			maxExpectedStarsPerStart: Number(config && config.maxExpectedStarsPerStart) || 0,
-			weightTH: Number(config && config.weightTH) || 0,
-			weightStarsPerf: Number(config && config.weightStarsPerf) || 0,
-			weightDestructionPerf: Number(config && config.weightDestructionPerf) || 0,
-			weightThreeStarRate: Number(config && config.weightThreeStarRate) || 0,
-			weightHitUpAbility: Number(config && config.weightHitUpAbility) || 0,
-			weightHitEvenAbility: Number(config && config.weightHitEvenAbility) || 0,
-			weightReliabilityPenalty: Number(config && config.weightReliabilityPenalty) || 0,
-			churnPenalty: Number(config && config.churnPenalty) || 0,
+			supportedTownHallMin: Number(config && config.supportedTownHallMin) || 1,
+			supportedTownHallMax: Number(config && config.supportedTownHallMax) || 18,
+			qualityPriorMeanStarsWhenUsed: Number(config && config.qualityPriorMeanStarsWhenUsed) || 3,
+			qualityPriorMeanDestruction: Number(config && config.qualityPriorMeanDestruction) || 100,
+			qualityPriorMeanThreeStarProbability: Number(config && config.qualityPriorMeanThreeStarProbability) || 1,
+			qualityPriorWeightAttacks: Number(config && config.qualityPriorWeightAttacks) || 0,
+			reliabilityPriorMean: Number(config && config.reliabilityPriorMean) || 0,
+			reliabilityPriorWeight: Number(config && config.reliabilityPriorWeight) || 0,
+			benchWeightTownHall: Number(config && config.benchWeightTownHall) || 0,
+			benchWeightStarsWhenUsed: Number(config && config.benchWeightStarsWhenUsed) || 0,
+			benchWeightDestructionWhenUsed: Number(config && config.benchWeightDestructionWhenUsed) || 0,
+			benchWeightThreeStarProbability: Number(config && config.benchWeightThreeStarProbability) || 0,
+			benchReliabilityExponent: Number(config && config.benchReliabilityExponent) || 0,
+			optionalSwapMinScoreDelta: Number(config && config.optionalSwapMinScoreDelta) || 0,
+			maxOptionalSwaps: Number(config && config.maxOptionalSwaps) || 0,
 		},
 	};
 }
@@ -1296,8 +1584,8 @@ function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 
 	const benchSuggestions = {
 		updatedAt: updatedAt,
-		algorithm: String(config.algorithm || "season_milp_v1"),
-		nextEditableDayIndex: snapshot.remainingEditableDays > 0 ? 0 : -1,
+		algorithm: String(config.algorithm || "cwl_bench_exact_dp_v2"),
+		nextEditableDayIndex: snapshot.remainingEditableDays > 0 ? snapshot.nextEditableDayIndex : -1,
 		targetMainTags: suggestions.targetMainTags,
 		actionableTargetMainTags: suggestions.actionableTargetMainTags,
 		benchTags: suggestions.benchTags,
@@ -1315,7 +1603,7 @@ function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 	};
 
 	ctx.roster.benchSuggestions = benchSuggestions;
-	Logger.log("computeBenchSuggestions planner rosterId=%s days=%s slack=%s solver=%s swaps=%s blocked=%s", ctx.rosterId, snapshot.remainingEditableDays, plan.optimalTotalSlack, plan.solverMode, suggestions.pairs.length, suggestions.blockedByExclusions ? "1" : "0");
+	Logger.log("computeBenchSuggestions planner rosterId=%s days=%s nextEditable=%s solver=%s swaps=%s optional=%s invalid=%s", ctx.rosterId, snapshot.remainingEditableDays, benchSuggestions.nextEditableDayIndex, plan.solverMode, suggestions.pairs.length, plan.optionalSwapCount || 0, plan.invalidConstraints ? "1" : "0");
 
 	const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "compute bench suggestions");
 	return {
