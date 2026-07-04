@@ -77,13 +77,13 @@
 
   brand: {
 
-    eyebrow: "200+ Members \u2022 Discord-Based",
+    eyebrow: "Discord \u2022 War \u2022 CWL",
 
   },
 
   cwl: {
 
-    body: "Every active CWL player gets planned before league week starts.",
+    body: "Set before league week. Side wars keep running.",
 
     eyebrow: "CWL",
 
@@ -93,7 +93,7 @@
 
         label: "Placement",
 
-        value: "All active players",
+        value: "Active",
 
       },
 
@@ -101,7 +101,7 @@
 
         label: "Rosters",
 
-        value: "Set before CWL",
+        value: "Pre-set",
 
       },
 
@@ -109,21 +109,21 @@
 
         label: "Rewards",
 
-        value: "Full-reward goal",
+        value: "Full path",
 
       },
 
       {
 
-        label: "Extra wars",
+        label: "Wars",
 
-        value: "Regular wars continue",
+        value: "Still running",
 
       },
 
     ],
 
-    title: "CWL plans for every active player.",
+    title: "Planned lineups. Clear rewards.",
 
   },
 
@@ -131,17 +131,17 @@
 
     cwlLabel: "CWL status",
 
-    eyebrow: "Clan family",
+    eyebrow: "Live clans",
 
-    loadingMetaText: "Syncing live roster data.",
+    loadingMetaText: "Syncing live rosters.",
 
-    metaTemplate: "{clanCount} clans • {playerCount} rostered players",
+    metaTemplate: "{clanCount} clans \u2022 {playerCount} rostered players",
 
     playersLabel: "Rostered players",
 
     regularWarLabel: "War status",
 
-    title: "A clan path for every active player.",
+    title: "Real rosters. Clear path.",
 
   },
 
@@ -155,23 +155,23 @@
 
     steps: [
 
-      "Join the server.",
+      "Join Discord.",
 
-      "Send your player tag.",
+      "Send your tag.",
 
-      "Get matched to a clan.",
+      "Get matched.",
 
     ],
 
-    title: "Join now and get placed.",
+    title: "Enter the shell.",
 
   },
 
   hero: {
 
-    body: "Every active player gets matched to a clan. CWL is planned. Strong attackers can move up.",
+    body: "Join Discord. Send your tag. Get matched.",
 
-    eyebrow: "Clan Family • War • CWL",
+    eyebrow: "Join \u2022 Match \u2022 War",
 
     primaryCtaLabel: "Join Discord",
 
@@ -183,43 +183,43 @@
 
   journey: {
 
-    eyebrow: "Joining",
+    eyebrow: "Entry",
 
     steps: [
 
       {
 
-        body: "Send your tag and playstyle.",
+        body: "Open a ticket with your tag.",
 
         label: "01",
 
-        title: "Open ticket",
+        title: "Join Discord",
 
       },
 
       {
 
-        body: "Matched by TH, activity, and goals.",
+        body: "Placed by TH, activity, and goals.",
 
         label: "02",
 
-        title: "Get placed",
+        title: "Get matched",
 
       },
 
       {
 
-        body: "Join the clan and play when ready.",
+        body: "War, CWL, stronger lineups.",
 
         label: "03",
 
-        title: "Start playing",
+        title: "Move up",
 
       },
 
     ],
 
-    title: "Join Discord. Get matched. Start playing.",
+    title: "Send tag. Get matched. Climb.",
 
   },
 
@@ -251,17 +251,17 @@
 
   network: {
 
-    body: "Consistent attackers can earn stronger lineups.",
+    body: "Reliability moves you up.",
 
-    eyebrow: "Competitive path",
+    eyebrow: "Progression",
 
     highlights: [
 
       {
 
-        label: "Entry",
+        label: "Signal",
 
-        value: "Earned by results",
+        value: "Results",
 
       },
 
@@ -269,7 +269,7 @@
 
         label: "Lineups",
 
-        value: "Stronger CWL rosters",
+        value: "Higher CWL",
 
       },
 
@@ -277,45 +277,45 @@
 
         label: "Practice",
 
-        value: "Friendly war hub",
+        value: "Wars",
 
       },
 
       {
 
-        label: "Progression",
+        label: "Path",
 
-        value: "Move up over time",
+        value: "Move up",
 
       },
 
     ],
 
-    title: "Strong players get harder wars.",
+    title: "Strong hits. Stronger lineups.",
 
   },
 
   proof: {
 
-    body: "Active means reachable on Discord, using attacks, and staying involved.",
+    body: "Be reachable. Use attacks. Communicate early.",
 
     eyebrow: "Standards",
 
-    title: "Discord required.\nActive players placed.\nReliable hits expected.",
+    title: "Discord on.\nHits used.\nProgress earned.",
 
   },
 
   war: {
 
-    body: "Serious enough to stay reliable, relaxed enough to enjoy.",
+    body: "Organised wars without the noise.",
 
-    eyebrow: "War system",
+    eyebrow: "War",
 
     highlights: [
 
       {
 
-        label: "War rhythm",
+        label: "Rhythm",
 
         value: "Back-to-back",
 
@@ -323,31 +323,31 @@
 
       {
 
-        label: "Attacks",
+        label: "Hits",
 
-        value: "Both hits expected",
-
-      },
-
-      {
-
-        label: "Reliability",
-
-        value: "Missed hits tracked",
+        value: "Both expected",
 
       },
 
       {
 
-        label: "Support",
+        label: "Record",
 
-        value: "Planning help available",
+        value: "Misses tracked",
+
+      },
+
+      {
+
+        label: "Help",
+
+        value: "Planning support",
 
       },
 
     ],
 
-    title: "Reliable wars, chill atmosphere.",
+    title: "Opt in. Use hits. Improve.",
 
   },
 
@@ -3489,6 +3489,14 @@
     hitUpCount: 0,
     hitDownCount: 0,
     sameThHitCount: 0,
+    defenseAttacksReceived: 0,
+    successfulDefensiveAttacks: 0,
+    attackedDefenseDays: 0,
+    defenseHolds: 0,
+    threeStarAttacksConceded: 0,
+    bestStarsConceded: 0,
+    bestDestructionConceded: 0,
+    unattackedDefenseDays: 0,
   });
 
   // Sanitize CWL stat entry local.
@@ -3510,6 +3518,14 @@
     out.hitUpCount = toNonNegativeIntLocal_(entry.hitUpCount);
     out.hitDownCount = toNonNegativeIntLocal_(entry.hitDownCount);
     out.sameThHitCount = toNonNegativeIntLocal_(entry.sameThHitCount);
+    out.defenseAttacksReceived = toNonNegativeIntLocal_(entry.defenseAttacksReceived);
+    out.successfulDefensiveAttacks = toNonNegativeIntLocal_(entry.successfulDefensiveAttacks);
+    out.attackedDefenseDays = toNonNegativeIntLocal_(entry.attackedDefenseDays);
+    out.defenseHolds = toNonNegativeIntLocal_(entry.defenseHolds);
+    out.threeStarAttacksConceded = toNonNegativeIntLocal_(entry.threeStarAttacksConceded);
+    out.bestStarsConceded = toNonNegativeIntLocal_(entry.bestStarsConceded);
+    out.bestDestructionConceded = toNonNegativeIntLocal_(entry.bestDestructionConceded);
+    out.unattackedDefenseDays = toNonNegativeIntLocal_(entry.unattackedDefenseDays);
     return out;
   };
 
@@ -3530,6 +3546,16 @@
       hitUpCount: entry.hitUpCount,
       hitDownCount: entry.hitDownCount,
       sameThHitCount: entry.sameThHitCount,
+      defenseAttacksReceived: entry.defenseAttacksReceived,
+      successfulDefensiveAttacks: entry.successfulDefensiveAttacks,
+      attackedDefenseDays: entry.attackedDefenseDays,
+      defenseHolds: entry.defenseHolds,
+      threeStarAttacksConceded: entry.threeStarAttacksConceded,
+      bestStarsConceded: entry.bestStarsConceded,
+      bestDestructionConceded: entry.bestDestructionConceded,
+      unattackedDefenseDays: entry.unattackedDefenseDays,
+      avgBestStarsConceded: entry.attackedDefenseDays > 0 ? (entry.bestStarsConceded / entry.attackedDefenseDays) : null,
+      avgBestDestructionConceded: entry.attackedDefenseDays > 0 ? (entry.bestDestructionConceded / entry.attackedDefenseDays) : null,
       starsPerf: possibleStars > 0 ? (entry.starsTotal / possibleStars) : null,
       destructionPerf: entry.resolvedWarDays > 0 ? (entry.totalDestruction / (100 * entry.resolvedWarDays)) : null,
     };
@@ -6335,10 +6361,10 @@
     // Handle infer upstream error.
     const inferUpstreamError = () => {
       const text = toStr(rawText).toLowerCase();
-      if (!text) return "";
       if (response.status === 404 && isLikelyWorkerAdminApiEndpoint(endpoint)) {
         return "Admin API route is missing at /api/admin. Falling back to Apps Script endpoint.";
       }
+      if (!text) return "";
       if (text.indexOf("script-funktion nicht gefunden: dopost") >= 0 || text.indexOf("script function not found: dopost") >= 0) {
         return "Apps Script is missing doPost. Deploy the latest script version and redeploy the web app.";
       }

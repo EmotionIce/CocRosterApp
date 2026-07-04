@@ -1913,7 +1913,6 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			warTag: warTag,
 			war: war,
 			warState: warState,
-			side: side,
 		});
 	}
 	if (!usableWars.length) {
@@ -1942,56 +1941,13 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		const warTag = usableWars[i].warTag;
 		const war = usableWars[i].war;
 		const warState = usableWars[i].warState;
-		const side = usableWars[i].side;
 		warsProcessed++;
 		if (warState === "warended") {
 			const ingested = ingestCwlWarIntoWarPerformance_(warPerformance, war, warTag, ctx.clanTag, trackedHistoryTagSet, nowIso, "cwlRefreshWarEnded");
 			if (ingested) finalizedCwlWars++;
 		}
 
-		const opponentSide = getOpponentSideForClan_(war, ctx.clanTag);
-		const opponentThByTag = buildMemberThByTag_(opponentSide && opponentSide.members);
-
-		const members = Array.isArray(side.members) ? side.members : [];
-		for (let j = 0; j < members.length; j++) {
-			const member = members[j] && typeof members[j] === "object" ? members[j] : {};
-			const tag = normalizeTag_(member.tag);
-			if (!tag || !statsTrackedTagSet[tag]) continue;
-
-			if (!byTag[tag]) {
-				byTag[tag] = createEmptyCwlStatEntry_();
-			}
-
-			const stats = byTag[tag];
-			const attacks = Array.isArray(member.attacks) ? member.attacks : [];
-			if (warState === "inwar" && attacks.length === 0) {
-				stats.currentWarAttackPending = 1;
-				continue;
-			}
-
-			const attackerTh = readTownHallLevel_(member);
-			stats.daysInLineup++;
-			stats.resolvedWarDays++;
-			stats.attacksMade += attacks.length;
-			if (attacks.length === 0) stats.missedAttacks++;
-
-			for (let k = 0; k < attacks.length; k++) {
-				const attack = attacks[k] && typeof attacks[k] === "object" ? attacks[k] : {};
-				const stars = toNonNegativeInt_(attack.stars);
-				const destruction = readAttackDestruction_(attack);
-				const defenderTag = normalizeTag_(attack.defenderTag);
-				const defenderTh = defenderTag && Object.prototype.hasOwnProperty.call(opponentThByTag, defenderTag) ? opponentThByTag[defenderTag] : null;
-				stats.starsTotal += stars;
-				stats.totalDestruction += destruction;
-				stats.countedAttacks++;
-				if (stars === 3) stats.threeStarCount++;
-				if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
-					if (attackerTh < defenderTh) stats.hitUpCount++;
-					else if (attackerTh > defenderTh) stats.hitDownCount++;
-					else stats.sameThHitCount++;
-				}
-			}
-		}
+		mergeCwlAggregateByTag_(byTag, buildCwlWarAggregateForClan_(war, ctx.clanTag, statsTrackedTagSet));
 	}
 
 	ctx.roster.cwlStats = {

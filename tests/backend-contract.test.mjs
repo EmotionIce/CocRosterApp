@@ -2769,3 +2769,411 @@ test("manual cleanup converts known legacy active schema leftovers", () => {
   assert.deepEqual(Object.keys(repaired.rosterData.playerMetrics.byTag), ["#PLAYER"]);
   assert.equal(repaired.rosterData.playerMetrics.byTag["#PLAYER"].identity.tag, "#PLAYER");
 });
+
+test("CWL aggregation tracks offense and defense independently", () => {
+  const backend = loadBackend();
+  const war = {
+    state: "warEnded",
+    attacksPerMember: 1,
+    clan: {
+      tag: "#AAA",
+      members: [
+        { tag: "#A", name: "A", townHallLevel: 16, attacks: [{ defenderTag: "#X", stars: 2, destructionPercentage: 80 }] },
+        { tag: "#B", name: "B", townHallLevel: 16, attacks: [] },
+        { tag: "#C", name: "C", townHallLevel: 16, attacks: [] },
+      ],
+    },
+    opponent: {
+      tag: "#BBB",
+      members: [
+        { tag: "#X", townHallLevel: 16, attacks: [{ defenderTag: "#A", stars: 1, destructionPercentage: 60 }] },
+        { tag: "#Y", townHallLevel: 16, attacks: [{ defenderTag: "#A", stars: 2, destructionPercentage: 80 }] },
+        { tag: "#Z", townHallLevel: 16, attacks: [{ defenderTag: "#A", stars: 3, destructionPercentage: 90 }] },
+        { tag: "#Q", townHallLevel: 16, attacks: [{ defenderTag: "#C", stars: 2, destructionPercentage: 70 }] },
+      ],
+    },
+  };
+
+  const stats = backend.buildCwlWarAggregateForClan_(war, "#AAA", null);
+
+  assert.equal(stats["#A"].starsTotal, 2);
+  assert.equal(stats["#A"].attacksMade, 1);
+  assert.equal(stats["#A"].defenseAttacksReceived, 3);
+  assert.equal(stats["#A"].successfulDefensiveAttacks, 2);
+  assert.equal(stats["#A"].threeStarAttacksConceded, 1);
+  assert.equal(stats["#A"].defenseHolds, 0);
+  assert.equal(stats["#A"].bestStarsConceded, 3);
+  assert.equal(stats["#A"].bestDestructionConceded, 90);
+
+  assert.equal(stats["#B"].missedAttacks, 1);
+  assert.equal(stats["#B"].unattackedDefenseDays, 1);
+  assert.equal(stats["#B"].defenseHolds, 0);
+
+  assert.equal(stats["#C"].attacksMade, 0);
+  assert.equal(stats["#C"].missedAttacks, 1);
+  assert.equal(stats["#C"].defenseAttacksReceived, 1);
+  assert.equal(stats["#C"].successfulDefensiveAttacks, 1);
+  assert.equal(stats["#C"].defenseHolds, 1);
+});
+
+test("CWL active war missed attacks and unattacked defenses stay provisional", () => {
+  const backend = loadBackend();
+  const war = {
+    state: "inWar",
+    attacksPerMember: 1,
+    clan: {
+      tag: "#AAA",
+      members: [
+        { tag: "#A", townHallLevel: 16, attacks: [] },
+        { tag: "#B", townHallLevel: 16, attacks: [] },
+      ],
+    },
+    opponent: {
+      tag: "#BBB",
+      members: [
+        { tag: "#X", townHallLevel: 16, attacks: [{ defenderTag: "#B", stars: 2, destructionPercentage: 70 }] },
+      ],
+    },
+  };
+
+  const stats = backend.buildCwlWarAggregateForClan_(war, "#AAA", null);
+
+  assert.equal(stats["#A"].currentWarAttackPending, 1);
+  assert.equal(stats["#A"].missedAttacks, 0);
+  assert.equal(stats["#A"].unattackedDefenseDays, 0);
+  assert.equal(stats["#B"].currentWarAttackPending, 1);
+  assert.equal(stats["#B"].defenseAttacksReceived, 1);
+  assert.equal(stats["#B"].defenseHolds, 0);
+});
+
+test("CWL ranking uses backend comparator and does not give no-defense perfect credit", () => {
+  const backend = loadBackend();
+  const rows = [
+    { tag: "#NODEF", _sortName: "NoDef", cwlStats: { starsTotal: 6, totalDestruction: 180, attackedDefenseDays: 0 } },
+    {
+      tag: "#DEF",
+      _sortName: "Def",
+      cwlStats: {
+        starsTotal: 6,
+        totalDestruction: 150,
+        attackedDefenseDays: 1,
+        defenseHolds: 0,
+        successfulDefensiveAttacks: 1,
+        threeStarAttacksConceded: 1,
+        bestStarsConceded: 3,
+        bestDestructionConceded: 100,
+      },
+    },
+    { tag: "#NONE", _sortName: "None", cwlStats: {} },
+  ];
+
+  rows.sort(backend.compareCwlSeasonEventLeaderboardRows_);
+
+  assert.deepEqual(rows.map((row) => row.tag), ["#DEF", "#NODEF", "#NONE"]);
+});
+
+test("CWL final aggregate remains compact for a large synthetic leaderboard", () => {
+  const backend = loadBackend();
+  const participantsByDiscordId = {};
+  const byTag = {};
+  for (let i = 0; i < 200; i++) {
+    const tag = `#P${String(i).padStart(4, "0")}`;
+    participantsByDiscordId[String(1000 + i)] = {
+      discordId: String(1000 + i),
+      discordUsername: `user${i}`,
+      discordDisplayName: `User ${i}`,
+      status: "signed_up",
+      accounts: [{ tag, name: `Player ${i}`, townHallLevel: 16 }],
+    };
+    byTag[tag] = {
+      starsTotal: i % 21,
+      attacksMade: 7,
+      missedAttacks: i % 2,
+      threeStarCount: i % 5,
+      totalDestruction: 500 + i,
+      countedAttacks: 7,
+      defenseAttacksReceived: 4,
+      successfulDefensiveAttacks: i % 4,
+      attackedDefenseDays: 4,
+      defenseHolds: i % 3,
+      threeStarAttacksConceded: i % 2,
+      bestStarsConceded: 8,
+      bestDestructionConceded: 320,
+      unattackedDefenseDays: 0,
+    };
+  }
+
+  const finalAggregate = backend.filterCwlAggregateToRegisteredParticipants_(
+    { eventId: "cwl-test", type: "cwl", participantsByDiscordId },
+    { eventId: "cwl-test", kind: "live", warTags: ["#WAR1", "#WAR2"], byTag }
+  );
+
+  assert.ok(Buffer.byteLength(JSON.stringify(finalAggregate), "utf8") < 128 * 1024);
+  assert.equal(Object.keys(finalAggregate.byTag).length, 200);
+  assert.equal(finalAggregate.rankedTags.length, 200);
+});
+
+test("CWL snapshot planning adds zero CWL requests without roster or event need", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = buildValidRosterData();
+  rosterData.rosters[0].trackingMode = "regularWar";
+  const paths = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    const errorByKey = {};
+    for (const entry of entries) {
+      paths.push(entry.path);
+      if (entry.path.endsWith("/members")) dataByKey[entry.key] = { items: [] };
+      else errorByKey[entry.key] = Object.assign(new Error("not found"), { statusCode: 404 });
+    }
+    return { dataByKey, errorByKey, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+
+  const snapshot = backend.buildAutoRefreshSnapshot_(rosterData, { sourceRosters: rosterData.rosters });
+
+  assert.equal(snapshot.requestCounts.leagueGroup, 0);
+  assert.equal(snapshot.requestCounts.cwlWar, 0);
+  assert.equal(paths.some((path) => path.includes("leaguegroup")), false);
+  assert.equal(paths.some((path) => path.includes("/clanwarleagues/wars/")), false);
+});
+
+test("CWL waiting event with no league group fetches groups once per unique clan and no wars", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-waiting", type: "cwl" },
+        byId: {
+          "cwl-waiting": {
+            eventId: "cwl-waiting",
+            type: "cwl",
+            status: "open",
+            signupsOpen: true,
+            cwlTrackingState: "waiting",
+            cwl: { groups: {} },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = buildValidRosterData();
+  rosterData.rosters = [
+    { ...rosterData.rosters[0], id: "a", connectedClanTag: "#AAA", trackingMode: "regularWar" },
+    { ...rosterData.rosters[0], id: "b", connectedClanTag: "#AAA", trackingMode: "regularWar" },
+    { ...rosterData.rosters[0], id: "c", connectedClanTag: "#BBB", trackingMode: "regularWar" },
+  ];
+  const paths = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    const errorByKey = {};
+    for (const entry of entries) {
+      paths.push(entry.path);
+      if (entry.path.endsWith("/members")) dataByKey[entry.key] = { items: [] };
+      else errorByKey[entry.key] = Object.assign(new Error("not in CWL"), { statusCode: 404 });
+    }
+    return { dataByKey, errorByKey, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+
+  const snapshot = backend.buildAutoRefreshSnapshot_(rosterData, { sourceRosters: rosterData.rosters });
+
+  assert.equal(snapshot.requestCounts.leagueGroup, 2);
+  assert.equal(snapshot.requestCounts.cwlWar, 0);
+  assert.equal(paths.filter((path) => path.includes("leaguegroup")).length, 2);
+  assert.equal(paths.some((path) => path.includes("/clanwarleagues/wars/")), false);
+});
+
+test("CWL active event dedupes shared league groups and war tags per snapshot run", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-active", type: "cwl" },
+        byId: {
+          "cwl-active": {
+            eventId: "cwl-active",
+            type: "cwl",
+            status: "open",
+            signupsOpen: true,
+            cwlTrackingState: "active",
+            cwl: {
+              groups: {
+                "grp-test": {
+                  groupId: "grp-test",
+                  clanTags: ["#AAA", "#BBB"],
+                  warTags: ["#WAR1", "#WAR2"],
+                  expectedRounds: 2,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = buildValidRosterData();
+  rosterData.rosters = [
+    { ...rosterData.rosters[0], id: "a", connectedClanTag: "#AAA", trackingMode: "regularWar" },
+    { ...rosterData.rosters[0], id: "b", connectedClanTag: "#BBB", trackingMode: "regularWar" },
+  ];
+  const leaguegroup = {
+    state: "inWar",
+    season: "2026-07",
+    clans: [{ tag: "#AAA" }, { tag: "#BBB" }],
+    rounds: [{ warTags: ["#WAR1", "#WAR2", "#WAR1"] }],
+  };
+  const war = {
+    state: "inWar",
+    clan: { tag: "#AAA", members: [] },
+    opponent: { tag: "#BBB", members: [] },
+  };
+  const paths = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    const errorByKey = {};
+    for (const entry of entries) {
+      paths.push(entry.path);
+      if (entry.path.endsWith("/members")) dataByKey[entry.key] = { items: [] };
+      else if (entry.path.includes("leaguegroup")) dataByKey[entry.key] = leaguegroup;
+      else if (entry.path.includes("/clanwarleagues/wars/")) dataByKey[entry.key] = war;
+      else errorByKey[entry.key] = Object.assign(new Error("not found"), { statusCode: 404 });
+    }
+    return { dataByKey, errorByKey, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+
+  const snapshot = backend.buildAutoRefreshSnapshot_(rosterData, { sourceRosters: rosterData.rosters });
+
+  assert.equal(snapshot.requestCounts.leagueGroup, 2);
+  assert.equal(snapshot.requestCounts.cwlWar, 2);
+  assert.equal(JSON.stringify(snapshot.requestPlan.cwlWarTags.sort()), JSON.stringify(["#WAR1", "#WAR2"]));
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 2);
+});
+
+test("CWL partial refresh marks previous aggregate stale without replacing scores", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-active", type: "cwl" },
+        byId: {
+          "cwl-active": {
+            eventId: "cwl-active",
+            type: "cwl",
+            status: "open",
+            signupsOpen: true,
+            cwlTrackingState: "active",
+            cwl: {
+              groups: {
+                "grp-test": {
+                  groupId: "grp-test",
+                  clanTags: ["#AAA"],
+                  warTags: ["#WAR1"],
+                  expectedRounds: 1,
+                },
+              },
+            },
+          },
+        },
+        cwlAggregates: {
+          byEvent: {
+            "cwl-active": {
+              live: {
+                eventId: "cwl-active",
+                kind: "live",
+                hash: "old",
+                byTag: { "#A": { starsTotal: 3, attacksMade: 1 } },
+                warTags: ["#WAR1"],
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = buildValidRosterData();
+  rosterData.rosters[0].connectedClanTag = "#AAA";
+  const snapshot = {
+    leaguegroupRawByClanTag: {},
+    cwlWarRawByTag: {},
+    cwlWarErrorByTag: {
+      "#WAR1": Object.assign(new Error("api failed"), { statusCode: 500 }),
+    },
+  };
+
+  const result = backend.refreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, { nowIso: "2026-07-04T00:00:00.000Z" });
+  const live = backend.readCwlSeasonEventAggregate_("cwl-active", "live");
+
+  assert.equal(result.status, "stale");
+  assert.equal(live.byTag["#A"].starsTotal, 3);
+  assert.equal(live.stale, true);
+});
+
+test("CWL completion freezes only after a second matching complete refresh", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-active", type: "cwl" },
+        byId: {
+          "cwl-active": {
+            eventId: "cwl-active",
+            type: "cwl",
+            status: "open",
+            signupsOpen: true,
+            cwlTrackingState: "active",
+            cwl: {
+              groups: {
+                "grp-test": {
+                  groupId: "grp-test",
+                  clanTags: ["#AAA"],
+                  warTags: ["#WAR1"],
+                  expectedRounds: 1,
+                },
+              },
+            },
+            participantsByDiscordId: {
+              "100": {
+                discordId: "100",
+                discordUsername: "alpha",
+                discordDisplayName: "Alpha",
+                status: "signed_up",
+                accounts: [{ tag: "#A", name: "Alpha" }],
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = buildValidRosterData();
+  rosterData.rosters[0].connectedClanTag = "#AAA";
+  const snapshot = {
+    leaguegroupRawByClanTag: {},
+    cwlWarRawByTag: {
+      "#WAR1": {
+        state: "warEnded",
+        startTime: "2026-07-01T00:00:00.000Z",
+        endTime: "2026-07-02T00:00:00.000Z",
+        clan: {
+          tag: "#AAA",
+          members: [{ tag: "#A", attacks: [{ defenderTag: "#X", stars: 3, destructionPercentage: 100 }] }],
+        },
+        opponent: {
+          tag: "#BBB",
+          members: [{ tag: "#X", attacks: [] }],
+        },
+      },
+    },
+    cwlWarErrorByTag: {},
+  };
+
+  const first = backend.refreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, { nowIso: "2026-07-04T00:00:00.000Z" });
+  const second = backend.refreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, { nowIso: "2026-07-04T01:00:00.000Z" });
+  const db = backend.__getFirebaseDb().events.seasonEvents;
+  const finalAggregate = backend.readCwlSeasonEventAggregate_("cwl-active", "final");
+
+  assert.equal(first.status, "finalizing");
+  assert.equal(second.status, "completed");
+  assert.equal(db.currentCwl, undefined);
+  assert.equal(db.latestCompletedCwl.eventId, "cwl-active");
+  assert.equal(db.cwlAggregates.byEvent["cwl-active"].live, undefined);
+  assert.equal(finalAggregate.byTag["#A"].starsTotal, 3);
+});

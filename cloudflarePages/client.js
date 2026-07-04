@@ -17,6 +17,9 @@
     const DONATION_REFRESH_BASE_PATH = "donationRefresh";
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
+    const SEASON_EVENTS_CURRENT_CWL_PATH = SEASON_EVENTS_BASE_PATH + "/currentCwl";
+    const SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH = SEASON_EVENTS_BASE_PATH + "/latestCompletedCwl";
+    const SEASON_EVENTS_CWL_AGGREGATES_PATH = SEASON_EVENTS_BASE_PATH + "/cwlAggregates/byEvent";
     const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
     const SEASON_EVENTS_BY_SEASON_PATH = SEASON_EVENTS_BASE_PATH + "/bySeason";
     const SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/seasonState/current";
@@ -114,6 +117,7 @@
         leaderboard: "leaderboard",
         landing: "landing",
     };
+    const LANDING_COMPACT_LAYOUT_QUERY = "(max-width: 820px), (max-height: 520px) and (max-width: 940px)";
     const PUBLIC_LANDING_DEFAULTS = {
         bannerMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=banner_xwhksj&profile=cld-looping",
         squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_ofyufv&profile=cld-looping",
@@ -121,7 +125,7 @@
     };
     const PUBLIC_PROFILE_DEFAULTS = {
         brand: {
-            eyebrow: "200+ Members \u2022 Discord-Based",
+            eyebrow: "Discord \u2022 War \u2022 CWL",
         },
         nav: {
             homeLabel: "Home",
@@ -131,73 +135,77 @@
             adminLabel: "Admin Panel",
         },
         hero: {
-            eyebrow: "Recruiting active players",
-            title: "TURTLE: active, organized, improving.",
-            body: "A place for every Town Hall, from steady progress to high-level wars and the Project Se7ven path.",
-            primaryCtaLabel: "Join Discord now!",
-            secondaryCtaLabel: "See Current Rosters",
+            eyebrow: "Join \u2022 Match \u2022 War",
+            title: "TURTLE",
+            body: "Join Discord. Send your tag. Get matched.",
+            primaryCtaLabel: "Join Discord",
+            secondaryCtaLabel: "View Rosters",
         },
         journey: {
-            eyebrow: "How joining works",
-            title: "You bring the player tag. We handle the setup and path forward.",
+            eyebrow: "Entry",
+            title: "Send tag. Get matched. Climb.",
             steps: [
-                { label: "Step 1", title: "Open a ticket", body: "Share your player tag and basic playstyle." },
-                { label: "Step 2", title: "Get linked and placed", body: "Your account gets linked to Discord and you set your self-roles." },
-                { label: "Step 3", title: "War, learn, move up", body: "Join the clan, opt into war through the pinned message and move up, in the TURTLE-family, as your Town Hall and performance improve." },
+                { label: "01", title: "Join Discord", body: "Open a ticket with your tag." },
+                { label: "02", title: "Get matched", body: "Placed by TH, activity, and goals." },
+                { label: "03", title: "Move up", body: "War, CWL, stronger lineups." },
             ],
         },
         family: {
-            eyebrow: "Clan family lineup",
-            title: "From early growth to Legends-level play, the family gives every Town Hall a real home and room to keep climbing.",
-            metaTemplate: "{clanCount} clans, {playerCount} tracked players across the family.",
-            loadingMetaText: "Syncing the latest family snapshot. Live lineup stats will appear shortly.",
-            playersLabel: "Players in roster",
-            cwlLabel: "CWL",
-            regularWarLabel: "Regular war",
+            eyebrow: "Live clans",
+            title: "Real rosters. Clear path.",
+            metaTemplate: "{clanCount} clans \u2022 {playerCount} rostered players",
+            loadingMetaText: "Syncing live rosters.",
+            playersLabel: "Rostered players",
+            cwlLabel: "CWL status",
+            regularWarLabel: "War status",
         },
         war: {
-            eyebrow: "Main clan focus",
-            title: "TURTLE Main is built for strong TH17 and TH18 players who want serious wars and the relaxed community vibe.",
-            body: "Reliable hits matter missed attacks and long-term performance are tracked. Planning help is there when you want it, and players who ask for coaching can get it.",
+            eyebrow: "War",
+            title: "Opt in. Use hits. Improve.",
+            body: "Organised wars without the noise.",
             highlights: [
-                { label: "War style", value: "Relaxed, but reliable" },
-                { label: "Core TH range", value: "TH17-18" },
+                { label: "Rhythm", value: "Back-to-back" },
+                { label: "Hits", value: "Both expected" },
+                { label: "Record", value: "Misses tracked" },
+                { label: "Help", value: "Planning support" },
             ],
         },
         cwl: {
-            eyebrow: "CWL structure",
-            title: "Every active member gets a CWL spot, and regular wars keep running even during league week.",
-            body: "Rosters are set before CWL starts, based on Town Hall strength and the best overall lineup fit. Subs are rotated so everyone still earns full rewards, and the family keeps side wars and back-to-back wars running year-round.",
+            eyebrow: "CWL",
+            title: "Planned lineups. Clear rewards.",
+            body: "Set before league week. Side wars keep running.",
             highlights: [
-                { label: "Access", value: "All active members" },
-                { label: "During CWL", value: "Side wars running" },
-                { label: "Coordination", value: "Always optimized" },
+                { label: "Places", value: "Active" },
+                { label: "Rosters", value: "Pre-set" },
+                { label: "Rewards", value: "Full path" },
+                { label: "Wars", value: "Still running" },
             ],
         },
         network: {
-            eyebrow: "ProjectSE7VEN",
-            title: "For the strongest players, TURTLE also opens a path into Project 7's fully competitive environment.",
-            body: "Confident Legends League players can move into P7 for a sharper competitive setting, high-level push play, and prize-backed push events worth multiple hundreds $$! It is the elite lane, but still part of the wider TURTLE ecosystem.",
+            eyebrow: "Progression",
+            title: "Strong hits. Stronger lineups.",
+            body: "Reliability moves you up.",
             highlights: [
-                { label: "Entry bar", value: "Legends + confident hits" },
-                { label: "Events", value: "$$$ push events" },
-                { label: "Connection", value: "Shared leadership" },
+                { label: "Signal", value: "Results" },
+                { label: "Lineups", value: "Higher CWL" },
+                { label: "Practice", value: "Wars" },
+                { label: "Path", value: "Move up" },
             ],
         },
         proof: {
-            eyebrow: "Why it works",
-            title: "Discord is required. Pressure isn't.",
-            body: "The expectations are simple: stay active, see your notifications, use your hits, and be willing to improve. EU and US staff coverage keeps replies fast, while the family stays organized without becoming overly strict.",
+            eyebrow: "Standards",
+            title: "Discord on.\nHits used.\nProgress earned.",
+            body: "Be reachable. Use attacks. Communicate early.",
         },
         finalCta: {
-            eyebrow: "Ready to join",
-            title: "Join the Discord and Open a Ticket.",
+            eyebrow: "Ready",
+            title: "Enter the shell.",
             steps: [
-                "Join the server and open a Ticket.",
-                "Share your player tag and playstyle",
-                "Get placed in the right clan and opt into war when ready",
+                "Join Discord.",
+                "Send your tag.",
+                "Get matched.",
             ],
-            primaryCtaLabel: "Join TURTLE on Discord",
+            primaryCtaLabel: "Join Discord",
             secondaryCtaLabel: "View Leaderboard",
         },
         media: {
@@ -533,6 +541,10 @@
         setElementTextIfPresent_("landingHeroBody", hero.body);
         setElementTextIfPresent_("landingHeroDiscordCta", hero.primaryCtaLabel);
         setElementTextIfPresent_("landingHeroRostersCta", hero.secondaryCtaLabel);
+        setElementTextIfPresent_("landingRouteDiscordLabel", nav.discordLabel || hero.primaryCtaLabel);
+        setElementTextIfPresent_("landingRouteMatchLabel", journeySteps[1] && journeySteps[1].title);
+        setElementTextIfPresent_("landingRouteWarLabel", war.eyebrow);
+        setElementTextIfPresent_("landingRouteCwlLabel", cwl.eyebrow);
 
         setElementTextIfPresent_("landingJourneyEyebrow", journey.eyebrow);
         setElementTextIfPresent_("landingJourneyTitle", journey.title);
@@ -1145,6 +1157,9 @@
         const starsTotal = toNonNegativeInt(entry.starsTotal);
         const countedAttacks = toNonNegativeInt(entry.countedAttacks);
         const totalDestruction = toNonNegativeInt(entry.totalDestruction);
+        const attackedDefenseDays = toNonNegativeInt(entry.attackedDefenseDays);
+        const bestStarsConceded = toNonNegativeInt(entry.bestStarsConceded);
+        const bestDestructionConceded = toNonNegativeInt(entry.bestDestructionConceded);
         const possibleStars = 3 * resolvedWarDays;
         return {
             season: toStr(cwlStatsRaw && cwlStatsRaw.season).trim(),
@@ -1160,6 +1175,16 @@
             hitUpCount: toNonNegativeInt(entry.hitUpCount),
             sameThHitCount: toNonNegativeInt(entry.sameThHitCount),
             hitDownCount: toNonNegativeInt(entry.hitDownCount),
+            defenseAttacksReceived: toNonNegativeInt(entry.defenseAttacksReceived),
+            successfulDefensiveAttacks: toNonNegativeInt(entry.successfulDefensiveAttacks),
+            attackedDefenseDays: attackedDefenseDays,
+            defenseHolds: toNonNegativeInt(entry.defenseHolds),
+            threeStarAttacksConceded: toNonNegativeInt(entry.threeStarAttacksConceded),
+            bestStarsConceded: bestStarsConceded,
+            bestDestructionConceded: bestDestructionConceded,
+            unattackedDefenseDays: toNonNegativeInt(entry.unattackedDefenseDays),
+            avgBestStarsConceded: attackedDefenseDays > 0 ? (bestStarsConceded / attackedDefenseDays) : null,
+            avgBestDestructionConceded: attackedDefenseDays > 0 ? (bestDestructionConceded / attackedDefenseDays) : null,
             possibleStars,
             starsPerf: possibleStars > 0 ? (starsTotal / possibleStars) : null,
             avgDestruction: countedAttacks > 0 ? (totalDestruction / countedAttacks) : null,
@@ -4109,10 +4134,10 @@
         // Handle infer upstream error.
         const inferUpstreamError = () => {
             const text = toStr(rawText).toLowerCase();
-            if (!text) return "";
             if (response.status === 404 && isLikelyWorkerAdminApiEndpoint(endpoint)) {
                 return "Admin API route is missing at /api/admin. Falling back to Apps Script endpoint.";
             }
+            if (!text) return "";
             if (text.indexOf("script-funktion nicht gefunden: dopost") >= 0 || text.indexOf("script function not found: dopost") >= 0) {
                 return "Apps Script is missing doPost. Deploy the latest script version and redeploy the web app.";
             }
@@ -4979,7 +5004,7 @@
     // Normalize season event type for public display.
     const normalizeSeasonEventType = (typeRaw) => {
         const type = toStr(typeRaw).trim().toLowerCase();
-        return type === "push" || type === "donation" ? type : "";
+        return type === "push" || type === "donation" || type === "cwl" ? type : "";
     };
 
     // Read the selected season-event results mode from public view state.
@@ -5002,6 +5027,8 @@
             current: source.current && typeof source.current === "object" ? source.current : {},
             seasonState: source.seasonState && typeof source.seasonState === "object" ? source.seasonState : {},
             byId: source.byId && typeof source.byId === "object" ? source.byId : {},
+            cwlAggregatesByEventId: source.cwlAggregatesByEventId && typeof source.cwlAggregatesByEventId === "object" ? source.cwlAggregatesByEventId : {},
+            latestCompletedCwl: source.latestCompletedCwl && typeof source.latestCompletedCwl === "object" ? source.latestCompletedCwl : null,
             loadErrors: Array.isArray(source.loadErrors) ? source.loadErrors : [],
             loadedAt: toStr(source.loadedAt).trim(),
             mode: mode,
@@ -5013,6 +5040,8 @@
         current: {},
         seasonState: {},
         byId: {},
+        cwlAggregatesByEventId: {},
+        latestCompletedCwl: null,
         loadErrors: Array.isArray(loadErrorsRaw) ? loadErrorsRaw : [],
         loadedAt: new Date().toISOString(),
     });
@@ -5450,6 +5479,116 @@
     };
 
     // Build one season event leaderboard model.
+    const getCwlSeasonEventAggregateForEvent = (dataRaw, eventRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        const aggregates = seasonEvents.cwlAggregatesByEventId && typeof seasonEvents.cwlAggregatesByEventId === "object"
+            ? seasonEvents.cwlAggregatesByEventId
+            : {};
+        const eventId = toStr(event.eventId).trim();
+        const byKind = eventId && aggregates[eventId] && typeof aggregates[eventId] === "object" ? aggregates[eventId] : {};
+        const state = toStr(event.cwlTrackingState || event.cwlStatus).trim().toLowerCase();
+        return state === "completed"
+            ? (byKind.final && typeof byKind.final === "object" ? byKind.final : null)
+            : (byKind.live && typeof byKind.live === "object" ? byKind.live : null);
+    };
+
+    const sanitizeCwlAggregateStat = (entryRaw) => {
+        const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+        const attackedDefenseDays = toNonNegativeInt(entry.attackedDefenseDays);
+        const bestStarsConceded = toNonNegativeInt(entry.bestStarsConceded);
+        const bestDestructionConceded = toNonNegativeInt(entry.bestDestructionConceded);
+        return {
+            starsTotal: toNonNegativeInt(entry.starsTotal),
+            attacksMade: toNonNegativeInt(entry.attacksMade),
+            missedAttacks: toNonNegativeInt(entry.missedAttacks),
+            threeStarCount: toNonNegativeInt(entry.threeStarCount),
+            totalDestruction: toNonNegativeInt(entry.totalDestruction),
+            countedAttacks: toNonNegativeInt(entry.countedAttacks),
+            currentWarAttackPending: Math.min(1, toNonNegativeInt(entry.currentWarAttackPending)),
+            defenseAttacksReceived: toNonNegativeInt(entry.defenseAttacksReceived),
+            successfulDefensiveAttacks: toNonNegativeInt(entry.successfulDefensiveAttacks),
+            attackedDefenseDays: attackedDefenseDays,
+            defenseHolds: toNonNegativeInt(entry.defenseHolds),
+            threeStarAttacksConceded: toNonNegativeInt(entry.threeStarAttacksConceded),
+            bestStarsConceded: bestStarsConceded,
+            bestDestructionConceded: bestDestructionConceded,
+            unattackedDefenseDays: toNonNegativeInt(entry.unattackedDefenseDays),
+            avgBestStarsConceded: attackedDefenseDays > 0 ? (bestStarsConceded / attackedDefenseDays) : null,
+            avgBestDestructionConceded: attackedDefenseDays > 0 ? (bestDestructionConceded / attackedDefenseDays) : null,
+        };
+    };
+
+    const buildCwlSeasonEventLeaderboardModel = (eventRaw, dataRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+        if (!event) return { event: null, rows: [], activeParticipantCount: 0, aggregate: null };
+        const participants = listSeasonEventSignedUpParticipants(event);
+        const aggregate = getCwlSeasonEventAggregateForEvent(dataRaw, event);
+        const byTag = aggregate && aggregate.byTag && typeof aggregate.byTag === "object" ? aggregate.byTag : {};
+        const rankedTags = Array.isArray(aggregate && aggregate.rankedTags)
+            ? aggregate.rankedTags.map((tag) => normalizeClanTag(tag)).filter((tag) => tag)
+            : [];
+        const registrationByTag = {};
+        const registeredOrder = [];
+        for (let i = 0; i < participants.length; i++) {
+            const participant = participants[i];
+            const accounts = Array.isArray(participant.accounts) ? participant.accounts : [];
+            for (let j = 0; j < accounts.length; j++) {
+                const account = accounts[j] && typeof accounts[j] === "object" ? accounts[j] : {};
+                const tag = normalizeClanTag(account.tag);
+                if (!tag || registrationByTag[tag]) continue;
+                registrationByTag[tag] = { participant: participant, account: account };
+                registeredOrder.push(tag);
+            }
+        }
+        const ordered = [];
+        const seen = Object.create(null);
+        for (let i = 0; i < rankedTags.length; i++) {
+            const tag = rankedTags[i];
+            if (!registrationByTag[tag] || seen[tag]) continue;
+            seen[tag] = true;
+            ordered.push(tag);
+        }
+        for (let i = 0; i < registeredOrder.length; i++) {
+            const tag = registeredOrder[i];
+            if (seen[tag]) continue;
+            seen[tag] = true;
+            ordered.push(tag);
+        }
+        const rows = [];
+        for (let i = 0; i < ordered.length; i++) {
+            const tag = ordered[i];
+            const registration = registrationByTag[tag];
+            const account = registration.account || {};
+            const participant = registration.participant || {};
+            const stats = sanitizeCwlAggregateStat(byTag[tag]);
+            const displayName = toStr(account.name).trim() || getSeasonEventParticipantDisplayName(participant) || tag;
+            rows.push({
+                rank: i + 1,
+                tag: tag,
+                playerTag: tag,
+                displayName: displayName,
+                discordUsername: toStr(participant.discordUsername).trim(),
+                accounts: [Object.assign({}, account, { tag: tag, cwlStats: stats })],
+                score: stats.starsTotal,
+                scoreLabel: formatNumber(stats.starsTotal) + " stars, " + formatNumber(stats.defenseHolds) + " holds",
+                scoreValueLabel: formatNumber(stats.starsTotal) + " stars",
+                leagueBadgeLabel: "",
+                metric: "cwl",
+                coverage: byTag[tag] ? "full" : "no-cwl-participation",
+                cwlStats: stats,
+            });
+        }
+        return {
+            event: event,
+            rows: rows,
+            activeParticipantCount: participants.length,
+            seasonId: "",
+            aggregate: aggregate,
+        };
+    };
+
     const buildSeasonEventLeaderboardModel = (eventRaw, dataRaw, optionsRaw) => {
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
         if (!event) return { event: null, rows: [], activeParticipantCount: 0 };
@@ -5457,6 +5596,7 @@
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
         const type = normalizeSeasonEventType(event.type);
+        if (type === "cwl") return buildCwlSeasonEventLeaderboardModel(event, data);
         const participants = listSeasonEventSignedUpParticipants(event);
         const rows = [];
         for (let i = 0; i < participants.length; i++) {
@@ -5575,7 +5715,16 @@
         return dateRange + " \u00b7 Discord signups";
     };
 
-    // Build public model for selected push and donation event results.
+    const getLatestCompletedCwlSeasonEvent = (dataRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
+        const pointer = seasonEvents.latestCompletedCwl && typeof seasonEvents.latestCompletedCwl === "object" ? seasonEvents.latestCompletedCwl : {};
+        const eventId = toStr(pointer.eventId).trim();
+        const byId = seasonEvents.byId && typeof seasonEvents.byId === "object" ? seasonEvents.byId : {};
+        return eventId && byId[eventId] && typeof byId[eventId] === "object" ? byId[eventId] : null;
+    };
+
+    // Build public model for selected seasonal event results.
     const buildSeasonEventsPublicModel = (dataRaw, modeRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const mode = sanitizeSeasonEventResultsMode(modeRaw);
@@ -5596,6 +5745,31 @@
                 unavailable: !event || !toStr(event.eventId).trim() || !bundle.byId[toStr(event.eventId).trim()],
             };
         });
+        const currentCwlEvent = getCurrentSeasonEventForType(data, "cwl", SEASON_EVENT_RESULT_MODE_VALUES.current);
+        const latestCompletedCwlEvent = getLatestCompletedCwlSeasonEvent(data);
+        const cwlState = toStr(currentCwlEvent && (currentCwlEvent.cwlTrackingState || currentCwlEvent.cwlStatus)).trim().toLowerCase();
+        const showLatestCompleted = (!currentCwlEvent || cwlState === "waiting") && !!latestCompletedCwlEvent;
+        const cwlDisplayEvent = currentCwlEvent || latestCompletedCwlEvent;
+        const cwlLeaderboardEvent = showLatestCompleted ? latestCompletedCwlEvent : cwlDisplayEvent;
+        const cwlLeaderboard = buildSeasonEventLeaderboardModel(cwlLeaderboardEvent, data);
+        if (cwlDisplayEvent) {
+            cards.push({
+                type: "cwl",
+                event: cwlDisplayEvent,
+                leaderboardEvent: cwlLeaderboardEvent,
+                title: "CWL",
+                status: toStr(cwlDisplayEvent && (cwlDisplayEvent.cwlTrackingState || cwlDisplayEvent.cwlStatus || cwlDisplayEvent.status)).trim() || "unavailable",
+                signupsOpen: cwlDisplayEvent && cwlDisplayEvent.signupsOpen === true,
+                dateRange: cwlDisplayEvent ? formatSeasonEventDateRange(cwlDisplayEvent) : "CWL window unavailable",
+                activeParticipantCount: cwlLeaderboard.activeParticipantCount,
+                rows: cwlLeaderboard.rows,
+                seasonId: "",
+                unavailable: !cwlDisplayEvent || !toStr(cwlDisplayEvent.eventId).trim(),
+                cwlTrackingState: cwlState || toStr(cwlDisplayEvent && cwlDisplayEvent.cwlTrackingState).trim().toLowerCase(),
+                aggregate: cwlLeaderboard.aggregate || null,
+                showingLatestCompleted: showLatestCompleted,
+            });
+        }
         const sharedMetaLine = buildSeasonEventsSharedMetaLine(cards);
         return {
             cards: cards,
@@ -5609,6 +5783,10 @@
     // Format event status label.
     const formatSeasonEventStatusLabel = (statusRaw) => {
         const status = toStr(statusRaw).trim().toLowerCase();
+        if (status === "waiting") return "Waiting for next CWL";
+        if (status === "active") return "Active provisional";
+        if (status === "finalizing") return "Finalizing";
+        if (status === "completed") return "Completed";
         if (status === "open") return "Open";
         if (status === "closed") return "Closed";
         if (status === "archived") return "Archived";
@@ -5619,10 +5797,20 @@
     // Format compact card status text.
     const formatSeasonEventCardStatusLine = (cardRaw) => {
         const card = cardRaw && typeof cardRaw === "object" ? cardRaw : {};
-        return formatSeasonEventStatusLabel(card.status) +
+        const aggregate = card.aggregate && typeof card.aggregate === "object" ? card.aggregate : null;
+        const stale = !!(aggregate && aggregate.stale);
+        const base = formatSeasonEventStatusLabel(card.status) +
             " \u00b7 " +
             formatSeasonEventNumber(card.activeParticipantCount) +
             " signed up";
+        if (stale) {
+            const refreshedAt = toStr(aggregate.lastSuccessfulRefreshAt).trim();
+            const refreshedDate = refreshedAt ? new Date(refreshedAt) : null;
+            const refreshedLabel = refreshedDate && Number.isFinite(refreshedDate.getTime()) ? refreshedDate.toLocaleDateString() : "";
+            return base + " \u00b7 stale" + (refreshedLabel ? (" since " + refreshedLabel) : "");
+        }
+        if (card.showingLatestCompleted) return base + " \u00b7 latest completed shown";
+        return base;
     };
 
     // Build a stable state key for one Season Events card.
@@ -5665,7 +5853,10 @@
         body.appendChild(meta);
         const score = el("div", "season-event-row__score");
         score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreValueLabel).trim() || buildSeasonEventScoreValueLabel(eventType, row.score)));
-        if (eventType !== "push") {
+        if (eventType === "cwl") {
+            const stats = row.cwlStats && typeof row.cwlStats === "object" ? row.cwlStats : {};
+            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(stats.defenseHolds) + " holds \u00b7 " + formatNumber(stats.successfulDefensiveAttacks) + " defenses"));
+        } else if (eventType !== "push") {
             score.appendChild(el("div", "season-event-row__score-sub", accounts.length + " " + pluralize(accounts.length, "account", "accounts")));
         }
         wrap.appendChild(rank);
@@ -5682,7 +5873,7 @@
         const wrap = el("article", "card season-event-card season-event-card--" + (eventType || "unknown"));
         const header = el("div", "season-event-card__header");
         const titleWrap = el("div", "season-event-card__title-wrap");
-        titleWrap.appendChild(el("h3", "season-event-card__title", toStr(card.title).trim() || (eventType === "push" ? "Push" : "Donations")));
+        titleWrap.appendChild(el("h3", "season-event-card__title", toStr(card.title).trim() || (eventType === "push" ? "Push" : eventType === "cwl" ? "CWL" : "Donations")));
         header.appendChild(titleWrap);
         header.appendChild(el("div", "season-event-card__status", formatSeasonEventCardStatusLine(card)));
         wrap.appendChild(header);
@@ -5813,13 +6004,17 @@
         const result = suggestionModel.result || {};
         const swapCount = Number.isFinite(Number(result.swapCount)) ? Number(result.swapCount) : suggestionModel.pairs.length;
         const needsRewardsCount = Number.isFinite(Number(result.needsRewardsCount)) ? Number(result.needsRewardsCount) : 0;
-        const banner = el("div", "roster-suggestion-banner" + (swapCount > 0 ? "" : " is-empty"));
+        const hasSwapDetails = suggestionModel.pairs.length > 0;
+        const banner = document.createElement(hasSwapDetails ? "details" : "div");
+        banner.className = "roster-suggestion-banner"
+            + (swapCount > 0 ? "" : " is-empty")
+            + (hasSwapDetails ? " roster-suggestion-banner--collapsible" : "");
         const copy = el("div", "roster-suggestion-banner__copy");
         copy.appendChild(el("div", "roster-suggestion-banner__eyebrow", "Saved bench suggestions"));
         copy.appendChild(el(
             "div",
             "roster-suggestion-banner__title",
-            swapCount > 0 ? (swapCount + " suggested " + pluralize(swapCount, "swap", "swaps") + " pending") : "No swaps currently suggested"
+            swapCount > 0 ? (swapCount + " " + pluralize(swapCount, "swap", "swaps") + " pending") : "No swaps currently suggested"
         ));
 
         const metaParts = [];
@@ -5827,9 +6022,17 @@
         if (needsRewardsCount > 0) metaParts.push(needsRewardsCount + " players still need stars");
         if (swapCount === 0 && suggestionModel.updatedAtRaw) metaParts.push("Last saved review found no pending swaps");
         if (metaParts.length) copy.appendChild(el("div", "roster-suggestion-banner__meta", metaParts.join(" • ")));
-        banner.appendChild(copy);
+        if (hasSwapDetails) {
+            const summary = document.createElement("summary");
+            summary.className = "roster-suggestion-banner__summary";
+            summary.appendChild(copy);
+            summary.appendChild(el("span", "roster-suggestion-banner__toggle", "View swaps"));
+            banner.appendChild(summary);
+        } else {
+            banner.appendChild(copy);
+        }
 
-        if (suggestionModel.pairs.length) {
+        if (hasSwapDetails) {
             const list = el("div", "roster-suggestion-list");
             for (let i = 0; i < suggestionModel.pairs.length; i++) {
                 const pair = suggestionModel.pairs[i];
@@ -6520,8 +6723,9 @@
         const regularWarAggregateShowWithLiveWarning = regularWarAggregateHasNotice
             && !(regularWarLiveUnavailable && regularWarAggregateStatusLevel !== "warning");
 
-        const card = el("div", "card");
+        const card = el("div", "card roster-card");
         const head = el("div", "roster-head");
+        const identity = el("div", "roster-head__identity");
         const h2 = document.createElement("h2");
         const titleText = toStr(roster.title);
 
@@ -6537,7 +6741,7 @@
 
         const bMain = el("span", "badge", (trackingMode === "regularWar" ? "In war: " : "Main: ") + toStr(roster.badges && roster.badges.main));
         const bSubs = el("span", "badge", (trackingMode === "regularWar" ? "Out of war: " : "Subs: ") + toStr(roster.badges && roster.badges.subs));
-        const meta = el("div", "roster-meta");
+        const meta = el("div", "roster-meta roster-command-row");
         meta.appendChild(bMain);
         meta.appendChild(bSubs);
         if (prepActive) {
@@ -6582,7 +6786,8 @@
             }
         }
 
-        head.appendChild(h2);
+        identity.appendChild(h2);
+        head.appendChild(identity);
         head.appendChild(meta);
         card.appendChild(head);
         if (trackingMode === "regularWar" && regularWarLiveUnavailable) {
@@ -7201,33 +7406,57 @@
         const family = isPlainObject_(profile.family) ? profile.family : {};
         const rosters = getOrderedRostersFromData(data);
         if (!rosters.length) {
-            const empty = el("div", "landing-family-empty", "Clan roster data will appear here once synced.");
+            const empty = el("div", "landing-family-empty landing-shell-empty", "Clan roster data will appear here once synced.");
             target.appendChild(empty);
             if (familyMeta) familyMeta.textContent = "Roster data is syncing. Clan lineup will populate automatically.";
             return;
         }
 
         let totalMembers = 0;
+        const rosterMemberCounts = [];
+        let maxMembers = 1;
+
+        for (let i = 0; i < rosters.length; i++) {
+            const members = countUniqueTagsAcrossActiveRosterRoles(rosters[i]);
+            rosterMemberCounts.push(members);
+            if (members > maxMembers) maxMembers = members;
+        }
 
         for (let i = 0; i < rosters.length; i++) {
             const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-            const card = el("article", "landing-family-card");
-            card.setAttribute("data-landing-reveal", "1");
+            const card = el("article", "landing-shell-clan");
+            const count = rosters.length;
+            const angle = count <= 1 ? -90 : (-112 + ((224 / Math.max(1, count - 1)) * i));
+            const radians = angle * Math.PI / 180;
+            const orbitX = 50 + (Math.cos(radians) * 39);
+            const orbitY = 52 + (Math.sin(radians) * 35);
+            const scale = 0.94 + (Math.min(1, rosterMemberCounts[i] / Math.max(1, maxMembers)) * 0.12);
+            const tilt = ((i % 2 === 0 ? -1 : 1) * (5 + ((i % 3) * 2)));
+            card.style.setProperty("--orbit-x", orbitX.toFixed(2));
+            card.style.setProperty("--orbit-y", orbitY.toFixed(2));
+            card.style.setProperty("--plate-scale", scale.toFixed(3));
+            card.style.setProperty("--plate-tilt", String(tilt) + "deg");
 
-            const title = el("h3", "landing-family-card__title", toStr(roster.title).trim() || "Unnamed roster");
-            const members = countUniqueTagsAcrossActiveRosterRoles(roster);
+            const titleText = toStr(roster.title).trim() || "Unnamed roster";
+            const members = rosterMemberCounts[i];
             totalMembers += members;
-            const memberValue = el("div", "landing-family-card__value", formatNumber(members));
-            const memberLabel = el("div", "landing-family-card__label", toStr(family.playersLabel).trim() || "Players in roster");
+            const playersLabel = toStr(family.playersLabel).trim() || "Players in roster";
             const trackingMode = getRosterTrackingMode(roster) === "regularWar"
                 ? (toStr(family.regularWarLabel).trim() || "Regular war")
                 : (toStr(family.cwlLabel).trim() || "CWL");
-            const meta = el("div", "landing-family-card__meta", trackingMode);
 
+            const mode = el("div", "landing-shell-clan__mode", trackingMode);
+            const title = el("h4", "landing-shell-clan__title", titleText);
+            const countWrap = el("div", "landing-shell-clan__count");
+            const memberValue = el("strong", "", formatNumber(members));
+            const memberLabel = el("span", "", playersLabel);
+            countWrap.appendChild(memberValue);
+            countWrap.appendChild(memberLabel);
+            card.setAttribute("aria-label", titleText + ", " + formatNumber(members) + " " + playersLabel + ", " + trackingMode);
+
+            card.appendChild(mode);
             card.appendChild(title);
-            card.appendChild(memberValue);
-            card.appendChild(memberLabel);
-            card.appendChild(meta);
+            card.appendChild(countWrap);
             target.appendChild(card);
         }
 
@@ -7256,6 +7485,52 @@
             node.classList.toggle("is-active", isActive);
             node.setAttribute("aria-current", isActive ? "true" : "false");
         }
+    };
+
+    // Return whether compact landing journey layout is active.
+    const isLandingCompactJourneyLayout_ = () => {
+        if (typeof window === "undefined" || !window) return false;
+        if (typeof window.matchMedia === "function") {
+            try {
+                return window.matchMedia(LANDING_COMPACT_LAYOUT_QUERY).matches;
+            } catch (err) { }
+        }
+        const width = Number(window.innerWidth) || 0;
+        const height = Number(window.innerHeight) || 0;
+        return width <= 820 || (height <= 520 && width <= 940);
+    };
+
+    // Resolve the active compact journey card from the cards' viewport positions.
+    const resolveLandingCompactSquareStoryStep = (storyRoot, viewportHeightRaw) => {
+        const story = storyRoot || $("#publicViewLanding [data-landing-square-story]");
+        if (!story) return -1;
+        const steps = Array.prototype.slice.call(story.querySelectorAll("[data-landing-square-step]"));
+        if (!steps.length) return -1;
+        const stepsWrap = story.querySelector(".landing-shell-map__steps");
+        if (!stepsWrap) return -1;
+
+        const viewportHeight = Math.max(1, Number(viewportHeightRaw) || 1);
+        const wrapRect = stepsWrap.getBoundingClientRect();
+        const isStepsZoneVisible = wrapRect.top < viewportHeight * 0.88 && wrapRect.bottom > viewportHeight * 0.12;
+        if (!isStepsZoneVisible) {
+            if (wrapRect.top >= viewportHeight * 0.88) return 0;
+            if (wrapRect.bottom <= viewportHeight * 0.12) return steps.length - 1;
+            return -1;
+        }
+
+        const targetY = viewportHeight * 0.52;
+        let bestIndex = 0;
+        let bestDistance = Infinity;
+        for (let i = 0; i < steps.length; i++) {
+            const rect = steps[i].getBoundingClientRect();
+            const centerY = rect.top + (rect.height * 0.5);
+            const distance = Math.abs(centerY - targetY);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestIndex = i;
+            }
+        }
+        return bestIndex;
     };
 
     // Apply landing square story effects.
@@ -7288,6 +7563,10 @@
         let stepIndex = 0;
         if (rawProgress >= 0.48) stepIndex = 2;
         else if (rawProgress >= 0.2) stepIndex = 1;
+        if (isLandingCompactJourneyLayout_()) {
+            const compactStepIndex = resolveLandingCompactSquareStoryStep(story, viewportHeight);
+            if (compactStepIndex >= 0) stepIndex = compactStepIndex;
+        }
         setLandingSquareStoryStep(story, stepIndex);
     };
 
@@ -7401,9 +7680,45 @@
         landingScrollEffectsBound = true;
         // Queue the next scheduled update.
         const queue = () => queueLandingScrollEffectsFrame();
+        const queueAfterViewportChange = () => {
+            landingSquareStoryActiveStep = -1;
+            queueLandingScrollEffectsFrame();
+            window.setTimeout(queueLandingScrollEffectsFrame, 80);
+            window.setTimeout(queueLandingScrollEffectsFrame, 260);
+        };
+        const readViewportSignature = () => {
+            const visualViewport = window.visualViewport || null;
+            const width = Math.round(Number(window.innerWidth) || 0);
+            const height = Math.round(Number(window.innerHeight) || 0);
+            const visualWidth = visualViewport ? Math.round(Number(visualViewport.width) || 0) : 0;
+            const visualHeight = visualViewport ? Math.round(Number(visualViewport.height) || 0) : 0;
+            return [width, height, visualWidth, visualHeight, isLandingCompactJourneyLayout_() ? "compact" : "wide"].join("x");
+        };
+        let lastViewportSignature = readViewportSignature();
+        const queueIfViewportChanged = () => {
+            const nextViewportSignature = readViewportSignature();
+            if (nextViewportSignature === lastViewportSignature) return;
+            lastViewportSignature = nextViewportSignature;
+            queueAfterViewportChange();
+        };
         window.addEventListener("scroll", queue, { passive: true });
-        window.addEventListener("resize", queue);
-        window.addEventListener("orientationchange", queue);
+        window.addEventListener("resize", queueAfterViewportChange);
+        window.addEventListener("orientationchange", queueAfterViewportChange);
+        if (window.visualViewport && typeof window.visualViewport.addEventListener === "function") {
+            window.visualViewport.addEventListener("resize", queueAfterViewportChange);
+            window.visualViewport.addEventListener("scroll", queue, { passive: true });
+        }
+        if (typeof window.matchMedia === "function") {
+            try {
+                const compactLayoutMedia = window.matchMedia(LANDING_COMPACT_LAYOUT_QUERY);
+                if (compactLayoutMedia && typeof compactLayoutMedia.addEventListener === "function") {
+                    compactLayoutMedia.addEventListener("change", queueAfterViewportChange);
+                } else if (compactLayoutMedia && typeof compactLayoutMedia.addListener === "function") {
+                    compactLayoutMedia.addListener(queueAfterViewportChange);
+                }
+            } catch (err) { }
+        }
+        window.setInterval(queueIfViewportChanged, 500);
         queueLandingScrollEffectsFrame();
     };
 
@@ -7514,11 +7829,15 @@
 
         const loadingGrid = el("div", "landing-family-loading-grid");
         for (let i = 0; i < 4; i++) {
-            const card = el("article", "landing-family-card landing-family-card--loading view-loading-skeleton");
+            const card = el("article", "landing-shell-clan landing-shell-clan--loading landing-family-card--loading view-loading-skeleton");
+            const angle = -112 + ((224 / 3) * i);
+            const radians = angle * Math.PI / 180;
+            card.style.setProperty("--orbit-x", (50 + (Math.cos(radians) * 39)).toFixed(2));
+            card.style.setProperty("--orbit-y", (52 + (Math.sin(radians) * 35)).toFixed(2));
+            card.style.setProperty("--plate-tilt", String((i % 2 === 0 ? -7 : 7)) + "deg");
             card.appendChild(createViewLoadingSkeletonLine("title"));
             card.appendChild(createViewLoadingSkeletonLine("value"));
             card.appendChild(createViewLoadingSkeletonLine("label"));
-            card.appendChild(createViewLoadingSkeletonLine("chip"));
             loadingGrid.appendChild(card);
         }
         target.appendChild(loadingGrid);
@@ -8393,6 +8712,13 @@
         return SEASON_EVENTS_BY_ID_PATH + "/" + encodeFirebaseObjectKey(eventId);
     };
 
+    const buildCwlSeasonEventAggregatePublicPath = (eventIdRaw, kindRaw) => {
+        const eventId = toStr(eventIdRaw).trim();
+        const kind = toStr(kindRaw).trim().toLowerCase();
+        if (!eventId || (kind !== "live" && kind !== "final")) return "";
+        return SEASON_EVENTS_CWL_AGGREGATES_PATH + "/" + encodeFirebaseObjectKey(eventId) + "/" + kind;
+    };
+
     // Return public Firebase event pointers path by season id.
     const buildSeasonEventsBySeasonPublicPath = (seasonIdRaw) => {
         const seasonId = toStr(seasonIdRaw).trim();
@@ -8419,6 +8745,18 @@
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
                 console.warn("[SeasonEvents] Public Firebase load failed for /" + path, err);
             }
+            return null;
+        }
+    };
+
+    const fetchNullableDecodedFirebaseJsonPublic = async (pathRaw) => {
+        const path = normalizeFirebasePath(pathRaw);
+        if (!path) return null;
+        try {
+            const payload = await fetchFirebaseJsonPublic(path);
+            if (payload == null) return null;
+            return decodeFirebaseObjectKeysRecursive(payload);
+        } catch (err) {
             return null;
         }
     };
@@ -8548,6 +8886,8 @@
         };
         collectEventId(pointers.push);
         collectEventId(pointers.donation);
+        collectEventId(pointers.cwl);
+        collectEventId(pointers.latestCompletedCwl);
         return eventIds;
     };
 
@@ -8563,6 +8903,25 @@
             }
         }));
         return byId;
+    };
+
+    const loadCwlSeasonEventAggregatesViaFirebasePublic = async (pointersRaw, eventsByIdRaw, loadErrors) => {
+        const pointers = pointersRaw && typeof pointersRaw === "object" && !Array.isArray(pointersRaw) ? pointersRaw : {};
+        const eventsById = eventsByIdRaw && typeof eventsByIdRaw === "object" ? eventsByIdRaw : {};
+        const out = {};
+        const eventIds = collectSeasonEventIdsFromPointers(pointers);
+        await Promise.all(eventIds.map(async (eventId) => {
+            const event = eventsById[eventId] && typeof eventsById[eventId] === "object" ? eventsById[eventId] : {};
+            if (normalizeSeasonEventType(event.type) !== "cwl") return;
+            const state = toStr(event.cwlTrackingState || event.cwlStatus).trim().toLowerCase();
+            const kind = state === "completed" ? "final" : "live";
+            const path = buildCwlSeasonEventAggregatePublicPath(eventId, kind);
+            const aggregate = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+            if (aggregate && typeof aggregate === "object" && !Array.isArray(aggregate)) {
+                out[eventId] = Object.assign({}, out[eventId] || {}, { [kind]: aggregate });
+            }
+        }));
+        return out;
     };
 
     // Resolve the current season descriptor from loaded event data.
@@ -8622,14 +8981,27 @@
     const loadCurrentSeasonEventsViaFirebasePublic = async () => {
         const loadErrors = [];
         const current = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_PATH, loadErrors);
+        const currentCwl = await fetchNullableDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_CWL_PATH);
+        const latestCompletedCwl = await fetchNullableDecodedFirebaseJsonPublic(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
         const seasonState = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
         const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+        if (currentCwl && typeof currentCwl === "object" && !Array.isArray(currentCwl)) currentObj.cwl = currentCwl;
+        const latestCompletedCwlObj = latestCompletedCwl && typeof latestCompletedCwl === "object" && !Array.isArray(latestCompletedCwl) ? latestCompletedCwl : null;
+        const eventPointerMap = Object.assign({}, currentObj);
+        if (latestCompletedCwlObj) eventPointerMap.latestCompletedCwl = latestCompletedCwlObj;
         const byId = await loadSeasonEventObjectsByPointerMapViaFirebasePublic(currentObj, loadErrors);
+        if (latestCompletedCwlObj && latestCompletedCwlObj.eventId && !byId[toStr(latestCompletedCwlObj.eventId).trim()]) {
+            const event = await fetchOptionalDecodedFirebaseJsonPublic(buildSeasonEventByIdPublicPath(latestCompletedCwlObj.eventId), loadErrors);
+            if (event && typeof event === "object" && !Array.isArray(event)) byId[toStr(latestCompletedCwlObj.eventId).trim()] = event;
+        }
+        const cwlAggregatesByEventId = await loadCwlSeasonEventAggregatesViaFirebasePublic(eventPointerMap, byId, loadErrors);
 
         return {
             current: currentObj,
             seasonState: seasonState && typeof seasonState === "object" && !Array.isArray(seasonState) ? seasonState : {},
             byId: byId,
+            cwlAggregatesByEventId: cwlAggregatesByEventId,
+            latestCompletedCwl: latestCompletedCwlObj,
             loadErrors: loadErrors,
             loadedAt: new Date().toISOString(),
         };

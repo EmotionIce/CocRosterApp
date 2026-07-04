@@ -15,6 +15,14 @@ function createEmptyCwlStatEntry_() {
 		hitUpCount: 0,
 		hitDownCount: 0,
 		sameThHitCount: 0,
+		defenseAttacksReceived: 0,
+		successfulDefensiveAttacks: 0,
+		attackedDefenseDays: 0,
+		defenseHolds: 0,
+		threeStarAttacksConceded: 0,
+		bestStarsConceded: 0,
+		bestDestructionConceded: 0,
+		unattackedDefenseDays: 0,
 	};
 }
 
@@ -1209,6 +1217,195 @@ function buildWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThBy
 	return out;
 }
 
+// Merge compact CWL stats.
+function mergeCwlStatEntry_(dest, srcRaw) {
+	if (!dest || typeof dest !== "object") return;
+	const src = sanitizeCwlStatEntry_(srcRaw);
+	dest.starsTotal = toNonNegativeInt_(dest.starsTotal) + src.starsTotal;
+	dest.daysInLineup = toNonNegativeInt_(dest.daysInLineup) + src.daysInLineup;
+	dest.resolvedWarDays = toNonNegativeInt_(dest.resolvedWarDays) + src.resolvedWarDays;
+	dest.attacksMade = toNonNegativeInt_(dest.attacksMade) + src.attacksMade;
+	dest.missedAttacks = toNonNegativeInt_(dest.missedAttacks) + src.missedAttacks;
+	dest.threeStarCount = toNonNegativeInt_(dest.threeStarCount) + src.threeStarCount;
+	dest.totalDestruction = toNonNegativeInt_(dest.totalDestruction) + src.totalDestruction;
+	dest.countedAttacks = toNonNegativeInt_(dest.countedAttacks) + src.countedAttacks;
+	dest.currentWarAttackPending = Math.min(1, toNonNegativeInt_(dest.currentWarAttackPending) + src.currentWarAttackPending);
+	dest.hitUpCount = toNonNegativeInt_(dest.hitUpCount) + src.hitUpCount;
+	dest.hitDownCount = toNonNegativeInt_(dest.hitDownCount) + src.hitDownCount;
+	dest.sameThHitCount = toNonNegativeInt_(dest.sameThHitCount) + src.sameThHitCount;
+	dest.defenseAttacksReceived = toNonNegativeInt_(dest.defenseAttacksReceived) + src.defenseAttacksReceived;
+	dest.successfulDefensiveAttacks = toNonNegativeInt_(dest.successfulDefensiveAttacks) + src.successfulDefensiveAttacks;
+	dest.attackedDefenseDays = toNonNegativeInt_(dest.attackedDefenseDays) + src.attackedDefenseDays;
+	dest.defenseHolds = toNonNegativeInt_(dest.defenseHolds) + src.defenseHolds;
+	dest.threeStarAttacksConceded = toNonNegativeInt_(dest.threeStarAttacksConceded) + src.threeStarAttacksConceded;
+	dest.bestStarsConceded = toNonNegativeInt_(dest.bestStarsConceded) + src.bestStarsConceded;
+	dest.bestDestructionConceded = toNonNegativeInt_(dest.bestDestructionConceded) + src.bestDestructionConceded;
+	dest.unattackedDefenseDays = toNonNegativeInt_(dest.unattackedDefenseDays) + src.unattackedDefenseDays;
+}
+
+// Build incoming attack lists by defender tag.
+function buildIncomingCwlAttacksByDefenderTag_(opponentMembersRaw) {
+	const out = {};
+	const opponentMembers = Array.isArray(opponentMembersRaw) ? opponentMembersRaw : [];
+	for (let i = 0; i < opponentMembers.length; i++) {
+		const member = opponentMembers[i] && typeof opponentMembers[i] === "object" ? opponentMembers[i] : {};
+		const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+		for (let j = 0; j < attacks.length; j++) {
+			const attack = attacks[j] && typeof attacks[j] === "object" ? attacks[j] : {};
+			const defenderTag = normalizeTag_(attack.defenderTag);
+			if (!defenderTag) continue;
+			if (!out[defenderTag]) out[defenderTag] = [];
+			out[defenderTag].push(attack);
+		}
+	}
+	return out;
+}
+
+// Apply CWL offense for one member to a compact stat entry.
+function applyCwlOffenseToStatEntry_(stats, memberRaw, opponentThByTagRaw, warStateRaw) {
+	if (!stats || typeof stats !== "object") return;
+	const member = memberRaw && typeof memberRaw === "object" ? memberRaw : {};
+	const opponentThByTag = opponentThByTagRaw && typeof opponentThByTagRaw === "object" ? opponentThByTagRaw : {};
+	const warState = normalizeWarState_(warStateRaw);
+	const isActive = warState === "inwar" || warState === "preparation";
+	const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+	if (isActive && attacks.length === 0) {
+		stats.currentWarAttackPending = 1;
+		return;
+	}
+
+	stats.daysInLineup++;
+	stats.resolvedWarDays++;
+	stats.attacksMade += attacks.length;
+	if (attacks.length === 0) stats.missedAttacks++;
+
+	const attackerTh = readTownHallLevel_(member);
+	for (let i = 0; i < attacks.length; i++) {
+		const attack = attacks[i] && typeof attacks[i] === "object" ? attacks[i] : {};
+		const stars = toNonNegativeInt_(attack.stars);
+		const destruction = readAttackDestruction_(attack);
+		const defenderTag = normalizeTag_(attack.defenderTag);
+		const defenderTh = defenderTag && Object.prototype.hasOwnProperty.call(opponentThByTag, defenderTag) ? opponentThByTag[defenderTag] : null;
+		stats.starsTotal += stars;
+		stats.totalDestruction += destruction;
+		stats.countedAttacks++;
+		if (stars === 3) stats.threeStarCount++;
+		if (typeof attackerTh === "number" && isFinite(attackerTh) && typeof defenderTh === "number" && isFinite(defenderTh)) {
+			if (attackerTh < defenderTh) stats.hitUpCount++;
+			else if (attackerTh > defenderTh) stats.hitDownCount++;
+			else stats.sameThHitCount++;
+		}
+	}
+}
+
+// Apply CWL defense for one member to a compact stat entry.
+function applyCwlDefenseToStatEntry_(stats, incomingAttacksRaw, warStateRaw) {
+	if (!stats || typeof stats !== "object") return;
+	const incomingAttacks = Array.isArray(incomingAttacksRaw) ? incomingAttacksRaw : [];
+	const warState = normalizeWarState_(warStateRaw);
+	const isEnded = warState === "warended";
+	if (incomingAttacks.length === 0) {
+		if (isEnded) stats.unattackedDefenseDays++;
+		return;
+	}
+
+	stats.attackedDefenseDays++;
+	let bestStars = -1;
+	let bestDestruction = -1;
+	let sawTriple = false;
+	for (let i = 0; i < incomingAttacks.length; i++) {
+		const attack = incomingAttacks[i] && typeof incomingAttacks[i] === "object" ? incomingAttacks[i] : {};
+		const stars = Math.min(3, toNonNegativeInt_(attack.stars));
+		const destruction = readAttackDestruction_(attack);
+		stats.defenseAttacksReceived++;
+		if (stars < 3) stats.successfulDefensiveAttacks++;
+		if (stars === 3) {
+			stats.threeStarAttacksConceded++;
+			sawTriple = true;
+		}
+		if (stars > bestStars || (stars === bestStars && destruction > bestDestruction)) {
+			bestStars = stars;
+			bestDestruction = destruction;
+		}
+	}
+	if (bestStars >= 0) {
+		stats.bestStarsConceded += bestStars;
+		stats.bestDestructionConceded += Math.max(0, bestDestruction);
+	}
+	if (isEnded && !sawTriple) stats.defenseHolds++;
+}
+
+// Build compact CWL stats for one connected clan side in one war.
+function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw) {
+	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
+	const clanTag = normalizeTag_(clanTagRaw);
+	const sides = getWarSidesForClan_(war, clanTag);
+	if (!sides) return {};
+	const sideMembers = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
+	const opponentMembers = Array.isArray(sides.opponentSide && sides.opponentSide.members) ? sides.opponentSide.members : [];
+	const opponentThByTag = buildMemberThByTag_(opponentMembers);
+	const incomingByDefenderTag = buildIncomingCwlAttacksByDefenderTag_(opponentMembers);
+	const trackedTagSet = trackedTagSetRaw && typeof trackedTagSetRaw === "object" ? trackedTagSetRaw : {};
+	const useTrackedFilter = Object.keys(trackedTagSet).length > 0;
+	const warState = normalizeWarState_(war.state);
+	const out = {};
+
+	for (let i = 0; i < sideMembers.length; i++) {
+		const member = sideMembers[i] && typeof sideMembers[i] === "object" ? sideMembers[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		const stats = createEmptyCwlStatEntry_();
+		applyCwlOffenseToStatEntry_(stats, member, opponentThByTag, warState);
+		applyCwlDefenseToStatEntry_(stats, incomingByDefenderTag[tag] || [], warState);
+		out[tag] = stats;
+	}
+	return out;
+}
+
+// Merge a CWL aggregate into another aggregate.
+function mergeCwlAggregateByTag_(destRaw, srcRaw) {
+	const dest = destRaw && typeof destRaw === "object" ? destRaw : {};
+	const src = srcRaw && typeof srcRaw === "object" ? srcRaw : {};
+	const tags = Object.keys(src);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		if (!dest[tag]) dest[tag] = createEmptyCwlStatEntry_();
+		mergeCwlStatEntry_(dest[tag], src[tags[i]]);
+	}
+	return dest;
+}
+
+// Convert compact CWL stats into the long-term war-performance offensive bucket.
+function convertCwlAggregateToWarPerformanceStatsByTag_(aggregateRaw) {
+	const aggregate = aggregateRaw && typeof aggregateRaw === "object" ? aggregateRaw : {};
+	const out = {};
+	const tags = Object.keys(aggregate);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const cwl = sanitizeCwlStatEntry_(aggregate[tags[i]]);
+		const stats = createEmptyWarPerformanceStats_();
+		stats.daysInLineup = cwl.daysInLineup;
+		stats.resolvedWarDays = cwl.resolvedWarDays;
+		stats.possibleAttacks = cwl.resolvedWarDays;
+		stats.usedAttacks = cwl.attacksMade;
+		stats.attacksMade = cwl.attacksMade;
+		stats.attacksMissed = cwl.missedAttacks;
+		stats.starsTotal = cwl.starsTotal;
+		stats.totalDestruction = cwl.totalDestruction;
+		stats.countedAttacks = cwl.countedAttacks;
+		stats.formEligibleAttacks = cwl.countedAttacks;
+		stats.threeStarCount = cwl.threeStarCount;
+		stats.hitUpCount = cwl.hitUpCount;
+		stats.sameThHitCount = cwl.sameThHitCount;
+		stats.hitDownCount = cwl.hitDownCount;
+		out[tag] = stats;
+	}
+	return out;
+}
+
 // Build form-eligible regular-war stats when attack chronology proves which attacks happened before max stars.
 // The additive bucket keeps the full opportunity model explicit: possibleAttacks, usedAttacks/attacksMade,
 // countedAttacks/formEligibleAttacks, and attacksMissed for the existing frontend reliability penalty.
@@ -1322,10 +1519,7 @@ function computeRegularWarFormStatsFromWar_(war, clanTag, trackedTagSet) {
 
 // Compute CWL war stats from war.
 function computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet) {
-	const sides = getWarSidesForClan_(war, clanTag);
-	if (!sides) return {};
-	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
-	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "cwl");
+	return convertCwlAggregateToWarPerformanceStatsByTag_(buildCwlWarAggregateForClan_(war, clanTag, trackedTagSet));
 }
 
 // Get stable regular war key.
@@ -2305,6 +2499,14 @@ function sanitizeCwlStatEntry_(entryRaw) {
 	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
 	out.hitDownCount = toNonNegativeInt_(entry.hitDownCount);
 	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
+	out.defenseAttacksReceived = toNonNegativeInt_(entry.defenseAttacksReceived);
+	out.successfulDefensiveAttacks = toNonNegativeInt_(entry.successfulDefensiveAttacks);
+	out.attackedDefenseDays = toNonNegativeInt_(entry.attackedDefenseDays);
+	out.defenseHolds = toNonNegativeInt_(entry.defenseHolds);
+	out.threeStarAttacksConceded = toNonNegativeInt_(entry.threeStarAttacksConceded);
+	out.bestStarsConceded = toNonNegativeInt_(entry.bestStarsConceded);
+	out.bestDestructionConceded = toNonNegativeInt_(entry.bestDestructionConceded);
+	out.unattackedDefenseDays = toNonNegativeInt_(entry.unattackedDefenseDays);
 	return out;
 }
 
@@ -2325,6 +2527,16 @@ function deriveCwlMetrics_(entryRaw) {
 		hitUpCount: entry.hitUpCount,
 		hitDownCount: entry.hitDownCount,
 		sameThHitCount: entry.sameThHitCount,
+		defenseAttacksReceived: entry.defenseAttacksReceived,
+		successfulDefensiveAttacks: entry.successfulDefensiveAttacks,
+		attackedDefenseDays: entry.attackedDefenseDays,
+		defenseHolds: entry.defenseHolds,
+		threeStarAttacksConceded: entry.threeStarAttacksConceded,
+		bestStarsConceded: entry.bestStarsConceded,
+		bestDestructionConceded: entry.bestDestructionConceded,
+		unattackedDefenseDays: entry.unattackedDefenseDays,
+		avgBestStarsConceded: entry.attackedDefenseDays > 0 ? entry.bestStarsConceded / entry.attackedDefenseDays : null,
+		avgBestDestructionConceded: entry.attackedDefenseDays > 0 ? entry.bestDestructionConceded / entry.attackedDefenseDays : null,
 		possibleStars: possibleStars,
 		starsPerf: possibleStars > 0 ? entry.starsTotal / possibleStars : null,
 		avgDestruction: entry.countedAttacks > 0 ? entry.totalDestruction / entry.countedAttacks : null,

@@ -478,11 +478,14 @@ function buildAutoRefreshSnapshotWaveOne_(connectedClanTagsRaw, currentWarClanTa
 }
 
 // Build the clan-tag portions of the AutoRefreshSnapshot request plan.
-function buildAutoRefreshSnapshotClanRequestPlan_(sourceRostersRaw) {
+function buildAutoRefreshSnapshotClanRequestPlan_(sourceRostersRaw, optionsRaw) {
 	const sourceRosters = Array.isArray(sourceRostersRaw) ? sourceRostersRaw : [];
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const cwlEventNeed = options.cwlSeasonEventNeed && typeof options.cwlSeasonEventNeed === "object" ? options.cwlSeasonEventNeed : {};
 	const connectedClanTagSet = {};
 	const currentWarClanTagSet = {};
 	const cwlClanTagSet = {};
+	const cwlRosterClanTagSet = {};
 
 	// Deduplicate clan tags and split by tracking mode so only relevant endpoints are fetched.
 	for (let i = 0; i < sourceRosters.length; i++) {
@@ -497,7 +500,14 @@ function buildAutoRefreshSnapshotClanRequestPlan_(sourceRostersRaw) {
 			currentWarClanTagSet[clanTag] = true;
 		} else {
 			cwlClanTagSet[clanTag] = true;
+			cwlRosterClanTagSet[clanTag] = true;
 			currentWarClanTagSet[clanTag] = true;
+		}
+	}
+	if (cwlEventNeed.needsCwl === true) {
+		const connectedClanTags = Object.keys(connectedClanTagSet);
+		for (let i = 0; i < connectedClanTags.length; i++) {
+			cwlClanTagSet[connectedClanTags[i]] = true;
 		}
 	}
 
@@ -505,6 +515,8 @@ function buildAutoRefreshSnapshotClanRequestPlan_(sourceRostersRaw) {
 		connectedClanTags: Object.keys(connectedClanTagSet),
 		currentWarClanTags: Object.keys(currentWarClanTagSet),
 		cwlClanTags: Object.keys(cwlClanTagSet),
+		cwlRosterClanTags: Object.keys(cwlRosterClanTagSet),
+		cwlSeasonEventNeed: cwlEventNeed,
 	};
 }
 
@@ -579,7 +591,8 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 		batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
 	};
 
-	const basePlan = buildAutoRefreshSnapshotClanRequestPlan_(sourceRosters);
+	const cwlSeasonEventNeed = typeof getCurrentCwlSeasonEventRefreshNeed_ === "function" ? getCurrentCwlSeasonEventRefreshNeed_() : { needsCwl: false };
+	const basePlan = buildAutoRefreshSnapshotClanRequestPlan_(sourceRosters, { cwlSeasonEventNeed: cwlSeasonEventNeed });
 
 	// Wave one covers member and war-index endpoints keyed only by clan tag.
 	const waveOneStartMs = Date.now();
@@ -588,11 +601,20 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 
 	// Second wave: resolve war tags from league groups and prefetch raw CWL wars once.
 	const cwlWarTagSet = {};
+	const cwlRosterClanTagSet = {};
+	for (let i = 0; i < basePlan.cwlRosterClanTags.length; i++) cwlRosterClanTagSet[normalizeTag_(basePlan.cwlRosterClanTags[i])] = true;
+	const cwlEventState = String((cwlSeasonEventNeed && cwlSeasonEventNeed.state) || "").trim();
 	const leaguegroupTags = Object.keys(waveOnePrefetch.leaguegroupRawByClanTag);
 	for (let i = 0; i < leaguegroupTags.length; i++) {
 		const clanTag = leaguegroupTags[i];
 		if (Object.prototype.hasOwnProperty.call(waveOnePrefetch.leaguegroupErrorByClanTag, clanTag)) continue;
 		const leaguegroup = waveOnePrefetch.leaguegroupRawByClanTag[clanTag];
+		const shouldUseForRoster = cwlRosterClanTagSet[normalizeTag_(clanTag)] === true;
+		const shouldUseForEvent =
+			cwlSeasonEventNeed &&
+			cwlSeasonEventNeed.needsCwl === true &&
+			(cwlEventState === "active" || cwlEventState === "finalizing" || (cwlEventState === "waiting" && isCwlLeagueGroupPotentiallyLive_(leaguegroup)));
+		if (!shouldUseForRoster && !shouldUseForEvent) continue;
 		// League groups are only an index; actual lineup data still lives on war endpoints.
 		const warTags = extractLeagueGroupWarTags_(leaguegroup);
 		for (let j = 0; j < warTags.length; j++) {
@@ -600,6 +622,11 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 			if (!warTag || warTag === "#0") continue;
 			cwlWarTagSet[warTag] = true;
 		}
+	}
+	const knownEventWarTags = Array.isArray(cwlSeasonEventNeed && cwlSeasonEventNeed.knownWarTags) ? cwlSeasonEventNeed.knownWarTags : [];
+	for (let i = 0; i < knownEventWarTags.length; i++) {
+		const warTag = normalizeTag_(knownEventWarTags[i]);
+		if (warTag && warTag !== "#0") cwlWarTagSet[warTag] = true;
 	}
 	const cwlWarTags = Object.keys(cwlWarTagSet);
 	const cwlWarWaveStartMs = Date.now();
@@ -648,8 +675,10 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 			connectedClanTags: basePlan.connectedClanTags,
 			currentWarClanTags: basePlan.currentWarClanTags,
 			cwlClanTags: basePlan.cwlClanTags,
+			cwlRosterClanTags: basePlan.cwlRosterClanTags,
 			cwlWarTags: cwlWarTags,
 			regularWarLogClanTags: regularWarLogClanTags,
+			cwlSeasonEventNeed: cwlSeasonEventNeed,
 		},
 		clanMembersSnapshotByTag: waveOnePrefetch.clanMembersSnapshotByTag,
 		clanMembersErrorByTag: waveOnePrefetch.clanMembersErrorByTag,
@@ -1742,6 +1771,10 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		throw new Error(appendDuplicateRosterTagDetailsToError_("finalize refresh payload", err, rosterData));
 	}
 	finalValidationDurationMs = Math.max(0, Date.now() - finalValidationStartMs);
+	const cwlSeasonEventRefresh =
+		typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function"
+			? tryRefreshCurrentCwlSeasonEventFromSnapshot_(validatedRosterData, autoRefreshSnapshot, { source: "refresh-all" })
+			: { ok: true, status: "unavailable" };
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(
 		"refreshAllRosters timing totalMs=%s snapshotMs=%s ownershipSnapshotMs=%s rosterPipelineCumulativeMs=%s rollbackCloneCumulativeMs=%s finalValidationMs=%s rosters=%s targeted=%s autoRefreshFinalValidationMode=%s",
@@ -1756,7 +1789,9 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 		autoRefreshFinalValidationMode,
 	);
 
-	return buildRefreshAllRunResultFromAccumulator_(validatedRosterData, accumulator);
+	const runResult = buildRefreshAllRunResultFromAccumulator_(validatedRosterData, accumulator);
+	runResult.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
+	return runResult;
 }
 
 // Public refresh-all entrypoint that wraps the unlocked core with the job lock lifecycle.

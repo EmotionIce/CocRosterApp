@@ -43,6 +43,10 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return reconcileCurrentSeasonEvents(args[0], args[1]);
 		case "getCurrentSeasonEvents":
 			return getCurrentSeasonEvents(args[0], args[1]);
+		case "ensureCurrentCwlSeasonEvent":
+			return ensureCurrentCwlSeasonEvent(args[0], args[1]);
+		case "getCurrentCwlSeasonEvent":
+			return getCurrentCwlSeasonEvent(args[0], args[1]);
 		case "getSeasonEvent":
 			return getSeasonEvent(args[0], args[1]);
 		case "getSeasonEventLeaderboard":

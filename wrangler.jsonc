@@ -1,0 +1,16 @@
+﻿{
+    "$schema":  "./node_modules/wrangler/config-schema.json",
+    "name":  "turtlecoc",
+    "account_id":  "32d4691b80f857348fba1d5fca64ecf6",
+    "main":  "./cloudflarePages/_worker.js",
+    "compatibility_date":  "2026-07-04",
+    "workers_dev":  true,
+    "preview_urls":  false,
+    "keep_vars":  true,
+    "assets":  {
+                   "directory":  "./cloudflarePages",
+                   "binding":  "ASSETS",
+                   "run_worker_first":  true
+               },
+    "logpush":  false
+}
