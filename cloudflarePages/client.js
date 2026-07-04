@@ -5749,7 +5749,7 @@
         const latestCompletedCwlEvent = getLatestCompletedCwlSeasonEvent(data);
         const cwlState = toStr(currentCwlEvent && (currentCwlEvent.cwlTrackingState || currentCwlEvent.cwlStatus)).trim().toLowerCase();
         const showLatestCompleted = (!currentCwlEvent || cwlState === "waiting") && !!latestCompletedCwlEvent;
-        const cwlDisplayEvent = currentCwlEvent || latestCompletedCwlEvent;
+        const cwlDisplayEvent = showLatestCompleted ? latestCompletedCwlEvent : (currentCwlEvent || latestCompletedCwlEvent);
         const cwlLeaderboardEvent = showLatestCompleted ? latestCompletedCwlEvent : cwlDisplayEvent;
         const cwlLeaderboard = buildSeasonEventLeaderboardModel(cwlLeaderboardEvent, data);
         if (cwlDisplayEvent) {

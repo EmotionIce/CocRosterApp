@@ -448,6 +448,7 @@ function normalizeAutoRefreshQueueCurrent_(stateRaw) {
 		issueCount: Math.max(0, toNonNegativeInt_(state.issueCount)),
 		issueSummary: String(state.issueSummary || "").slice(0, 500),
 		taskSummary: state.taskSummary && typeof state.taskSummary === "object" ? state.taskSummary : null,
+		cwlSeasonEventRefresh: state.cwlSeasonEventRefresh && typeof state.cwlSeasonEventRefresh === "object" ? state.cwlSeasonEventRefresh : null,
 		lock: state.lock && typeof state.lock === "object" ? state.lock : null,
 	};
 }
@@ -1627,6 +1628,9 @@ function writeAutoRefreshQueueLastJobState_(currentRaw, statusRaw, summaryRaw, e
 		issueSummary: current.issueSummary,
 		summary: String(summaryRaw || ""),
 	};
+	if (current.cwlSeasonEventRefresh && typeof current.cwlSeasonEventRefresh === "object") {
+		summary.cwlSeasonEventRefresh = current.cwlSeasonEventRefresh;
+	}
 	firebaseRequestJson_(FIREBASE_INTERNAL_AUTO_REFRESH_LAST_JOB_PATH, "PUT", encodeFirebaseObjectKeysRecursive_(summary));
 	return summary;
 }
@@ -1976,6 +1980,89 @@ function buildAutoRefreshActiveVersionManifestFromSourceMeta_(runIdRaw, sourceMe
 	return manifest;
 }
 
+// Build the lightest valid roster payload needed to probe connected-clan CWL
+// groups during staged queue finalization.
+function buildAutoRefreshCwlRosterDataFromSourceMeta_(sourceMetaRaw, lastUpdatedAtRaw) {
+	const sourceMeta = sourceMetaRaw && typeof sourceMetaRaw === "object" ? sourceMetaRaw : {};
+	const rosterIdsRaw = Array.isArray(sourceMeta.rosterIds) ? sourceMeta.rosterIds : [];
+	const connectedClanTagByRosterId =
+		sourceMeta.connectedClanTagByRosterId && typeof sourceMeta.connectedClanTagByRosterId === "object"
+			? sourceMeta.connectedClanTagByRosterId
+			: {};
+	const rosters = [];
+	for (let i = 0; i < rosterIdsRaw.length; i++) {
+		const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
+		if (!rosterId) continue;
+		rosters.push({
+			id: rosterId,
+			title: rosterId,
+			connectedClanTag: normalizeTag_(connectedClanTagByRosterId[rosterId]),
+			trackingMode: "regularWar",
+			main: [],
+			subs: [],
+			missing: [],
+		});
+	}
+	const payload = {
+		schemaVersion: typeof sourceMeta.schemaVersion === "number" && isFinite(sourceMeta.schemaVersion) ? sourceMeta.schemaVersion : 1,
+		pageTitle: typeof sourceMeta.pageTitle === "string" ? sourceMeta.pageTitle : "",
+		rosterOrder: Array.isArray(sourceMeta.rosterOrder) ? sourceMeta.rosterOrder.slice() : rosters.map((roster) => roster.id),
+		rosters: rosters,
+		playerMetrics: createEmptyPlayerMetricsStore_(),
+		lastUpdatedAt: String(lastUpdatedAtRaw || sourceMeta.sourceLastUpdatedAt || new Date().toISOString()),
+	};
+	if (sourceMeta.publicConfig && typeof sourceMeta.publicConfig === "object") payload.publicConfig = sourceMeta.publicConfig;
+	return validateRosterData_(payload);
+}
+
+// Refresh the independent CWL season-event tracker during queue finalization.
+// This deliberately reuses the canonical shared snapshot and event refresher.
+function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw, runIdRaw) {
+	try {
+		if (
+			typeof getCurrentCwlSeasonEventRefreshNeed_ !== "function" ||
+			typeof buildAutoRefreshSnapshot_ !== "function" ||
+			typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ !== "function"
+		) {
+			return { ok: true, status: "unavailable" };
+		}
+		const need = getCurrentCwlSeasonEventRefreshNeed_();
+		if (!need || need.needsCwl !== true) {
+			return {
+				ok: true,
+				status: "no-current-cwl-event",
+				eventId: need && need.eventId ? String(need.eventId) : "",
+			};
+		}
+		const rosterData =
+			rosterDataRaw && typeof rosterDataRaw === "object" && Array.isArray(rosterDataRaw.rosters)
+				? rosterDataRaw
+				: buildAutoRefreshCwlRosterDataFromSourceMeta_(sourceMetaRaw, new Date().toISOString());
+		const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+		const snapshot = buildAutoRefreshSnapshot_(rosterData, {
+			sourceRosters: sourceRosters,
+			allowRegularWarHistoryRepair: false,
+		});
+		const result = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, {
+			source: "refresh-all-queue",
+			runId: String(runIdRaw || ""),
+		});
+		if (result && typeof result === "object") {
+			result.requestCounts = snapshot && snapshot.requestCounts && typeof snapshot.requestCounts === "object"
+				? {
+					leagueGroup: toNonNegativeInt_(snapshot.requestCounts.leagueGroup),
+					cwlWar: toNonNegativeInt_(snapshot.requestCounts.cwlWar),
+					total: toNonNegativeInt_(snapshot.requestCounts.total),
+				}
+				: {};
+		}
+		return result || { ok: false, status: "unknown" };
+	} catch (err) {
+		Logger.log("Auto-refresh queue CWL season event refresh skipped: %s", errorMessage_(err));
+		return { ok: false, status: "error", error: errorMessage_(err) };
+	}
+}
+
 // Ensure all metric-copy tasks that precede staged finalization wrote their
 // completion markers.
 function verifyAutoRefreshMetricCopyTasksComplete_(runIdRaw, taskIdsRaw) {
@@ -2155,6 +2242,8 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		};
 		const summary = buildAutoRefreshFinalSummary_(runResult, writeResult);
 		setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
+		const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(null, sourceMeta, runId);
+		current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 		tryReconcileCurrentSeasonEventsForAutoRefresh_();
 		current.status = "completed";
 		current.phase = "completed";
@@ -2261,6 +2350,8 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const summary = buildAutoRefreshFinalSummary_(runResult, writeResult);
 	setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 	tryReconcileRegularWarFinalizationTriggerStateValidated_(finalRosterData);
+	const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(finalRosterData, sourceMeta, runId);
+	current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 	tryReconcileCurrentSeasonEventsForAutoRefresh_();
 	current.status = "completed";
 	current.phase = "completed";

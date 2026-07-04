@@ -1488,6 +1488,105 @@ test("queue finalization uses source version guard without reading the active pa
   assert.equal(backend.readPublishedActiveVersionId_(), runId);
 });
 
+test("queue finalization refreshes a waiting CWL season event from staged source metadata", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-waiting", type: "cwl" },
+        byId: {
+          "cwl-waiting": {
+            eventId: "cwl-waiting",
+            type: "cwl",
+            status: "open",
+            visibility: "public",
+            signupsOpen: true,
+            startsAt: "",
+            endsAt: "",
+            cwlTrackingState: "waiting",
+            cwl: { groups: {} },
+            participantsByDiscordId: {
+              "100": {
+                discordId: "100",
+                discordUsername: "alpha",
+                discordDisplayName: "Alpha",
+                status: "signed_up",
+                accounts: [{ tag: "#PLAYER", name: "Player" }],
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 1,
+    processedTasks: 1,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId, playerTags: ["#PLAYER"] }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true, issues: [] }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "metricResults/main", { metricResultMode: "activeVersionPatches", metricsStaged: true, tags: [] }, "PUT");
+  const leaguegroup = {
+    state: "inWar",
+    season: "2026-07",
+    clans: [{ tag: "#CLAN", name: "Main" }, { tag: "#OPP", name: "Opponent" }],
+    rounds: [{ warTags: ["#WAR1"] }],
+  };
+  const war = {
+    state: "inWar",
+    startTime: "2026-07-04T20:00:00.000Z",
+    endTime: "2026-07-05T20:00:00.000Z",
+    clan: {
+      tag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", attacks: [{ defenderTag: "#BASE", stars: 3, destructionPercentage: 100 }] }],
+    },
+    opponent: {
+      tag: "#OPP",
+      members: [{ tag: "#BASE", name: "Base", attacks: [] }],
+    },
+  };
+  const paths = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    const errorByKey = {};
+    for (const entry of entries) {
+      paths.push(entry.path);
+      if (entry.path.endsWith("/members")) dataByKey[entry.key] = { items: [] };
+      else if (entry.path.includes("/currentwar/leaguegroup")) dataByKey[entry.key] = leaguegroup;
+      else if (entry.path.includes("/clanwarleagues/wars/")) dataByKey[entry.key] = war;
+      else if (entry.path.endsWith("/currentwar")) errorByKey[entry.key] = Object.assign(new Error("not in war"), { statusCode: 404 });
+    }
+    return { dataByKey, errorByKey, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("staged CWL event refresh should not read the full active payload");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
+  const event = backend.readSeasonEventById_("cwl-waiting");
+  const live = backend.readCwlSeasonEventAggregate_("cwl-waiting", "live");
+  const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
+
+  assert.equal(result.status, "completed");
+  assert.equal(event.cwlTrackingState, "active");
+  assert.equal(event.startsAt, "2026-07-04T20:00:00.000Z");
+  assert.equal(event.endsAt, "2026-07-05T20:00:00.000Z");
+  assert.equal(live.byTag["#PLAYER"].starsTotal, 3);
+  assert.equal(lastJob.cwlSeasonEventRefresh.status, "active");
+  assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.leagueGroup, 1);
+  assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.cwlWar, 1);
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 1);
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
+});
+
 test("queue finalization refuses duplicate player tags before publishing staged active version", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());

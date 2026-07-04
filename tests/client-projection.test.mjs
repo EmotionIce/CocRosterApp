@@ -763,6 +763,131 @@ test("season events model renders unavailable and empty states safely", () => {
   assert.equal(model.cards[1].activeParticipantCount, 0);
 });
 
+test("season events model includes an active CWL leaderboard card", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const data = {
+    seasonEvents: {
+      current: {
+        cwl: { eventId: "cwl-active", type: "cwl" },
+      },
+      byId: {
+        "cwl-active": {
+          eventId: "cwl-active",
+          type: "cwl",
+          title: "CWL Event",
+          status: "open",
+          signupsOpen: true,
+          startsAt: "2026-07-04T20:00:00.000Z",
+          endsAt: "2026-07-11T20:00:00.000Z",
+          cwlTrackingState: "active",
+          participantsByDiscordId: {
+            "100": {
+              discordDisplayName: "Alpha",
+              discordUsername: "alpha",
+              status: "signed_up",
+              accounts: [{ tag: "#AAA", name: "Alpha" }],
+            },
+          },
+        },
+      },
+      cwlAggregatesByEventId: {
+        "cwl-active": {
+          live: {
+            eventId: "cwl-active",
+            kind: "live",
+            cwlTrackingState: "active",
+            rankedTags: ["#AAA"],
+            byTag: {
+              "#AAA": {
+                starsTotal: 7,
+                attacksMade: 3,
+                threeStarCount: 2,
+                totalDestruction: 265,
+                defenseAttacksReceived: 2,
+                successfulDefensiveAttacks: 1,
+                attackedDefenseDays: 1,
+                defenseHolds: 1,
+                bestStarsConceded: 2,
+                bestDestructionConceded: 88,
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventsPublicModel(data);
+  const cwlCard = model.cards.find((card) => card.type === "cwl");
+
+  assert.ok(cwlCard);
+  assert.equal(cwlCard.status, "active");
+  assert.equal(cwlCard.rows.length, 1);
+  assert.equal(cwlCard.rows[0].displayName, "Alpha");
+  assert.equal(cwlCard.rows[0].score, 7);
+  assert.equal(cwlCard.rows[0].cwlStats.defenseHolds, 1);
+});
+
+test("season events model shows latest completed CWL when the current CWL is waiting", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const data = {
+    seasonEvents: {
+      current: {
+        cwl: { eventId: "cwl-waiting", type: "cwl" },
+      },
+      latestCompletedCwl: { eventId: "cwl-completed", type: "cwl" },
+      byId: {
+        "cwl-waiting": {
+          eventId: "cwl-waiting",
+          type: "cwl",
+          status: "open",
+          signupsOpen: true,
+          startsAt: "",
+          endsAt: "",
+          cwlTrackingState: "waiting",
+          participantsByDiscordId: {
+            "200": { discordDisplayName: "Waiting", status: "signed_up", accounts: [{ tag: "#WAIT", name: "Waiting" }] },
+          },
+        },
+        "cwl-completed": {
+          eventId: "cwl-completed",
+          type: "cwl",
+          status: "closed",
+          signupsOpen: false,
+          startsAt: "2026-06-01T00:00:00.000Z",
+          endsAt: "2026-06-08T00:00:00.000Z",
+          cwlTrackingState: "completed",
+          participantsByDiscordId: {
+            "100": { discordDisplayName: "Winner", status: "signed_up", accounts: [{ tag: "#WIN", name: "Winner" }] },
+          },
+        },
+      },
+      cwlAggregatesByEventId: {
+        "cwl-completed": {
+          final: {
+            eventId: "cwl-completed",
+            kind: "final",
+            rankedTags: ["#WIN"],
+            byTag: {
+              "#WIN": { starsTotal: 21, defenseHolds: 2, attackedDefenseDays: 2 },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventsPublicModel(data);
+  const cwlCard = model.cards.find((card) => card.type === "cwl");
+
+  assert.ok(cwlCard);
+  assert.equal(cwlCard.event.eventId, "cwl-completed");
+  assert.equal(cwlCard.showingLatestCompleted, true);
+  assert.equal(cwlCard.rows.length, 1);
+  assert.equal(cwlCard.rows[0].tag, "#WIN");
+  assert.equal(cwlCard.rows[0].score, 21);
+});
+
 test("season event leaderboards include signed-up participants and exclude cancelled or removed", () => {
   const { buildSeasonEventLeaderboardModel } = loadClientInternals();
   const event = {
