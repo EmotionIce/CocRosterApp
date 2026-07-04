@@ -2872,6 +2872,41 @@ test("CWL ranking uses backend comparator and does not give no-defense perfect c
   assert.deepEqual(rows.map((row) => row.tag), ["#DEF", "#NODEF", "#NONE"]);
 });
 
+test("CWL participant-filtered aggregate ranked tags use backend display-name tie-break", () => {
+  const backend = loadBackend();
+  const finalAggregate = backend.filterCwlAggregateToRegisteredParticipants_(
+    {
+      eventId: "cwl-test",
+      type: "cwl",
+      participantsByDiscordId: {
+        "200": {
+          discordId: "200",
+          discordDisplayName: "Zulu",
+          status: "signed_up",
+          accounts: [{ tag: "#BBB", name: "Zulu" }],
+        },
+        "100": {
+          discordId: "100",
+          discordDisplayName: "Alpha",
+          status: "signed_up",
+          accounts: [{ tag: "#AAA", name: "Alpha" }],
+        },
+      },
+    },
+    {
+      eventId: "cwl-test",
+      kind: "live",
+      warTags: ["#WAR1"],
+      byTag: {
+        "#AAA": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
+        "#BBB": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
+      },
+    },
+  );
+
+  assert.equal(JSON.stringify(finalAggregate.rankedTags), JSON.stringify(["#AAA", "#BBB"]));
+});
+
 test("CWL final aggregate remains compact for a large synthetic leaderboard", () => {
   const backend = loadBackend();
   const participantsByDiscordId = {};

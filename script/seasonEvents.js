@@ -3171,15 +3171,25 @@ function filterCwlAggregateToRegisteredParticipants_(eventRaw, aggregateRaw) {
 	const aggregate = sanitizeCwlSeasonEventAggregate_(aggregateRaw);
 	const registered = listCwlSeasonEventRegisteredAccounts_(eventRaw);
 	const byTag = {};
+	const sortNameByTag = {};
 	for (let i = 0; i < registered.length; i++) {
 		const tag = registered[i].tag;
 		if (!tag) continue;
 		byTag[tag] = sanitizeCwlStatEntry_(aggregate.byTag[tag]);
+		const participant = registered[i].participant || {};
+		const account = registered[i].account || {};
+		sortNameByTag[tag] =
+			sanitizeSeasonEventText_(account.name, 120) ||
+			participant.discordDisplayName ||
+			participant.discordGlobalName ||
+			participant.discordUsername ||
+			participant.discordId ||
+			tag;
 	}
 	const rankedRows = [];
 	const tags = Object.keys(byTag).sort();
 	for (let i = 0; i < tags.length; i++) {
-		rankedRows.push({ tag: tags[i], cwlStats: byTag[tags[i]], _sortName: tags[i] });
+		rankedRows.push({ tag: tags[i], cwlStats: byTag[tags[i]], _sortName: sortNameByTag[tags[i]] || tags[i] });
 	}
 	rankedRows.sort(compareCwlSeasonEventLeaderboardRows_);
 	return {
@@ -3251,7 +3261,9 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 		aggregate.cwlTrackingState = lockedState === "waiting" ? "active" : lockedState;
 		aggregate.rankedTags = filterCwlAggregateToRegisteredParticipants_(lockedEvent, aggregate).rankedTags;
 		const existingLive = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(eventId, "live"));
-		if (existingLive.hash !== aggregate.hash || existingLive.stale === true) {
+		const existingRankedTagsJson = JSON.stringify(Array.isArray(existingLive.rankedTags) ? existingLive.rankedTags : []);
+		const nextRankedTagsJson = JSON.stringify(Array.isArray(aggregate.rankedTags) ? aggregate.rankedTags : []);
+		if (existingLive.hash !== aggregate.hash || existingLive.stale === true || existingRankedTagsJson !== nextRankedTagsJson) {
 			writeSeasonEventFirebasePayload_(buildCwlSeasonEventAggregatePath_(eventId, "live"), "PUT", aggregate);
 		}
 
