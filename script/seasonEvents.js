@@ -952,6 +952,37 @@ function getCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 	};
 }
 
+// Public current-CWL refresh callable. This uses the same shared snapshot and
+// aggregation path as refresh-all without mutating roster payloads.
+function refreshCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
+	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPassword);
+	const payload = parsed.payload;
+	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
+	const sourceSnapshot =
+		typeof readAutoRefreshCoordinatorSourceSnapshot_ === "function"
+			? readAutoRefreshCoordinatorSourceSnapshot_()
+			: readActiveRosterSnapshot_();
+	const rosterData = validateRosterData_(sourceSnapshot && sourceSnapshot.rosterData);
+	const snapshot = buildAutoRefreshSnapshot_(rosterData, {
+		sourceRosters: Array.isArray(rosterData.rosters) ? rosterData.rosters : [],
+		allowRegularWarHistoryRepair: false,
+	});
+	const result = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, {
+		source: payload.source || { type: "api-refresh-current-cwl-event" },
+		nowIso: payload.nowIso || payload.now,
+	});
+	if (result && typeof result === "object") {
+		result.requestCounts = snapshot && snapshot.requestCounts && typeof snapshot.requestCounts === "object"
+			? {
+				leagueGroup: toNonNegativeInt_(snapshot.requestCounts.leagueGroup),
+				cwlWar: toNonNegativeInt_(snapshot.requestCounts.cwlWar),
+				total: toNonNegativeInt_(snapshot.requestCounts.total),
+			}
+			: {};
+	}
+	return result || { ok: false, status: "unknown" };
+}
+
 // Sanitize participant account.
 function sanitizeSeasonEventParticipantAccount_(accountRaw) {
 	const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
