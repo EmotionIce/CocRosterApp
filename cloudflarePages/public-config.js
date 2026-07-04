@@ -5,7 +5,8 @@
  * - ROSTER_FIREBASE_DB_URL: public Firebase Realtime Database URL.
  * - ROSTER_BASE_URL: Apps Script web app URL used as backend source.
  * - ROSTER_ADMIN_URL (optional): absolute or root-relative admin page URL.
- * - ROSTER_ADMIN_API_BASE (optional): admin API proxy base (default /api/admin).
+ * - ROSTER_ADMIN_API_BASE (optional): admin API base. Defaults to the Apps Script URL;
+ *   set it to /api/admin only when the Cloudflare worker API route is deployed.
  * - ROSTER_PUBLIC_CONFIG_OVERRIDES (optional): static public/branding overrides.
  *
  * `ROSTER_PUBLIC_CONFIG_OVERRIDES` supports these optional keys:
@@ -36,6 +37,16 @@
         return value.replace(/[\/\\]+$/, "");
     }
 
+    // Normalize admin API base URL.
+    function normalizeAdminApiBaseUrl(valueRaw) {
+        var value = asTrimmedText(valueRaw);
+        if (!value) return "";
+        if (/^https?:\/\//i.test(value) || value.charAt(0) === "/") {
+            return value.replace(/[\/\\]+$/, "");
+        }
+        return "";
+    }
+
     var locationRef = globalScope.location || null;
     var sameOriginBaseUrl = "/";
     if (locationRef && typeof locationRef.origin === "string" && locationRef.origin && locationRef.origin !== "null") {
@@ -52,6 +63,9 @@
     var configuredRosterBaseUrl = normalizeHttpBaseUrl(globalScope.ROSTER_BASE_URL);
     var defaultRosterBaseUrl = normalizeHttpBaseUrl(DEFAULT_APPS_SCRIPT_BASE_URL);
     globalScope.ROSTER_BASE_URL = configuredRosterBaseUrl || defaultRosterBaseUrl;
+
+    var configuredAdminApiBase = normalizeAdminApiBaseUrl(globalScope.ROSTER_ADMIN_API_BASE);
+    globalScope.ROSTER_ADMIN_API_BASE = configuredAdminApiBase || globalScope.ROSTER_BASE_URL || "/api/admin";
 
     var configuredPublicOverrides = globalScope.ROSTER_PUBLIC_CONFIG_OVERRIDES;
     if (!configuredPublicOverrides || typeof configuredPublicOverrides !== "object" || Array.isArray(configuredPublicOverrides)) {

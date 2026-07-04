@@ -2326,7 +2326,7 @@
     window.BUILD_STAMP = "cloudflare-admin";
     window.ROSTER_STATIC_BASE_URL = window.ROSTER_STATIC_BASE_URL || "/";
     window.ROSTER_BASE_URL = window.ROSTER_BASE_URL || "";
-    window.ROSTER_ADMIN_API_BASE = window.ROSTER_ADMIN_API_BASE || "/api/admin";
+    window.ROSTER_ADMIN_API_BASE = window.ROSTER_ADMIN_API_BASE || window.ROSTER_BASE_URL || "/api/admin";
   </script>
 
 <!-- Runtime config, XLSX parsing, and the shared roster/admin clients. -->

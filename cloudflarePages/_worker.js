@@ -35,7 +35,7 @@ const resolveFallbackAppsScriptExecUrl = () =>
 // Return whether upstream returned a Google HTML miss instead of Apps Script JSON.
 const shouldRetryAppsScriptFallback = (response, textRaw, contentTypeRaw) => {
   const status = Number(response && response.status);
-  if (status !== 404 && status !== 405) return false;
+  if (![401, 403, 404, 405].includes(status)) return false;
   const contentType = String(contentTypeRaw || "").toLowerCase();
   const text = String(textRaw || "").trim();
   return contentType.includes("text/html") || /^<!doctype\b/i.test(text) || /^<html[\s>]/i.test(text);
