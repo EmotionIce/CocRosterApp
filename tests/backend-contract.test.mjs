@@ -3093,6 +3093,105 @@ test("authenticated CWL event refresh callable binds the current published group
   assert.equal(live.byTag["#PLAYER"].starsTotal, 3);
 });
 
+test("CWL event window projects through expected future rounds without duplicating the group", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-active", type: "cwl" },
+        byId: {
+          "cwl-active": {
+            eventId: "cwl-active",
+            type: "cwl",
+            status: "open",
+            signupsOpen: true,
+            startsAt: "2026-07-04T03:20:17.000Z",
+            endsAt: "2026-07-05T03:20:30.000Z",
+            cwlTrackingState: "active",
+            cwl: {
+              groups: {
+                "grp-existing": {
+                  groupId: "grp-existing",
+                  anchorWarTag: "#WAR1",
+                  clanTags: ["#CLAN"],
+                  warTags: ["#WAR1"],
+                  firstWarStartTime: "2026-07-04T03:20:17.000Z",
+                  lastWarEndTime: "2026-07-05T03:20:30.000Z",
+                  expectedRounds: 7,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = buildValidRosterData();
+  rosterData.rosters[0].connectedClanTag = "#CLAN";
+  const leaguegroup = {
+    state: "inWar",
+    season: "2026-07",
+    clans: [{ tag: "#CLAN" }, { tag: "#OPP" }],
+    rounds: [
+      { warTags: ["#WAR1", "#OTHER1"] },
+      { warTags: ["#WAR2", "#OTHER2"] },
+      { warTags: ["#0"] },
+      { warTags: ["#0"] },
+      { warTags: ["#0"] },
+      { warTags: ["#0"] },
+      { warTags: ["#0"] },
+    ],
+  };
+  const makeWar = (tag, start, end, stars) => ({
+    state: tag === "#WAR1" ? "warEnded" : "inWar",
+    startTime: start,
+    endTime: end,
+    clan: {
+      tag: "#CLAN",
+      members: [{ tag: "#PLAYER", attacks: [{ defenderTag: "#BASE", stars, destructionPercentage: stars === 3 ? 100 : 80 }] }],
+    },
+    opponent: {
+      tag: "#OPP",
+      members: [{ tag: "#BASE", attacks: [] }],
+    },
+  });
+  const snapshot = {
+    leaguegroupRawByClanTag: { "#CLAN": leaguegroup },
+    cwlWarRawByTag: {
+      "#WAR1": makeWar("#WAR1", "2026-07-04T03:20:17.000Z", "2026-07-05T03:20:30.000Z", 3),
+      "#WAR2": makeWar("#WAR2", "2026-07-05T03:20:17.000Z", "2026-07-06T03:20:30.000Z", 2),
+      "#OTHER1": {
+        state: "warEnded",
+        startTime: "2026-07-04T03:20:17.000Z",
+        endTime: "2026-07-05T03:20:30.000Z",
+        clan: { tag: "#AAA", members: [] },
+        opponent: { tag: "#BBB", members: [] },
+      },
+      "#OTHER2": {
+        state: "inWar",
+        startTime: "2026-07-05T03:20:17.000Z",
+        endTime: "2026-07-06T03:20:30.000Z",
+        clan: { tag: "#AAA", members: [] },
+        opponent: { tag: "#BBB", members: [] },
+      },
+    },
+    cwlWarErrorByTag: {},
+  };
+
+  const result = backend.refreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, { nowIso: "2026-07-05T00:00:00.000Z" });
+  const event = backend.readSeasonEventById_("cwl-active");
+  const groupIds = Object.keys(event.cwl.groups);
+
+  assert.equal(result.status, "active");
+  assert.equal(event.endsAt, "2026-07-11T03:20:30.000Z");
+  assert.equal(groupIds.length, 1);
+  assert.equal(groupIds[0], "grp-existing");
+  assert.equal(
+    JSON.stringify(event.cwl.groups["grp-existing"].warTags),
+    JSON.stringify(["#OTHER1", "#OTHER2", "#WAR1", "#WAR2"])
+  );
+  assert.equal(event.cwl.groups["grp-existing"].projectedLastWarEndTime, "2026-07-11T03:20:30.000Z");
+});
+
 test("CWL active event dedupes shared league groups and war tags per snapshot run", () => {
   const backend = installMemoryFirebase(loadBackend(), {
     events: {

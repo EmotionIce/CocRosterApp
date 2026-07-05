@@ -615,6 +615,7 @@ function sanitizeCwlSeasonEventGroup_(groupRaw) {
 		season: sanitizeSeasonEventText_(group.season, 40),
 		firstWarStartTime: sanitizeSeasonEventTimestampOrEmpty_(group.firstWarStartTime),
 		lastWarEndTime: sanitizeSeasonEventTimestampOrEmpty_(group.lastWarEndTime),
+		projectedLastWarEndTime: sanitizeSeasonEventTimestampOrEmpty_(group.projectedLastWarEndTime),
 		expectedRounds: toNonNegativeInt_(group.expectedRounds),
 		clanTags: Object.keys(clanTagSet).sort(),
 		warTags: Object.keys(warTagSet).sort(),
@@ -2963,6 +2964,100 @@ function extractCwlWarTiming_(warTagsRaw, warRawByTagRaw) {
 	};
 }
 
+function medianPositiveNumber_(valuesRaw) {
+	const values = Array.isArray(valuesRaw) ? valuesRaw.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b) : [];
+	if (!values.length) return 0;
+	const mid = Math.floor(values.length / 2);
+	return values.length % 2 ? values[mid] : Math.round((values[mid - 1] + values[mid]) / 2);
+}
+
+function getCwlWarStartEndMs_(warRaw) {
+	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
+	const startIso = sanitizeSeasonEventTimestampOrEmpty_(war.startTime || war.preparationStartTime);
+	const endIso = sanitizeSeasonEventTimestampOrEmpty_(war.endTime || war.startTime || war.preparationStartTime);
+	return {
+		startMs: parseIsoToMs_(startIso),
+		endMs: parseIsoToMs_(endIso),
+		startIso: startIso,
+		endIso: endIso,
+	};
+}
+
+function extractCwlLeagueGroupRoundTiming_(leaguegroupRaw, warRawByTagRaw) {
+	const leaguegroup = leaguegroupRaw && typeof leaguegroupRaw === "object" ? leaguegroupRaw : {};
+	const warRawByTag = warRawByTagRaw && typeof warRawByTagRaw === "object" ? warRawByTagRaw : {};
+	const rounds = Array.isArray(leaguegroup.rounds) ? leaguegroup.rounds : [];
+	const materializedRounds = [];
+	const warDurations = [];
+	let firstMs = 0;
+	let lastMs = 0;
+	let firstIso = "";
+	let lastIso = "";
+
+	for (let i = 0; i < rounds.length; i++) {
+		const round = rounds[i] && typeof rounds[i] === "object" ? rounds[i] : {};
+		const tags = Array.isArray(round.warTags) ? round.warTags : [];
+		let roundStartMs = 0;
+		let roundEndMs = 0;
+		for (let j = 0; j < tags.length; j++) {
+			const warTag = normalizeTag_(tags[j]);
+			const war = warTag && warTag !== "#0" && warRawByTag[warTag] && typeof warRawByTag[warTag] === "object" ? warRawByTag[warTag] : null;
+			if (!war) continue;
+			const timing = getCwlWarStartEndMs_(war);
+			if (timing.startMs > 0 && (!roundStartMs || timing.startMs < roundStartMs)) roundStartMs = timing.startMs;
+			if (timing.endMs > 0 && timing.endMs > roundEndMs) roundEndMs = timing.endMs;
+			if (timing.startMs > 0 && timing.endMs > timing.startMs) warDurations.push(timing.endMs - timing.startMs);
+			if (timing.startMs > 0 && (!firstMs || timing.startMs < firstMs)) {
+				firstMs = timing.startMs;
+				firstIso = timing.startIso;
+			}
+			if (timing.endMs > 0 && timing.endMs > lastMs) {
+				lastMs = timing.endMs;
+				lastIso = timing.endIso;
+			}
+		}
+		if (roundStartMs > 0 || roundEndMs > 0) {
+			materializedRounds.push({
+				index: i,
+				startMs: roundStartMs,
+				endMs: roundEndMs,
+			});
+		}
+	}
+
+	let cadenceMs = 0;
+	const roundStartDeltas = [];
+	for (let i = 1; i < materializedRounds.length; i++) {
+		const prev = materializedRounds[i - 1];
+		const current = materializedRounds[i];
+		const indexDelta = current.index - prev.index;
+		if (indexDelta > 0 && prev.startMs > 0 && current.startMs > prev.startMs) {
+			roundStartDeltas.push(Math.round((current.startMs - prev.startMs) / indexDelta));
+		}
+	}
+	cadenceMs = medianPositiveNumber_(roundStartDeltas) || medianPositiveNumber_(warDurations);
+
+	let projectedLastMs = lastMs;
+	if (rounds.length > 0 && materializedRounds.length > 0 && cadenceMs > 0) {
+		const roundsWithEnd = materializedRounds.filter((round) => round.endMs > 0).sort((left, right) => left.index - right.index);
+		const anchorRound = roundsWithEnd.length ? roundsWithEnd[roundsWithEnd.length - 1] : materializedRounds[materializedRounds.length - 1];
+		const anchorMs = anchorRound.endMs || anchorRound.startMs;
+		const remainingRounds = Math.max(0, rounds.length - 1 - anchorRound.index);
+		if (anchorMs > 0) projectedLastMs = anchorMs + remainingRounds * cadenceMs;
+	}
+
+	return {
+		firstMs: firstMs,
+		lastMs: lastMs,
+		projectedLastMs: projectedLastMs,
+		firstIso: firstIso,
+		lastIso: lastIso,
+		projectedLastIso: projectedLastMs > 0 ? new Date(projectedLastMs).toISOString() : "",
+		materializedRoundCount: materializedRounds.length,
+		cadenceMs: cadenceMs,
+	};
+}
+
 // Build a compact group binding from a league group.
 function buildCwlSeasonEventGroupBinding_(clanTagRaw, leaguegroupRaw, warRawByTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
@@ -2970,7 +3065,8 @@ function buildCwlSeasonEventGroupBinding_(clanTagRaw, leaguegroupRaw, warRawByTa
 	if (!clanTag || !leagueGroupContainsClan_(leaguegroup, clanTag)) return null;
 	const warTags = extractLeagueGroupWarTags_(leaguegroup);
 	if (!warTags.length) return null;
-	const timing = extractCwlWarTiming_(warTags, warRawByTagRaw);
+	const roundTiming = extractCwlLeagueGroupRoundTiming_(leaguegroup, warRawByTagRaw);
+	const timing = roundTiming.firstIso || roundTiming.lastIso ? roundTiming : extractCwlWarTiming_(warTags, warRawByTagRaw);
 	const seed = {
 		season: typeof leaguegroup.season === "string" ? leaguegroup.season : "",
 		warTags: warTags.slice().sort(),
@@ -2982,6 +3078,7 @@ function buildCwlSeasonEventGroupBinding_(clanTagRaw, leaguegroupRaw, warRawByTa
 		season: seed.season,
 		firstWarStartTime: timing.firstIso,
 		lastWarEndTime: timing.lastIso,
+		projectedLastWarEndTime: timing.projectedLastIso || timing.lastIso,
 		expectedRounds: Array.isArray(leaguegroup.rounds) ? leaguegroup.rounds.length : 0,
 		clanTags: [clanTag],
 		warTags: warTags,
@@ -2991,8 +3088,20 @@ function buildCwlSeasonEventGroupBinding_(clanTagRaw, leaguegroupRaw, warRawByTa
 // Merge a group binding into compact CWL metadata.
 function mergeCwlSeasonEventGroupBinding_(metaRaw, bindingRaw) {
 	const meta = sanitizeCwlSeasonEventMeta_(metaRaw);
-	const binding = sanitizeCwlSeasonEventGroup_(bindingRaw);
+	let binding = sanitizeCwlSeasonEventGroup_(bindingRaw);
 	if (!binding.groupId) return meta;
+	if (!meta.groups[binding.groupId]) {
+		const existingIds = Object.keys(meta.groups).sort();
+		for (let i = 0; i < existingIds.length; i++) {
+			const candidate = sanitizeCwlSeasonEventGroup_(meta.groups[existingIds[i]]);
+			const sharedWarTag = candidate.warTags.some((tag) => binding.warTags.indexOf(tag) >= 0);
+			const sharedClanTag = candidate.clanTags.some((tag) => binding.clanTags.indexOf(tag) >= 0);
+			if ((sharedWarTag && sharedClanTag) || (candidate.anchorWarTag && binding.warTags.indexOf(candidate.anchorWarTag) >= 0)) {
+				binding = sanitizeCwlSeasonEventGroup_(Object.assign({}, binding, { groupId: candidate.groupId }));
+				break;
+			}
+		}
+	}
 	const existing = sanitizeCwlSeasonEventGroup_(meta.groups[binding.groupId]);
 	const clanTagSet = {};
 	const warTagSet = {};
@@ -3013,6 +3122,7 @@ function mergeCwlSeasonEventGroupBinding_(metaRaw, bindingRaw) {
 		season: existing.season || binding.season,
 		firstWarStartTime: existing.firstWarStartTime || binding.firstWarStartTime,
 		lastWarEndTime: binding.lastWarEndTime || existing.lastWarEndTime,
+		projectedLastWarEndTime: binding.projectedLastWarEndTime || existing.projectedLastWarEndTime || binding.lastWarEndTime || existing.lastWarEndTime,
 		expectedRounds: Math.max(toNonNegativeInt_(existing.expectedRounds), toNonNegativeInt_(binding.expectedRounds)),
 		clanTags: Object.keys(clanTagSet).sort(),
 		warTags: Object.keys(warTagSet).sort(),
@@ -3064,6 +3174,33 @@ function bindEligibleCwlSeasonEventGroupsFromSnapshot_(eventRaw, rosterDataRaw, 
 		meta = mergeCwlSeasonEventGroupBinding_(meta, candidates[i]);
 	}
 	return meta;
+}
+
+function getCwlSeasonEventWindowFromMeta_(metaRaw) {
+	const meta = sanitizeCwlSeasonEventMeta_(metaRaw);
+	const groupIds = Object.keys(meta.groups);
+	let startMs = 0;
+	let endMs = 0;
+	let startsAt = "";
+	let endsAt = "";
+	for (let i = 0; i < groupIds.length; i++) {
+		const group = sanitizeCwlSeasonEventGroup_(meta.groups[groupIds[i]]);
+		const groupStartMs = parseIsoToMs_(group.firstWarStartTime);
+		const projectedEnd = group.projectedLastWarEndTime || group.lastWarEndTime;
+		const groupEndMs = parseIsoToMs_(projectedEnd);
+		if (groupStartMs > 0 && (!startMs || groupStartMs < startMs)) {
+			startMs = groupStartMs;
+			startsAt = group.firstWarStartTime;
+		}
+		if (groupEndMs > 0 && groupEndMs > endMs) {
+			endMs = groupEndMs;
+			endsAt = projectedEnd;
+		}
+	}
+	return {
+		startsAt: startsAt,
+		endsAt: endsAt,
+	};
 }
 
 // Build compact CWL event aggregate from bound groups and shared wars.
@@ -3291,11 +3428,12 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 			meta.finalizationFirstSeenAt = "";
 		}
 
+		const cwlWindow = getCwlSeasonEventWindowFromMeta_(meta);
 		const patch = {
 			cwlTrackingState: nextState,
 			cwl: meta,
-			startsAt: lockedEvent.startsAt || Object.keys(meta.groups).map((id) => meta.groups[id].firstWarStartTime).filter(Boolean).sort()[0] || "",
-			endsAt: Object.keys(meta.groups).map((id) => meta.groups[id].lastWarEndTime).filter(Boolean).sort().pop() || lockedEvent.endsAt || "",
+			startsAt: lockedEvent.startsAt || cwlWindow.startsAt || "",
+			endsAt: cwlWindow.endsAt || lockedEvent.endsAt || "",
 			updatedAt: nowIso,
 		};
 		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(eventId), "PATCH", patch);
