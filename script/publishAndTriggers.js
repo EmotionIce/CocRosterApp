@@ -449,6 +449,7 @@ function normalizeAutoRefreshQueueCurrent_(stateRaw) {
 		issueSummary: String(state.issueSummary || "").slice(0, 500),
 		taskSummary: state.taskSummary && typeof state.taskSummary === "object" ? state.taskSummary : null,
 		cwlSeasonEventRefresh: state.cwlSeasonEventRefresh && typeof state.cwlSeasonEventRefresh === "object" ? state.cwlSeasonEventRefresh : null,
+		cloudflarePublicDataPublish: state.cloudflarePublicDataPublish && typeof state.cloudflarePublicDataPublish === "object" ? state.cloudflarePublicDataPublish : null,
 		lock: state.lock && typeof state.lock === "object" ? state.lock : null,
 	};
 }
@@ -2078,6 +2079,134 @@ function verifyAutoRefreshMetricCopyTasksComplete_(runIdRaw, taskIdsRaw) {
 	}
 }
 
+function getCloudflareAutoRefreshResultError_(resultRaw) {
+	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
+	if (!result) return "Cloudflare publish returned no result.";
+	const parts = [];
+	const pushFailure = function (label, itemRaw) {
+		const item = itemRaw && typeof itemRaw === "object" ? itemRaw : null;
+		if (!item || item.ok === true) return;
+		const reason = String(item.error || item.reason || "not ok").trim();
+		parts.push(label + ": " + reason);
+	};
+	if (result.ok !== true) {
+		const reason = String(result.error || result.reason || "").trim();
+		if (reason) parts.push(reason);
+	}
+	pushFailure("active", result.active);
+	if (result.active && typeof result.active === "object") {
+		pushFailure("active public", result.active.publicResult);
+		pushFailure("active bot", result.active.botResult);
+	}
+	pushFailure("cwlLeagueSignups", result.cwlLeagueSignups);
+	pushFailure("seasonEvents", result.seasonEvents);
+	return (parts.join("; ") || "Cloudflare publish did not return ok.").slice(0, 1000);
+}
+
+function summarizeCloudflareAutoRefreshResult_(publishResultRaw, verifyResultRaw) {
+	const publishResult = publishResultRaw && typeof publishResultRaw === "object" ? publishResultRaw : {};
+	const verifyResult = verifyResultRaw && typeof verifyResultRaw === "object" ? verifyResultRaw : {};
+	const active = publishResult.active && typeof publishResult.active === "object" ? publishResult.active : {};
+	const publicResult = active.publicResult && typeof active.publicResult === "object" ? active.publicResult : {};
+	const botResult = active.botResult && typeof active.botResult === "object" ? active.botResult : {};
+	const signups = publishResult.cwlLeagueSignups && typeof publishResult.cwlLeagueSignups === "object" ? publishResult.cwlLeagueSignups : {};
+	const seasonEvents = publishResult.seasonEvents && typeof publishResult.seasonEvents === "object" ? publishResult.seasonEvents : {};
+	return {
+		ok: publishResult.ok === true && verifyResult.ok === true,
+		versionId: normalizeActiveVersionId_(active.versionId || verifyResult.actualVersionId || verifyResult.expectedVersionId),
+		verifiedAt: new Date().toISOString(),
+		verifyStatusCode: toNonNegativeInt_(verifyResult.statusCode),
+		activePublicPutCount: toNonNegativeInt_(publicResult.putCount),
+		activeBotPutCount: toNonNegativeInt_(botResult.putCount),
+		cwlLeagueSignupsPutCount: toNonNegativeInt_(signups.putCount),
+		seasonEventsPutCount: toNonNegativeInt_(seasonEvents.putCount),
+		seasonEventsDeleteCount: toNonNegativeInt_(seasonEvents.deleteCount),
+	};
+}
+
+function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const message = String(errorRaw || "Cloudflare public data mirror is not verified.").slice(0, 1000);
+	if (current) {
+		current.status = "finalizing";
+		current.phase = "cloudflare-publish";
+		current.error = message;
+		current.cloudflarePublicDataPublish = {
+			ok: false,
+			label: String(labelRaw || "").slice(0, 120),
+			error: message,
+			updatedAt: new Date().toISOString(),
+		};
+		writeAutoRefreshQueueCurrent_(current, false);
+		setAutoRefreshRunResult_(
+			"inProgress",
+			"Auto-refresh published Firebase; waiting for Cloudflare public data mirror verification.",
+			message,
+			current.issueCount,
+			current.issueSummary,
+			current.startedAt,
+			new Date().toISOString(),
+		);
+	}
+	scheduleAutoRefreshJobResume_();
+	Logger.log("autoRefresh Cloudflare mirror deferred runId=%s label=%s error=%s", current ? current.runId : "", String(labelRaw || ""), message);
+	return {
+		ok: true,
+		status: "inProgress",
+		inProgress: true,
+		deferred: true,
+		reason: "cloudflarePublicDataMirror",
+		error: message,
+		runId: current ? current.runId : "",
+		processedRosters: current ? current.processedRosters : 0,
+		totalRosters: current ? current.rosterIds.length : 0,
+	};
+}
+
+function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const runId = current && current.runId;
+	const label = String(labelRaw || "auto-refresh-finalize").trim() || "auto-refresh-finalize";
+	if (!runId) throw new Error("Auto-refresh Cloudflare publish is missing run id.");
+	if (typeof publishCloudflarePublicDataSnapshot_ !== "function") {
+		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data publisher is unavailable.", label);
+	}
+	current.status = "finalizing";
+	current.phase = "cloudflare-publish";
+	current.cloudflarePublicDataPublish = {
+		ok: false,
+		label: label.slice(0, 120),
+		status: "publishing",
+		updatedAt: new Date().toISOString(),
+	};
+	writeAutoRefreshQueueCurrent_(current, false);
+	scheduleAutoRefreshJobResume_();
+	const publishResult = publishCloudflarePublicDataSnapshot_({ label: label });
+	if (!publishResult || publishResult.ok !== true) {
+		return buildCloudflareAutoRefreshDeferredResult_(current, getCloudflareAutoRefreshResultError_(publishResult), label);
+	}
+	if (typeof verifyCloudflarePublicActiveVersionId_ !== "function") {
+		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data verification is unavailable.", label);
+	}
+	const verifyResult = verifyCloudflarePublicActiveVersionId_(runId);
+	if (!verifyResult || verifyResult.ok !== true) {
+		const message = verifyResult && (verifyResult.error || verifyResult.reason)
+			? String(verifyResult.error || verifyResult.reason)
+			: "Cloudflare active version pointer did not verify.";
+		return buildCloudflareAutoRefreshDeferredResult_(current, message, label);
+	}
+	current.error = "";
+	current.cloudflarePublicDataPublish = summarizeCloudflareAutoRefreshResult_(publishResult, verifyResult);
+	return {
+		ok: true,
+		status: "verified",
+		runId: runId,
+		publishResult: publishResult,
+		verifyResult: verifyResult,
+		summary: current.cloudflarePublicDataPublish,
+	};
+}
+
 // Execute finalization task: verify shards, guard source fingerprint, write final
 // manifest/playerMetrics shard, then publish the small version pointer.
 function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRaw) {
@@ -2087,6 +2216,9 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const runId = current && current.runId;
 	if (!runId) throw new Error("Auto-refresh finalize task is missing run id.");
 	if (readPublishedActiveVersionId_() === runId) {
+		const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize-already-published");
+		if (cloudflareMirror && cloudflareMirror.deferred) return cloudflareMirror;
+		current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
 		const summary = "Auto-refresh version was already published; cleared completed queue state.";
 		current.status = "completed";
 		current.phase = "completed";
@@ -2241,13 +2373,13 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			archiveCleanupDeleted: archiveCleanupDeleted,
 		};
 		const summary = buildAutoRefreshFinalSummary_(runResult, writeResult);
-		setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 		const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(null, sourceMeta, runId);
 		current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 		tryReconcileCurrentSeasonEventsForAutoRefresh_();
-		if (typeof publishCloudflarePublicDataSnapshot_ === "function") {
-			publishCloudflarePublicDataSnapshot_({ label: "auto-refresh-finalize-staged" });
-		}
+		const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize-staged");
+		if (cloudflareMirror && cloudflareMirror.deferred) return cloudflareMirror;
+		current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
+		setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 		current.status = "completed";
 		current.phase = "completed";
 		current.completedAt = new Date().toISOString();
@@ -2351,14 +2483,14 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		rosterData: finalRosterData,
 	};
 	const summary = buildAutoRefreshFinalSummary_(runResult, writeResult);
-	setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 	tryReconcileRegularWarFinalizationTriggerStateValidated_(finalRosterData);
 	const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(finalRosterData, sourceMeta, runId);
 	current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 	tryReconcileCurrentSeasonEventsForAutoRefresh_();
-	if (typeof publishCloudflarePublicDataSnapshot_ === "function") {
-		publishCloudflarePublicDataSnapshot_({ label: "auto-refresh-finalize" });
-	}
+	const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize");
+	if (cloudflareMirror && cloudflareMirror.deferred) return cloudflareMirror;
+	current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
+	setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 	current.status = "completed";
 	current.phase = "completed";
 	current.completedAt = new Date().toISOString();

@@ -39,6 +39,21 @@ function getCloudflarePublicDataPublishEndpoint_() {
 	return baseUrl + "/api/internal/public-data/publish";
 }
 
+function getCloudflarePublicDataReadEndpoint_(pathRaw) {
+	const baseUrl = getCloudflarePublicDataBaseUrl_();
+	if (!baseUrl) return "";
+	const path = normalizeCloudflareDataObjectPath_(pathRaw);
+	let readBase = baseUrl;
+	if (/\/api\/internal\/public-data\/publish$/i.test(readBase)) {
+		readBase = readBase.replace(/\/api\/internal\/public-data\/publish$/i, "/api/public-data");
+	} else if (/\/api\/bot-data$/i.test(readBase)) {
+		readBase = readBase.replace(/\/api\/bot-data$/i, "/api/public-data");
+	} else if (!/\/api\/public-data$/i.test(readBase)) {
+		readBase += "/api/public-data";
+	}
+	return readBase + "/" + path;
+}
+
 function getCloudflarePublicDataPublishSecret_() {
 	return (
 		getOptionalScriptProperty_(CLOUDFLARE_PUBLIC_DATA_PUBLISH_SECRET_PROPERTY) ||
@@ -552,6 +567,59 @@ function publishCloudflarePublicDataSnapshot_(optionsRaw) {
 		cwlLeagueSignups: signups,
 		seasonEvents: seasonEvents,
 	};
+}
+
+function verifyCloudflarePublicActiveVersionId_(expectedVersionIdRaw) {
+	const expectedVersionId = normalizeActiveVersionId_(expectedVersionIdRaw);
+	if (!expectedVersionId) return { ok: false, error: "Missing expected active version id." };
+	if (!isCloudflarePublicDataEnabled_()) return { ok: false, skipped: true, reason: "disabled" };
+	if (typeof UrlFetchApp === "undefined" || !UrlFetchApp || typeof UrlFetchApp.fetch !== "function") {
+		return { ok: false, skipped: true, reason: "urlfetch-unavailable" };
+	}
+	const endpoint = getCloudflarePublicDataReadEndpoint_("activePublished/currentVersionId");
+	if (!endpoint) return { ok: false, skipped: true, reason: "missing-cloudflare-url" };
+	try {
+		const separator = endpoint.indexOf("?") >= 0 ? "&" : "?";
+		const response = UrlFetchApp.fetch(endpoint + separator + "_verify=" + encodeURIComponent(new Date().toISOString()), {
+			method: "get",
+			headers: {
+				"Cache-Control": "no-cache",
+			},
+			muteHttpExceptions: true,
+		});
+		const code = typeof response.getResponseCode === "function" ? response.getResponseCode() : 0;
+		const text = typeof response.getContentText === "function" ? response.getContentText() : "";
+		if (code < 200 || code >= 300) {
+			return { ok: false, statusCode: code, error: "Cloudflare active version verification failed with HTTP " + code + "." };
+		}
+		let parsed = null;
+		try {
+			parsed = text ? JSON.parse(text) : null;
+		} catch (parseErr) {
+			return { ok: false, statusCode: code, error: "Cloudflare active version verification returned invalid JSON." };
+		}
+		const payload = parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "data")
+			? parsed.data
+			: parsed;
+		const actualVersionId = normalizeActiveVersionId_(payload);
+		if (actualVersionId !== expectedVersionId) {
+			return {
+				ok: false,
+				statusCode: code,
+				expectedVersionId: expectedVersionId,
+				actualVersionId: actualVersionId,
+				error: "Cloudflare active version pointer mismatch.",
+			};
+		}
+		return {
+			ok: true,
+			statusCode: code,
+			expectedVersionId: expectedVersionId,
+			actualVersionId: actualVersionId,
+		};
+	} catch (err) {
+		return { ok: false, error: errorMessage_(err) };
+	}
 }
 
 function assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw) {

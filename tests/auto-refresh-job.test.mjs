@@ -138,6 +138,29 @@ const loadBackend = () => {
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
+const installCloudflareMirrorSuccess = (backend) => {
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    const versionId = backend.readPublishedActiveVersionId_();
+    return {
+      ok: true,
+      active: {
+        ok: true,
+        versionId,
+        publicResult: { ok: true, putCount: 6 },
+        botResult: { ok: true, putCount: 4 },
+      },
+      cwlLeagueSignups: { ok: true, putCount: 1 },
+      seasonEvents: { ok: true, putCount: 3, deleteCount: 1 },
+    };
+  };
+  backend.verifyCloudflarePublicActiveVersionId_ = (versionId) => ({
+    ok: true,
+    statusCode: 200,
+    expectedVersionId: versionId,
+    actualVersionId: versionId,
+  });
+};
+
 const installMemoryFirebase = (backend, initial = {}) => {
   let db = clone(initial);
   const segmentsFor = (pathRaw) => String(pathRaw ?? "")
@@ -1423,6 +1446,7 @@ test("queue finalization publishes completed shards through the active version p
   backend.updateActiveRosterDataCaches_ = () => null;
   backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
   backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  installCloudflareMirrorSuccess(backend);
 
   const finalizeTask = tasks.find((task) => task.type === "finalize");
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
@@ -1439,6 +1463,58 @@ test("queue finalization publishes completed shards through the active version p
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
   assert.equal(backend.firebaseRequestJson_("activeVersions/run-1", "GET") !== null, true);
+});
+
+test("queue finalization defers completion until Cloudflare public data verifies", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 1,
+    processedTasks: 1,
+    processedRosters: 1,
+  });
+  backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.rosters[0]));
+  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true, issues: [] }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "metricResults/main", { byTag: {}, tags: [] }, "PUT");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: data, text: JSON.stringify(data) });
+  backend.updateActiveRosterDataCaches_ = () => null;
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  backend.publishCloudflarePublicDataSnapshot_ = () => ({
+    ok: true,
+    active: {
+      ok: true,
+      versionId: runId,
+      publicResult: { ok: true, putCount: 6 },
+      botResult: { ok: true, putCount: 4 },
+    },
+    cwlLeagueSignups: { ok: true, putCount: 1 },
+    seasonEvents: { ok: true, putCount: 3, deleteCount: 1 },
+  });
+  backend.verifyCloudflarePublicActiveVersionId_ = () => ({
+    ok: false,
+    expectedVersionId: runId,
+    actualVersionId: "old-version",
+    error: "Cloudflare active version pointer mismatch.",
+  });
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
+  const queue = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "cloudflarePublicDataMirror");
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(queue.status, "finalizing");
+  assert.equal(queue.phase, "cloudflare-publish");
+  assert.match(queue.error, /Cloudflare active version pointer mismatch/);
+  assert.equal(queue.cloudflarePublicDataPublish.ok, false);
+  assert.equal(backend.__properties.get("AUTO_REFRESH_LAST_RUN_STATUS"), "inProgress");
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET") !== null, true);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"), null);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.handler === "autoRefreshWorkerTick").length, 1);
 });
 
 test("queue finalization uses source version guard without reading the active payload", () => {
@@ -1478,6 +1554,7 @@ test("queue finalization uses source version guard without reading the active pa
   backend.updateActiveRosterDataCaches_ = () => null;
   backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
   backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  installCloudflareMirrorSuccess(backend);
   const finalizeTask = tasks.find((task) => task.type === "finalize");
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
@@ -1568,6 +1645,7 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   };
   backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
   backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  installCloudflareMirrorSuccess(backend);
   const finalizeTask = tasks.find((task) => task.type === "finalize");
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
@@ -1712,6 +1790,7 @@ test("queue finalization clears current state when the version is already publis
     publishedAt: "2026-05-25T00:00:00.000Z",
     rosterIds: ["main"],
   });
+  installCloudflareMirrorSuccess(backend);
   const finalizeTask = tasks.find((task) => task.type === "finalize");
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
