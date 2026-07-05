@@ -10,7 +10,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <meta name="build-stamp" content="cloudflare-admin" />
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./styles.css?v=20260705a" />
   <style>
     /* Admin-only tweaks */
     .admin-card {
@@ -2321,7 +2321,7 @@
   </div>
 
   <div id="startupLoader" class="admin-startup-loader hidden" role="status" aria-live="polite" aria-atomic="true"
-    aria-hidden="true" aria-busy="false">
+    aria-hidden="true" aria-busy="false" data-startup-step="1">
     <div class="admin-startup-loader__veil"></div>
     <div class="admin-startup-loader__panel">
       <div class="admin-startup-loader__visual" aria-hidden="true">
@@ -2333,6 +2333,9 @@
       <div class="admin-startup-loader__copy">
         <div id="startupLoaderStage" class="admin-startup-loader__stage">Preparing workspace</div>
         <div id="startupLoaderMessage" class="admin-startup-loader__message">Loading admin controls...</div>
+        <div class="admin-startup-loader__progress" aria-hidden="true">
+          <span class="admin-startup-loader__progress-fill"></span>
+        </div>
       </div>
     </div>
   </div>
@@ -2351,7 +2354,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="./generator.js?v=20260408c"></script>
   <script src="./client.js?v=20260704c"></script>
-  <script src="./admin.js?v=20260703a"></script>
+  <script src="./admin.js?v=20260705a"></script>
 </body>
 
 </html>

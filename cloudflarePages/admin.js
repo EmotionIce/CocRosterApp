@@ -2258,7 +2258,7 @@
     authCard.classList.toggle("is-unlocked", !!unlocked);
   };
 
-  const STARTUP_LOADER_MIN_VISIBLE_MS = 700;
+  const STARTUP_LOADER_MIN_VISIBLE_MS = 360;
   let startupLoaderShownAtMs = 0;
 
   // Wait for the requested milliseconds.
@@ -2267,14 +2267,23 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   };
 
+  // Extract loader progress step from visible stage copy.
+  const getStartupLoaderStep_ = (stageRaw) => {
+    const match = toStr(stageRaw).trim().match(/step\s+([1-3])\s+of\s+3/i);
+    return match ? match[1] : "";
+  };
+
   // Update startup loader text copy.
   const setStartupLoaderCopy_ = (stageRaw, messageRaw) => {
     const stageEl = $("#startupLoaderStage");
     const messageEl = $("#startupLoaderMessage");
+    const overlay = $("#startupLoader");
     const stage = toStr(stageRaw).trim() || "Preparing workspace";
     const message = toStr(messageRaw).trim() || "Loading admin controls...";
+    const step = getStartupLoaderStep_(stage);
     if (stageEl) stageEl.textContent = stage;
     if (messageEl) messageEl.textContent = message;
+    if (overlay && step) overlay.setAttribute("data-startup-step", step);
   };
 
   // Show startup loader and block shell interactions.
@@ -7082,6 +7091,7 @@
       }
 
       let unlockSucceeded = false;
+      let postUnlockWarning = "";
       if (loginBtn) {
         loginBtn.disabled = true;
         loginBtn.textContent = "Unlocking...";
@@ -7103,25 +7113,34 @@
         }
         if (pwInput) pwInput.disabled = true;
         refreshAdminWorkflowUi();
-        setLoginStatus("Unlocked. Syncing refresh settings...");
-        refreshStartupLoader_("Step 2 of 3", "Syncing refresh schedules...");
-        try {
-          await loadAutoRefreshSettings();
-          await loadDonationRefreshSettings();
-        } catch (settingsErr) {
-          alert("Unlocked, but failed to load refresh settings: " + toErrorMessage(settingsErr));
-        }
-        setLoginStatus("Unlocked. Loading active config...");
-        refreshStartupLoader_("Step 3 of 3", "Loading rosters...");
-        try {
-          await loadActiveConfigIntoPreview({
+        setLoginStatus("Unlocked. Loading workspace...");
+        refreshStartupLoader_("Step 2 of 3", "Loading rosters and refresh settings...");
+        const settingsLoadPromise = Promise.allSettled([
+          loadAutoRefreshSettings(),
+          loadDonationRefreshSettings(),
+        ]);
+        const activeConfigLoadPromise = loadActiveConfigIntoPreview({
             silentError: true,
             statusOnSuccess: "Active config loaded.",
-          });
+          })
+          .then(() => ({ ok: true }))
+          .catch((loadErr) => ({ ok: false, error: loadErr }));
+        const loadResults = await Promise.all([settingsLoadPromise, activeConfigLoadPromise]);
+        const settingsResults = Array.isArray(loadResults[0]) ? loadResults[0] : [];
+        const activeConfigResult = loadResults[1] && typeof loadResults[1] === "object"
+          ? loadResults[1]
+          : { ok: false };
+        const failedSettings = settingsResults.filter((result) => result && result.status === "rejected");
+        if (failedSettings.length) {
+          postUnlockWarning = failedSettings.map((result) => toErrorMessage(result.reason)).join(" | ");
+        }
+        if (activeConfigResult.ok) {
           setLoginStatus("Unlocked.");
-        } catch (loadErr) {
+          refreshStartupLoader_("Step 3 of 3", "Opening admin panel...");
+        } else {
           setLoginStatus("Unlocked (auto-load failed).");
           setStatus("Auto-load failed. Refresh and unlock again.");
+          refreshStartupLoader_("Step 3 of 3", "Opening admin panel without roster data...");
         }
         unlockSucceeded = true;
       } catch (err) {
@@ -7144,6 +7163,8 @@
             loginBtn.textContent = "Unlock";
           }
           if (pwInput) pwInput.disabled = false;
+        } else if (postUnlockWarning) {
+          alert("Unlocked, but failed to load refresh settings: " + postUnlockWarning);
         }
       }
     };
