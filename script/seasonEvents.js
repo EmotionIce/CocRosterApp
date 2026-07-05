@@ -3222,13 +3222,14 @@ function buildCwlSeasonEventAggregateFromSnapshot_(eventRaw, rosterDataRaw, snap
 	const endedWarTagSet = {};
 	let expectedRelevantRounds = 0;
 	let materializedRelevantRounds = 0;
+	let endedRelevantRounds = 0;
 	const processedWarClanKey = {};
 
 	for (let i = 0; i < groupIds.length; i++) {
 		const group = sanitizeCwlSeasonEventGroup_(meta.groups[groupIds[i]]);
 		const groupClanTags = group.clanTags.filter((tag) => connectedClanSet[tag]);
 		const warTags = Array.isArray(group.warTags) ? group.warTags : [];
-		if (groupClanTags.length > 0 && group.expectedRounds > 0) expectedRelevantRounds += group.expectedRounds;
+		if (groupClanTags.length > 0 && group.expectedRounds > 0) expectedRelevantRounds += group.expectedRounds * groupClanTags.length;
 		for (let j = 0; j < warTags.length; j++) {
 			const warTag = normalizeTag_(warTags[j]);
 			if (!warTag || warTag === "#0") continue;
@@ -3241,20 +3242,23 @@ function buildCwlSeasonEventAggregateFromSnapshot_(eventRaw, rosterDataRaw, snap
 				missingWarTags.push(warTag);
 				continue;
 			}
-			let relevantThisWar = false;
+			let relevantClanRoundCount = 0;
 			for (let k = 0; k < groupClanTags.length; k++) {
 				const clanTag = groupClanTags[k];
 				if (!pickWarSideForClan_(war, clanTag)) continue;
-				relevantThisWar = true;
+				relevantClanRoundCount++;
 				const key = warTag + "|" + clanTag;
 				if (processedWarClanKey[key]) continue;
 				processedWarClanKey[key] = true;
 				mergeCwlAggregateByTag_(aggregateByTag, buildCwlWarAggregateForClan_(war, clanTag, null));
 			}
-			if (relevantThisWar) {
+			if (relevantClanRoundCount > 0) {
 				relevantWarTagSet[warTag] = true;
-				if (normalizeWarState_(war.state) === "warended") endedWarTagSet[warTag] = true;
-				materializedRelevantRounds++;
+				materializedRelevantRounds += relevantClanRoundCount;
+				if (normalizeWarState_(war.state) === "warended") {
+					endedWarTagSet[warTag] = true;
+					endedRelevantRounds += relevantClanRoundCount;
+				}
 			}
 		}
 	}
@@ -3273,7 +3277,7 @@ function buildCwlSeasonEventAggregateFromSnapshot_(eventRaw, rosterDataRaw, snap
 	const hash = buildSeasonEventStableHash_(hashSource);
 	const complete =
 		relevantWarTags.length > 0 &&
-		relevantWarTags.length === Object.keys(endedWarTagSet).length &&
+		materializedRelevantRounds === endedRelevantRounds &&
 		(expectedRelevantRounds <= 0 || materializedRelevantRounds >= expectedRelevantRounds);
 	return {
 		ok: missingWarTags.length === 0 && errorWarTags.length === 0,
