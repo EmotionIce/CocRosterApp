@@ -7559,8 +7559,8 @@
         story.style.setProperty("--landing-square-progress", easedProgress.toFixed(4));
 
         let stepIndex = 0;
-        if (rawProgress >= 0.48) stepIndex = 2;
-        else if (rawProgress >= 0.2) stepIndex = 1;
+        if (rawProgress >= 0.9) stepIndex = 2;
+        else if (rawProgress >= 0.66) stepIndex = 1;
         if (isLandingCompactJourneyLayout_()) {
             const compactStepIndex = resolveLandingCompactSquareStoryStep(story, viewportHeight);
             if (compactStepIndex >= 0) stepIndex = compactStepIndex;
