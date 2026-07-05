@@ -44,12 +44,12 @@ const createKv = (entriesRaw) => {
   };
 };
 
-test("bot data route falls back to public shards for public event data", async () => {
+test("bot data route reads bot-scoped event data", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_BOT_SECRET: "secret",
     ROSTER_DATA_KV: createKv({
-      "public-data/events/seasonEvents/current.json": JSON.stringify({
+      "bot-data/events/seasonEvents/current.json": JSON.stringify({
         donation: { eventId: "donation-current" },
         push: { eventId: "push-current" },
       }),
@@ -66,6 +66,25 @@ test("bot data route falls back to public shards for public event data", async (
     donation: { eventId: "donation-current" },
     push: { eventId: "push-current" },
   });
+});
+
+test("bot data route does not fall back to public shards", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "public-data/events/seasonEvents/current.json": JSON.stringify({
+        donation: { eventId: "donation-current" },
+      }),
+    }),
+  };
+
+  const response = await worker.fetch(new Request("https://worker.test/api/bot-data/events/seasonEvents/current.json", {
+    headers: { authorization: "Bearer secret" },
+  }), env, {});
+
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error, "Data object not found.");
 });
 
 test("mutable public pointers are no-store while version shards stay immutable", async () => {

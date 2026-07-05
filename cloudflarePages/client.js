@@ -9,11 +9,9 @@
     const pluralize = (count, singular, plural) => (count === 1 ? singular : plural);
     const PROFILE_MODAL_ID = "rosterPlayerProfileModal";
     const DAY_MS = 24 * 60 * 60 * 1000;
-    const ACTIVE_ROSTER_ASSET_NAME = "roster-data.json";
-    const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
-    const FIREBASE_ACTIVE_PATH = "active";
-    const FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";
-    const FIREBASE_ACTIVE_VERSIONS_PATH = "activeVersions";
+    const PUBLIC_DATA_KEY_ENCODING_PREFIX = "__FB64__";
+    const ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";
+    const ACTIVE_VERSIONS_PATH = "activeVersions";
     const DONATION_REFRESH_BASE_PATH = "donationRefresh";
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
@@ -24,9 +22,8 @@
     const SEASON_EVENTS_BY_SEASON_PATH = SEASON_EVENTS_BASE_PATH + "/bySeason";
     const SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/seasonState/current";
     const SEASON_EVENT_COLLAPSED_ROW_COUNT = 3;
-    const FIREBASE_PUBLIC_SOURCE = "cloudflare-public";
+    const CLOUDFLARE_PUBLIC_SOURCE = "cloudflare-public";
     const PUBLIC_DATA_BASE_FALLBACK_URL = "/api/public-data";
-    const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
     const ROSTER_SNAPSHOT_IDB_DB_NAME = "roster-public-cache";
@@ -7991,7 +7988,7 @@
         previousSeasonEventsLoadInFlight = true;
         const requestId = ++previousSeasonEventsLoadRequestId;
         render(lastRenderedData);
-        loadPreviousSeasonEventsViaFirebasePublic(lastRenderedData)
+        loadPreviousSeasonEventsViaCloudflarePublic(lastRenderedData)
             .then(async (bundle) => {
                 if (requestId !== previousSeasonEventsLoadRequestId) return;
                 attachPreviousSeasonEventsBundle(lastRenderedData, bundle);
@@ -8387,7 +8384,7 @@
                 return null;
             }
             const cachedSourceRaw = toStr(payload.source).trim();
-            const cachedSource = /^(?:cloudflare-public|firebase-public)(?:-|$)/.test(cachedSourceRaw) ? cachedSourceRaw : "cache";
+            const cachedSource = /^cloudflare-public(?:-|$)/.test(cachedSourceRaw) ? cachedSourceRaw : "cache";
             return {
                 data: data,
                 cachedAt: cachedAtMs > 0 ? new Date(cachedAtMs).toISOString() : "",
@@ -8463,7 +8460,7 @@
     };
 
     // Normalize public data path.
-    const normalizeFirebasePath = (pathRaw) =>
+    const normalizePublicDataPath = (pathRaw) =>
         toStr(pathRaw)
             .trim()
             .replace(/\\/g, "/")
@@ -8471,7 +8468,7 @@
             .replace(/\.\./g, "");
 
     // Build Cloudflare public data JSON URL.
-    const buildFirebasePublicJsonUrl = (pathRaw) => {
+    const buildCloudflarePublicJsonUrl = (pathRaw) => {
         const configuredBaseUrl = normalizePublicDataBaseUrl(
             (typeof window !== "undefined" && window && window.ROSTER_PUBLIC_DATA_BASE_URL)
                 ? window.ROSTER_PUBLIC_DATA_BASE_URL
@@ -8482,7 +8479,7 @@
             throw new Error("Missing window.ROSTER_PUBLIC_DATA_BASE_URL for public data hydration. Set it in public-config.js.");
         }
 
-        const safePath = normalizeFirebasePath(pathRaw);
+        const safePath = normalizePublicDataPath(pathRaw);
         const queryIndex = publicDataBaseUrl.indexOf("?");
         const baseWithoutQuery = queryIndex >= 0 ? publicDataBaseUrl.slice(0, queryIndex) : publicDataBaseUrl;
         const baseNoQuery = baseWithoutQuery.replace(/\/+$/, "");
@@ -8515,13 +8512,13 @@
     };
 
     // Fetch Cloudflare public JSON.
-    const fetchFirebaseJsonPublic = async (pathRaw) => {
-        const safePath = normalizeFirebasePath(pathRaw);
+    const fetchCloudflarePublicJson = async (pathRaw) => {
+        const safePath = normalizePublicDataPath(pathRaw);
         const pathLabel = "/" + (safePath || "");
         if (typeof fetch !== "function") {
             throw new Error("window.fetch is unavailable for public data hydration.");
         }
-        const response = await fetch(buildFirebasePublicJsonUrl(safePath), {
+        const response = await fetch(buildCloudflarePublicJsonUrl(safePath), {
             method: "GET",
             cache: "default",
             credentials: "same-origin",
@@ -8591,41 +8588,41 @@
         return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     };
 
-    // Return whether a Firebase object key needs encoding.
-    const needsFirebaseKeyEncoding = (keyRaw) => {
+    // Return whether a public-data object key needs encoding.
+    const needsPublicDataKeyEncoding = (keyRaw) => {
         const key = toStr(keyRaw);
         if (!key) return true;
-        if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) === 0) return true;
+        if (key.indexOf(PUBLIC_DATA_KEY_ENCODING_PREFIX) === 0) return true;
         if (/[.$#[\]\/]/.test(key)) return true;
         if (/[\u0000-\u001F\u007F]/.test(key)) return true;
         return false;
     };
 
-    // Encode Firebase object key.
-    const encodeFirebaseObjectKey = (keyRaw) => {
+    // Encode a public-data object key.
+    const encodePublicDataObjectKey = (keyRaw) => {
         const key = toStr(keyRaw);
-        if (!needsFirebaseKeyEncoding(key)) return key;
-        return FIREBASE_KEY_ENCODING_PREFIX + base64UrlEncodeUtf8(key);
+        if (!needsPublicDataKeyEncoding(key)) return key;
+        return PUBLIC_DATA_KEY_ENCODING_PREFIX + base64UrlEncodeUtf8(key);
     };
 
-    // Decode Firebase object key.
-    const decodeFirebaseObjectKey = (keyRaw) => {
+    // Decode a public-data object key.
+    const decodePublicDataObjectKey = (keyRaw) => {
         const key = toStr(keyRaw);
-        if (key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) !== 0) return key;
-        const encodedPart = key.slice(FIREBASE_KEY_ENCODING_PREFIX.length);
-        if (!encodedPart) throw new Error("Invalid Firebase encoded key with empty payload.");
+        if (key.indexOf(PUBLIC_DATA_KEY_ENCODING_PREFIX) !== 0) return key;
+        const encodedPart = key.slice(PUBLIC_DATA_KEY_ENCODING_PREFIX.length);
+        if (!encodedPart) throw new Error("Invalid public-data encoded key with empty payload.");
         try {
             return base64UrlDecodeToUtf8(encodedPart);
         } catch (err) {
-            throw new Error("Invalid Firebase encoded key '" + key + "': " + ((err && err.message) ? err.message : String(err)));
+            throw new Error("Invalid public-data encoded key '" + key + "': " + ((err && err.message) ? err.message : String(err)));
         }
     };
 
-    // Decode Firebase object keys recursive.
-    const decodeFirebaseObjectKeysRecursive = (valueRaw) => {
+    // Decode public-data object keys recursively.
+    const decodePublicDataObjectKeysRecursive = (valueRaw) => {
         if (Array.isArray(valueRaw)) {
             const outArray = [];
-            for (let i = 0; i < valueRaw.length; i++) outArray.push(decodeFirebaseObjectKeysRecursive(valueRaw[i]));
+            for (let i = 0; i < valueRaw.length; i++) outArray.push(decodePublicDataObjectKeysRecursive(valueRaw[i]));
             return outArray;
         }
         if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
@@ -8633,49 +8630,39 @@
         const keys = Object.keys(valueRaw);
         for (let i = 0; i < keys.length; i++) {
             const key = keys[i];
-            const decodedKey = decodeFirebaseObjectKey(key);
+            const decodedKey = decodePublicDataObjectKey(key);
             if (Object.prototype.hasOwnProperty.call(out, decodedKey) && decodedKey !== key) {
-                throw new Error("Firebase key decoding collision for object key '" + key + "'.");
+                throw new Error("Public-data key decoding collision for object key '" + key + "'.");
             }
-            out[decodedKey] = decodeFirebaseObjectKeysRecursive(valueRaw[key]);
+            out[decodedKey] = decodePublicDataObjectKeysRecursive(valueRaw[key]);
         }
         return out;
-    };
-
-    // Decode and validate active roster payload from public data.
-    const decodeAndValidateActiveRosterPayloadFromFirebasePublic = (encodedPayloadRaw, sourceLabelRaw) => {
-        const sourceLabel = toStr(sourceLabelRaw).trim() || FIREBASE_PUBLIC_SOURCE;
-        if (!encodedPayloadRaw || typeof encodedPayloadRaw !== "object" || Array.isArray(encodedPayloadRaw)) {
-            throw new Error("Missing or invalid active roster payload at " + sourceLabel + ".");
-        }
-        const decodedPayload = decodeFirebaseObjectKeysRecursive(encodedPayloadRaw);
-        return assertValidRosterPayload(decodedPayload, sourceLabel);
     };
 
     // Build an active version public data path.
     const buildActiveVersionPublicPath = (versionIdRaw, childPathRaw) => {
         const versionId = toStr(versionIdRaw).trim();
         if (!versionId) return "";
-        const childPath = normalizeFirebasePath(childPathRaw);
-        const basePath = FIREBASE_ACTIVE_VERSIONS_PATH + "/" + encodeFirebaseObjectKey(versionId);
+        const childPath = normalizePublicDataPath(childPathRaw);
+        const basePath = ACTIVE_VERSIONS_PATH + "/" + encodePublicDataObjectKey(versionId);
         return childPath ? basePath + "/" + childPath : basePath;
     };
 
     // Load current active published version id from public data.
-    const loadActivePublishedVersionIdViaFirebasePublic = async () =>
-        toStr(await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
+    const loadActivePublishedVersionIdViaCloudflarePublic = async () =>
+        toStr(await fetchCloudflarePublicJson(ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
 
     // Load roster data from the published active version shards, if available.
-    const loadPublishedActiveVersionViaFirebasePublic = async (versionIdRaw) => {
-        const versionId = toStr(versionIdRaw).trim() || await loadActivePublishedVersionIdViaFirebasePublic();
-        if (!versionId) return null;
+    const loadPublishedActiveVersionViaCloudflarePublic = async (versionIdRaw) => {
+        const versionId = toStr(versionIdRaw).trim() || await loadActivePublishedVersionIdViaCloudflarePublic();
+        if (!versionId) throw new Error("Missing active published version pointer.");
         const versionLabel = "Cloudflare public data /activeVersions/" + versionId;
-        const manifestPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "manifest"));
-        const rostersPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "rosters"));
-        const playerMetricsPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "playerMetrics"));
-        const manifest = decodeFirebaseObjectKeysRecursive(manifestPayload);
-        const rosterMap = decodeFirebaseObjectKeysRecursive(rostersPayload);
-        const playerMetrics = decodeFirebaseObjectKeysRecursive(playerMetricsPayload || {});
+        const manifestPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "manifest"));
+        const rostersPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "rosters"));
+        const playerMetricsPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "playerMetrics"));
+        const manifest = decodePublicDataObjectKeysRecursive(manifestPayload);
+        const rosterMap = decodePublicDataObjectKeysRecursive(rostersPayload);
+        const playerMetrics = decodePublicDataObjectKeysRecursive(playerMetricsPayload || {});
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("Missing active version manifest at " + versionLabel + ".");
         }
@@ -8714,31 +8701,31 @@
     const buildSeasonEventByIdPublicPath = (eventIdRaw) => {
         const eventId = toStr(eventIdRaw).trim();
         if (!eventId) return "";
-        return SEASON_EVENTS_BY_ID_PATH + "/" + encodeFirebaseObjectKey(eventId);
+        return SEASON_EVENTS_BY_ID_PATH + "/" + encodePublicDataObjectKey(eventId);
     };
 
     const buildCwlSeasonEventAggregatePublicPath = (eventIdRaw, kindRaw) => {
         const eventId = toStr(eventIdRaw).trim();
         const kind = toStr(kindRaw).trim().toLowerCase();
         if (!eventId || (kind !== "live" && kind !== "final")) return "";
-        return SEASON_EVENTS_CWL_AGGREGATES_PATH + "/" + encodeFirebaseObjectKey(eventId) + "/" + kind;
+        return SEASON_EVENTS_CWL_AGGREGATES_PATH + "/" + encodePublicDataObjectKey(eventId) + "/" + kind;
     };
 
     // Return public event pointers path by season id.
     const buildSeasonEventsBySeasonPublicPath = (seasonIdRaw) => {
         const seasonId = toStr(seasonIdRaw).trim();
         if (!seasonId) return "";
-        return SEASON_EVENTS_BY_SEASON_PATH + "/" + encodeFirebaseObjectKey(seasonId);
+        return SEASON_EVENTS_BY_SEASON_PATH + "/" + encodePublicDataObjectKey(seasonId);
     };
 
     // Fetch optional decoded public JSON without failing roster hydration.
-    const fetchOptionalDecodedFirebaseJsonPublic = async (pathRaw, loadErrors) => {
-        const path = normalizeFirebasePath(pathRaw);
+    const fetchOptionalDecodedCloudflarePublicJson = async (pathRaw, loadErrors) => {
+        const path = normalizePublicDataPath(pathRaw);
         if (!path) return null;
         try {
-            const payload = await fetchFirebaseJsonPublic(path);
+            const payload = await fetchCloudflarePublicJson(path);
             if (payload == null) return null;
-            return decodeFirebaseObjectKeysRecursive(payload);
+            return decodePublicDataObjectKeysRecursive(payload);
         } catch (err) {
             const errors = Array.isArray(loadErrors) ? loadErrors : null;
             if (errors) {
@@ -8754,13 +8741,13 @@
         }
     };
 
-    const fetchNullableDecodedFirebaseJsonPublic = async (pathRaw) => {
-        const path = normalizeFirebasePath(pathRaw);
+    const fetchNullableDecodedCloudflarePublicJson = async (pathRaw) => {
+        const path = normalizePublicDataPath(pathRaw);
         if (!path) return null;
         try {
-            const payload = await fetchFirebaseJsonPublic(path);
+            const payload = await fetchCloudflarePublicJson(path);
             if (payload == null) return null;
-            return decodeFirebaseObjectKeysRecursive(payload);
+            return decodePublicDataObjectKeysRecursive(payload);
         } catch (err) {
             return null;
         }
@@ -8769,7 +8756,7 @@
     const buildDonationRefreshSeasonPublicPath = (seasonIdRaw) => {
         const seasonId = sanitizeDonationCycleKey(seasonIdRaw);
         if (!seasonId) return "";
-        return DONATION_REFRESH_BASE_PATH + "/bySeason/" + encodeFirebaseObjectKey(seasonId);
+        return DONATION_REFRESH_BASE_PATH + "/bySeason/" + encodePublicDataObjectKey(seasonId);
     };
 
     const normalizeDonationRefreshSeasonOverlay = (seasonIdRaw, payloadRaw) => {
@@ -8867,7 +8854,7 @@
         const loadErrors = [];
         await Promise.all(seasonIds.map(async (seasonId) => {
             const path = buildDonationRefreshSeasonPublicPath(seasonId);
-            const payload = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+            const payload = path ? await fetchOptionalDecodedCloudflarePublicJson(path, loadErrors) : null;
             attachDonationRefreshSeasonOverlay(data, normalizeDonationRefreshSeasonOverlay(seasonId, payload));
         }));
         if (loadErrors.length) {
@@ -8897,12 +8884,12 @@
     };
 
     // Load full season event objects for a pointer map.
-    const loadSeasonEventObjectsByPointerMapViaFirebasePublic = async (pointersRaw, loadErrors) => {
+    const loadSeasonEventObjectsByPointerMapViaCloudflarePublic = async (pointersRaw, loadErrors) => {
         const byId = {};
         const eventIds = collectSeasonEventIdsFromPointers(pointersRaw);
         await Promise.all(eventIds.map(async (eventId) => {
             const path = buildSeasonEventByIdPublicPath(eventId);
-            const event = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+            const event = path ? await fetchOptionalDecodedCloudflarePublicJson(path, loadErrors) : null;
             if (event && typeof event === "object" && !Array.isArray(event)) {
                 byId[eventId] = event;
             }
@@ -8910,7 +8897,7 @@
         return byId;
     };
 
-    const loadCwlSeasonEventAggregatesViaFirebasePublic = async (pointersRaw, eventsByIdRaw, loadErrors) => {
+    const loadCwlSeasonEventAggregatesViaCloudflarePublic = async (pointersRaw, eventsByIdRaw, loadErrors) => {
         const pointers = pointersRaw && typeof pointersRaw === "object" && !Array.isArray(pointersRaw) ? pointersRaw : {};
         const eventsById = eventsByIdRaw && typeof eventsByIdRaw === "object" ? eventsByIdRaw : {};
         const out = {};
@@ -8921,7 +8908,7 @@
             const state = toStr(event.cwlTrackingState || event.cwlStatus).trim().toLowerCase();
             const kind = state === "completed" ? "final" : "live";
             const path = buildCwlSeasonEventAggregatePublicPath(eventId, kind);
-            const aggregate = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+            const aggregate = path ? await fetchOptionalDecodedCloudflarePublicJson(path, loadErrors) : null;
             if (aggregate && typeof aggregate === "object" && !Array.isArray(aggregate)) {
                 out[eventId] = Object.assign({}, out[eventId] || {}, { [kind]: aggregate });
             }
@@ -8957,14 +8944,14 @@
     };
 
     // Load a season events bundle through /bySeason and /byId.
-    const loadSeasonEventsBySeasonViaFirebasePublic = async (seasonRaw) => {
+    const loadSeasonEventsBySeasonViaCloudflarePublic = async (seasonRaw) => {
         const loadErrors = [];
         const season = seasonRaw && typeof seasonRaw === "object" ? seasonRaw : { seasonId: toStr(seasonRaw).trim() };
         const seasonId = toStr(season.seasonId).trim();
         const path = buildSeasonEventsBySeasonPublicPath(seasonId);
-        const pointers = path ? await fetchOptionalDecodedFirebaseJsonPublic(path, loadErrors) : null;
+        const pointers = path ? await fetchOptionalDecodedCloudflarePublicJson(path, loadErrors) : null;
         const current = pointers && typeof pointers === "object" && !Array.isArray(pointers) ? pointers : {};
-        const byId = await loadSeasonEventObjectsByPointerMapViaFirebasePublic(current, loadErrors);
+        const byId = await loadSeasonEventObjectsByPointerMapViaCloudflarePublic(current, loadErrors);
         return {
             current: current,
             seasonState: {
@@ -8979,27 +8966,27 @@
     };
 
     // Load previous season event data from public data.
-    const loadPreviousSeasonEventsViaFirebasePublic = async (dataRaw) =>
-        loadSeasonEventsBySeasonViaFirebasePublic(resolvePreviousSeasonEventsSeason(dataRaw));
+    const loadPreviousSeasonEventsViaCloudflarePublic = async (dataRaw) =>
+        loadSeasonEventsBySeasonViaCloudflarePublic(resolvePreviousSeasonEventsSeason(dataRaw));
 
     // Load current season event data from public data.
-    const loadCurrentSeasonEventsViaFirebasePublic = async () => {
+    const loadCurrentSeasonEventsViaCloudflarePublic = async () => {
         const loadErrors = [];
-        const current = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_PATH, loadErrors);
-        const currentCwl = await fetchNullableDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_CWL_PATH);
-        const latestCompletedCwl = await fetchNullableDecodedFirebaseJsonPublic(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
-        const seasonState = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
+        const current = await fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_PATH, loadErrors);
+        const currentCwl = await fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_CWL_PATH);
+        const latestCompletedCwl = await fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+        const seasonState = await fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
         const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
         if (currentCwl && typeof currentCwl === "object" && !Array.isArray(currentCwl)) currentObj.cwl = currentCwl;
         const latestCompletedCwlObj = latestCompletedCwl && typeof latestCompletedCwl === "object" && !Array.isArray(latestCompletedCwl) ? latestCompletedCwl : null;
         const eventPointerMap = Object.assign({}, currentObj);
         if (latestCompletedCwlObj) eventPointerMap.latestCompletedCwl = latestCompletedCwlObj;
-        const byId = await loadSeasonEventObjectsByPointerMapViaFirebasePublic(currentObj, loadErrors);
+        const byId = await loadSeasonEventObjectsByPointerMapViaCloudflarePublic(currentObj, loadErrors);
         if (latestCompletedCwlObj && latestCompletedCwlObj.eventId && !byId[toStr(latestCompletedCwlObj.eventId).trim()]) {
-            const event = await fetchOptionalDecodedFirebaseJsonPublic(buildSeasonEventByIdPublicPath(latestCompletedCwlObj.eventId), loadErrors);
+            const event = await fetchOptionalDecodedCloudflarePublicJson(buildSeasonEventByIdPublicPath(latestCompletedCwlObj.eventId), loadErrors);
             if (event && typeof event === "object" && !Array.isArray(event)) byId[toStr(latestCompletedCwlObj.eventId).trim()] = event;
         }
-        const cwlAggregatesByEventId = await loadCwlSeasonEventAggregatesViaFirebasePublic(eventPointerMap, byId, loadErrors);
+        const cwlAggregatesByEventId = await loadCwlSeasonEventAggregatesViaCloudflarePublic(eventPointerMap, byId, loadErrors);
 
         return {
             current: currentObj,
@@ -9013,7 +9000,7 @@
     };
 
     // Reuse cached roster/playerMetrics when the active published version is unchanged.
-    const loadCachedActiveVersionSnapshotViaFirebasePublic = async (cachedSnapshotRaw, activeVersionIdRaw) => {
+    const loadCachedActiveVersionSnapshotViaCloudflarePublic = async (cachedSnapshotRaw, activeVersionIdRaw) => {
         const cachedSnapshot = cachedSnapshotRaw && typeof cachedSnapshotRaw === "object" ? cachedSnapshotRaw : null;
         const activeVersionId = toStr(activeVersionIdRaw).trim();
         if (!cachedSnapshot || !cachedSnapshot.data || !activeVersionId) return null;
@@ -9021,7 +9008,7 @@
 
         const data = cloneJsonValue(cachedSnapshot.data);
         try {
-            data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
+            data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
             await hydrateDonationRefreshForLoadedSeasonEvents(data);
         } catch (err) {
             if (!data.seasonEvents || typeof data.seasonEvents !== "object" || Array.isArray(data.seasonEvents)) {
@@ -9036,42 +9023,28 @@
         }
 
         return {
-            source: FIREBASE_PUBLIC_SOURCE + "-cached-active-version",
+            source: CLOUDFLARE_PUBLIC_SOURCE + "-cached-active-version",
             data: assertValidRosterPayload(data, "Cached public data /activeVersions/" + activeVersionId),
             activeVersionId: activeVersionId,
         };
     };
 
     // Load roster data via Cloudflare public data.
-    const loadRosterDataViaFirebasePublic = async (optionsRaw) => {
+    const loadRosterDataViaCloudflarePublic = async (optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const cachedSnapshot = options.cachedSnapshot && typeof options.cachedSnapshot === "object" ? options.cachedSnapshot : null;
-        let data = null;
         let activeVersionId = "";
-        try {
-            if (cachedSnapshot && cachedSnapshot.activeVersionId) {
-                activeVersionId = await loadActivePublishedVersionIdViaFirebasePublic();
-                const cachedLoaded = await loadCachedActiveVersionSnapshotViaFirebasePublic(cachedSnapshot, activeVersionId);
-                if (cachedLoaded) return cachedLoaded;
-            }
+        if (cachedSnapshot && cachedSnapshot.activeVersionId) {
+            activeVersionId = await loadActivePublishedVersionIdViaCloudflarePublic();
+            const cachedLoaded = await loadCachedActiveVersionSnapshotViaCloudflarePublic(cachedSnapshot, activeVersionId);
+            if (cachedLoaded) return cachedLoaded;
+        }
 
-            const versionedLoaded = await loadPublishedActiveVersionViaFirebasePublic(activeVersionId);
-            if (versionedLoaded) {
-                data = versionedLoaded.data;
-                activeVersionId = toStr(versionedLoaded.activeVersionId).trim();
-            }
-        } catch (err) {
-            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[RosterData] Versioned public data load failed; falling back to /active.", err);
-            }
-        }
-        if (!data) {
-            const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
-            data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Cloudflare public data /active");
-            activeVersionId = "";
-        }
+        const versionedLoaded = await loadPublishedActiveVersionViaCloudflarePublic(activeVersionId);
+        const data = versionedLoaded.data;
+        activeVersionId = toStr(versionedLoaded.activeVersionId).trim();
         try {
-            data.seasonEvents = await loadCurrentSeasonEventsViaFirebasePublic();
+            data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
             await hydrateDonationRefreshForLoadedSeasonEvents(data);
         } catch (err) {
             data.seasonEvents = buildEmptySeasonEventsBundle([{
@@ -9079,11 +9052,11 @@
                 message: err && err.message ? err.message : toStr(err),
             }]);
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[SeasonEvents] Public data event hydration failed; continuing with /active only.", err);
+                console.warn("[SeasonEvents] Public data event hydration failed; continuing without event data.", err);
             }
         }
         return {
-            source: FIREBASE_PUBLIC_SOURCE,
+            source: CLOUDFLARE_PUBLIC_SOURCE,
             data: data,
             activeVersionId: activeVersionId,
         };
@@ -9131,57 +9104,6 @@
         return baseUrl + "/" + relativePath;
     };
 
-    // Resolve configured Script base URL.
-    const resolveConfiguredScriptBaseUrl = () =>
-        toStr(
-            (typeof window !== "undefined" && window && (window.ROSTER_BASE_URL || window.BASE_URL))
-                ? (window.ROSTER_BASE_URL || window.BASE_URL)
-                : ""
-        ).trim();
-
-    // Build Script asset URL.
-    const buildScriptAssetUrl = (assetNameRaw) => {
-        const assetName = toStr(assetNameRaw).trim();
-        if (!assetName) return "";
-
-        const baseUrl = resolveConfiguredScriptBaseUrl();
-        if (!baseUrl) return "";
-
-        const sep = baseUrl.indexOf("?") >= 0 ? "&" : "?";
-        return baseUrl + sep + "asset=" + encodeURIComponent(assetName);
-    };
-
-    // Load roster data via asset route.
-    const loadRosterDataViaAssetRoute = async () => {
-        if (typeof fetch !== "function") {
-            throw new Error("window.fetch is unavailable for asset hydration.");
-        }
-        const url = buildScriptAssetUrl(ACTIVE_ROSTER_ASSET_NAME);
-        if (!url) {
-            throw new Error("Unable to resolve asset URL for " + ACTIVE_ROSTER_ASSET_NAME + ".");
-        }
-        const response = await fetch(url, {
-            method: "GET",
-            cache: "no-store",
-            credentials: "same-origin",
-        });
-        if (!response || !response.ok) {
-            throw new Error("Asset fetch failed (" + (response ? response.status : "unknown") + ").");
-        }
-
-        const rawText = await response.text();
-        const text = toStr(rawText);
-        if (!text.trim()) {
-            throw new Error("Asset fetch returned an empty roster payload.");
-        }
-
-        try {
-            return JSON.parse(text);
-        } catch (err) {
-            throw new Error("Asset fetch returned invalid JSON: " + ((err && err.message) ? err.message : String(err)));
-        }
-    };
-
     // Handle read inline bootstrap data.
     const readInlineBootstrapData = () => {
         if (typeof window === "undefined" || !window) return null;
@@ -9191,43 +9113,20 @@
         return inlineData;
     };
 
-    // Load roster data with fallback.
+    // Load roster data from Cloudflare public data.
     const loadRosterDataWithFallback = async (optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-        let firebaseError = null;
         try {
-            const loaded = await loadRosterDataViaFirebasePublic({
+            const loaded = await loadRosterDataViaCloudflarePublic({
                 cachedSnapshot: options.cachedSnapshot,
             });
             return {
-                source: toStr(loaded && loaded.source).trim() || FIREBASE_PUBLIC_SOURCE,
+                source: toStr(loaded && loaded.source).trim() || CLOUDFLARE_PUBLIC_SOURCE,
                 data: assertValidRosterPayload(loaded && loaded.data, "Cloudflare public data hydration"),
                 activeVersionId: toStr(loaded && loaded.activeVersionId).trim(),
             };
         } catch (err) {
-            firebaseError = err;
-        }
-
-        const configuredScriptBaseUrl = resolveConfiguredScriptBaseUrl();
-        if (!configuredScriptBaseUrl) {
-            throw firebaseError || new Error("Cloudflare public data hydration failed and no Apps Script fallback base URL is configured.");
-        }
-
-        try {
-            const legacyData = await loadRosterDataViaAssetRoute();
-            return {
-                source: ASSET_ROUTE_FALLBACK_SOURCE,
-                data: assertValidRosterPayload(legacyData, "Apps Script asset fallback"),
-            };
-        } catch (assetErr) {
-            const firebaseMessage = firebaseError && firebaseError.message ? firebaseError.message : toStr(firebaseError);
-            const assetMessage = assetErr && assetErr.message ? assetErr.message : toStr(assetErr);
-            throw new Error(
-                "Cloudflare public data hydration failed: " +
-                firebaseMessage +
-                " | Apps Script asset fallback failed: " +
-                assetMessage
-            );
+            throw new Error("Cloudflare public data hydration failed: " + ((err && err.message) ? err.message : toStr(err)));
         }
     };
 
@@ -9311,18 +9210,16 @@
                 rosterHydrationInFlight = false;
                 hideShellLoadingNotice();
                 if (cachedSnapshot && cachedSnapshot.data) {
-                    markBootTiming("roster-fetch-failed-using-cache", { source: cachedSnapshot.source || "cache" });
+                    markBootTiming("roster-fetch-failed-with-stale-cache", { source: cachedSnapshot.source || "cache" });
                     if (typeof console !== "undefined" && console && typeof console.warn === "function") {
                         console.warn(
-                            "[RosterBoot] public data refresh failed; continuing with cached roster snapshot.",
+                            "[RosterBoot] public data refresh failed; cached roster snapshot is stale and will not be treated as fresh.",
                             err && (err.message || err.stack) ? (err.message || err.stack) : String(err)
                         );
                     }
-                    promoteLandingMediaStart_("hydration-cache-fallback");
-                    return;
                 }
                 promoteLandingMediaStart_("hydration-error");
-                showError("Roster app failed while loading fresh public data from Firebase.", err);
+                showError("Roster app failed while loading fresh Cloudflare public data.", err);
             }
         })();
     }

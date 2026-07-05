@@ -788,10 +788,7 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
     return jsonResponse(503, { ok: false, error: "Roster data store is not configured." }, cors);
   }
 
-  let object = await getDataStoreObject(store, key);
-  if (!object && scope === "bot") {
-    object = await getDataStoreObject(store, buildDataObjectKey("public", objectPath));
-  }
+  const object = await getDataStoreObject(store, key);
   if (!object) {
     return jsonResponse(404, {
       ok: false,

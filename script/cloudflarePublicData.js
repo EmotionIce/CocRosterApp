@@ -282,10 +282,27 @@ function buildCloudflareLinkedAccountIndexes_(rosterDataRaw) {
 	};
 }
 
+function createCloudflarePublicDataVersionId_(prefixRaw) {
+	if (typeof createActiveVersionId_ === "function") {
+		return createActiveVersionId_(prefixRaw);
+	}
+	const prefix = String(prefixRaw == null ? "cloudflare-publish" : prefixRaw)
+		.trim()
+		.replace(/[^A-Za-z0-9_.-]/g, "_")
+		.slice(0, 40) || "cloudflare-publish";
+	const timestamp = new Date().toISOString()
+		.replace(/[-:]/g, "")
+		.replace(/\./g, "_");
+	const suffix = Math.random().toString(36).slice(2, 10) || String(Date.now()).slice(-8);
+	return String(prefix + "-" + timestamp + "-" + suffix)
+		.replace(/[^A-Za-z0-9_.-]/g, "_")
+		.slice(0, 160);
+}
+
 function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 	const versionWrite = versionWriteRaw && typeof versionWriteRaw === "object" ? versionWriteRaw : {};
 	const rosterData = validateRosterData_(versionWrite.rosterData);
-	const versionId = normalizeActiveVersionId_(versionWrite.versionId || "legacy-active");
+	const versionId = normalizeActiveVersionId_(versionWrite.versionId) || createCloudflarePublicDataVersionId_("cloudflare-publish");
 	if (!versionId) throw new Error("Active version id is required for Cloudflare publish.");
 	const manifest = versionWrite.manifest && typeof versionWrite.manifest === "object"
 		? versionWrite.manifest
@@ -548,7 +565,7 @@ function publishCloudflarePublicDataSnapshot_(optionsRaw) {
 	const label = String(options.label || "manual-snapshot").trim() || "manual-snapshot";
 	const snapshot = readActiveRosterSnapshot_();
 	const versionWrite = {
-		versionId: normalizeActiveVersionId_(snapshot && snapshot.versionId) || readPublishedActiveVersionId_() || "legacy-active",
+		versionId: normalizeActiveVersionId_(snapshot && snapshot.versionId) || readPublishedActiveVersionId_() || createCloudflarePublicDataVersionId_(label),
 		manifest: snapshot && snapshot.manifest && typeof snapshot.manifest === "object" ? snapshot.manifest : null,
 		rosterData: snapshot && snapshot.rosterData ? snapshot.rosterData : parseRosterDataText_(snapshot && snapshot.text, ACTIVE_ROSTER_FILENAME),
 	};

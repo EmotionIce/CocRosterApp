@@ -15,6 +15,14 @@ const loadPublisher = () => {
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
+test("generated Cloudflare publish version ids are unique active-version keys", () => {
+  const backend = loadPublisher();
+  const versionId = backend.createCloudflarePublicDataVersionId_("manual snapshot");
+
+  assert.match(versionId, /^manual_snapshot-\d{8}T\d{6}_\d{3}Z-[A-Za-z0-9]+$/);
+  assert.notEqual(versionId, "legacy-active");
+});
+
 test("public event publish batches are mirrored into bot scope", () => {
   const backend = loadPublisher();
   const batch = backend.buildCloudflareBotScopeMirroredPublishBatch_([
