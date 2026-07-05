@@ -368,6 +368,36 @@ function addCloudflareDeletePath_(deletePaths, pathRaw) {
 	deletePaths.push(normalizeCloudflareDataObjectPath_(pathRaw));
 }
 
+function buildCloudflareBotScopeMirroredPublishBatch_(objectsRaw, deletePathsRaw) {
+	const objectsIn = Array.isArray(objectsRaw) ? objectsRaw : [];
+	const deletePathsIn = Array.isArray(deletePathsRaw) ? deletePathsRaw : [];
+	const objects = objectsIn.slice();
+	const deletePaths = deletePathsIn.slice();
+	for (let i = 0; i < objectsIn.length; i++) {
+		const item = objectsIn[i] && typeof objectsIn[i] === "object" ? objectsIn[i] : null;
+		if (!item || normalizeCloudflareDataScope_(item.scope || "public") === "bot") continue;
+		objects.push({
+			path: item.path,
+			payload: item.payload,
+			scope: "bot",
+		});
+	}
+	for (let i = 0; i < deletePathsIn.length; i++) {
+		const item = deletePathsIn[i] && typeof deletePathsIn[i] === "object"
+			? deletePathsIn[i]
+			: { path: deletePathsIn[i] };
+		if (!item.path || normalizeCloudflareDataScope_(item.scope || "public") === "bot") continue;
+		deletePaths.push({
+			path: item.path,
+			scope: "bot",
+		});
+	}
+	return {
+		objects: objects,
+		deletePaths: deletePaths,
+	};
+}
+
 function collectCloudflareSeasonEventIdsFromPointerMap_(pointerMapRaw, setRaw) {
 	const pointerMap = pointerMapRaw && typeof pointerMapRaw === "object" && !Array.isArray(pointerMapRaw) ? pointerMapRaw : {};
 	const set = setRaw && typeof setRaw === "object" ? setRaw : {};
@@ -455,9 +485,10 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 			const overlay = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(donationBySeasonPath, key));
 			addCloudflarePublishObjectIfPresent_(objects, buildFirebaseChildPath_(donationBySeasonPath, key), overlay);
 		}
-		return publishCloudflareDataObjectsBestEffort_("public", objects, {
+		const mirrored = buildCloudflareBotScopeMirroredPublishBatch_(objects, deletePaths);
+		return publishCloudflareDataObjectsBestEffort_("public", mirrored.objects, {
 			label: label,
-			deletePaths: deletePaths,
+			deletePaths: mirrored.deletePaths,
 		});
 	} catch (err) {
 		const failed = { ok: false, error: errorMessage_(err) };
@@ -484,8 +515,10 @@ function publishCloudflareDonationRefreshSeasonBestEffort_(seasonIdRaw, labelRaw
 			buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"),
 			readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current")),
 		);
-		return publishCloudflareDataObjectsBestEffort_("public", objects, {
+		const mirrored = buildCloudflareBotScopeMirroredPublishBatch_(objects, []);
+		return publishCloudflareDataObjectsBestEffort_("public", mirrored.objects, {
 			label: String(labelRaw || "donation-refresh"),
+			deletePaths: mirrored.deletePaths,
 		});
 	} catch (err) {
 		const failed = { ok: false, error: errorMessage_(err) };
