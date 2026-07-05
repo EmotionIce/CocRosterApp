@@ -668,8 +668,13 @@ const getDataObjectCacheControl = (scopeRaw, logicalPathRaw) => {
   const path = String(logicalPathRaw == null ? "" : logicalPathRaw).replace(/\.json$/i, "");
   if (scope === "bot") return "private, max-age=30";
   if (path.startsWith("activeVersions/")) return "public, max-age=31536000, immutable";
-  if (path === "activePublished/currentVersionId" || path === "activePublished/currentManifest") {
-    return "public, max-age=30, stale-while-revalidate=120";
+  if (
+    path === "active" ||
+    path.startsWith("activePublished/") ||
+    path.startsWith("events/seasonEvents/") ||
+    path.startsWith("donationRefresh/")
+  ) {
+    return "no-store";
   }
   return "public, max-age=30, stale-while-revalidate=120";
 };
@@ -783,7 +788,10 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
     return jsonResponse(503, { ok: false, error: "Roster data store is not configured." }, cors);
   }
 
-  const object = await getDataStoreObject(store, key);
+  let object = await getDataStoreObject(store, key);
+  if (!object && scope === "bot") {
+    object = await getDataStoreObject(store, buildDataObjectKey("public", objectPath));
+  }
   if (!object) {
     return jsonResponse(404, {
       ok: false,
