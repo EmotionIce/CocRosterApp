@@ -473,6 +473,9 @@ function writeActiveCwlLeagueSignups_(payloadRaw) {
 	if (!payload.signupId) payload.signupId = buildCwlLeagueSignupId_();
 	firebaseRequestJson_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH, "PUT", encodeFirebaseObjectKeysRecursive_(payload));
 	clearActiveRosterDataCache_();
+	if (typeof publishCloudflareCwlLeagueSignupsBestEffort_ === "function") {
+		publishCloudflareCwlLeagueSignupsBestEffort_(payload, "cwl-league-signups-write");
+	}
 	return payload;
 }
 

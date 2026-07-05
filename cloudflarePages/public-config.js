@@ -2,7 +2,7 @@
  * Public runtime config for the static roster page.
  *
  * Fill the default values below with real values for production:
- * - ROSTER_FIREBASE_DB_URL: public Firebase Realtime Database URL.
+ * - ROSTER_PUBLIC_DATA_BASE_URL: public JSON data route served by the Worker.
  * - ROSTER_BASE_URL: Apps Script web app URL used as backend source.
  * - ROSTER_ADMIN_URL (optional): absolute or root-relative admin page URL.
  * - ROSTER_ADMIN_API_BASE (optional): admin API base. Defaults to the Apps Script URL;
@@ -16,11 +16,11 @@
  * - landing (object): same keys as above, plus profile
  * - profile (object): landing/nav copy plus optional importMappingSeeds hints
  * Runtime overrides take precedence over published payload values.
- * At minimum set ROSTER_FIREBASE_DB_URL for direct Firebase hydration.
+ * The default public-data route is same-origin `/api/public-data`.
  */
 (function initRosterPublicConfig(globalScope) {
     if (!globalScope || typeof globalScope !== "object") return;
-    var DEFAULT_FIREBASE_DB_URL = "https://turtlecoc-37f22-default-rtdb.firebaseio.com";
+    var DEFAULT_PUBLIC_DATA_BASE_PATH = "/api/public-data";
     var DEFAULT_APPS_SCRIPT_BASE_URL = "https://script.google.com/macros/s/AKfycbw6ASmNd5Ajn8p8dfN1d0I0GwG5agjMWjDCaa25umExFmV1_fxhvV3kcDLmoKNoC8Lnlw/exec";
 
     // Handle as trimmed text.
@@ -35,6 +35,16 @@
         if (!value) return "";
         if (!/^https?:\/\//i.test(value)) return "";
         return value.replace(/[\/\\]+$/, "");
+    }
+
+    // Normalize a public-data base URL.
+    function normalizePublicDataBaseUrl(valueRaw) {
+        var value = asTrimmedText(valueRaw);
+        if (!value) return "";
+        if (/^https?:\/\//i.test(value) || value.charAt(0) === "/") {
+            return value.replace(/[\/\\]+$/, "");
+        }
+        return "";
     }
 
     // Normalize admin API base URL.
@@ -56,9 +66,8 @@
     var configuredStaticBaseUrl = normalizeHttpBaseUrl(globalScope.ROSTER_STATIC_BASE_URL);
     globalScope.ROSTER_STATIC_BASE_URL = configuredStaticBaseUrl || sameOriginBaseUrl;
 
-    var configuredFirebaseDbUrl = normalizeHttpBaseUrl(globalScope.ROSTER_FIREBASE_DB_URL);
-    var defaultFirebaseDbUrl = normalizeHttpBaseUrl(DEFAULT_FIREBASE_DB_URL);
-    globalScope.ROSTER_FIREBASE_DB_URL = configuredFirebaseDbUrl || defaultFirebaseDbUrl;
+    var configuredPublicDataBaseUrl = normalizePublicDataBaseUrl(globalScope.ROSTER_PUBLIC_DATA_BASE_URL);
+    globalScope.ROSTER_PUBLIC_DATA_BASE_URL = configuredPublicDataBaseUrl || DEFAULT_PUBLIC_DATA_BASE_PATH;
 
     var configuredRosterBaseUrl = normalizeHttpBaseUrl(globalScope.ROSTER_BASE_URL);
     var defaultRosterBaseUrl = normalizeHttpBaseUrl(DEFAULT_APPS_SCRIPT_BASE_URL);

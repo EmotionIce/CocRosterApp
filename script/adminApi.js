@@ -79,6 +79,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return debugFirebasePrivateKeySigning(args[0]);
 		case "cleanupFirebaseStorageRetention":
 			return cleanupFirebaseStorageRetention(args[0]);
+		case "publishCloudflarePublicDataSnapshot":
+			return publishCloudflarePublicDataSnapshot(args[0], args[1]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}

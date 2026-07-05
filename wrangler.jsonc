@@ -13,5 +13,11 @@
                    "html_handling":  "none",
                    "run_worker_first":  true
                },
+    "r2_buckets":  [
+                       {
+                           "binding":  "ROSTER_DATA",
+                           "bucket_name":  "turtlecoc-roster-data"
+                       }
+                   ],
     "logpush":  false
 }

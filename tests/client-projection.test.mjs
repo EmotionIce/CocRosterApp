@@ -229,21 +229,21 @@ test("prefers canonical metrics Discord username for display", () => {
   assert.equal(getDisplayDiscordUsernameForPlayer(player, {}), "row-cache");
 });
 
-test("loads current season event payloads from public Firebase and decodes keys", async () => {
+test("loads current season event payloads from public data and decodes keys", async () => {
   const pushId = "push-ranked-legend-i-2026-05-18";
   const donationId = "donation-ranked-legend-i-2026-05-18";
   const encodedTagKey = "__FB64__" + Buffer.from("#2LUCULP", "utf8").toString("base64url");
   const responses = new Map([
-    ["https://firebase.test/events/seasonEvents/current.json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", {
       push: { eventId: pushId, seasonId: "ranked-legend-i-2026-05-18" },
       donation: { eventId: donationId, seasonId: "ranked-legend-i-2026-05-18" },
     }],
-    ["https://firebase.test/events/seasonEvents/seasonState/current.json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", {
       seasonId: "ranked-legend-i-2026-05-18",
       startsAt: "2026-05-18T05:00:00.000Z",
       endsAt: "2026-06-15T05:00:00.000Z",
     }],
-    ["https://firebase.test/events/seasonEvents/byId/" + pushId + ".json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/byId/" + pushId + ".json", {
       eventId: pushId,
       type: "push",
       seasonId: "ranked-legend-i-2026-05-18",
@@ -251,14 +251,14 @@ test("loads current season event payloads from public Firebase and decodes keys"
         [encodedTagKey]: { tag: "#2LUCULP" },
       },
     }],
-    ["https://firebase.test/events/seasonEvents/byId/" + donationId + ".json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/byId/" + donationId + ".json", {
       eventId: donationId,
       type: "donation",
       seasonId: "ranked-legend-i-2026-05-18",
     }],
   ]);
   const { loadCurrentSeasonEventsViaFirebasePublic } = loadClientInternals({
-    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
     context: {
       fetch: async (url) => ({
         ok: responses.has(url),
@@ -275,12 +275,12 @@ test("loads current season event payloads from public Firebase and decodes keys"
   assert.equal(loaded.loadErrors.length, 0);
 });
 
-test("loads previous season event payloads directly from public Firebase bySeason", async () => {
+test("loads previous season event payloads directly from public data bySeason", async () => {
   const previousSeasonId = "ranked-legend-i-2026-05-18";
   const pushId = "push-ranked-legend-i-2026-05-18";
   const donationId = "donation-ranked-legend-i-2026-05-18";
   const responses = new Map([
-    ["https://firebase.test/events/seasonEvents/bySeason/" + previousSeasonId + ".json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/bySeason/" + previousSeasonId + ".json", {
       push: {
         eventId: pushId,
         seasonId: previousSeasonId,
@@ -294,13 +294,13 @@ test("loads previous season event payloads directly from public Firebase bySeaso
         endsAt: "2026-06-15T05:00:00.000Z",
       },
     }],
-    ["https://firebase.test/events/seasonEvents/byId/" + pushId + ".json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/byId/" + pushId + ".json", {
       eventId: pushId,
       type: "push",
       seasonId: previousSeasonId,
       status: "archived",
     }],
-    ["https://firebase.test/events/seasonEvents/byId/" + donationId + ".json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/byId/" + donationId + ".json", {
       eventId: donationId,
       type: "donation",
       seasonId: previousSeasonId,
@@ -309,7 +309,7 @@ test("loads previous season event payloads directly from public Firebase bySeaso
   ]);
   const requested = [];
   const { loadPreviousSeasonEventsViaFirebasePublic } = loadClientInternals({
-    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
     context: {
       fetch: async (url) => {
         requested.push(url);
@@ -343,14 +343,14 @@ test("loads previous season event payloads directly from public Firebase bySeaso
   assert.equal(loaded.seasonState.seasonId, previousSeasonId);
   assert.equal(loaded.current.push.eventId, pushId);
   assert.equal(loaded.byId[donationId].status, "archived");
-  assert.equal(requested.includes("https://firebase.test/events/seasonEvents/bySeason/" + previousSeasonId + ".json"), true);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/events/seasonEvents/bySeason/" + previousSeasonId + ".json"), true);
 });
 
 test("loads published active version shards before falling back to legacy active", async () => {
   const encodedTagKey = "__FB64__" + Buffer.from("#PLAYER", "utf8").toString("base64url");
   const responses = new Map([
-    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
-    ["https://firebase.test/activeVersions/version-1/manifest.json", {
+    ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-1"],
+    ["https://public-data.test/api/public-data/activeVersions/version-1/manifest.json", {
       versionId: "version-1",
       schemaVersion: 1,
       pageTitle: "Versioned Roster",
@@ -358,7 +358,7 @@ test("loads published active version shards before falling back to legacy active
       rosterIds: ["main"],
       lastUpdatedAt: "2026-05-25T00:00:00.000Z",
     }],
-    ["https://firebase.test/activeVersions/version-1/rosters.json", {
+    ["https://public-data.test/api/public-data/activeVersions/version-1/rosters.json", {
       main: {
         id: "main",
         title: "Main",
@@ -377,7 +377,7 @@ test("loads published active version shards before falling back to legacy active
         missing: [],
       },
     }],
-    ["https://firebase.test/activeVersions/version-1/playerMetrics.json", {
+    ["https://public-data.test/api/public-data/activeVersions/version-1/playerMetrics.json", {
       schemaVersion: 1,
       updatedAt: "2026-05-25T00:00:00.000Z",
       byTag: {
@@ -388,9 +388,9 @@ test("loads published active version shards before falling back to legacy active
         },
       },
     }],
-    ["https://firebase.test/events/seasonEvents/current.json", null],
-    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
-    ["https://firebase.test/active.json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", null],
+    ["https://public-data.test/api/public-data/active.json", {
       schemaVersion: 1,
       pageTitle: "Legacy Active",
       rosterOrder: [],
@@ -400,7 +400,7 @@ test("loads published active version shards before falling back to legacy active
   ]);
   const requested = [];
   const { loadRosterDataViaFirebasePublic } = loadClientInternals({
-    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
     context: {
       fetch: async (url) => {
         requested.push(url);
@@ -418,18 +418,18 @@ test("loads published active version shards before falling back to legacy active
   assert.equal(loaded.data.pageTitle, "Versioned Roster");
   assert.equal(loaded.data.rosters[0].id, "main");
   assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
-  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/active.json"), false);
 });
 
 test("reuses cached roster and player metrics when active published version is unchanged", async () => {
   const responses = new Map([
-    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
-    ["https://firebase.test/events/seasonEvents/current.json", null],
-    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+    ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-1"],
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", null],
   ]);
   const requested = [];
   const { loadRosterDataViaFirebasePublic } = loadClientInternals({
-    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
     context: {
       fetch: async (url) => {
         requested.push(url);
@@ -474,21 +474,21 @@ test("reuses cached roster and player metrics when active published version is u
     },
   });
 
-  assert.equal(loaded.source, "firebase-public-cached-active-version");
+  assert.equal(loaded.source, "cloudflare-public-cached-active-version");
   assert.equal(loaded.activeVersionId, "version-1");
   assert.equal(loaded.data.pageTitle, "Cached Version");
   assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/rosters.json"), false);
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/playerMetrics.json"), false);
-  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-1/rosters.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-1/playerMetrics.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/active.json"), false);
 });
 
 test("cached active version still hydrates detached donation overlay", async () => {
   const seasonId = "ranked-legend-i-2026-05-18";
   const donationId = "donation-ranked-legend-i-2026-05-18";
   const responses = new Map([
-    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
-    ["https://firebase.test/events/seasonEvents/current.json", {
+    ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-1"],
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", {
       donation: {
         eventId: donationId,
         seasonId,
@@ -496,12 +496,12 @@ test("cached active version still hydrates detached donation overlay", async () 
         endsAt: "2026-06-15T05:00:00.000Z",
       },
     }],
-    ["https://firebase.test/events/seasonEvents/seasonState/current.json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", {
       seasonId,
       startsAt: "2026-05-18T05:00:00.000Z",
       endsAt: "2026-06-15T05:00:00.000Z",
     }],
-    ["https://firebase.test/events/seasonEvents/byId/" + donationId + ".json", {
+    ["https://public-data.test/api/public-data/events/seasonEvents/byId/" + donationId + ".json", {
       eventId: donationId,
       type: "donation",
       seasonId,
@@ -513,7 +513,7 @@ test("cached active version still hydrates detached donation overlay", async () 
         "111": { discordDisplayName: "Alpha", status: "signed_up", accounts: [{ tag: "#AAA", name: "Alpha" }] },
       },
     }],
-    ["https://firebase.test/donationRefresh/bySeason/" + seasonId + ".json", {
+    ["https://public-data.test/api/public-data/donationRefresh/bySeason/" + seasonId + ".json", {
       meta: { seasonId, updatedAt: "2026-05-25T00:00:00.000Z" },
       byTag: {
         ["__FB64__" + Buffer.from("#AAA", "utf8").toString("base64url")]: {
@@ -532,7 +532,7 @@ test("cached active version still hydrates detached donation overlay", async () 
   ]);
   const requested = [];
   const { loadRosterDataViaFirebasePublic, buildSeasonEventsPublicModel } = loadClientInternals({
-    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
     context: {
       fetch: async (url) => {
         requested.push(url);
@@ -576,21 +576,21 @@ test("cached active version still hydrates detached donation overlay", async () 
   });
   const model = buildSeasonEventsPublicModel(loaded.data);
 
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/playerMetrics.json"), false);
-  assert.equal(requested.includes("https://firebase.test/donationRefresh/bySeason/" + seasonId + ".json"), true);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-1/playerMetrics.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/donationRefresh/bySeason/" + seasonId + ".json"), true);
   assert.equal(model.cards[1].rows[0].score, 66);
 });
 
 test("uses IndexedDB cached snapshot when localStorage cannot store the full active payload", async () => {
   const responses = new Map([
-    ["https://firebase.test/activePublished/currentVersionId.json", "version-1"],
-    ["https://firebase.test/events/seasonEvents/current.json", null],
-    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+    ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-1"],
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", null],
   ]);
   const requested = [];
   const internals = loadClientInternals({
     window: {
-      ROSTER_FIREBASE_DB_URL: "https://firebase.test",
+      ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data",
       indexedDB: makeMemoryIndexedDb(),
       localStorage: makeThrowingLocalStorage(),
     },
@@ -628,7 +628,7 @@ test("uses IndexedDB cached snapshot when localStorage cannot store the full act
   };
 
   assert.equal(
-    await internals.writeCachedRosterSnapshot(cachedData, "firebase-public", {
+    await internals.writeCachedRosterSnapshot(cachedData, "cloudflare-public", {
       activeVersionId: "version-1",
     }),
     true,
@@ -643,17 +643,17 @@ test("uses IndexedDB cached snapshot when localStorage cannot store the full act
     cachedSnapshot: durableSnapshot,
   });
 
-  assert.equal(loaded.source, "firebase-public-cached-active-version");
+  assert.equal(loaded.source, "cloudflare-public-cached-active-version");
   assert.equal(loaded.data.pageTitle, "IndexedDB Cached Version");
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/rosters.json"), false);
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-1/playerMetrics.json"), false);
-  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-1/rosters.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-1/playerMetrics.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/active.json"), false);
 });
 
 test("downloads active version shards when cached active published version is stale", async () => {
   const responses = new Map([
-    ["https://firebase.test/activePublished/currentVersionId.json", "version-2"],
-    ["https://firebase.test/activeVersions/version-2/manifest.json", {
+    ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-2"],
+    ["https://public-data.test/api/public-data/activeVersions/version-2/manifest.json", {
       versionId: "version-2",
       schemaVersion: 1,
       pageTitle: "Fresh Version",
@@ -661,7 +661,7 @@ test("downloads active version shards when cached active published version is st
       rosterIds: ["main"],
       lastUpdatedAt: "2026-05-26T00:00:00.000Z",
     }],
-    ["https://firebase.test/activeVersions/version-2/rosters.json", {
+    ["https://public-data.test/api/public-data/activeVersions/version-2/rosters.json", {
       main: {
         id: "main",
         title: "Fresh Main",
@@ -670,17 +670,17 @@ test("downloads active version shards when cached active published version is st
         missing: [],
       },
     }],
-    ["https://firebase.test/activeVersions/version-2/playerMetrics.json", {
+    ["https://public-data.test/api/public-data/activeVersions/version-2/playerMetrics.json", {
       schemaVersion: 1,
       updatedAt: "2026-05-26T00:00:00.000Z",
       byTag: {},
     }],
-    ["https://firebase.test/events/seasonEvents/current.json", null],
-    ["https://firebase.test/events/seasonEvents/seasonState/current.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", null],
   ]);
   const requested = [];
   const { loadRosterDataViaFirebasePublic } = loadClientInternals({
-    window: { ROSTER_FIREBASE_DB_URL: "https://firebase.test" },
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
     context: {
       fetch: async (url) => {
         requested.push(url);
@@ -706,12 +706,12 @@ test("downloads active version shards when cached active published version is st
     },
   });
 
-  assert.equal(loaded.source, "firebase-public");
+  assert.equal(loaded.source, "cloudflare-public");
   assert.equal(loaded.activeVersionId, "version-2");
   assert.equal(loaded.data.pageTitle, "Fresh Version");
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-2/rosters.json"), true);
-  assert.equal(requested.includes("https://firebase.test/activeVersions/version-2/playerMetrics.json"), true);
-  assert.equal(requested.includes("https://firebase.test/active.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-2/rosters.json"), true);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activeVersions/version-2/playerMetrics.json"), true);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/active.json"), false);
 });
 
 test("season events model renders unavailable and empty states safely", () => {

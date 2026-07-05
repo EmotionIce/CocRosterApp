@@ -24,7 +24,8 @@
     const SEASON_EVENTS_BY_SEASON_PATH = SEASON_EVENTS_BASE_PATH + "/bySeason";
     const SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/seasonState/current";
     const SEASON_EVENT_COLLAPSED_ROW_COUNT = 3;
-    const FIREBASE_PUBLIC_SOURCE = "firebase-public";
+    const FIREBASE_PUBLIC_SOURCE = "cloudflare-public";
+    const PUBLIC_DATA_BASE_FALLBACK_URL = "/api/public-data";
     const ASSET_ROUTE_FALLBACK_SOURCE = "apps-script-asset-fallback";
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
@@ -8386,7 +8387,7 @@
                 return null;
             }
             const cachedSourceRaw = toStr(payload.source).trim();
-            const cachedSource = /^firebase-public(?:-|$)/.test(cachedSourceRaw) ? cachedSourceRaw : "cache";
+            const cachedSource = /^(?:cloudflare-public|firebase-public)(?:-|$)/.test(cachedSourceRaw) ? cachedSourceRaw : "cache";
             return {
                 data: data,
                 cachedAt: cachedAtMs > 0 ? new Date(cachedAtMs).toISOString() : "",
@@ -8451,14 +8452,17 @@
         }
     };
 
-    // Normalize Firebase db URL.
-    const normalizeFirebaseDbUrl = (urlRaw) => {
+    // Normalize public data base URL.
+    const normalizePublicDataBaseUrl = (urlRaw) => {
         const raw = toStr(urlRaw).trim();
         if (!raw) return "";
-        return raw.replace(/\/+$/, "");
+        if (/^https?:\/\//i.test(raw) || raw.charAt(0) === "/") {
+            return raw.replace(/\/+$/, "");
+        }
+        return "";
     };
 
-    // Normalize Firebase path.
+    // Normalize public data path.
     const normalizeFirebasePath = (pathRaw) =>
         toStr(pathRaw)
             .trim()
@@ -8466,33 +8470,34 @@
             .replace(/^[\/]+|[\/]+$/g, "")
             .replace(/\.\./g, "");
 
-    // Build Firebase public JSON URL.
+    // Build Cloudflare public data JSON URL.
     const buildFirebasePublicJsonUrl = (pathRaw) => {
-        const configuredDbUrl = normalizeFirebaseDbUrl(
-            (typeof window !== "undefined" && window && window.ROSTER_FIREBASE_DB_URL)
-                ? window.ROSTER_FIREBASE_DB_URL
+        const configuredBaseUrl = normalizePublicDataBaseUrl(
+            (typeof window !== "undefined" && window && window.ROSTER_PUBLIC_DATA_BASE_URL)
+                ? window.ROSTER_PUBLIC_DATA_BASE_URL
                 : ""
         );
-        if (!configuredDbUrl) {
-            throw new Error("Missing window.ROSTER_FIREBASE_DB_URL for Firebase public hydration. Set it in public-config.js.");
+        const publicDataBaseUrl = configuredBaseUrl || PUBLIC_DATA_BASE_FALLBACK_URL;
+        if (!publicDataBaseUrl) {
+            throw new Error("Missing window.ROSTER_PUBLIC_DATA_BASE_URL for public data hydration. Set it in public-config.js.");
         }
 
         const safePath = normalizeFirebasePath(pathRaw);
-        const queryIndex = configuredDbUrl.indexOf("?");
-        const dbUrlWithoutQuery = queryIndex >= 0 ? configuredDbUrl.slice(0, queryIndex) : configuredDbUrl;
-        const dbUrlBaseNoQuery = dbUrlWithoutQuery.replace(/\/+$/, "");
-        const querySuffix = queryIndex >= 0 ? configuredDbUrl.slice(queryIndex) : "";
+        const queryIndex = publicDataBaseUrl.indexOf("?");
+        const baseWithoutQuery = queryIndex >= 0 ? publicDataBaseUrl.slice(0, queryIndex) : publicDataBaseUrl;
+        const baseNoQuery = baseWithoutQuery.replace(/\/+$/, "");
+        const querySuffix = queryIndex >= 0 ? publicDataBaseUrl.slice(queryIndex) : "";
         const encodedSegments = safePath
             ? safePath.split("/").filter((segment) => segment).map((segment) => encodeURIComponent(segment))
             : [];
 
-        if (/\.json$/i.test(dbUrlBaseNoQuery)) {
-            if (!encodedSegments.length) return dbUrlBaseNoQuery + querySuffix;
-            const base = dbUrlBaseNoQuery.replace(/\/+\.json$/i, "");
+        if (/\.json$/i.test(baseNoQuery)) {
+            if (!encodedSegments.length) return baseNoQuery + querySuffix;
+            const base = baseNoQuery.replace(/\/+\.json$/i, "");
             return base + "/" + encodedSegments.join("/") + ".json" + querySuffix;
         }
-        if (!encodedSegments.length) return dbUrlBaseNoQuery + "/.json" + querySuffix;
-        return dbUrlBaseNoQuery + "/" + encodedSegments.join("/") + ".json" + querySuffix;
+        if (!encodedSegments.length) return baseNoQuery + "/.json" + querySuffix;
+        return baseNoQuery + "/" + encodedSegments.join("/") + ".json" + querySuffix;
     };
 
     // Parse JSON text strict.
@@ -8509,21 +8514,21 @@
         }
     };
 
-    // Fetch Firebase JSON public.
+    // Fetch Cloudflare public JSON.
     const fetchFirebaseJsonPublic = async (pathRaw) => {
         const safePath = normalizeFirebasePath(pathRaw);
         const pathLabel = "/" + (safePath || "");
         if (typeof fetch !== "function") {
-            throw new Error("window.fetch is unavailable for Firebase public hydration.");
+            throw new Error("window.fetch is unavailable for public data hydration.");
         }
         const response = await fetch(buildFirebasePublicJsonUrl(safePath), {
             method: "GET",
-            cache: "no-store",
-            credentials: "omit",
+            cache: "default",
+            credentials: "same-origin",
         });
         if (!response || !response.ok) {
             throw new Error(
-                "Firebase public fetch failed for " +
+                "Cloudflare public data fetch failed for " +
                 pathLabel +
                 " (" +
                 (response ? response.status : "unknown") +
@@ -8531,7 +8536,7 @@
             );
         }
         const responseText = await response.text();
-        return parseJsonTextStrict(responseText, "Firebase public fetch for " + pathLabel);
+        return parseJsonTextStrict(responseText, "Cloudflare public data fetch for " + pathLabel);
     };
 
     // Handle base64 URL decode to utf8.
@@ -8637,9 +8642,9 @@
         return out;
     };
 
-    // Decode and validate active roster payload from Firebase public.
+    // Decode and validate active roster payload from public data.
     const decodeAndValidateActiveRosterPayloadFromFirebasePublic = (encodedPayloadRaw, sourceLabelRaw) => {
-        const sourceLabel = toStr(sourceLabelRaw).trim() || "firebase-public";
+        const sourceLabel = toStr(sourceLabelRaw).trim() || FIREBASE_PUBLIC_SOURCE;
         if (!encodedPayloadRaw || typeof encodedPayloadRaw !== "object" || Array.isArray(encodedPayloadRaw)) {
             throw new Error("Missing or invalid active roster payload at " + sourceLabel + ".");
         }
@@ -8647,7 +8652,7 @@
         return assertValidRosterPayload(decodedPayload, sourceLabel);
     };
 
-    // Build an active version public Firebase path.
+    // Build an active version public data path.
     const buildActiveVersionPublicPath = (versionIdRaw, childPathRaw) => {
         const versionId = toStr(versionIdRaw).trim();
         if (!versionId) return "";
@@ -8656,7 +8661,7 @@
         return childPath ? basePath + "/" + childPath : basePath;
     };
 
-    // Load current active published version id from Firebase public.
+    // Load current active published version id from public data.
     const loadActivePublishedVersionIdViaFirebasePublic = async () =>
         toStr(await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
 
@@ -8664,7 +8669,7 @@
     const loadPublishedActiveVersionViaFirebasePublic = async (versionIdRaw) => {
         const versionId = toStr(versionIdRaw).trim() || await loadActivePublishedVersionIdViaFirebasePublic();
         if (!versionId) return null;
-        const versionLabel = "Firebase public /activeVersions/" + versionId;
+        const versionLabel = "Cloudflare public data /activeVersions/" + versionId;
         const manifestPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "manifest"));
         const rostersPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "rosters"));
         const playerMetricsPayload = await fetchFirebaseJsonPublic(buildActiveVersionPublicPath(versionId, "playerMetrics"));
@@ -8705,7 +8710,7 @@
         };
     };
 
-    // Return public Firebase event path by event id.
+    // Return public event path by event id.
     const buildSeasonEventByIdPublicPath = (eventIdRaw) => {
         const eventId = toStr(eventIdRaw).trim();
         if (!eventId) return "";
@@ -8719,14 +8724,14 @@
         return SEASON_EVENTS_CWL_AGGREGATES_PATH + "/" + encodeFirebaseObjectKey(eventId) + "/" + kind;
     };
 
-    // Return public Firebase event pointers path by season id.
+    // Return public event pointers path by season id.
     const buildSeasonEventsBySeasonPublicPath = (seasonIdRaw) => {
         const seasonId = toStr(seasonIdRaw).trim();
         if (!seasonId) return "";
         return SEASON_EVENTS_BY_SEASON_PATH + "/" + encodeFirebaseObjectKey(seasonId);
     };
 
-    // Fetch optional decoded Firebase public JSON without failing roster hydration.
+    // Fetch optional decoded public JSON without failing roster hydration.
     const fetchOptionalDecodedFirebaseJsonPublic = async (pathRaw, loadErrors) => {
         const path = normalizeFirebasePath(pathRaw);
         if (!path) return null;
@@ -8743,7 +8748,7 @@
                 });
             }
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[SeasonEvents] Public Firebase load failed for /" + path, err);
+                console.warn("[SeasonEvents] Public data load failed for /" + path, err);
             }
             return null;
         }
@@ -8973,11 +8978,11 @@
         };
     };
 
-    // Load previous season event data from public Firebase.
+    // Load previous season event data from public data.
     const loadPreviousSeasonEventsViaFirebasePublic = async (dataRaw) =>
         loadSeasonEventsBySeasonViaFirebasePublic(resolvePreviousSeasonEventsSeason(dataRaw));
 
-    // Load current season event data from public Firebase.
+    // Load current season event data from public data.
     const loadCurrentSeasonEventsViaFirebasePublic = async () => {
         const loadErrors = [];
         const current = await fetchOptionalDecodedFirebaseJsonPublic(SEASON_EVENTS_CURRENT_PATH, loadErrors);
@@ -9026,18 +9031,18 @@
                 }]);
             }
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[SeasonEvents] Public Firebase event hydration failed while reusing cached active version.", err);
+                console.warn("[SeasonEvents] Public data event hydration failed while reusing cached active version.", err);
             }
         }
 
         return {
             source: FIREBASE_PUBLIC_SOURCE + "-cached-active-version",
-            data: assertValidRosterPayload(data, "Cached Firebase public /activeVersions/" + activeVersionId),
+            data: assertValidRosterPayload(data, "Cached public data /activeVersions/" + activeVersionId),
             activeVersionId: activeVersionId,
         };
     };
 
-    // Load roster data via Firebase public.
+    // Load roster data via Cloudflare public data.
     const loadRosterDataViaFirebasePublic = async (optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const cachedSnapshot = options.cachedSnapshot && typeof options.cachedSnapshot === "object" ? options.cachedSnapshot : null;
@@ -9057,12 +9062,12 @@
             }
         } catch (err) {
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[RosterData] Versioned Firebase active load failed; falling back to /active.", err);
+                console.warn("[RosterData] Versioned public data load failed; falling back to /active.", err);
             }
         }
         if (!data) {
             const activePayload = await fetchFirebaseJsonPublic(FIREBASE_ACTIVE_PATH);
-            data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Firebase public /active");
+            data = decodeAndValidateActiveRosterPayloadFromFirebasePublic(activePayload, "Cloudflare public data /active");
             activeVersionId = "";
         }
         try {
@@ -9074,7 +9079,7 @@
                 message: err && err.message ? err.message : toStr(err),
             }]);
             if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[SeasonEvents] Public Firebase event hydration failed; continuing with /active only.", err);
+                console.warn("[SeasonEvents] Public data event hydration failed; continuing with /active only.", err);
             }
         }
         return {
@@ -9196,7 +9201,7 @@
             });
             return {
                 source: toStr(loaded && loaded.source).trim() || FIREBASE_PUBLIC_SOURCE,
-                data: assertValidRosterPayload(loaded && loaded.data, "Firebase public hydration"),
+                data: assertValidRosterPayload(loaded && loaded.data, "Cloudflare public data hydration"),
                 activeVersionId: toStr(loaded && loaded.activeVersionId).trim(),
             };
         } catch (err) {
@@ -9205,7 +9210,7 @@
 
         const configuredScriptBaseUrl = resolveConfiguredScriptBaseUrl();
         if (!configuredScriptBaseUrl) {
-            throw firebaseError || new Error("Firebase public hydration failed and no Apps Script fallback base URL is configured.");
+            throw firebaseError || new Error("Cloudflare public data hydration failed and no Apps Script fallback base URL is configured.");
         }
 
         try {
@@ -9218,7 +9223,7 @@
             const firebaseMessage = firebaseError && firebaseError.message ? firebaseError.message : toStr(firebaseError);
             const assetMessage = assetErr && assetErr.message ? assetErr.message : toStr(assetErr);
             throw new Error(
-                "Firebase public hydration failed: " +
+                "Cloudflare public data hydration failed: " +
                 firebaseMessage +
                 " | Apps Script asset fallback failed: " +
                 assetMessage
@@ -9309,7 +9314,7 @@
                     markBootTiming("roster-fetch-failed-using-cache", { source: cachedSnapshot.source || "cache" });
                     if (typeof console !== "undefined" && console && typeof console.warn === "function") {
                         console.warn(
-                            "[RosterBoot] firebase-public refresh failed; continuing with cached roster snapshot.",
+                            "[RosterBoot] public data refresh failed; continuing with cached roster snapshot.",
                             err && (err.message || err.stack) ? (err.message || err.stack) : String(err)
                         );
                     }

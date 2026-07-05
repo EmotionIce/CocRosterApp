@@ -2245,6 +2245,9 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(null, sourceMeta, runId);
 		current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 		tryReconcileCurrentSeasonEventsForAutoRefresh_();
+		if (typeof publishCloudflarePublicDataSnapshot_ === "function") {
+			publishCloudflarePublicDataSnapshot_({ label: "auto-refresh-finalize-staged" });
+		}
 		current.status = "completed";
 		current.phase = "completed";
 		current.completedAt = new Date().toISOString();
@@ -2353,6 +2356,9 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(finalRosterData, sourceMeta, runId);
 	current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 	tryReconcileCurrentSeasonEventsForAutoRefresh_();
+	if (typeof publishCloudflarePublicDataSnapshot_ === "function") {
+		publishCloudflarePublicDataSnapshot_({ label: "auto-refresh-finalize" });
+	}
 	current.status = "completed";
 	current.phase = "completed";
 	current.completedAt = new Date().toISOString();

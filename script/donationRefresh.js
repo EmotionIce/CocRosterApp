@@ -464,6 +464,9 @@ function runDonationRefreshCore_(optionsRaw) {
 		const cleanupWrites = cleanupDonationRefreshSeasonRetentionWrites_();
 		for (let i = 0; i < cleanupWrites.length; i++) writes.push(cleanupWrites[i]);
 		firebaseBatchPutJson_(writes);
+		if (typeof publishCloudflareDonationRefreshSeasonBestEffort_ === "function") {
+			publishCloudflareDonationRefreshSeasonBestEffort_(seasonId, "donation-refresh-write");
+		}
 		return {
 			ok: errorKeys.length < clanTags.length,
 			status: errorKeys.length ? "partial" : "ok",

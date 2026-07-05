@@ -324,6 +324,11 @@ function writeSeasonEventFirebasePayload_(pathRaw, methodRaw, payloadRaw) {
 	return firebaseRequestJson_(pathRaw, methodRaw, encodeFirebaseObjectKeysRecursive_(payloadRaw));
 }
 
+function publishCloudflareSeasonEventsAfterMutation_(labelRaw) {
+	if (typeof publishCloudflareSeasonEventsAndDonationDataBestEffort_ !== "function") return null;
+	return publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw);
+}
+
 // Build audit key.
 function buildSeasonEventAuditKey_(timestampRaw) {
 	const date = timestampRaw ? new Date(timestampRaw) : new Date();
@@ -846,12 +851,14 @@ function reconcileCurrentSeasonEvents(payloadRaw, secretOrPassword) {
 	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPassword);
 	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
 	const payload = parsed.payload;
-	return reconcileCurrentSeasonEvents_({
+	const result = reconcileCurrentSeasonEvents_({
 		forceRefresh: payload.forceRefresh === true,
 		manualSeason: payload.manualSeason,
 		now: payload.now || payload.nowIso,
 		source: payload.source || { type: "api-reconcile" },
 	});
+	publishCloudflareSeasonEventsAfterMutation_("api-reconcile-season-events");
+	return result;
 }
 
 // Public get current events callable.
@@ -937,7 +944,9 @@ function ensureCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPassword);
 	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
 	const payload = parsed.payload;
-	return ensureCurrentCwlSeasonEvent_(payload.source || { type: "api-ensure-cwl-event" });
+	const result = ensureCurrentCwlSeasonEvent_(payload.source || { type: "api-ensure-cwl-event" });
+	if (result && result.created === true) publishCloudflareSeasonEventsAfterMutation_("api-ensure-current-cwl");
+	return result;
 }
 
 // Public current-CWL event read callable.
@@ -981,6 +990,7 @@ function refreshCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 			}
 			: {};
 	}
+	if (result && result.ok !== false) publishCloudflareSeasonEventsAfterMutation_("api-refresh-current-cwl");
 	return result || { ok: false, status: "unknown" };
 }
 
@@ -1127,6 +1137,7 @@ function updateSeasonEvent(payloadRaw, secretOrPassword) {
 			changedFields: patchKeys,
 		},
 	});
+	publishCloudflareSeasonEventsAfterMutation_("api-update-season-event");
 	return {
 		ok: true,
 		event: summarizeSeasonEvent_(updated),
@@ -1522,6 +1533,7 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-signup");
 		return buildSeasonEventStatusResponse_("signed-up", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
@@ -1599,6 +1611,7 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-account-update");
 		return buildSeasonEventStatusResponse_("updated", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
@@ -1650,6 +1663,7 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-cancel");
 		return buildSeasonEventStatusResponse_(existing.status === "cancelled" ? "already-cancelled" : "cancelled", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,

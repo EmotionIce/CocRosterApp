@@ -1,0 +1,893 @@
+// Cloudflare Worker routing, Apps Script fallback helpers, and R2 roster data plane.
+
+const FALLBACK_APPS_SCRIPT_EXEC_URL =
+  "https://script.google.com/macros/s/AKfycbw6ASmNd5Ajn8p8dfN1d0I0GwG5agjMWjDCaa25umExFmV1_fxhvV3kcDLmoKNoC8Lnlw/exec";
+
+const PUBLIC_DATA_ROUTE_PREFIX = "/api/public-data";
+const BOT_DATA_ROUTE_PREFIX = "/api/bot-data";
+const DATA_PUBLISH_ROUTE = "/api/internal/public-data/publish";
+const PUBLIC_DATA_R2_PREFIX = "public-data";
+const BOT_DATA_R2_PREFIX = "bot-data";
+
+// Normalize http URL.
+const normalizeHttpUrl = (valueRaw) => {
+  const value = String(valueRaw == null ? "" : valueRaw).trim();
+  if (!value) return "";
+  if (!/^https?:\/\//i.test(value)) return "";
+  return value.replace(/[\/\\]+$/, "");
+};
+
+// Ensure Apps Script exec path.
+const withAppsScriptExecPath = (baseRaw) => {
+  const base = normalizeHttpUrl(baseRaw);
+  if (!base) return "";
+  if (/\/exec$/i.test(base)) return base;
+  return base + "/exec";
+};
+
+// Resolve Apps Script exec URL.
+const resolveAppsScriptExecUrl = (envRaw) => {
+  const env = envRaw && typeof envRaw === "object" ? envRaw : {};
+  const configured = normalizeHttpUrl(
+    env.ROSTER_APPS_SCRIPT_URL || env.ROSTER_BASE_URL || ""
+  );
+  return withAppsScriptExecPath(configured || FALLBACK_APPS_SCRIPT_EXEC_URL);
+};
+
+// Resolve fallback Apps Script exec URL.
+const resolveFallbackAppsScriptExecUrl = () =>
+  withAppsScriptExecPath(FALLBACK_APPS_SCRIPT_EXEC_URL);
+
+// Return whether upstream returned a Google HTML miss instead of Apps Script JSON.
+const shouldRetryAppsScriptFallback = (response, textRaw, contentTypeRaw) => {
+  const status = Number(response && response.status);
+  if (![401, 403, 404, 405].includes(status)) return false;
+  const contentType = String(contentTypeRaw || "").toLowerCase();
+  const text = String(textRaw || "").trim();
+  return contentType.includes("text/html") || /^<!doctype\b/i.test(text) || /^<html[\s>]/i.test(text);
+};
+
+// Build JSON response.
+const jsonResponse = (status, payload, headersRaw) => {
+  const headers = new Headers(headersRaw || {});
+  if (!headers.has("content-type")) headers.set("content-type", "application/json; charset=utf-8");
+  if (!headers.has("cache-control")) headers.set("cache-control", "no-store");
+  return new Response(JSON.stringify(payload), { status, headers });
+};
+
+// Return whether admin API path.
+const isAdminApiPath = (pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  return pathname === "/api/admin" || pathname === "/api/admin/";
+};
+
+// Return whether Discord bot sync API path.
+const isDiscordBotSyncApiPath = (pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  return pathname === "/api/bot/discord-sync" || pathname === "/api/bot/discord-sync/";
+};
+
+// Return whether admin page path.
+const isAdminPagePath = (pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  return (
+    pathname === "/admin" ||
+    pathname === "/admin/" ||
+    pathname === "/console" ||
+    pathname === "/console/"
+  );
+};
+
+// Return whether admin page query.
+const isAdminPageQuery = (urlRaw) => {
+  const url = urlRaw && typeof urlRaw === "object" ? urlRaw : null;
+  if (!url) return false;
+  const pathname = String(url.pathname == null ? "" : url.pathname).trim();
+  if (pathname !== "/") return false;
+  const page = String(url.searchParams && url.searchParams.get("page") || "").trim().toLowerCase();
+  return page === "admin";
+};
+
+// Return whether public root path.
+const isPublicRootPath = (pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  return pathname === "" || pathname === "/";
+};
+
+// Return whether a path is under a route prefix.
+const isRoutePrefixPath = (pathnameRaw, prefixRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  const prefix = String(prefixRaw == null ? "" : prefixRaw).trim();
+  return pathname === prefix || pathname === prefix + "/" || pathname.startsWith(prefix + "/");
+};
+
+// Handle admin API.
+const handleAdminApi = async (request, env) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "cache-control": "no-store",
+      },
+    });
+  }
+  if (method !== "POST") {
+    return jsonResponse(405, {
+      ok: false,
+      error: "Method not allowed. Use POST.",
+    });
+  }
+
+  const execUrl = resolveAppsScriptExecUrl(env);
+  if (!execUrl) {
+    return jsonResponse(500, {
+      ok: false,
+      error: "Apps Script URL is not configured.",
+    });
+  }
+
+  let bodyText = "";
+  try {
+    bodyText = await request.text();
+  } catch (err) {
+    return jsonResponse(400, {
+      ok: false,
+      error: err && err.message ? err.message : "Invalid request body.",
+    });
+  }
+
+  try {
+    const buildUpstreamRequest = (url) => fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: bodyText || "{}",
+    });
+
+    let upstream = await buildUpstreamRequest(execUrl);
+    let text = await upstream.text();
+    let contentType =
+      upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    const fallbackExecUrl = resolveFallbackAppsScriptExecUrl();
+    if (
+      fallbackExecUrl &&
+      fallbackExecUrl !== execUrl &&
+      shouldRetryAppsScriptFallback(upstream, text, contentType)
+    ) {
+      upstream = await buildUpstreamRequest(fallbackExecUrl);
+      text = await upstream.text();
+      contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    }
+
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": contentType,
+        "cache-control": "no-store",
+      },
+    });
+  } catch (err) {
+    return jsonResponse(502, {
+      ok: false,
+      error: err && err.message ? err.message : "Upstream request failed.",
+    });
+  }
+};
+
+// Read Discord bot secret from supported headers.
+const readDiscordBotSecret = (request) => {
+  const authorization = String(request.headers.get("authorization") || "");
+  const bearerMatch = /^\s*Bearer\s+(.+?)\s*$/i.exec(authorization);
+  if (bearerMatch && bearerMatch[1]) return bearerMatch[1];
+  return String(request.headers.get("x-discord-bot-secret") || "").trim();
+};
+
+// Read publish/bot data secret from supported headers.
+const readRequestSecret = (request) => {
+  const authorization = String(request.headers.get("authorization") || "");
+  const bearerMatch = /^\s*Bearer\s+(.+?)\s*$/i.exec(authorization);
+  if (bearerMatch && bearerMatch[1]) return bearerMatch[1];
+  return (
+    String(request.headers.get("x-roster-publish-secret") || "").trim() ||
+    String(request.headers.get("x-discord-bot-secret") || "").trim()
+  );
+};
+
+// Hash text for constant-time secret comparison.
+const sha256Bytes = async (valueRaw) => {
+  const text = String(valueRaw == null ? "" : valueRaw);
+  const bytes = new TextEncoder().encode(text);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+};
+
+// Constant-time compare for two non-empty secret strings.
+const constantTimeSecretEqual = async (leftRaw, rightRaw) => {
+  const left = String(leftRaw == null ? "" : leftRaw);
+  const right = String(rightRaw == null ? "" : rightRaw);
+  if (!left || !right) return false;
+  const [leftHash, rightHash] = await Promise.all([sha256Bytes(left), sha256Bytes(right)]);
+  let diff = leftHash.length ^ rightHash.length;
+  const length = Math.max(leftHash.length, rightHash.length);
+  for (let i = 0; i < length; i++) {
+    diff |= (leftHash[i] || 0) ^ (rightHash[i] || 0);
+  }
+  return diff === 0;
+};
+
+// Resolve the configured secret for protected R2 routes.
+const resolveBotDataSecret = (envRaw) => {
+  const env = envRaw && typeof envRaw === "object" ? envRaw : {};
+  return String(
+    env.ROSTER_BOT_SECRET ||
+    env.DISCORD_BOT_API_SECRET ||
+    env.ROSTER_PUBLIC_DATA_PUBLISH_SECRET ||
+    env.CLOUDFLARE_PUBLIC_DATA_PUBLISH_SECRET ||
+    ""
+  );
+};
+
+// Resolve the configured secret for Apps Script publish calls.
+const resolvePublishSecret = (envRaw) => {
+  const env = envRaw && typeof envRaw === "object" ? envRaw : {};
+  return String(
+    env.ROSTER_PUBLIC_DATA_PUBLISH_SECRET ||
+    env.CLOUDFLARE_PUBLIC_DATA_PUBLISH_SECRET ||
+    env.ROSTER_BOT_SECRET ||
+    env.DISCORD_BOT_API_SECRET ||
+    ""
+  );
+};
+
+// Verify a protected request.
+const verifyRequestSecret = async (request, expectedRaw, labelRaw) => {
+  const expected = String(expectedRaw == null ? "" : expectedRaw);
+  if (!expected) {
+    return {
+      ok: false,
+      response: jsonResponse(503, {
+        ok: false,
+        error: String(labelRaw || "Secret") + " is not configured.",
+      }),
+    };
+  }
+  const provided = readRequestSecret(request);
+  if (!(await constantTimeSecretEqual(provided, expected))) {
+    return {
+      ok: false,
+      response: jsonResponse(401, {
+        ok: false,
+        error: "Unauthorized.",
+      }),
+    };
+  }
+  return { ok: true, response: null };
+};
+
+// Normalize Discord bot sync/delete request body into an Apps Script call.
+const buildDiscordBotSyncUpstreamCall = (body, secret) => {
+  const requestedMethod = String(body && (body.methodName || body.method) || "").trim();
+  const args = Array.isArray(body && body.args) ? body.args : [];
+  const readObjectOrPositional = () => {
+    const first = args[0] && typeof args[0] === "object" && !Array.isArray(args[0]) ? args[0] : null;
+    if (first) {
+      return {
+        playerTag: typeof first.playerTag === "string" ? first.playerTag : typeof first.tag === "string" ? first.tag : "",
+        discordId: typeof first.discordId === "string" ? first.discordId : "",
+        discordUsername: typeof first.discordUsername === "string" ? first.discordUsername : typeof first.username === "string" ? first.username : "",
+        force: first.force === true,
+      };
+    }
+    return {
+      playerTag: typeof args[0] === "string" ? args[0] : "",
+      discordId: typeof args[1] === "string" ? args[1] : "",
+      discordUsername: typeof args[2] === "string" ? args[2] : "",
+      force: args[3] === true || args[4] === true,
+    };
+  };
+
+  if (requestedMethod === "linkDiscordIdentityForPlayerTag") {
+    const parsed = readObjectOrPositional();
+    if (!parsed.playerTag.trim() || (!parsed.discordId.trim() && !parsed.discordUsername.trim())) {
+      return {
+        errorStatus: 400,
+        error: "playerTag and discordUsername or discordId are required.",
+      };
+    }
+    return {
+      method: "linkDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        discordId: parsed.discordId,
+        discordUsername: parsed.discordUsername,
+        force: parsed.force === true,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (requestedMethod === "syncDiscordIdentityForPlayerTag") {
+    const parsed = readObjectOrPositional();
+    if (!parsed.playerTag.trim() || (!parsed.discordId.trim() && !parsed.discordUsername.trim())) {
+      return {
+        errorStatus: 400,
+        error: "playerTag and discordUsername or discordId are required.",
+      };
+    }
+    return {
+      method: "syncDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        discordId: parsed.discordId,
+        discordUsername: parsed.discordUsername,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (requestedMethod === "deleteDiscordIdentityLink") {
+    const parsed = readObjectOrPositional();
+    const hasPlayerTag = !!parsed.playerTag.trim();
+    const hasDiscordUser = !!(parsed.discordId.trim() || parsed.discordUsername.trim());
+    if (hasPlayerTag === hasDiscordUser) {
+      return {
+        errorStatus: 400,
+        error: "Provide exactly one of playerTag or Discord user.",
+      };
+    }
+    return {
+      method: "deleteDiscordIdentityLink",
+      args: [{
+        playerTag: parsed.playerTag,
+        discordId: parsed.discordId,
+        discordUsername: parsed.discordUsername,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (requestedMethod === "deleteDiscordIdentityForPlayerTag") {
+    const parsed = readObjectOrPositional();
+    if (!parsed.playerTag.trim()) {
+      return {
+        errorStatus: 400,
+        error: "playerTag is required.",
+      };
+    }
+    return {
+      method: "deleteDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag: parsed.playerTag,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  const playerTag = body && typeof body.playerTag === "string" ? body.playerTag : "";
+  const discordId = body && typeof body.discordId === "string" ? body.discordId : "";
+  const discordUsername = body && typeof body.discordUsername === "string" ? body.discordUsername : "";
+  const action = String(body && (body.action || body.operation || body.linkAction) || "").trim().toLowerCase();
+  const isDelete = body && body.deleted === true || ["delete", "deleted", "remove", "removed", "unlink", "unlinked"].includes(action);
+
+  if (isDelete) {
+    if (!playerTag.trim()) {
+      return {
+        errorStatus: 400,
+        error: "playerTag is required.",
+      };
+    }
+    return {
+      method: "deleteDiscordIdentityForPlayerTag",
+      args: [{
+        playerTag,
+        botSecret: secret,
+      }],
+    };
+  }
+
+  if (!playerTag.trim() || (!discordId.trim() && !discordUsername.trim())) {
+    return {
+      errorStatus: 400,
+      error: "playerTag and discordUsername or discordId are required.",
+    };
+  }
+
+  return {
+    method: "syncDiscordIdentityForPlayerTag",
+    args: [{
+      playerTag,
+      discordId,
+      discordUsername,
+      botSecret: secret,
+    }],
+  };
+};
+
+// Handle Discord bot identity sync API.
+const handleDiscordBotSyncApi = async (request, env) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "authorization, content-type, x-discord-bot-secret",
+        "cache-control": "no-store",
+      },
+    });
+  }
+  if (method !== "POST") {
+    return jsonResponse(405, {
+      ok: false,
+      error: "Method not allowed. Use POST.",
+    });
+  }
+
+  const secret = readDiscordBotSecret(request);
+  if (!secret) {
+    return jsonResponse(401, {
+      ok: false,
+      error: "Missing Discord bot secret.",
+    });
+  }
+
+  let body = null;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return jsonResponse(400, {
+      ok: false,
+      error: "Invalid JSON payload.",
+    });
+  }
+
+  const upstreamCall = buildDiscordBotSyncUpstreamCall(body, secret);
+  if (upstreamCall.error) {
+    return jsonResponse(400, {
+      ok: false,
+      error: upstreamCall.error,
+    });
+  }
+
+  const execUrl = resolveAppsScriptExecUrl(env);
+  if (!execUrl) {
+    return jsonResponse(500, {
+      ok: false,
+      error: "Apps Script URL is not configured.",
+    });
+  }
+
+  try {
+    const upstreamBody = JSON.stringify({
+      method: upstreamCall.method,
+      args: upstreamCall.args,
+    });
+    const buildUpstreamRequest = (url) => fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: upstreamBody,
+    });
+
+    let upstream = await buildUpstreamRequest(execUrl);
+    let text = await upstream.text();
+    let contentType =
+      upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    const fallbackExecUrl = resolveFallbackAppsScriptExecUrl();
+    if (
+      fallbackExecUrl &&
+      fallbackExecUrl !== execUrl &&
+      shouldRetryAppsScriptFallback(upstream, text, contentType)
+    ) {
+      upstream = await buildUpstreamRequest(fallbackExecUrl);
+      text = await upstream.text();
+      contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    }
+
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": contentType,
+        "cache-control": "no-store",
+      },
+    });
+  } catch (err) {
+    return jsonResponse(502, {
+      ok: false,
+      error: err && err.message ? err.message : "Upstream request failed.",
+    });
+  }
+};
+
+// Resolve the R2 data bucket binding.
+const resolveRosterDataBucket = (envRaw) => {
+  const env = envRaw && typeof envRaw === "object" ? envRaw : {};
+  return env.ROSTER_DATA || env.ROSTER_PUBLIC_DATA || null;
+};
+
+// Decode a slash path safely.
+const decodePathSegments = (pathRaw) => {
+  const path = String(pathRaw == null ? "" : pathRaw);
+  if (!path) return "";
+  const parts = path.split("/");
+  const decoded = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part) continue;
+    decoded.push(decodeURIComponent(part));
+  }
+  return decoded.join("/");
+};
+
+// Normalize a logical data object path.
+const normalizeDataObjectPath = (pathRaw) => {
+  let path = String(pathRaw == null ? "" : pathRaw)
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^[\/]+|[\/]+$/g, "");
+  if (!path) throw new Error("Data object path is required.");
+  path = path.replace(/\.json$/i, "");
+  const parts = path.split("/").filter((part) => part);
+  if (!parts.length) throw new Error("Data object path is required.");
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (part === "." || part === ".." || part.includes("..")) {
+      throw new Error("Invalid data object path.");
+    }
+    if (/[\u0000-\u001F\u007F]/.test(part)) {
+      throw new Error("Invalid data object path.");
+    }
+  }
+  return parts.join("/") + ".json";
+};
+
+// Normalize scope.
+const normalizeDataScope = (scopeRaw) => {
+  const scope = String(scopeRaw == null ? "" : scopeRaw).trim().toLowerCase();
+  if (scope === "bot" || scope === "bot-data") return "bot";
+  if (scope === "public" || scope === "public-data" || !scope) return "public";
+  throw new Error("Invalid data scope.");
+};
+
+// Build an R2 key for one data object.
+const buildDataObjectKey = (scopeRaw, pathRaw) => {
+  const scope = normalizeDataScope(scopeRaw);
+  const path = normalizeDataObjectPath(pathRaw);
+  return (scope === "bot" ? BOT_DATA_R2_PREFIX : PUBLIC_DATA_R2_PREFIX) + "/" + path;
+};
+
+// Read route-relative data path.
+const readDataRoutePath = (pathnameRaw, prefixRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw);
+  const prefix = String(prefixRaw == null ? "" : prefixRaw);
+  let relative = pathname.slice(prefix.length).replace(/^\/+/, "");
+  relative = decodePathSegments(relative);
+  return relative;
+};
+
+// Return cache policy by scope and logical path.
+const getDataObjectCacheControl = (scopeRaw, logicalPathRaw) => {
+  const scope = normalizeDataScope(scopeRaw);
+  const path = String(logicalPathRaw == null ? "" : logicalPathRaw).replace(/\.json$/i, "");
+  if (scope === "bot") return "private, max-age=30";
+  if (path.startsWith("activeVersions/")) return "public, max-age=31536000, immutable";
+  if (path === "activePublished/currentVersionId" || path === "activePublished/currentManifest") {
+    return "public, max-age=30, stale-while-revalidate=120";
+  }
+  return "public, max-age=30, stale-while-revalidate=120";
+};
+
+// Return CORS headers for public data routes.
+const publicDataCorsHeaders = () => ({
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, HEAD, OPTIONS",
+  "access-control-allow-headers": "if-none-match, content-type",
+  "access-control-max-age": "86400",
+});
+
+// Return CORS headers for publish route.
+const publishCorsHeaders = () => ({
+  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type, x-discord-bot-secret, x-roster-publish-secret",
+  "cache-control": "no-store",
+});
+
+// Return whether an If-None-Match header matches an object ETag.
+const requestEtagMatches = (request, etagRaw) => {
+  const etag = String(etagRaw == null ? "" : etagRaw).trim();
+  if (!etag) return false;
+  const header = String(request.headers.get("if-none-match") || "").trim();
+  if (!header) return false;
+  if (header === "*") return true;
+  return header.split(",").map((part) => part.trim()).includes(etag);
+};
+
+// Handle R2 public/bot health.
+const handleDataHealth = async (request, env, scopeRaw) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: scopeRaw === "public" ? publicDataCorsHeaders() : { "cache-control": "no-store" },
+    });
+  }
+  if (method !== "GET" && method !== "HEAD") {
+    return jsonResponse(405, { ok: false, error: "Method not allowed. Use GET." });
+  }
+
+  if (normalizeDataScope(scopeRaw) === "bot") {
+    const auth = await verifyRequestSecret(request, resolveBotDataSecret(env), "Bot data secret");
+    if (!auth.ok) return auth.response;
+  }
+
+  const bucket = resolveRosterDataBucket(env);
+  if (!bucket || typeof bucket.get !== "function") {
+    return jsonResponse(503, { ok: false, error: "Roster data bucket is not configured." });
+  }
+
+  const pointerKey = buildDataObjectKey("public", "activePublished/currentVersionId");
+  const pointer = await bucket.get(pointerKey);
+  let currentVersionId = "";
+  if (pointer) {
+    try {
+      currentVersionId = String(JSON.parse(await pointer.text()) || "").trim();
+    } catch (err) {
+      currentVersionId = "";
+    }
+  }
+  const response = jsonResponse(200, {
+    ok: true,
+    scope: normalizeDataScope(scopeRaw),
+    bucketConfigured: true,
+    currentVersionId,
+    hasCurrentVersion: !!currentVersionId,
+  }, scopeRaw === "public" ? publicDataCorsHeaders() : {});
+  if (method === "HEAD") return new Response(null, { status: response.status, headers: response.headers });
+  return response;
+};
+
+// Handle R2 data object read.
+const handleDataRead = async (request, env, url, scopeRaw) => {
+  const scope = normalizeDataScope(scopeRaw);
+  const method = String(request.method || "").toUpperCase();
+  const cors = scope === "public" ? publicDataCorsHeaders() : {};
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: cors });
+  }
+  if (method !== "GET" && method !== "HEAD") {
+    return jsonResponse(405, { ok: false, error: "Method not allowed. Use GET." }, cors);
+  }
+
+  if (scope === "bot") {
+    const auth = await verifyRequestSecret(request, resolveBotDataSecret(env), "Bot data secret");
+    if (!auth.ok) return auth.response;
+  }
+
+  const relativePath = readDataRoutePath(
+    url.pathname,
+    scope === "bot" ? BOT_DATA_ROUTE_PREFIX : PUBLIC_DATA_ROUTE_PREFIX
+  );
+  if (!relativePath || relativePath === "health") {
+    return handleDataHealth(request, env, scope);
+  }
+
+  let objectPath = "";
+  let key = "";
+  try {
+    objectPath = normalizeDataObjectPath(relativePath);
+    key = buildDataObjectKey(scope, objectPath);
+  } catch (err) {
+    return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid data path." }, cors);
+  }
+
+  const bucket = resolveRosterDataBucket(env);
+  if (!bucket || typeof bucket.get !== "function") {
+    return jsonResponse(503, { ok: false, error: "Roster data bucket is not configured." }, cors);
+  }
+
+  const object = await bucket.get(key);
+  if (!object) {
+    return jsonResponse(404, {
+      ok: false,
+      error: "Data object not found.",
+      path: objectPath.replace(/\.json$/i, ""),
+    }, Object.assign({}, cors, { "cache-control": "no-store" }));
+  }
+
+  const etag = object.httpEtag || object.etag || "";
+  const headers = new Headers(cors);
+  headers.set("content-type", object.httpMetadata && object.httpMetadata.contentType || "application/json; charset=utf-8");
+  headers.set("cache-control", getDataObjectCacheControl(scope, objectPath));
+  if (etag) headers.set("etag", etag);
+  if (requestEtagMatches(request, etag)) {
+    return new Response(null, { status: 304, headers });
+  }
+  if (method === "HEAD") {
+    return new Response(null, { status: 200, headers });
+  }
+  return new Response(object.body, { status: 200, headers });
+};
+
+// Parse publish request body.
+const readPublishBody = async (request) => {
+  let body = null;
+  try {
+    body = await request.json();
+  } catch (err) {
+    throw new Error("Invalid JSON payload.");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("Publish payload must be an object.");
+  }
+  return body;
+};
+
+// Read an object payload from a publish entry.
+const readPublishEntryPayload = (entry) => {
+  if (Object.prototype.hasOwnProperty.call(entry, "payload")) return entry.payload;
+  if (Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
+  if (Object.prototype.hasOwnProperty.call(entry, "json")) return entry.json;
+  throw new Error("Publish object payload is required.");
+};
+
+// Prepare one publish object.
+const normalizePublishObject = (entryRaw, defaultScopeRaw, publishedAt) => {
+  const entry = entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw) ? entryRaw : null;
+  if (!entry) throw new Error("Each publish object must be an object.");
+  const scope = normalizeDataScope(entry.scope || defaultScopeRaw);
+  const path = normalizeDataObjectPath(entry.path || entry.key || entry.name);
+  const payload = readPublishEntryPayload(entry);
+  return {
+    scope,
+    path,
+    key: buildDataObjectKey(scope, path),
+    payloadText: JSON.stringify(payload),
+    cacheControl: String(entry.cacheControl || getDataObjectCacheControl(scope, path)).trim(),
+    contentType: String(entry.contentType || "application/json; charset=utf-8").trim(),
+    publishedAt,
+  };
+};
+
+// Prepare one delete object.
+const normalizeDeleteObject = (entryRaw, defaultScopeRaw) => {
+  const entry = entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw)
+    ? entryRaw
+    : { path: entryRaw };
+  const scope = normalizeDataScope(entry.scope || defaultScopeRaw);
+  const path = normalizeDataObjectPath(entry.path || entry.key || entry.name);
+  return {
+    scope,
+    path,
+    key: buildDataObjectKey(scope, path),
+  };
+};
+
+// Handle internal Apps Script -> R2 publish.
+const handleDataPublish = async (request, env) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: publishCorsHeaders() });
+  }
+  if (method !== "POST") {
+    return jsonResponse(405, { ok: false, error: "Method not allowed. Use POST." }, publishCorsHeaders());
+  }
+
+  const auth = await verifyRequestSecret(request, resolvePublishSecret(env), "Roster data publish secret");
+  if (!auth.ok) return auth.response;
+
+  const bucket = resolveRosterDataBucket(env);
+  if (!bucket || typeof bucket.put !== "function" || typeof bucket.delete !== "function") {
+    return jsonResponse(503, { ok: false, error: "Roster data bucket is not configured." });
+  }
+
+  let body = null;
+  try {
+    body = await readPublishBody(request);
+  } catch (err) {
+    return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid publish payload." });
+  }
+
+  const defaultScope = normalizeDataScope(body.scope || "public");
+  const publishedAt = String(body.publishedAt || new Date().toISOString());
+  const objectsRaw = Array.isArray(body.objects) ? body.objects : [];
+  const deletesRaw = Array.isArray(body.deletePaths) ? body.deletePaths : Array.isArray(body.deletes) ? body.deletes : [];
+  if (!objectsRaw.length && !deletesRaw.length) {
+    return jsonResponse(400, { ok: false, error: "At least one object or delete path is required." });
+  }
+  if (objectsRaw.length > 500 || deletesRaw.length > 500) {
+    return jsonResponse(413, { ok: false, error: "Publish batch is too large." });
+  }
+
+  let objects = [];
+  let deletes = [];
+  try {
+    objects = objectsRaw.map((entry) => normalizePublishObject(entry, defaultScope, publishedAt));
+    deletes = deletesRaw.map((entry) => normalizeDeleteObject(entry, defaultScope));
+  } catch (err) {
+    return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid publish object." });
+  }
+
+  try {
+    for (let i = 0; i < objects.length; i++) {
+      const item = objects[i];
+      await bucket.put(item.key, item.payloadText, {
+        httpMetadata: {
+          contentType: item.contentType,
+          cacheControl: item.cacheControl,
+        },
+        customMetadata: {
+          publishedAt: item.publishedAt,
+          scope: item.scope,
+          schema: "roster-public-data-v1",
+        },
+      });
+    }
+    for (let i = 0; i < deletes.length; i++) {
+      await bucket.delete(deletes[i].key);
+    }
+    return jsonResponse(200, {
+      ok: true,
+      publishedAt,
+      putCount: objects.length,
+      deleteCount: deletes.length,
+      scopes: Array.from(new Set(objects.concat(deletes).map((item) => item.scope))).sort(),
+    });
+  } catch (err) {
+    return jsonResponse(502, {
+      ok: false,
+      error: err && err.message ? err.message : "R2 publish failed.",
+    });
+  }
+};
+
+// Create an asset request.
+const createAssetRequest = (request, pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  if (!pathname) return request;
+  const rewrittenUrl = new URL(request.url);
+  rewrittenUrl.pathname = pathname;
+  return new Request(rewrittenUrl.toString(), request);
+};
+
+// Handle serve static asset.
+const serveStaticAsset = (request, env) => {
+  if (!env || !env.ASSETS || typeof env.ASSETS.fetch !== "function") {
+    return new Response("ASSETS binding is missing.", { status: 500 });
+  }
+  return env.ASSETS.fetch(request);
+};
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === DATA_PUBLISH_ROUTE || url.pathname === DATA_PUBLISH_ROUTE + "/") {
+      return handleDataPublish(request, env);
+    }
+    if (isRoutePrefixPath(url.pathname, PUBLIC_DATA_ROUTE_PREFIX)) {
+      return handleDataRead(request, env, url, "public");
+    }
+    if (isRoutePrefixPath(url.pathname, BOT_DATA_ROUTE_PREFIX)) {
+      return handleDataRead(request, env, url, "bot");
+    }
+    if (isAdminApiPath(url.pathname)) {
+      return handleAdminApi(request, env);
+    }
+    if (isDiscordBotSyncApiPath(url.pathname)) {
+      return handleDiscordBotSyncApi(request, env);
+    }
+    if (isAdminPageQuery(url)) {
+      return serveStaticAsset(createAssetRequest(request, "/console.html"), env, ctx);
+    }
+    if (isAdminPagePath(url.pathname)) {
+      return serveStaticAsset(createAssetRequest(request, "/console.html"), env, ctx);
+    }
+    if (isPublicRootPath(url.pathname)) {
+      return serveStaticAsset(createAssetRequest(request, "/index.html"), env, ctx);
+    }
+    return serveStaticAsset(request, env, ctx);
+  },
+};
