@@ -1,4 +1,4 @@
-// Cloudflare Worker routing, Apps Script fallback helpers, and R2 roster data plane.
+// Cloudflare Worker routing, Apps Script fallback helpers, and roster data plane.
 
 const FALLBACK_APPS_SCRIPT_EXEC_URL =
   "https://script.google.com/macros/s/AKfycbw6ASmNd5Ajn8p8dfN1d0I0GwG5agjMWjDCaa25umExFmV1_fxhvV3kcDLmoKNoC8Lnlw/exec";
@@ -6,8 +6,8 @@ const FALLBACK_APPS_SCRIPT_EXEC_URL =
 const PUBLIC_DATA_ROUTE_PREFIX = "/api/public-data";
 const BOT_DATA_ROUTE_PREFIX = "/api/bot-data";
 const DATA_PUBLISH_ROUTE = "/api/internal/public-data/publish";
-const PUBLIC_DATA_R2_PREFIX = "public-data";
-const BOT_DATA_R2_PREFIX = "bot-data";
+const PUBLIC_DATA_STORE_PREFIX = "public-data";
+const BOT_DATA_STORE_PREFIX = "bot-data";
 
 // Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
@@ -204,6 +204,14 @@ const sha256Bytes = async (valueRaw) => {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
 };
 
+// Convert bytes to lowercase hex.
+const bytesToHex = (bytesRaw) => {
+  const bytes = bytesRaw instanceof Uint8Array ? bytesRaw : new Uint8Array(bytesRaw || []);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+};
+
 // Constant-time compare for two non-empty secret strings.
 const constantTimeSecretEqual = async (leftRaw, rightRaw) => {
   const left = String(leftRaw == null ? "" : leftRaw);
@@ -218,7 +226,7 @@ const constantTimeSecretEqual = async (leftRaw, rightRaw) => {
   return diff === 0;
 };
 
-// Resolve the configured secret for protected R2 routes.
+// Resolve the configured secret for protected data routes.
 const resolveBotDataSecret = (envRaw) => {
   const env = envRaw && typeof envRaw === "object" ? envRaw : {};
   return String(
@@ -503,10 +511,95 @@ const handleDiscordBotSyncApi = async (request, env) => {
   }
 };
 
-// Resolve the R2 data bucket binding.
-const resolveRosterDataBucket = (envRaw) => {
+// Resolve the configured data store binding. Production uses KV; R2 remains
+// supported for accounts where it is enabled.
+const resolveRosterDataStore = (envRaw) => {
   const env = envRaw && typeof envRaw === "object" ? envRaw : {};
-  return env.ROSTER_DATA || env.ROSTER_PUBLIC_DATA || null;
+  if (env.ROSTER_DATA && typeof env.ROSTER_DATA.get === "function") {
+    return { kind: "r2", binding: env.ROSTER_DATA };
+  }
+  if (env.ROSTER_PUBLIC_DATA && typeof env.ROSTER_PUBLIC_DATA.get === "function") {
+    return { kind: "r2", binding: env.ROSTER_PUBLIC_DATA };
+  }
+  if (env.ROSTER_DATA_KV && typeof env.ROSTER_DATA_KV.get === "function") {
+    return { kind: "kv", binding: env.ROSTER_DATA_KV };
+  }
+  return null;
+};
+
+// Read one data object from R2 or KV.
+const getDataStoreObject = async (store, key) => {
+  if (!store || !store.binding) return null;
+  if (store.kind === "r2") {
+    return store.binding.get(key);
+  }
+  if (store.kind === "kv") {
+    if (typeof store.binding.getWithMetadata === "function") {
+      const result = await store.binding.getWithMetadata(key, "text");
+      if (!result || result.value == null) return null;
+      const metadata = result.metadata && typeof result.metadata === "object" ? result.metadata : {};
+      return {
+        body: result.value,
+        text: async () => result.value,
+        httpEtag: String(metadata.etag || ""),
+        etag: String(metadata.etag || ""),
+        httpMetadata: {
+          contentType: String(metadata.contentType || "application/json; charset=utf-8"),
+          cacheControl: String(metadata.cacheControl || ""),
+        },
+      };
+    }
+    const value = await store.binding.get(key, "text");
+    if (value == null) return null;
+    return {
+      body: value,
+      text: async () => value,
+      httpEtag: "",
+      etag: "",
+      httpMetadata: {
+        contentType: "application/json; charset=utf-8",
+        cacheControl: "",
+      },
+    };
+  }
+  return null;
+};
+
+// Put one data object into R2 or KV.
+const putDataStoreObject = async (store, key, valueText, metadataRaw) => {
+  if (!store || !store.binding) throw new Error("Roster data store is not configured.");
+  const metadata = metadataRaw && typeof metadataRaw === "object" ? metadataRaw : {};
+  if (store.kind === "r2") {
+    return store.binding.put(key, valueText, {
+      httpMetadata: {
+        contentType: metadata.contentType || "application/json; charset=utf-8",
+        cacheControl: metadata.cacheControl || "",
+      },
+      customMetadata: metadata.customMetadata || {},
+    });
+  }
+  if (store.kind === "kv") {
+    const etag = "\"" + bytesToHex(await sha256Bytes(valueText)) + "\"";
+    return store.binding.put(key, valueText, {
+      metadata: {
+        etag,
+        contentType: metadata.contentType || "application/json; charset=utf-8",
+        cacheControl: metadata.cacheControl || "",
+        publishedAt: metadata.customMetadata && metadata.customMetadata.publishedAt || "",
+        scope: metadata.customMetadata && metadata.customMetadata.scope || "",
+        schema: metadata.customMetadata && metadata.customMetadata.schema || "roster-public-data-v1",
+      },
+    });
+  }
+  throw new Error("Unsupported roster data store.");
+};
+
+// Delete one data object from R2 or KV.
+const deleteDataStoreObject = async (store, key) => {
+  if (!store || !store.binding || typeof store.binding.delete !== "function") {
+    throw new Error("Roster data store is not configured.");
+  }
+  return store.binding.delete(key);
 };
 
 // Decode a slash path safely.
@@ -553,11 +646,11 @@ const normalizeDataScope = (scopeRaw) => {
   throw new Error("Invalid data scope.");
 };
 
-// Build an R2 key for one data object.
+// Build a data-store key for one data object.
 const buildDataObjectKey = (scopeRaw, pathRaw) => {
   const scope = normalizeDataScope(scopeRaw);
   const path = normalizeDataObjectPath(pathRaw);
-  return (scope === "bot" ? BOT_DATA_R2_PREFIX : PUBLIC_DATA_R2_PREFIX) + "/" + path;
+  return (scope === "bot" ? BOT_DATA_STORE_PREFIX : PUBLIC_DATA_STORE_PREFIX) + "/" + path;
 };
 
 // Read route-relative data path.
@@ -606,7 +699,7 @@ const requestEtagMatches = (request, etagRaw) => {
   return header.split(",").map((part) => part.trim()).includes(etag);
 };
 
-// Handle R2 public/bot health.
+// Handle public/bot data health.
 const handleDataHealth = async (request, env, scopeRaw) => {
   const method = String(request.method || "").toUpperCase();
   if (method === "OPTIONS") {
@@ -624,13 +717,13 @@ const handleDataHealth = async (request, env, scopeRaw) => {
     if (!auth.ok) return auth.response;
   }
 
-  const bucket = resolveRosterDataBucket(env);
-  if (!bucket || typeof bucket.get !== "function") {
-    return jsonResponse(503, { ok: false, error: "Roster data bucket is not configured." });
+  const store = resolveRosterDataStore(env);
+  if (!store) {
+    return jsonResponse(503, { ok: false, error: "Roster data store is not configured." });
   }
 
   const pointerKey = buildDataObjectKey("public", "activePublished/currentVersionId");
-  const pointer = await bucket.get(pointerKey);
+  const pointer = await getDataStoreObject(store, pointerKey);
   let currentVersionId = "";
   if (pointer) {
     try {
@@ -642,7 +735,8 @@ const handleDataHealth = async (request, env, scopeRaw) => {
   const response = jsonResponse(200, {
     ok: true,
     scope: normalizeDataScope(scopeRaw),
-    bucketConfigured: true,
+    storeConfigured: true,
+    storeKind: store.kind,
     currentVersionId,
     hasCurrentVersion: !!currentVersionId,
   }, scopeRaw === "public" ? publicDataCorsHeaders() : {});
@@ -650,7 +744,7 @@ const handleDataHealth = async (request, env, scopeRaw) => {
   return response;
 };
 
-// Handle R2 data object read.
+// Handle data object read.
 const handleDataRead = async (request, env, url, scopeRaw) => {
   const scope = normalizeDataScope(scopeRaw);
   const method = String(request.method || "").toUpperCase();
@@ -684,12 +778,12 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
     return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid data path." }, cors);
   }
 
-  const bucket = resolveRosterDataBucket(env);
-  if (!bucket || typeof bucket.get !== "function") {
-    return jsonResponse(503, { ok: false, error: "Roster data bucket is not configured." }, cors);
+  const store = resolveRosterDataStore(env);
+  if (!store) {
+    return jsonResponse(503, { ok: false, error: "Roster data store is not configured." }, cors);
   }
 
-  const object = await bucket.get(key);
+  const object = await getDataStoreObject(store, key);
   if (!object) {
     return jsonResponse(404, {
       ok: false,
@@ -766,7 +860,7 @@ const normalizeDeleteObject = (entryRaw, defaultScopeRaw) => {
   };
 };
 
-// Handle internal Apps Script -> R2 publish.
+// Handle internal Apps Script -> data-store publish.
 const handleDataPublish = async (request, env) => {
   const method = String(request.method || "").toUpperCase();
   if (method === "OPTIONS") {
@@ -779,9 +873,9 @@ const handleDataPublish = async (request, env) => {
   const auth = await verifyRequestSecret(request, resolvePublishSecret(env), "Roster data publish secret");
   if (!auth.ok) return auth.response;
 
-  const bucket = resolveRosterDataBucket(env);
-  if (!bucket || typeof bucket.put !== "function" || typeof bucket.delete !== "function") {
-    return jsonResponse(503, { ok: false, error: "Roster data bucket is not configured." });
+  const store = resolveRosterDataStore(env);
+  if (!store) {
+    return jsonResponse(503, { ok: false, error: "Roster data store is not configured." });
   }
 
   let body = null;
@@ -814,11 +908,9 @@ const handleDataPublish = async (request, env) => {
   try {
     for (let i = 0; i < objects.length; i++) {
       const item = objects[i];
-      await bucket.put(item.key, item.payloadText, {
-        httpMetadata: {
-          contentType: item.contentType,
-          cacheControl: item.cacheControl,
-        },
+      await putDataStoreObject(store, item.key, item.payloadText, {
+        contentType: item.contentType,
+        cacheControl: item.cacheControl,
         customMetadata: {
           publishedAt: item.publishedAt,
           scope: item.scope,
@@ -827,7 +919,7 @@ const handleDataPublish = async (request, env) => {
       });
     }
     for (let i = 0; i < deletes.length; i++) {
-      await bucket.delete(deletes[i].key);
+      await deleteDataStoreObject(store, deletes[i].key);
     }
     return jsonResponse(200, {
       ok: true,
@@ -839,7 +931,7 @@ const handleDataPublish = async (request, env) => {
   } catch (err) {
     return jsonResponse(502, {
       ok: false,
-      error: err && err.message ? err.message : "R2 publish failed.",
+      error: err && err.message ? err.message : "Roster data publish failed.",
     });
   }
 };

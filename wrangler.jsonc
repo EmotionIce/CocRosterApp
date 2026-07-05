@@ -13,11 +13,11 @@
                    "html_handling":  "none",
                    "run_worker_first":  true
                },
-    "r2_buckets":  [
-                       {
-                           "binding":  "ROSTER_DATA",
-                           "bucket_name":  "turtlecoc-roster-data"
-                       }
-                   ],
+    "kv_namespaces":  [
+                          {
+                              "binding":  "ROSTER_DATA_KV",
+                              "id":  "bcbcdad929d64833a79129afc2ee7caf"
+                          }
+                      ],
     "logpush":  false
 }
