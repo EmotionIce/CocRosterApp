@@ -10,6 +10,7 @@
     "assets":  {
                    "directory":  "./cloudflarePages",
                    "binding":  "ASSETS",
+                   "html_handling":  "none",
                    "run_worker_first":  true
                },
     "logpush":  false

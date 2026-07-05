@@ -84,6 +84,12 @@ const isAdminPageQuery = (urlRaw) => {
   return page === "admin";
 };
 
+// Return whether public root path.
+const isPublicRootPath = (pathnameRaw) => {
+  const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
+  return pathname === "" || pathname === "/";
+};
+
 // Handle admin API.
 const handleAdminApi = async (request, env) => {
   const method = String(request.method || "").toUpperCase();
@@ -436,6 +442,9 @@ export default {
     }
     if (isAdminPagePath(url.pathname)) {
       return serveStaticAsset(createAssetRequest(request, "/console.html"), env, ctx);
+    }
+    if (isPublicRootPath(url.pathname)) {
+      return serveStaticAsset(createAssetRequest(request, "/index.html"), env, ctx);
     }
     return serveStaticAsset(request, env, ctx);
   },
