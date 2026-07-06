@@ -3356,6 +3356,19 @@ function filterCwlAggregateToRegisteredParticipants_(eventRaw, aggregateRaw) {
 	};
 }
 
+// Stringify JSON-like values with deterministic object key order.
+function stringifySeasonEventCanonicalJson_(valueRaw) {
+	function canonicalize(value) {
+		if (Array.isArray(value)) return value.map((item) => canonicalize(item));
+		if (!isSeasonEventPlainObject_(value)) return value;
+		const out = {};
+		const keys = Object.keys(value).sort();
+		for (let i = 0; i < keys.length; i++) out[keys[i]] = canonicalize(value[keys[i]]);
+		return out;
+	}
+	return JSON.stringify(canonicalize(valueRaw == null ? null : valueRaw));
+}
+
 // Rewrite stored CWL season-event aggregates through the current stat schema.
 function migrateCwlSeasonEventDefenseStarsStorage_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -3382,8 +3395,8 @@ function migrateCwlSeasonEventDefenseStarsStorage_(optionsRaw) {
 			next.kind = kind;
 			next.scoreSchema = "cwl-offense-stars-defense-stars-v2";
 			if (event) next.rankedTags = filterCwlAggregateToRegisteredParticipants_(event, next).rankedTags;
-			const beforeJson = JSON.stringify(aggregateRaw);
-			const afterJson = JSON.stringify(next);
+			const beforeJson = stringifySeasonEventCanonicalJson_(aggregateRaw);
+			const afterJson = stringifySeasonEventCanonicalJson_(next);
 			if (beforeJson === afterJson) continue;
 			changed.push({
 				eventId: eventId,

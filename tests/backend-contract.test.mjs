@@ -3043,12 +3043,18 @@ test("CWL defense-stars migration backfills stored aggregates", () => {
   const result = backend.migrateCwlSeasonEventDefenseStarsStorage_({
     nowIso: "2026-07-06T00:00:00.000Z",
   });
+  const second = backend.migrateCwlSeasonEventDefenseStarsStorage_({
+    dryRun: true,
+    nowIso: "2026-07-06T00:01:00.000Z",
+  });
   const stored = backend.decodeFirebaseObjectKeysRecursive_(
     backend.__getFirebaseDb().events.seasonEvents.cwlAggregates.byEvent[encodedEventId].live,
   );
 
   assert.equal(result.changedAggregateCount, 1);
   assert.equal(result.writtenAggregateCount, 1);
+  assert.equal(second.changedAggregateCount, 0);
+  assert.equal(second.writtenAggregateCount, 0);
   assert.equal(stored.scoreSchema, "cwl-offense-stars-defense-stars-v2");
   assert.equal(stored.byTag["#AAA"].defenseStarsConceded, 3);
   assert.equal(stored.byTag["#AAA"].bestStarsConceded, 3);
