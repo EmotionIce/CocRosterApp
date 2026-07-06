@@ -339,12 +339,15 @@ function countMapKeys_(mapRaw) {
 // Count errors captured by AutoRefreshSnapshot endpoint maps.
 function countAutoRefreshSnapshotErrors_(snapshotRaw) {
 	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+	const cwlCoordinator = snapshot.cwlCoordinator && typeof snapshot.cwlCoordinator === "object" ? snapshot.cwlCoordinator : {};
+	const cwlRuntimeState = cwlCoordinator.runtimeState && typeof cwlCoordinator.runtimeState === "object" ? cwlCoordinator.runtimeState : {};
 	return (
 		countMapKeys_(snapshot.clanMembersErrorByTag) +
 		countMapKeys_(snapshot.currentRegularWarErrorByClanTag) +
 		countMapKeys_(snapshot.leaguegroupErrorByClanTag) +
 		countMapKeys_(snapshot.cwlWarErrorByTag) +
-		countMapKeys_(snapshot.regularWarLogErrorByClanTag)
+		countMapKeys_(snapshot.regularWarLogErrorByClanTag) +
+		(cwlRuntimeState.discoveryIncomplete ? 1 : 0)
 	);
 }
 
@@ -594,44 +597,27 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 	const cwlSeasonEventNeed = typeof getCurrentCwlSeasonEventRefreshNeed_ === "function" ? getCurrentCwlSeasonEventRefreshNeed_() : { needsCwl: false };
 	const basePlan = buildAutoRefreshSnapshotClanRequestPlan_(sourceRosters, { cwlSeasonEventNeed: cwlSeasonEventNeed });
 
-	// Wave one covers member and war-index endpoints keyed only by clan tag.
+	// Wave one covers member and regular-war entry-point endpoints keyed only by clan tag.
 	const waveOneStartMs = Date.now();
-	const waveOnePrefetch = buildAutoRefreshSnapshotWaveOne_(basePlan.connectedClanTags, basePlan.currentWarClanTags, basePlan.cwlClanTags, prefetchOptions);
+	const waveOnePrefetch = buildAutoRefreshSnapshotWaveOne_(basePlan.connectedClanTags, basePlan.currentWarClanTags, [], prefetchOptions);
 	const waveOneMs = Math.max(0, Date.now() - waveOneStartMs);
 
-	// Second wave: resolve war tags from league groups and prefetch raw CWL wars once.
-	const cwlWarTagSet = {};
-	const cwlRosterClanTagSet = {};
-	for (let i = 0; i < basePlan.cwlRosterClanTags.length; i++) cwlRosterClanTagSet[normalizeTag_(basePlan.cwlRosterClanTags[i])] = true;
-	const cwlEventState = String((cwlSeasonEventNeed && cwlSeasonEventNeed.state) || "").trim();
-	const leaguegroupTags = Object.keys(waveOnePrefetch.leaguegroupRawByClanTag);
-	for (let i = 0; i < leaguegroupTags.length; i++) {
-		const clanTag = leaguegroupTags[i];
-		if (Object.prototype.hasOwnProperty.call(waveOnePrefetch.leaguegroupErrorByClanTag, clanTag)) continue;
-		const leaguegroup = waveOnePrefetch.leaguegroupRawByClanTag[clanTag];
-		const shouldUseForRoster = cwlRosterClanTagSet[normalizeTag_(clanTag)] === true;
-		const shouldUseForEvent =
-			cwlSeasonEventNeed &&
-			cwlSeasonEventNeed.needsCwl === true &&
-			(cwlEventState === "active" || cwlEventState === "finalizing" || (cwlEventState === "waiting" && isCwlLeagueGroupPotentiallyLive_(leaguegroup)));
-		if (!shouldUseForRoster && !shouldUseForEvent) continue;
-		// League groups are only an index; actual lineup data still lives on war endpoints.
-		const warTags = extractLeagueGroupWarTags_(leaguegroup);
-		for (let j = 0; j < warTags.length; j++) {
-			const warTag = normalizeTag_(warTags[j]);
-			if (!warTag || warTag === "#0") continue;
-			cwlWarTagSet[warTag] = true;
-		}
-	}
-	const knownEventWarTags = Array.isArray(cwlSeasonEventNeed && cwlSeasonEventNeed.knownWarTags) ? cwlSeasonEventNeed.knownWarTags : [];
-	for (let i = 0; i < knownEventWarTags.length; i++) {
-		const warTag = normalizeTag_(knownEventWarTags[i]);
-		if (warTag && warTag !== "#0") cwlWarTagSet[warTag] = true;
-	}
-	const cwlWarTags = Object.keys(cwlWarTagSet);
-	const cwlWarWaveStartMs = Date.now();
-	const cwlWarPrefetch = prefetchCwlWarRawByTag_(cwlWarTags, prefetchOptions);
-	const cwlWarWaveMs = Math.max(0, Date.now() - cwlWarWaveStartMs);
+	// CWL coordinator owns league-group discovery and relevant-war polling. It
+	// stores only compact runtime state and exposes narrow per-clan views.
+	const cwlCoordinatorStartMs = Date.now();
+	const cwlCoordinator =
+		typeof buildCwlCoordinatorResult_ === "function"
+			? buildCwlCoordinatorResult_(rosterData, {
+				sourceRosters: sourceRosters,
+				nowIso: capturedAt,
+				source: "refresh-all-snapshot",
+			})
+			: { ok: true, status: "unavailable", requestCounts: { leagueGroup: 0, cwlWar: 0, total: 0 } };
+	const cwlCoordinatorMs = Math.max(0, Date.now() - cwlCoordinatorStartMs);
+	const cwlCoordinatorRequestCounts =
+		cwlCoordinator && cwlCoordinator.requestCounts && typeof cwlCoordinator.requestCounts === "object"
+			? cwlCoordinator.requestCounts
+			: {};
 
 	const regularWarLogClanTagSet = {};
 	for (let i = 0; i < sourceRosters.length; i++) {
@@ -658,16 +644,16 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 	const requestCounts = {
 		members: waveOnePrefetch.requestCounts.members,
 		currentWar: waveOnePrefetch.requestCounts.currentWar,
-		leagueGroup: waveOnePrefetch.requestCounts.leagueGroup,
-		cwlWar: cwlWarPrefetch.requestCount,
+		leagueGroup: toNonNegativeInt_(cwlCoordinatorRequestCounts.leagueGroup),
+		cwlWar: toNonNegativeInt_(cwlCoordinatorRequestCounts.cwlWar),
 		regularWarLog: regularWarLogPrefetch.requestCount,
-		total: waveOnePrefetch.requestCounts.total + cwlWarPrefetch.requestCount + regularWarLogPrefetch.requestCount,
+		total: waveOnePrefetch.requestCounts.total + toNonNegativeInt_(cwlCoordinatorRequestCounts.total) + regularWarLogPrefetch.requestCount,
 	};
 	const batchCounts = {
 		waveOne: waveOnePrefetch.batchCount,
-		cwlWarWave: cwlWarPrefetch.batchCount,
+		cwlWarWave: 0,
 		regularWarLogWave: regularWarLogPrefetch.batchCount,
-		total: waveOnePrefetch.batchCount + cwlWarPrefetch.batchCount + regularWarLogPrefetch.batchCount,
+		total: waveOnePrefetch.batchCount + regularWarLogPrefetch.batchCount,
 	};
 	const snapshot = {
 		capturedAt: capturedAt,
@@ -676,7 +662,13 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 			currentWarClanTags: basePlan.currentWarClanTags,
 			cwlClanTags: basePlan.cwlClanTags,
 			cwlRosterClanTags: basePlan.cwlRosterClanTags,
-			cwlWarTags: cwlWarTags,
+			cwlWarTags:
+				cwlCoordinator &&
+				cwlCoordinator.eventAggregateResult &&
+				cwlCoordinator.eventAggregateResult.aggregate &&
+				Array.isArray(cwlCoordinator.eventAggregateResult.aggregate.warTags)
+					? cwlCoordinator.eventAggregateResult.aggregate.warTags
+					: [],
 			regularWarLogClanTags: regularWarLogClanTags,
 			cwlSeasonEventNeed: cwlSeasonEventNeed,
 		},
@@ -684,15 +676,22 @@ function buildAutoRefreshSnapshot_(rosterDataRaw, optionsRaw) {
 		clanMembersErrorByTag: waveOnePrefetch.clanMembersErrorByTag,
 		currentRegularWarByClanTag: waveOnePrefetch.currentRegularWarByClanTag,
 		currentRegularWarErrorByClanTag: waveOnePrefetch.currentRegularWarErrorByClanTag,
-		leaguegroupRawByClanTag: waveOnePrefetch.leaguegroupRawByClanTag,
-		leaguegroupErrorByClanTag: waveOnePrefetch.leaguegroupErrorByClanTag,
-		cwlWarRawByTag: cwlWarPrefetch.rawByWarTag,
-		cwlWarErrorByTag: cwlWarPrefetch.errorByWarTag,
+		leaguegroupRawByClanTag:
+			cwlCoordinator && cwlCoordinator.leaguegroupRawByClanTag && typeof cwlCoordinator.leaguegroupRawByClanTag === "object"
+				? cwlCoordinator.leaguegroupRawByClanTag
+				: {},
+		leaguegroupErrorByClanTag:
+			cwlCoordinator && cwlCoordinator.leaguegroupErrorByClanTag && typeof cwlCoordinator.leaguegroupErrorByClanTag === "object"
+				? cwlCoordinator.leaguegroupErrorByClanTag
+				: {},
+		cwlWarRawByTag: {},
+		cwlWarErrorByTag: {},
+		cwlCoordinator: cwlCoordinator,
 		regularWarLogByClanTag: regularWarLogPrefetch.entriesByClanTag,
 		regularWarLogErrorByClanTag: regularWarLogPrefetch.errorByClanTag,
 		timingMs: {
 			waveOne: waveOneMs,
-			cwlWarWave: cwlWarWaveMs,
+			cwlWarWave: cwlCoordinatorMs,
 			regularWarLogWave: regularWarLogWaveMs,
 			total: Math.max(0, Date.now() - snapshotStartMs),
 		},
@@ -772,6 +771,28 @@ function countRosterPoolSlotsForTransition_(rosterRaw) {
 function resolveLeagueGroupForAutomaticTransition_(clanTagRaw, optionsRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const cwlView = typeof getCwlCoordinatorClanViewFromOptions_ === "function" ? getCwlCoordinatorClanViewFromOptions_(options, clanTag) : null;
+	if (cwlView && typeof cwlView === "object") {
+		const groupStates = Array.isArray(cwlView.groupStates) ? cwlView.groupStates : [];
+		const hasGroup = groupStates.length > 0;
+		return {
+			ok: hasGroup && !(cwlView.freshness && cwlView.freshness.discoveryIncomplete),
+			source: "cwlCoordinator",
+			state: hasGroup ? "inwar" : "",
+			rawState: hasGroup ? "inWar" : "",
+			clanFound: hasGroup,
+			isMalformed: false,
+			leaguegroup: {
+				state: hasGroup ? "inwar" : "",
+				clanFound: hasGroup,
+				isMalformed: false,
+				warTags: cwlView.currentWar && cwlView.currentWar.warTag ? [cwlView.currentWar.warTag] : [],
+				season: String(cwlView.season || ""),
+			},
+			statusCode: 0,
+			errorMessage: "",
+		};
+	}
 	const rawByClanTag =
 		options.prefetchedLeaguegroupRawByClanTag && typeof options.prefetchedLeaguegroupRawByClanTag === "object" ? options.prefetchedLeaguegroupRawByClanTag : {};
 	const errorByClanTag =
@@ -1124,6 +1145,8 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object" ? options.prefetchedLeaguegroupErrorByClanTag : {},
 		prefetchedCwlWarRawByTag: options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {},
 		prefetchedCwlWarErrorByTag: options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {},
+		cwlCoordinatorResult: options.cwlCoordinatorResult && typeof options.cwlCoordinatorResult === "object" ? options.cwlCoordinatorResult : null,
+		cwlCoordinatorClanView: options.cwlCoordinatorClanView && typeof options.cwlCoordinatorClanView === "object" ? options.cwlCoordinatorClanView : null,
 		prefetchedRegularWarLogByClanTag:
 			options.prefetchedRegularWarLogByClanTag && typeof options.prefetchedRegularWarLogByClanTag === "object" ? options.prefetchedRegularWarLogByClanTag : {},
 		prefetchedRegularWarLogErrorByClanTag:
@@ -1169,6 +1192,28 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 	const initialRoster = getCurrentRoster();
 	const rosterName = String((initialRoster && initialRoster.title) || "").trim() || rosterId;
 	const initialTrackingMode = getCurrentTrackingMode();
+	if (
+		initialRoster &&
+		initialTrackingMode === "cwl" &&
+		!pipelinePrefetchOptions.autoRefreshSnapshotMode &&
+		!pipelinePrefetchOptions.cwlCoordinatorResult &&
+		typeof buildCwlCoordinatorResult_ === "function"
+	) {
+		const coordinator = buildCwlCoordinatorResult_(rosterData, {
+			sourceRosters: [initialRoster],
+			source: "single-roster-refresh",
+		});
+		pipelinePrefetchOptions.cwlCoordinatorResult = coordinator;
+		const coordinatorOptions = typeof buildCwlCoordinatorPipelineOptions_ === "function" ? buildCwlCoordinatorPipelineOptions_(coordinator) : {};
+		pipelinePrefetchOptions.prefetchedLeaguegroupRawByClanTag =
+			coordinatorOptions.prefetchedLeaguegroupRawByClanTag && typeof coordinatorOptions.prefetchedLeaguegroupRawByClanTag === "object"
+				? coordinatorOptions.prefetchedLeaguegroupRawByClanTag
+				: pipelinePrefetchOptions.prefetchedLeaguegroupRawByClanTag;
+		pipelinePrefetchOptions.prefetchedLeaguegroupErrorByClanTag =
+			coordinatorOptions.prefetchedLeaguegroupErrorByClanTag && typeof coordinatorOptions.prefetchedLeaguegroupErrorByClanTag === "object"
+				? coordinatorOptions.prefetchedLeaguegroupErrorByClanTag
+				: pipelinePrefetchOptions.prefetchedLeaguegroupErrorByClanTag;
+	}
 	// Step labels are intentionally user-facing because they flow into issue summaries.
 	const poolStepLabel = "sync clan roster pool";
 	const modeTransitionStepLabel = "detect tracking mode";
@@ -1480,6 +1525,7 @@ function buildAutoRefreshPipelineSnapshotOptions_(snapshotRaw) {
 			snapshot.leaguegroupErrorByClanTag && typeof snapshot.leaguegroupErrorByClanTag === "object" ? snapshot.leaguegroupErrorByClanTag : {},
 		prefetchedCwlWarRawByTag: snapshot.cwlWarRawByTag && typeof snapshot.cwlWarRawByTag === "object" ? snapshot.cwlWarRawByTag : {},
 		prefetchedCwlWarErrorByTag: snapshot.cwlWarErrorByTag && typeof snapshot.cwlWarErrorByTag === "object" ? snapshot.cwlWarErrorByTag : {},
+		cwlCoordinatorResult: snapshot.cwlCoordinator && typeof snapshot.cwlCoordinator === "object" ? snapshot.cwlCoordinator : null,
 		prefetchedRegularWarLogByClanTag:
 			snapshot.regularWarLogByClanTag && typeof snapshot.regularWarLogByClanTag === "object" ? snapshot.regularWarLogByClanTag : {},
 		prefetchedRegularWarLogErrorByClanTag:

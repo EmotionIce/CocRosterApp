@@ -346,6 +346,9 @@ const setupQueueRun = (backend, sourceDataRaw, options = {}) => {
   return { data, runId, rosterIds, sourceFingerprint, tasks, taskIds, current };
 };
 
+const firstRosterTask = (tasks) => tasks.find((task) => task.type === "roster");
+const rosterTaskById = (tasks, rosterId) => tasks.find((task) => task.type === "roster" && task.rosterId === rosterId);
+
 test("scheduleAutoRefreshJobResume keeps exactly one resume trigger", () => {
   const backend = loadBackend();
 
@@ -567,8 +570,10 @@ test("queue coordinator stores tiny current state and sharded run data", () => {
 
   assert.equal(result.inProgress, true);
   assert.equal(current.kind, "auto-refresh-queue");
-  assert.equal(current.taskCount, 3);
+  assert.equal(current.taskCount, 4);
   assert.equal(current.rosterIds.length, 2);
+  assert.equal(backend.readAutoRefreshTask_(current.runId, current.taskIds[0]).type, "cwlCoordinator");
+  assert.equal(backend.readAutoRefreshTask_(current.runId, current.taskIds[1]).type, "roster");
   assert.equal(Object.prototype.hasOwnProperty.call(current, "rosterDataDraft"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(current, "autoRefreshSnapshot"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(current, "ownershipSnapshot"), false);
@@ -1048,7 +1053,7 @@ test("queue worker loads source metrics for departed prep-out players before poo
     };
   };
 
-  backend.executeAutoRefreshRosterTask_(current, tasks[0], Date.now());
+  backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
   const activeRosterShard = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_("activeVersions/" + runId + "/rosters/main", "GET"),
   );
@@ -1100,7 +1105,7 @@ test("queue worker reads immutable source version shards when sourceVersionId is
     };
   };
 
-  const result = backend.executeAutoRefreshRosterTask_(current, tasks[0], Date.now());
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
 
   assert.equal(result.rosterId, "main");
   assert.equal(backend.readAutoRefreshRunShard_(runId, "source/rosters"), null);
@@ -1352,7 +1357,11 @@ test("detached donation refresh writes season overlay without mutating active me
 
 test("queue worker treats existing roster result shards as an idempotent retry", () => {
   const backend = installMemoryFirebase(loadBackend());
-  const { runId, taskIds } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  const { runId, taskIds } = setupQueueRun(backend, buildRosterData(), {
+    rosterIds: ["main"],
+    currentTaskIndex: 1,
+    processedTasks: 1,
+  });
   const data = backend.validateRosterData_(buildRosterData());
   const roster = data.rosters.find((entry) => entry.id === "main");
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(roster));
@@ -1367,13 +1376,13 @@ test("queue worker treats existing roster result shards as an idempotent retry",
   };
 
   const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
-  const task = backend.readAutoRefreshTask_(runId, taskIds[0]);
+  const task = backend.readAutoRefreshTask_(runId, taskIds[1]);
   const current = backend.readAutoRefreshQueueCurrent_();
 
   assert.equal(result.inProgress, true);
   assert.equal(task.status, "completed");
   assert.equal(current.processedRosters, 1);
-  assert.equal(current.currentTaskIndex, 1);
+  assert.equal(current.currentTaskIndex, 2);
 });
 
 test("roster queue task writes war and metric shards from clan member data", () => {
@@ -1418,7 +1427,7 @@ test("roster queue task writes war and metric shards from clan member data", () 
     return { rosterData: processed, pipelineResult: { memberTracking: { capturedPlayers: 1 } } };
   };
 
-  const result = backend.executeAutoRefreshRosterTask_(current, tasks[0], Date.now());
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
   const warResult = backend.readAutoRefreshRunShard_(runId, "warResults/main");
   const metricResult = backend.readAutoRefreshRunShard_(runId, "metricResults/main");
   const activeRosterShard = backend.decodeFirebaseObjectKeysRecursive_(
@@ -1442,6 +1451,97 @@ test("roster queue task writes war and metric shards from clan member data", () 
   assert.equal(activeRosterShard.title, "Main Processed");
 });
 
+test("roster queue shards reuse the CWL coordinator view without league or war refetches", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-active", type: "cwl" },
+        byId: {
+          "cwl-active": {
+            eventId: "cwl-active",
+            type: "cwl",
+            status: "open",
+            cwlTrackingState: "active",
+            cwl: { groups: {} },
+          },
+        },
+      },
+    },
+  });
+  const rawData = buildRosterData();
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  rawData.rosters[0].main[0].tag = "#8CCVV";
+  rawData.playerMetrics.byTag = {
+    "#8CCVV": {
+      identity: { tag: "#8CCVV", name: "Player" },
+      trophyHistoryDaily: [],
+      donationCycles: [],
+    },
+  };
+  const data = backend.validateRosterData_(rawData);
+  const { current, tasks } = setupQueueRun(backend, data, { rosterIds: ["main"] });
+  const leaguegroup = {
+    state: "inWar",
+    season: "2026-07",
+    clans: [{ tag: "#2LUCULP" }, { tag: "#9PYLQG" }],
+    rounds: [{ warTags: ["#WAR1"] }],
+  };
+  const war = {
+    state: "inWar",
+    startTime: "2026-07-04T20:00:00.000Z",
+    endTime: "2026-07-05T20:00:00.000Z",
+    clan: {
+      tag: "#2LUCULP",
+      members: [{ tag: "#8CCVV", name: "Player", attacks: [{ defenderTag: "#BASE", stars: 3, destructionPercentage: 100 }] }],
+    },
+    opponent: {
+      tag: "#9PYLQG",
+      members: [{ tag: "#BASE", name: "Base", attacks: [] }],
+    },
+  };
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    for (const entry of entries) {
+      if (entry.path.includes("/currentwar/leaguegroup")) dataByKey[entry.key] = leaguegroup;
+      else if (entry.path.includes("/clanwarleagues/wars/")) dataByKey[entry.key] = war;
+    }
+    return { dataByKey, errorByKey: {}, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  const cwlTask = tasks.find((task) => task.type === "cwlCoordinator");
+  const cwlResult = backend.executeAutoRefreshCwlCoordinatorTask_(current, cwlTask, Date.now());
+  let blockedCwlRequestCount = 0;
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    if (entries.some((entry) => String(entry.path || "").includes("/currentwar/leaguegroup") || String(entry.path || "").includes("/clanwarleagues/wars/"))) {
+      blockedCwlRequestCount += entries.length;
+      throw new Error("roster shard should use persisted CWL coordinator view");
+    }
+    return { dataByKey: {}, errorByKey: {}, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#2LUCULP",
+    members: [{ tag: "#8CCVV", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#8CCVV", name: "Player", trophies: 5000 }],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    assert.equal(rosterId, "main");
+    assert.equal(options.cwlCoordinatorClanView.clanTag, "#2LUCULP");
+    const stats = backend.refreshCwlStatsCore_(rosterData, rosterId, options);
+    assert.equal(stats.result.source, "cwlRuntime");
+    assert.equal(stats.rosterData.rosters[0].cwlStats.byTag["#8CCVV"].starsTotal, 3);
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return { rosterData: stats.rosterData, pipelineResult: { cwlStats: stats.result } };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+
+  assert.equal(cwlResult.requestCounts.leagueGroup, 1);
+  assert.equal(cwlResult.requestCounts.cwlWar, 1);
+  assert.equal(result.rosterId, "main");
+  assert.equal(blockedCwlRequestCount, 0);
+});
+
 test("roster queue task defers before pipeline when pre-process reads consume the budget", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
@@ -1458,7 +1558,7 @@ test("roster queue task defers before pipeline when pre-process reads consume th
 
   const result = backend.executeAutoRefreshRosterTask_(
     current,
-    tasks[0],
+    firstRosterTask(tasks),
     Date.now() - (270 * 1000) + 1000,
   );
 
@@ -1486,7 +1586,7 @@ test("roster queue task validates the staged roster shard before writing it", ()
   };
 
   assert.throws(
-    () => backend.executeAutoRefreshRosterTask_(current, tasks[0], Date.now()),
+    () => backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now()),
     /metric-like field 'latestSnapshot' is not allowed/,
   );
   assert.equal(backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "GET"), null);
@@ -1498,8 +1598,8 @@ test("queue finalization publishes completed shards through the active version p
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main", "second"],
-    currentTaskIndex: 2,
-    processedTasks: 2,
+    currentTaskIndex: 3,
+    processedTasks: 3,
     processedRosters: 2,
   });
   for (const roster of data.rosters) {
@@ -1536,8 +1636,8 @@ test("queue finalization defers completion until Cloudflare public data verifies
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
   });
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.rosters[0]));
@@ -1588,8 +1688,8 @@ test("queue finalization uses source version guard without reading the active pa
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
     sourceVersionId: "source-1",
   });
@@ -1664,8 +1764,8 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
     sourceVersionId: "source-1",
   });
@@ -1712,6 +1812,13 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
   backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
   installCloudflareMirrorSuccess(backend);
+  const cwlTask = tasks.find((task) => task.type === "cwlCoordinator");
+  const cwlResult = backend.executeAutoRefreshCwlCoordinatorTask_(current, cwlTask, Date.now());
+  assert.equal(cwlResult.requestCounts.leagueGroup, 1);
+  assert.equal(cwlResult.requestCounts.cwlWar, 1);
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 1);
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
+  paths.length = 0;
   const finalizeTask = tasks.find((task) => task.type === "finalize");
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
@@ -1727,8 +1834,8 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   assert.equal(lastJob.cwlSeasonEventRefresh.status, "active");
   assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.leagueGroup, 1);
   assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.cwlWar, 1);
-  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 1);
-  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 0);
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 0);
 });
 
 test("queue finalization refuses duplicate player tags before publishing staged active version", () => {
@@ -1736,8 +1843,8 @@ test("queue finalization refuses duplicate player tags before publishing staged 
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main", "second"],
-    currentTaskIndex: 2,
-    processedTasks: 2,
+    currentTaskIndex: 3,
+    processedTasks: 3,
     processedRosters: 2,
     sourceVersionId: "source-1",
   });
@@ -1766,8 +1873,8 @@ test("queue finalization marks stale source version mismatch without reading the
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
     sourceVersionId: "source-1",
   });
@@ -1798,8 +1905,8 @@ test("queue finalization refuses to publish when a metric shard is missing", () 
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
   });
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.rosters[0]));
@@ -1821,8 +1928,8 @@ test("queue finalization aborts when the active source fingerprint changed", () 
   const changedSource = backend.validateRosterData_(Object.assign({}, buildRosterData(), { pageTitle: "Changed" }));
   const { runId, current, tasks } = setupQueueRun(backend, sourceData, {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
   });
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(sourceData.rosters[0]));
@@ -1847,8 +1954,8 @@ test("queue finalization clears current state when the version is already publis
   const backend = installMemoryFirebase(loadBackend());
   const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), {
     rosterIds: ["main"],
-    currentTaskIndex: 1,
-    processedTasks: 1,
+    currentTaskIndex: 2,
+    processedTasks: 2,
     processedRosters: 1,
   });
   backend.publishActiveRosterVersionPointer_(runId, {
@@ -1869,16 +1976,21 @@ test("queue finalization clears current state when the version is already publis
 
 test("queue worker recovers after partial completion by continuing at the next pending task", () => {
   const backend = installMemoryFirebase(loadBackend());
-  const { runId, taskIds } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main", "second"], processedRosters: 1 });
+  const { runId, taskIds } = setupQueueRun(backend, buildRosterData(), {
+    rosterIds: ["main", "second"],
+    currentTaskIndex: 1,
+    processedTasks: 1,
+    processedRosters: 1,
+  });
   const data = backend.validateRosterData_(buildRosterData());
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.rosters[0]));
   backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId }, "PUT");
   backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true, issues: [] }, "PUT");
   backend.writeAutoRefreshRunShard_(runId, "metricResults/main", { byTag: {}, tags: [] }, "PUT");
-  const firstTask = backend.readAutoRefreshTask_(runId, taskIds[0]);
-  firstTask.status = "completed";
-  firstTask.completedAt = "2026-05-25T00:00:00.000Z";
-  backend.writeAutoRefreshTask_(runId, firstTask);
+  const mainTask = backend.readAutoRefreshTask_(runId, taskIds[1]);
+  mainTask.status = "completed";
+  mainTask.completedAt = "2026-05-25T00:00:00.000Z";
+  backend.writeAutoRefreshTask_(runId, mainTask);
   let processedRosterId = "";
   backend.fetchClanMembersSnapshot_ = () => ({ clanTag: "#CLAN2", members: [], metricsMembers: [] });
   backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
@@ -1892,7 +2004,7 @@ test("queue worker recovers after partial completion by continuing at the next p
 
   assert.equal(result.inProgress, true);
   assert.equal(processedRosterId, "second");
-  assert.equal(current.currentTaskIndex, 2);
+  assert.equal(current.currentTaskIndex, 3);
   assert.equal(current.processedRosters, 2);
 });
 

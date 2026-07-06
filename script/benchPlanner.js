@@ -252,6 +252,23 @@ function buildCwlSeasonContext_(roster, config, optionsRaw) {
 		fallbackContext.warnings.push("season-context-no-connected-clan-tag");
 		return fallbackContext;
 	}
+	const cwlCoordinatorView = typeof getCwlCoordinatorClanViewFromOptions_ === "function" ? getCwlCoordinatorClanViewFromOptions_(options || {}, clanTag) : null;
+	if (cwlCoordinatorView && cwlCoordinatorView.seasonContext && typeof cwlCoordinatorView.seasonContext === "object") {
+		const context = cwlCoordinatorView.seasonContext;
+		return {
+			source: String(context.source || "cwl_runtime"),
+			contextSource: String(context.contextSource || "cwl_runtime"),
+			estimated: context.estimated === true,
+			season: String(context.season || seasonFromRoster || ""),
+			totalSeasonDays: Math.max(1, toNonNegativeInt_(context.totalSeasonDays) || defaultSeasonDays),
+			completedDays: clampNumber_(toNonNegativeInt_(context.completedDays), 0, Math.max(1, toNonNegativeInt_(context.totalSeasonDays) || defaultSeasonDays)),
+			lockedDays: clampNumber_(toNonNegativeInt_(context.lockedDays), 0, Math.max(1, toNonNegativeInt_(context.totalSeasonDays) || defaultSeasonDays)),
+			remainingEditableDays: Math.max(0, toNonNegativeInt_(context.remainingEditableDays)),
+			nextEditableDayIndex: isFinite(Number(context.nextEditableDayIndex)) ? Math.floor(Number(context.nextEditableDayIndex)) : -1,
+			roundStates: Array.isArray(context.roundStates) ? context.roundStates.slice() : [],
+			warnings: Array.isArray(context.warnings) ? context.warnings.slice() : [],
+		};
+	}
 
 	try {
 		let leaguegroup = null;

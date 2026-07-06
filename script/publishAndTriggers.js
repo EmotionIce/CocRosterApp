@@ -610,6 +610,20 @@ function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
 			summary: "",
 		});
 	}
+	tasks.push({
+		taskId: buildAutoRefreshTaskId_(tasks.length, "cwlCoordinator", ""),
+		runId: runId,
+		type: "cwlCoordinator",
+		status: "pending",
+		rosterId: "",
+		index: tasks.length,
+		attempts: 0,
+		startedAt: "",
+		updatedAt: "",
+		completedAt: "",
+		error: "",
+		summary: "",
+	});
 	for (let i = 0; i < rosterIds.length; i++) {
 		const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
 		if (!rosterId) continue;
@@ -671,20 +685,24 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 	const sourceCounts = countRosterPayload_(rosterData);
 	const sourceMetrics = rosterData.playerMetrics && typeof rosterData.playerMetrics === "object" ? rosterData.playerMetrics : createEmptyPlayerMetricsStore_();
 	const connectedClanTagByRosterId = {};
+	const trackingModeByRosterId = {};
 	const connectedRosterIds = [];
 	const connectedClanTags = [];
 	const connectedClanSeen = {};
+	const cwlRosterClanSet = {};
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 		const rosterId = String(roster.id || "").trim();
 		const clanTag = normalizeTag_(roster.connectedClanTag);
 		if (!rosterId || !clanTag) continue;
 		connectedClanTagByRosterId[rosterId] = clanTag;
+		trackingModeByRosterId[rosterId] = getRosterTrackingMode_(roster);
 		connectedRosterIds.push(rosterId);
 		if (!connectedClanSeen[clanTag]) {
 			connectedClanSeen[clanTag] = true;
 			connectedClanTags.push(clanTag);
 		}
+		if (getRosterTrackingMode_(roster) === "cwl") cwlRosterClanSet[clanTag] = true;
 	}
 	const meta = {
 		runId: runId,
@@ -693,8 +711,10 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		rosterOrder: Array.isArray(rosterData.rosterOrder) ? rosterData.rosterOrder.slice() : [],
 		rosterIds: Array.isArray(runPlan.rosterIds) ? runPlan.rosterIds.slice() : [],
 		connectedClanTagByRosterId: connectedClanTagByRosterId,
+		trackingModeByRosterId: trackingModeByRosterId,
 		connectedRosterIds: connectedRosterIds,
 		connectedClanTags: connectedClanTags,
+		cwlRosterClanTags: Object.keys(cwlRosterClanSet).sort(),
 		sourceFingerprint: String(sourceFingerprintRaw || ""),
 		sourceVersionId: sourceVersionId,
 		sourceShardMode: sourceVersionId ? "activeVersion" : "runCopy",
@@ -1249,6 +1269,10 @@ function isAutoRefreshTaskResultComplete_(runIdRaw, taskRaw) {
 		const result = readAutoRefreshRunShard_(runIdRaw, "metricCopies/" + encodeFirebaseObjectKey_(taskId));
 		return !!(result && typeof result === "object");
 	}
+	if (type === "cwlCoordinator") {
+		const result = readAutoRefreshRunShard_(runIdRaw, "cwl/summary");
+		return !!(result && typeof result === "object" && result.completed === true);
+	}
 	if (type === "roster") {
 		const rosterId = String(task.rosterId || "").trim();
 		if (!rosterId) return false;
@@ -1268,6 +1292,143 @@ function isAutoRefreshTaskResultComplete_(runIdRaw, taskRaw) {
 		return readPublishedActiveVersionId_() === normalizeActiveVersionId_(runIdRaw);
 	}
 	return false;
+}
+
+function buildAutoRefreshCwlCoordinatorRosterDataFromSourceMeta_(sourceMetaRaw, lastUpdatedAtRaw) {
+	const sourceMeta = sourceMetaRaw && typeof sourceMetaRaw === "object" ? sourceMetaRaw : {};
+	const rosterIdsRaw = Array.isArray(sourceMeta.rosterIds) ? sourceMeta.rosterIds : [];
+	const connectedClanTagByRosterId =
+		sourceMeta.connectedClanTagByRosterId && typeof sourceMeta.connectedClanTagByRosterId === "object"
+			? sourceMeta.connectedClanTagByRosterId
+			: {};
+	const trackingModeByRosterId =
+		sourceMeta.trackingModeByRosterId && typeof sourceMeta.trackingModeByRosterId === "object"
+			? sourceMeta.trackingModeByRosterId
+			: {};
+	const rosters = [];
+	for (let i = 0; i < rosterIdsRaw.length; i++) {
+		const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
+		if (!rosterId) continue;
+		rosters.push({
+			id: rosterId,
+			title: rosterId,
+			connectedClanTag: normalizeTag_(connectedClanTagByRosterId[rosterId]),
+			trackingMode: trackingModeByRosterId[rosterId] === "regularWar" ? "regularWar" : "cwl",
+			main: [],
+			subs: [],
+			missing: [],
+		});
+	}
+	const payload = {
+		schemaVersion: typeof sourceMeta.schemaVersion === "number" && isFinite(sourceMeta.schemaVersion) ? sourceMeta.schemaVersion : 1,
+		pageTitle: typeof sourceMeta.pageTitle === "string" ? sourceMeta.pageTitle : "",
+		rosterOrder: Array.isArray(sourceMeta.rosterOrder) ? sourceMeta.rosterOrder.slice() : rosters.map((roster) => roster.id),
+		rosters: rosters,
+		playerMetrics: createEmptyPlayerMetricsStore_(),
+		lastUpdatedAt: String(lastUpdatedAtRaw || sourceMeta.sourceLastUpdatedAt || new Date().toISOString()),
+	};
+	if (sourceMeta.publicConfig && typeof sourceMeta.publicConfig === "object") payload.publicConfig = sourceMeta.publicConfig;
+	return validateRosterData_(payload);
+}
+
+function writeAutoRefreshCwlCoordinatorResult_(runIdRaw, coordinatorRaw) {
+	const coordinator = coordinatorRaw && typeof coordinatorRaw === "object" ? coordinatorRaw : {};
+	const views = coordinator.viewsByClanTag && typeof coordinator.viewsByClanTag === "object" ? coordinator.viewsByClanTag : {};
+	const writes = [];
+	const clanTags = Object.keys(views).sort();
+	for (let i = 0; i < clanTags.length; i++) {
+		const clanTag = normalizeTag_(clanTags[i]);
+		if (!clanTag) continue;
+		writes.push({
+			path: buildAutoRefreshRunPath_(runIdRaw, "cwl/views/" + encodeFirebaseObjectKey_(clanTag)),
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_(views[clanTags[i]]),
+		});
+	}
+	const compact = {
+		completed: true,
+		eventId: String(coordinator.eventId || ""),
+		capturedAt: String(coordinator.capturedAt || new Date().toISOString()),
+		requestCounts: coordinator.requestCounts && typeof coordinator.requestCounts === "object" ? coordinator.requestCounts : {},
+		requestPlan: coordinator.requestPlan && typeof coordinator.requestPlan === "object" ? coordinator.requestPlan : {},
+		runtimeState: coordinator.runtimeState && typeof coordinator.runtimeState === "object" ? coordinator.runtimeState : {},
+		eventAggregateResult:
+			coordinator.eventAggregateResult && typeof coordinator.eventAggregateResult === "object"
+				? coordinator.eventAggregateResult
+				: null,
+		viewClanTags: clanTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag),
+		diagnostics: Array.isArray(coordinator.diagnostics) ? coordinator.diagnostics.slice(-CWL_RUNTIME_DIAGNOSTIC_LIMIT) : [],
+		writtenAt: new Date().toISOString(),
+	};
+	writes.push({
+		path: buildAutoRefreshRunPath_(runIdRaw, "cwl/summary"),
+		method: "PUT",
+		payload: encodeFirebaseObjectKeysRecursive_(compact),
+	});
+	if (writes.length) firebaseBatchPutJson_(writes);
+	return compact;
+}
+
+function readAutoRefreshCwlCoordinatorSummary_(runIdRaw) {
+	const summary = readAutoRefreshRunShard_(runIdRaw, "cwl/summary");
+	return summary && typeof summary === "object" ? summary : null;
+}
+
+function readAutoRefreshCwlClanView_(runIdRaw, clanTagRaw) {
+	const clanTag = normalizeTag_(clanTagRaw);
+	if (!clanTag) return null;
+	const view = readAutoRefreshRunShard_(runIdRaw, "cwl/views/" + encodeFirebaseObjectKey_(clanTag));
+	return view && typeof view === "object" ? view : null;
+}
+
+function executeAutoRefreshCwlCoordinatorTask_(currentRaw, taskRaw, executionStartMsRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	const runId = current && current.runId;
+	const taskStartMs = Date.now();
+	if (!runId) throw new Error("Auto-refresh CWL coordinator task is missing runId.");
+	if (isAutoRefreshTaskResultComplete_(runId, task)) {
+		return { skipped: true, reason: "resultExists", totalMs: Math.max(0, Date.now() - taskStartMs) };
+	}
+	const sourceMeta = readAutoRefreshRunShard_(runId, "source/meta");
+	if (!sourceMeta || typeof sourceMeta !== "object") throw new Error("Auto-refresh source metadata is missing.");
+	const rosterData = buildAutoRefreshCwlCoordinatorRosterDataFromSourceMeta_(sourceMeta, sourceMeta.sourceLastUpdatedAt || new Date().toISOString());
+	const processStartMs = Date.now();
+	const coordinator =
+		typeof buildCwlCoordinatorResult_ === "function"
+			? buildCwlCoordinatorResult_(rosterData, {
+				nowIso: new Date().toISOString(),
+				source: "auto-refresh-queue-cwl-coordinator",
+				runId: runId,
+			})
+			: { ok: true, status: "unavailable", viewsByClanTag: {}, requestCounts: {} };
+	const processMs = Math.max(0, Date.now() - processStartMs);
+	if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+		return { deferred: true, reason: "beforeCwlCoordinatorWrite", processMs: processMs };
+	}
+	const writeStartMs = Date.now();
+	const compact = writeAutoRefreshCwlCoordinatorResult_(runId, coordinator);
+	const writeMs = Math.max(0, Date.now() - writeStartMs);
+	Logger.log(
+		"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s cwlLeagueGroupRequests=%s cwlWarRequests=%s",
+		runId,
+		String(task.taskId || ""),
+		"",
+		"cwlCoordinator",
+		0,
+		processMs,
+		writeMs,
+		Math.max(0, Date.now() - taskStartMs),
+		getAutoRefreshJobRemainingMs_(executionStartMsRaw),
+		toNonNegativeInt_(compact.requestCounts && compact.requestCounts.leagueGroup),
+		toNonNegativeInt_(compact.requestCounts && compact.requestCounts.cwlWar),
+	);
+	return {
+		eventId: compact.eventId,
+		viewClanCount: Array.isArray(compact.viewClanTags) ? compact.viewClanTags.length : 0,
+		requestCounts: compact.requestCounts,
+		totalMs: Math.max(0, Date.now() - taskStartMs),
+	};
 }
 
 // Execute one bounded per-roster task.
@@ -1312,6 +1473,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 	if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
 	if (!sourceRoster) throw new Error("Auto-refresh source roster shard is missing: " + rosterId + ".");
 	const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
+	const cwlCoordinatorClanView = clanTag ? readAutoRefreshCwlClanView_(runId, clanTag) : null;
 	let clanSnapshot = null;
 	let clanFetchMs = 0;
 	if (clanTag) {
@@ -1395,6 +1557,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		autoRefreshFinalValidationMode: true,
 		prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
 		prefetchedClanErrorsByTag: {},
+		cwlCoordinatorClanView: cwlCoordinatorClanView,
 	};
 	const processed = processRefreshAllRosterPipelineIntoAccumulator_(workingRosterData, rosterId, pipelineOptions, accumulator);
 	const processMs = Math.max(0, Date.now() - processStartMs);
@@ -1708,13 +1871,34 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			const lastWriteAt = String(getLastSuccessfulActiveWriteAt_() || "").trim();
 			const lastWriteSource = String(getLastSuccessfulActiveWriteSource_() || "").trim();
 			const sourceSuffix = lastWriteSource ? " by " + lastWriteSource : "";
+			let cwlSeasonEventRefresh = { ok: true, status: "not-needed" };
+			try {
+				const need = typeof getCurrentCwlSeasonEventRefreshNeed_ === "function" ? getCurrentCwlSeasonEventRefreshNeed_() : { needsCwl: false };
+				if (need && need.needsCwl === true && typeof buildCwlCoordinatorResult_ === "function" && typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function") {
+					const sourceSnapshot = readAutoRefreshCoordinatorSourceSnapshot_();
+					const rosterData = validateRosterData_(sourceSnapshot && sourceSnapshot.rosterData);
+					const coordinator = buildCwlCoordinatorResult_(rosterData, {
+						nowIso: new Date().toISOString(),
+						source: "auto-refresh-cooldown-cwl",
+					});
+					cwlSeasonEventRefresh = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, { cwlCoordinator: coordinator }, {
+						source: "auto-refresh-cooldown",
+					});
+					if (cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
+						cwlSeasonEventRefresh.requestCounts = coordinator.requestCounts || {};
+					}
+				}
+			} catch (err) {
+				Logger.log("Auto-refresh cooldown CWL event update failed: %s", errorMessage_(err));
+				cwlSeasonEventRefresh = { ok: false, status: "error", error: errorMessage_(err) };
+			}
 			let summary = "Auto-refresh skipped: active data was written recently" + sourceSuffix + " (" + (lastWriteAt || "unknown") + ").";
 			const cleanupResult = maybeCleanupOldAutoRefreshDailyArchives_(getServerDateString_(new Date()));
 			const cleanupDeleted = toNonNegativeInt_(cleanupResult && cleanupResult.deletedCount);
 			if (cleanupDeleted > 0) summary += " Cleaned " + cleanupDeleted + " stale daily archive(s).";
 			setAutoRefreshRunResult_("skipped", summary, "", 0, "", startedAt, new Date().toISOString());
 			tryReconcileRegularWarFinalizationTriggerState_();
-			return { ok: true, status: "skipped", skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt };
+			return { ok: true, status: "skipped", skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt, cwlSeasonEventRefresh: cwlSeasonEventRefresh };
 		}
 		const sourceReadStartMs = Date.now();
 		const sourceSnapshot = readAutoRefreshCoordinatorSourceSnapshot_();
@@ -2022,7 +2206,6 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 	try {
 		if (
 			typeof getCurrentCwlSeasonEventRefreshNeed_ !== "function" ||
-			typeof buildAutoRefreshSnapshot_ !== "function" ||
 			typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ !== "function"
 		) {
 			return { ok: true, status: "unavailable" };
@@ -2035,25 +2218,37 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 				eventId: need && need.eventId ? String(need.eventId) : "",
 			};
 		}
+		const runId = normalizeActiveVersionId_(runIdRaw);
+		const summary = runId ? readAutoRefreshCwlCoordinatorSummary_(runId) : null;
+		if (!summary || typeof summary !== "object" || summary.completed !== true) {
+			return { ok: false, status: "missing-cwl-coordinator-result", eventId: need.eventId || "", runId: runId };
+		}
+		const viewClanTags = Array.isArray(summary.viewClanTags) ? summary.viewClanTags : [];
+		const viewsByClanTag = {};
+		for (let i = 0; i < viewClanTags.length; i++) {
+			const clanTag = normalizeTag_(viewClanTags[i]);
+			if (!clanTag) continue;
+			const view = readAutoRefreshCwlClanView_(runId, clanTag);
+			if (view && typeof view === "object") viewsByClanTag[clanTag] = view;
+		}
+		const coordinator = Object.assign({}, summary, {
+			viewsByClanTag: viewsByClanTag,
+		});
 		const rosterData =
 			rosterDataRaw && typeof rosterDataRaw === "object" && Array.isArray(rosterDataRaw.rosters)
 				? rosterDataRaw
-				: buildAutoRefreshCwlRosterDataFromSourceMeta_(sourceMetaRaw, new Date().toISOString());
-		const sourceRosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-		const snapshot = buildAutoRefreshSnapshot_(rosterData, {
-			sourceRosters: sourceRosters,
-			allowRegularWarHistoryRepair: false,
-		});
+				: buildAutoRefreshCwlCoordinatorRosterDataFromSourceMeta_(sourceMetaRaw, new Date().toISOString());
+		const snapshot = { cwlCoordinator: coordinator };
 		const result = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, {
 			source: "refresh-all-queue",
-			runId: String(runIdRaw || ""),
+			runId: runId,
 		});
 		if (result && typeof result === "object") {
-			result.requestCounts = snapshot && snapshot.requestCounts && typeof snapshot.requestCounts === "object"
+			result.requestCounts = summary && summary.requestCounts && typeof summary.requestCounts === "object"
 				? {
-					leagueGroup: toNonNegativeInt_(snapshot.requestCounts.leagueGroup),
-					cwlWar: toNonNegativeInt_(snapshot.requestCounts.cwlWar),
-					total: toNonNegativeInt_(snapshot.requestCounts.total),
+					leagueGroup: toNonNegativeInt_(summary.requestCounts.leagueGroup),
+					cwlWar: toNonNegativeInt_(summary.requestCounts.cwlWar),
+					total: toNonNegativeInt_(summary.requestCounts.total),
 				}
 				: {};
 		}
@@ -2568,7 +2763,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 		task.attempts = toNonNegativeInt_(task.attempts) + 1;
 		task.error = "";
 		writeAutoRefreshTask_(current.runId, task);
-		current.phase = task.type === "finalize" ? "finalizing" : "processing";
+		current.phase = task.type === "finalize" ? "finalizing" : task.type === "cwlCoordinator" ? "cwl-coordinator" : "processing";
 		current.status = task.type === "finalize" ? "finalizing" : "running";
 		current.taskSummary = {
 			taskId: task.taskId,
@@ -2584,7 +2779,9 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				? executeAutoRefreshFinalizeTask_(current, task, executionStartMs)
 				: task.type === "metricCopy"
 					? executeAutoRefreshMetricCopyTask_(current, task, executionStartMs)
-					: executeAutoRefreshRosterTask_(current, task, executionStartMs);
+					: task.type === "cwlCoordinator"
+						? executeAutoRefreshCwlCoordinatorTask_(current, task, executionStartMs)
+						: executeAutoRefreshRosterTask_(current, task, executionStartMs);
 			if (result && result.deferred) {
 				task.status = "pending";
 				task.summary = String(result.reason || "deferred");
