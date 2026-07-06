@@ -3427,7 +3427,7 @@ function runCwlSeasonEventDefenseStarsMigrationOnce() {
 
 // Admin API wrapper for the one-time CWL defensive-star schema migration.
 function migrateCwlSeasonEventDefenseStarsStorage(payloadRaw, password) {
-	assertAdminPassword_(password);
+	assertSeasonEventSecretOrAdmin_(password);
 	return migrateCwlSeasonEventDefenseStarsStorage_(payloadRaw);
 }
 
