@@ -1,0 +1,17 @@
+﻿{
+  "id": "8f79efd9-9b06-4dee-b3a7-0a7b63e83218",
+  "source": "dash",
+  "strategy": "percentage",
+  "author_email": "4jbf82gng5@privaterelay.appleid.com",
+  "annotations": {
+    "workers/message": "Automatic deployment on upload.",
+    "workers/triggered_by": "upload"
+  },
+  "versions": [
+    {
+      "version_id": "0cf1f888-34cf-44a9-99cd-dc49d976ef3a",
+      "percentage": 100
+    }
+  ],
+  "created_on": "2026-07-04T14:24:46.122075Z"
+}
