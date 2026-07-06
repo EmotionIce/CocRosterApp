@@ -361,6 +361,49 @@ test("scheduleAutoRefreshJobResume keeps exactly one resume trigger", () => {
   assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), resumeTriggers[0].getUniqueId());
 });
 
+test("admin diagnostics exposes current auto-refresh queue state without roster payloads", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("ADMIN_PW", "secret");
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.__properties.set("ACTIVE_ROSTER_JOB_LOCK", JSON.stringify({
+    token: "lock-token",
+    owner: "auto-refresh-worker",
+    expiresAt: Date.now() + 30000,
+  }));
+  const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), {
+    rosterIds: ["main"],
+    currentTaskIndex: 2,
+    processedTasks: 2,
+    processedRosters: 1,
+  });
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+  finalizeTask.status = "running";
+  finalizeTask.startedAt = "2026-05-25T00:02:00.000Z";
+  finalizeTask.summary = "finalizing";
+  backend.writeAutoRefreshTask_(runId, finalizeTask);
+  current.status = "finalizing";
+  current.phase = "cloudflare-publish";
+  current.taskSummary = { taskId: finalizeTask.taskId, type: "finalize", startedAt: finalizeTask.startedAt };
+  current.cloudflarePublicDataPublish = { ok: false, status: "publishing", label: "test" };
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+
+  const result = backend.runAdminApiMethod_("getAutoRefreshDiagnostics", ["secret"]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.enabled, true);
+  assert.equal(result.current.runId, runId);
+  assert.equal(result.current.status, "finalizing");
+  assert.equal(result.current.phase, "cloudflare-publish");
+  assert.equal(result.current.currentTaskIndex, 2);
+  assert.equal(result.current.taskSummary.taskId, finalizeTask.taskId);
+  assert.equal(result.current.cloudflarePublicDataPublish.status, "publishing");
+  assert.equal(result.currentTask.taskId, finalizeTask.taskId);
+  assert.equal(result.currentTask.status, "running");
+  assert.equal(result.activeRosterJobLock.owner, "auto-refresh-worker");
+  assert.equal(Object.prototype.hasOwnProperty.call(result.current, "rosterData"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result.current, "rosters"), false);
+});
+
 test("autoRefreshActiveRosterTick uses sharded queue coordinator path", () => {
   const backend = loadBackend();
   backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
@@ -1964,13 +2007,41 @@ test("queue finalization clears current state when the version is already publis
     publishedAt: "2026-05-25T00:00:00.000Z",
     rosterIds: ["main"],
   });
-  installCloudflareMirrorSuccess(backend);
+  let activeReadSawClearedQueue = false;
+  let cloudflarePublishSawClearedQueue = false;
+  backend.readActiveRosterSnapshot_ = () => {
+    activeReadSawClearedQueue = backend.readAutoRefreshQueueCurrent_() === null;
+    throw new Error("active read intentionally skipped in test");
+  };
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    cloudflarePublishSawClearedQueue = backend.readAutoRefreshQueueCurrent_() === null;
+    return {
+      ok: true,
+      active: {
+        ok: true,
+        versionId: runId,
+        publicResult: { ok: true, putCount: 6 },
+        botResult: { ok: true, putCount: 4 },
+      },
+      cwlLeagueSignups: { ok: true, putCount: 1 },
+      seasonEvents: { ok: true, putCount: 3, deleteCount: 1 },
+    };
+  };
+  backend.verifyCloudflarePublicActiveVersionId_ = (versionId) => ({
+    ok: true,
+    statusCode: 200,
+    expectedVersionId: versionId,
+    actualVersionId: versionId,
+  });
   const finalizeTask = tasks.find((task) => task.type === "finalize");
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
 
   assert.equal(result.status, "completed");
   assert.equal(result.alreadyPublished, true);
+  assert.equal(activeReadSawClearedQueue, true);
+  assert.equal(cloudflarePublishSawClearedQueue, true);
+  assert.equal(result.skipPostTickMirrorRepair, true);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
 });
@@ -2007,6 +2078,46 @@ test("queue worker recovers after partial completion by continuing at the next p
   assert.equal(processedRosterId, "second");
   assert.equal(current.currentTaskIndex, 3);
   assert.equal(current.processedRosters, 2);
+});
+
+test("queue worker clears stale auto-refresh lock after timeout-shaped finalization", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), {
+    rosterIds: ["main"],
+    currentTaskIndex: 2,
+    processedTasks: 2,
+    processedRosters: 1,
+    status: "finalizing",
+  });
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+  finalizeTask.status = "running";
+  finalizeTask.startedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  finalizeTask.updatedAt = finalizeTask.startedAt;
+  backend.writeAutoRefreshRunShard_(runId, "tasks/" + backend.encodeFirebaseObjectKey_(finalizeTask.taskId), finalizeTask, "PUT");
+  current.status = "finalizing";
+  current.phase = "cloudflare-publish";
+  current.taskSummary = {
+    taskId: finalizeTask.taskId,
+    type: "finalize",
+    startedAt: finalizeTask.startedAt,
+    updatedAt: finalizeTask.updatedAt,
+  };
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  backend.__properties.set("ACTIVE_ROSTER_JOB_LOCK", JSON.stringify({
+    token: "stale-auto-refresh",
+    owner: "auto-refresh-worker",
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  }));
+
+  const result = backend.autoRefreshWorkerTick();
+
+  assert.equal(result.inProgress, true);
+  assert.equal(result.reason, "overlap");
+  assert.equal(result.lockRecovery.cleared, true);
+  assert.equal(result.lockRecovery.taskId, finalizeTask.taskId);
+  assert.equal(backend.__properties.get("ACTIVE_ROSTER_JOB_LOCK"), undefined);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 1);
 });
 
 test("expired lock and stale worker triggers are cleaned up", () => {

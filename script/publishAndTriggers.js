@@ -584,6 +584,220 @@ function writeAutoRefreshTask_(runIdRaw, taskRaw) {
 	return task;
 }
 
+function truncateAutoRefreshDiagnosticString_(valueRaw, maxLengthRaw) {
+	const maxLength = Math.max(1, toNonNegativeInt_(maxLengthRaw || 500));
+	return String(valueRaw == null ? "" : valueRaw).slice(0, maxLength);
+}
+
+function sanitizeAutoRefreshDiagnosticFragment_(valueRaw, depthRaw) {
+	const depth = Math.max(0, toNonNegativeInt_(depthRaw));
+	if (valueRaw == null || typeof valueRaw === "number" || typeof valueRaw === "boolean") return valueRaw;
+	if (typeof valueRaw === "string") return truncateAutoRefreshDiagnosticString_(valueRaw, 500);
+	if (depth <= 0) return "[object]";
+	if (Array.isArray(valueRaw)) {
+		const out = [];
+		const limit = Math.min(valueRaw.length, 20);
+		for (let i = 0; i < limit; i++) out.push(sanitizeAutoRefreshDiagnosticFragment_(valueRaw[i], depth - 1));
+		if (valueRaw.length > limit) out.push("+" + (valueRaw.length - limit) + " more");
+		return out;
+	}
+	if (typeof valueRaw === "object") {
+		const out = {};
+		const keys = Object.keys(valueRaw).sort();
+		const limit = Math.min(keys.length, 30);
+		for (let i = 0; i < limit; i++) {
+			const key = keys[i];
+			out[key] = sanitizeAutoRefreshDiagnosticFragment_(valueRaw[key], depth - 1);
+		}
+		if (keys.length > limit) out.truncatedKeyCount = keys.length - limit;
+		return out;
+	}
+	return truncateAutoRefreshDiagnosticString_(valueRaw, 500);
+}
+
+function buildAutoRefreshQueueDiagnosticsState_(currentRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	if (!current) return null;
+	return {
+		runId: current.runId,
+		kind: current.kind,
+		status: current.status,
+		phase: current.phase,
+		startedAt: current.startedAt,
+		updatedAt: current.updatedAt,
+		completedAt: current.completedAt,
+		failedAt: current.failedAt,
+		error: truncateAutoRefreshDiagnosticString_(current.error, 1000),
+		sourceVersionId: current.sourceVersionId,
+		sourceLastUpdatedAt: current.sourceLastUpdatedAt,
+		rosterCount: current.rosterIds.length,
+		taskCount: current.taskCount,
+		currentTaskIndex: current.currentTaskIndex,
+		processedTasks: current.processedTasks,
+		processedRosters: current.processedRosters,
+		issueCount: current.issueCount,
+		issueSummary: truncateAutoRefreshDiagnosticString_(current.issueSummary, 500),
+		taskSummary: sanitizeAutoRefreshDiagnosticFragment_(current.taskSummary, 3),
+		cwlSeasonEventRefresh: sanitizeAutoRefreshDiagnosticFragment_(current.cwlSeasonEventRefresh, 3),
+		cloudflarePublicDataPublish: sanitizeAutoRefreshDiagnosticFragment_(current.cloudflarePublicDataPublish, 3),
+	};
+}
+
+function buildAutoRefreshTaskDiagnostics_(taskRaw) {
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : null;
+	if (!task) return null;
+	return {
+		taskId: String(task.taskId || ""),
+		type: String(task.type || ""),
+		status: String(task.status || ""),
+		rosterId: String(task.rosterId || ""),
+		index: toNonNegativeInt_(task.index),
+		attempts: toNonNegativeInt_(task.attempts),
+		startedAt: String(task.startedAt || ""),
+		updatedAt: String(task.updatedAt || ""),
+		completedAt: String(task.completedAt || ""),
+		error: truncateAutoRefreshDiagnosticString_(task.error, 1000),
+		summary: truncateAutoRefreshDiagnosticString_(task.summary, 500),
+	};
+}
+
+function readAutoRefreshLastJobState_() {
+	const encoded = firebaseRequestJson_(FIREBASE_INTERNAL_AUTO_REFRESH_LAST_JOB_PATH, "GET");
+	if (encoded == null) return null;
+	return decodeFirebaseObjectKeysRecursive_(encoded);
+}
+
+function buildAutoRefreshTriggerDiagnostics_() {
+	let autoRefreshCount = 0;
+	let resumeCount = 0;
+	try {
+		autoRefreshCount = listAutoRefreshTriggers_().length;
+	} catch (err) {
+		autoRefreshCount = -1;
+	}
+	try {
+		resumeCount = listAutoRefreshJobResumeTriggers_().length;
+	} catch (err) {
+		resumeCount = -1;
+	}
+	return {
+		autoRefreshCount: autoRefreshCount,
+		resumeCount: resumeCount,
+		configuredAutoRefreshTriggerId: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || ""),
+		configuredResumeTriggerId: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || ""),
+	};
+}
+
+function buildAutoRefreshLockDiagnostics_() {
+	const lock = typeof readActiveRosterJobLockState_ === "function" ? readActiveRosterJobLockState_() : null;
+	if (!lock) return null;
+	const nowMs = Date.now();
+	return {
+		owner: lock.owner,
+		expiresAt: new Date(lock.expiresAt).toISOString(),
+		expired: lock.expiresAt <= nowMs,
+		ttlMs: Math.max(0, lock.expiresAt - nowMs),
+	};
+}
+
+function buildAutoRefreshDiagnostics_() {
+	const current = readAutoRefreshQueueCurrent_();
+	let currentTask = null;
+	if (current && current.runId && current.taskIds.length) {
+		const index = Math.min(current.taskIds.length - 1, Math.max(0, current.currentTaskIndex));
+		const taskId = current.taskIds[index];
+		if (taskId) {
+			try {
+				currentTask = readAutoRefreshTask_(current.runId, taskId);
+			} catch (err) {
+				currentTask = { taskId: taskId, status: "readError", error: errorMessage_(err) };
+			}
+		}
+	}
+	let lastJob = null;
+	try {
+		lastJob = readAutoRefreshLastJobState_();
+	} catch (err) {
+		lastJob = { status: "readError", error: errorMessage_(err) };
+	}
+	let activeVersionId = "";
+	try {
+		activeVersionId = readPublishedActiveVersionId_();
+	} catch (err) {
+		activeVersionId = "";
+	}
+	return {
+		ok: true,
+		checkedAt: new Date().toISOString(),
+		enabled: isAutoRefreshEnabled_(),
+		activeVersionId: activeVersionId,
+		current: buildAutoRefreshQueueDiagnosticsState_(current),
+		currentTask: buildAutoRefreshTaskDiagnostics_(currentTask),
+		lastJob: sanitizeAutoRefreshDiagnosticFragment_(lastJob, 3),
+		triggers: buildAutoRefreshTriggerDiagnostics_(),
+		activeRosterJobLock: buildAutoRefreshLockDiagnostics_(),
+	};
+}
+
+function getAutoRefreshStaleTaskAgeMs_(currentRaw, taskRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : null;
+	const candidates = [];
+	if (task) {
+		candidates.push(task.updatedAt);
+		candidates.push(task.startedAt);
+	}
+	if (current && current.taskSummary && typeof current.taskSummary === "object") {
+		candidates.push(current.taskSummary.updatedAt);
+		candidates.push(current.taskSummary.startedAt);
+	}
+	if (current) candidates.push(current.updatedAt);
+	for (let i = 0; i < candidates.length; i++) {
+		const ms = parseIsoToMs_(candidates[i]);
+		if (ms > 0) return Math.max(0, Date.now() - ms);
+	}
+	return 0;
+}
+
+function maybeClearStaleAutoRefreshLockAfterBusy_(labelRaw) {
+	const label = String(labelRaw == null ? "auto-refresh lock busy recovery" : labelRaw).trim() || "auto-refresh lock busy recovery";
+	try {
+		const current = readAutoRefreshQueueCurrent_();
+		if (!current || current.kind !== "auto-refresh-queue") return { cleared: false, reason: "noQueue" };
+		if (current.status !== "running" && current.status !== "finalizing") {
+			return { cleared: false, reason: "queueNotRunnable", status: current.status };
+		}
+		let task = null;
+		if (current.runId && current.taskIds.length) {
+			const index = Math.min(current.taskIds.length - 1, Math.max(0, current.currentTaskIndex));
+			const taskId = current.taskIds[index];
+			if (taskId) task = readAutoRefreshTask_(current.runId, taskId);
+		}
+		const taskStatus = String((task && task.status) || "").trim();
+		const ageMs = getAutoRefreshStaleTaskAgeMs_(current, task);
+		if (ageMs < AUTO_REFRESH_QUEUE_TASK_STALE_MS) {
+			return { cleared: false, reason: "notStale", ageMs: ageMs, thresholdMs: AUTO_REFRESH_QUEUE_TASK_STALE_MS };
+		}
+		if (task && taskStatus && taskStatus !== "running") {
+			return { cleared: false, reason: "taskNotRunning", taskStatus: taskStatus, ageMs: ageMs };
+		}
+		const cleared = clearActiveRosterJobLockForOwners_(
+			{
+				"auto-refresh-coordinator": true,
+				"auto-refresh-worker": true,
+			},
+			label,
+		);
+		cleared.ageMs = ageMs;
+		cleared.runId = current.runId;
+		cleared.phase = current.phase;
+		cleared.taskId = String((task && task.taskId) || (current.taskSummary && current.taskSummary.taskId) || "");
+		return cleared;
+	} catch (err) {
+		return { cleared: false, reason: "error", error: errorMessage_(err) };
+	}
+}
+
 // Build the queue tasks for one run. Optional metric-copy chunks stage source
 // metrics before roster tasks patch their refreshed entries.
 function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
@@ -2328,10 +2542,12 @@ function summarizeCloudflareAutoRefreshResult_(publishResultRaw, verifyResultRaw
 	};
 }
 
-function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRaw) {
+function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const updateQueue = options.updateQueue !== false;
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const message = String(errorRaw || "Cloudflare public data mirror is not verified.").slice(0, 1000);
-	if (current) {
+	if (current && updateQueue) {
 		current.status = "finalizing";
 		current.phase = "cloudflare-publish";
 		current.error = message;
@@ -2352,8 +2568,14 @@ function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRa
 			new Date().toISOString(),
 		);
 	}
-	scheduleAutoRefreshJobResume_();
-	Logger.log("autoRefresh Cloudflare mirror deferred runId=%s label=%s error=%s", current ? current.runId : "", String(labelRaw || ""), message);
+	if (updateQueue) scheduleAutoRefreshJobResume_();
+	Logger.log(
+		"autoRefresh Cloudflare mirror deferred runId=%s label=%s updateQueue=%s error=%s",
+		current ? current.runId : "",
+		String(labelRaw || ""),
+		updateQueue,
+		message,
+	);
 	return {
 		ok: true,
 		status: "inProgress",
@@ -2367,37 +2589,41 @@ function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRa
 	};
 }
 
-function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw) {
+function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const updateQueue = options.updateQueue !== false;
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const runId = current && current.runId;
 	const label = String(labelRaw || "auto-refresh-finalize").trim() || "auto-refresh-finalize";
 	if (!runId) throw new Error("Auto-refresh Cloudflare publish is missing run id.");
 	if (typeof publishCloudflarePublicDataSnapshot_ !== "function") {
-		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data publisher is unavailable.", label);
+		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data publisher is unavailable.", label, options);
 	}
-	current.status = "finalizing";
-	current.phase = "cloudflare-publish";
-	current.cloudflarePublicDataPublish = {
-		ok: false,
-		label: label.slice(0, 120),
-		status: "publishing",
-		updatedAt: new Date().toISOString(),
-	};
-	writeAutoRefreshQueueCurrent_(current, false);
-	scheduleAutoRefreshJobResume_();
+	if (updateQueue) {
+		current.status = "finalizing";
+		current.phase = "cloudflare-publish";
+		current.cloudflarePublicDataPublish = {
+			ok: false,
+			label: label.slice(0, 120),
+			status: "publishing",
+			updatedAt: new Date().toISOString(),
+		};
+		writeAutoRefreshQueueCurrent_(current, false);
+		scheduleAutoRefreshJobResume_();
+	}
 	const publishResult = publishCloudflarePublicDataSnapshot_({ label: label });
 	if (!publishResult || publishResult.ok !== true) {
-		return buildCloudflareAutoRefreshDeferredResult_(current, getCloudflareAutoRefreshResultError_(publishResult), label);
+		return buildCloudflareAutoRefreshDeferredResult_(current, getCloudflareAutoRefreshResultError_(publishResult), label, options);
 	}
 	if (typeof verifyCloudflarePublicActiveVersionId_ !== "function") {
-		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data verification is unavailable.", label);
+		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data verification is unavailable.", label, options);
 	}
 	const verifyResult = verifyCloudflarePublicActiveVersionId_(runId);
 	if (!verifyResult || verifyResult.ok !== true) {
 		const message = verifyResult && (verifyResult.error || verifyResult.reason)
 			? String(verifyResult.error || verifyResult.reason)
 			: "Cloudflare active version pointer did not verify.";
-		return buildCloudflareAutoRefreshDeferredResult_(current, message, label);
+		return buildCloudflareAutoRefreshDeferredResult_(current, message, label, options);
 	}
 	current.error = "";
 	current.cloudflarePublicDataPublish = summarizeCloudflareAutoRefreshResult_(publishResult, verifyResult);
@@ -2411,6 +2637,127 @@ function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw) {
 	};
 }
 
+function runAutoRefreshAlreadyPublishedPostCleanupBestEffort_(currentRaw, sourceMetaRaw, summaryRaw, executionStartMsRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	if (!current || !current.runId) return { ok: false, skipped: true, reason: "missingCurrent" };
+	const runId = current.runId;
+	const sourceMeta = sourceMetaRaw && typeof sourceMetaRaw === "object" ? sourceMetaRaw : null;
+	const summary = String(summaryRaw || "");
+	const result = {
+		ok: true,
+		status: "attempted",
+		runId: runId,
+		activeSnapshotRead: null,
+		cwlSeasonEventRefresh: null,
+		cloudflarePublicDataPublish: null,
+	};
+	let alreadyPublishedRosterData = null;
+	if (hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+		const activeReadStartMs = Date.now();
+		try {
+			const activeSnapshot = readActiveRosterSnapshot_();
+			alreadyPublishedRosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : null;
+			result.activeSnapshotRead = {
+				ok: true,
+				hasRosterData: !!alreadyPublishedRosterData,
+				durationMs: Math.max(0, Date.now() - activeReadStartMs),
+			};
+			Logger.log(
+				"autoRefresh already-published active snapshot read runId=%s ok=true hasRosterData=%s durationMs=%s",
+				runId,
+				!!alreadyPublishedRosterData,
+				result.activeSnapshotRead.durationMs,
+			);
+		} catch (err) {
+			result.activeSnapshotRead = {
+				ok: false,
+				error: errorMessage_(err),
+				durationMs: Math.max(0, Date.now() - activeReadStartMs),
+			};
+			Logger.log(
+				"autoRefresh already-published active snapshot read runId=%s ok=false durationMs=%s error=%s",
+				runId,
+				result.activeSnapshotRead.durationMs,
+				result.activeSnapshotRead.error,
+			);
+		}
+	} else {
+		result.activeSnapshotRead = { ok: false, skipped: true, reason: "budget" };
+		Logger.log("autoRefresh already-published active snapshot read skipped runId=%s reason=budget", runId);
+	}
+	if (hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+		const cwlStartMs = Date.now();
+		try {
+			const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(alreadyPublishedRosterData, sourceMeta, runId);
+			current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
+			result.cwlSeasonEventRefresh = cwlSeasonEventRefresh || null;
+			Logger.log(
+				"autoRefresh already-published cwl refresh runId=%s status=%s durationMs=%s",
+				runId,
+				String((cwlSeasonEventRefresh && cwlSeasonEventRefresh.status) || ""),
+				Math.max(0, Date.now() - cwlStartMs),
+			);
+		} catch (err) {
+			result.cwlSeasonEventRefresh = { ok: false, status: "error", error: errorMessage_(err) };
+			Logger.log(
+				"autoRefresh already-published cwl refresh runId=%s status=error durationMs=%s error=%s",
+				runId,
+				Math.max(0, Date.now() - cwlStartMs),
+				errorMessage_(err),
+			);
+		}
+	} else {
+		result.cwlSeasonEventRefresh = { ok: false, skipped: true, reason: "budget" };
+		Logger.log("autoRefresh already-published cwl refresh skipped runId=%s reason=budget", runId);
+	}
+	if (hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+		const cloudflareStartMs = Date.now();
+		try {
+			const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize-already-published", {
+				updateQueue: false,
+			});
+			current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : current.cloudflarePublicDataPublish;
+			result.cloudflarePublicDataPublish = cloudflareMirror || null;
+			Logger.log(
+				"autoRefresh already-published cloudflare ensure runId=%s status=%s deferred=%s durationMs=%s error=%s",
+				runId,
+				String((cloudflareMirror && cloudflareMirror.status) || ""),
+				!!(cloudflareMirror && cloudflareMirror.deferred),
+				Math.max(0, Date.now() - cloudflareStartMs),
+				String((cloudflareMirror && cloudflareMirror.error) || ""),
+			);
+		} catch (err) {
+			result.cloudflarePublicDataPublish = { ok: false, status: "error", error: errorMessage_(err) };
+			Logger.log(
+				"autoRefresh already-published cloudflare ensure runId=%s status=error durationMs=%s error=%s",
+				runId,
+				Math.max(0, Date.now() - cloudflareStartMs),
+				errorMessage_(err),
+			);
+		}
+	} else {
+		result.cloudflarePublicDataPublish = { ok: false, skipped: true, reason: "budget" };
+		Logger.log("autoRefresh already-published cloudflare ensure skipped runId=%s reason=budget", runId);
+	}
+	if (alreadyPublishedRosterData && typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
+		try {
+			ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_(
+				result.cwlSeasonEventRefresh && result.cwlSeasonEventRefresh.eventId,
+				alreadyPublishedRosterData,
+				new Date().toISOString(),
+			);
+		} catch (err) {
+			Logger.log("autoRefresh already-published cwl runtime ack skipped runId=%s error=%s", runId, errorMessage_(err));
+		}
+	}
+	try {
+		writeAutoRefreshQueueLastJobState_(current, "completed", summary, "");
+	} catch (err) {
+		Logger.log("autoRefresh already-published post-cleanup lastJob update skipped runId=%s error=%s", runId, errorMessage_(err));
+	}
+	return result;
+}
+
 // Execute finalization task: verify shards, guard source fingerprint, write final
 // manifest/playerMetrics shard, then publish the small version pointer.
 function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRaw) {
@@ -2420,25 +2767,21 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const runId = current && current.runId;
 	if (!runId) throw new Error("Auto-refresh finalize task is missing run id.");
 	if (readPublishedActiveVersionId_() === runId) {
-		let alreadyPublishedRosterData = null;
 		let sourceMetaForCwl = null;
+		const sourceMetaReadStartMs = Date.now();
 		try {
 			sourceMetaForCwl = readAutoRefreshRunShard_(runId, "source/meta");
-			const activeSnapshot = readActiveRosterSnapshot_();
-			alreadyPublishedRosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : null;
+			Logger.log(
+				"autoRefresh already-published source meta read runId=%s ok=true durationMs=%s",
+				runId,
+				Math.max(0, Date.now() - sourceMetaReadStartMs),
+			);
 		} catch (err) {
-			Logger.log("autoRefresh already-published recovery read skipped: %s", errorMessage_(err));
-		}
-		const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(alreadyPublishedRosterData, sourceMetaForCwl, runId);
-		current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
-		const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize-already-published");
-		if (cloudflareMirror && cloudflareMirror.deferred) return cloudflareMirror;
-		current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
-		if (alreadyPublishedRosterData && typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
-			ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_(
-				cwlSeasonEventRefresh && cwlSeasonEventRefresh.eventId,
-				alreadyPublishedRosterData,
-				new Date().toISOString(),
+			Logger.log(
+				"autoRefresh already-published source meta read runId=%s ok=false durationMs=%s error=%s",
+				runId,
+				Math.max(0, Date.now() - sourceMetaReadStartMs),
+				errorMessage_(err),
 			);
 		}
 		const summary = "Auto-refresh version was already published; cleared completed queue state.";
@@ -2461,7 +2804,18 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			getAutoRefreshJobRemainingMs_(executionStartMsRaw),
 			"alreadyPublished",
 		);
-		return { ok: true, status: "completed", summary: summary, alreadyPublished: true, runId: runId, processedRosters: current.processedRosters, issueCount: current.issueCount };
+		const postCleanup = runAutoRefreshAlreadyPublishedPostCleanupBestEffort_(current, sourceMetaForCwl, summary, executionStartMsRaw);
+		return {
+			ok: true,
+			status: "completed",
+			summary: summary,
+			alreadyPublished: true,
+			runId: runId,
+			processedRosters: current.processedRosters,
+			issueCount: current.issueCount,
+			postCleanup: sanitizeAutoRefreshDiagnosticFragment_(postCleanup, 3),
+			skipPostTickMirrorRepair: true,
+		};
 	}
 	if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_FINALIZE_RESERVE_MS)) {
 		scheduleAutoRefreshJobResume_();
@@ -2621,7 +2975,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			playerMetricEntryCount,
 		);
 		archiveAndClearAutoRefreshQueueStateBestEffort_(current, "completed", summary, "", "autoRefresh queue completed cleanup");
-		return { ok: true, status: "completed", summary: summary, changed: true, processedRosters: current.processedRosters, issueCount: current.issueCount };
+		return { ok: true, status: "completed", summary: summary, changed: true, processedRosters: current.processedRosters, issueCount: current.issueCount, skipPostTickMirrorRepair: true };
 	}
 	const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: true });
 	const activeRosterById = verifiedResults.activeRosterById;
@@ -2738,7 +3092,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		changed,
 	);
 	archiveAndClearAutoRefreshQueueStateBestEffort_(current, "completed", summary, "", "autoRefresh queue completed cleanup");
-	return { ok: true, status: "completed", summary: summary, changed: changed, processedRosters: current.processedRosters, issueCount: current.issueCount };
+	return { ok: true, status: "completed", summary: summary, changed: changed, processedRosters: current.processedRosters, issueCount: current.issueCount, skipPostTickMirrorRepair: true };
 }
 
 // Continue one queue worker execution. The worker intentionally executes at most
@@ -3385,6 +3739,7 @@ function maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_(labelRaw, 
 	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
 	if (typeof repairCloudflareActiveRosterMirrorIfStale_ !== "function") return null;
 	if (!result || result.ok === false || result.inProgress === true || String(result.status || "") === "error") return null;
+	if (result.skipPostTickMirrorRepair === true) return null;
 	if (String(result.reason || "") === "overlap") return null;
 	try {
 		const repair = repairCloudflareActiveRosterMirrorIfStale_({ label: label });
@@ -3437,10 +3792,19 @@ function autoRefreshActiveRosterTick() {
 		return result;
 	} catch (err) {
 		if (isActiveRosterJobLockBusyError_(err)) {
+			const lockRecovery = maybeClearStaleAutoRefreshLockAfterBusy_("autoRefreshActiveRosterTick lock busy recovery");
+			if (lockRecovery && lockRecovery.cleared) {
+				Logger.log(
+					"autoRefreshActiveRosterTick cleared stale auto-refresh lock runId=%s taskId=%s ageMs=%s",
+					String(lockRecovery.runId || ""),
+					String(lockRecovery.taskId || ""),
+					toNonNegativeInt_(lockRecovery.ageMs),
+				);
+			}
 			scheduleAutoRefreshJobResume_();
 			setAutoRefreshRunResult_("skipped", "Auto-refresh skipped due to overlap with another active roster refresh/publish flow.", "", 0, "", startedAt, new Date().toISOString());
 			tryReconcileRegularWarFinalizationTriggerState_();
-			resultForLog = { ok: true, status: "skipped", skipped: true, reason: "overlap" };
+			resultForLog = { ok: true, status: "skipped", skipped: true, reason: "overlap", lockRecovery: lockRecovery };
 			return resultForLog;
 		}
 		const message = errorMessage_(err);
@@ -3492,9 +3856,18 @@ function autoRefreshWorkerTick() {
 		return result;
 	} catch (err) {
 		if (isActiveRosterJobLockBusyError_(err)) {
+			const lockRecovery = maybeClearStaleAutoRefreshLockAfterBusy_("autoRefreshWorkerTick lock busy recovery");
+			if (lockRecovery && lockRecovery.cleared) {
+				Logger.log(
+					"autoRefreshWorkerTick cleared stale auto-refresh lock runId=%s taskId=%s ageMs=%s",
+					String(lockRecovery.runId || ""),
+					String(lockRecovery.taskId || ""),
+					toNonNegativeInt_(lockRecovery.ageMs),
+				);
+			}
 			scheduleAutoRefreshJobResume_();
 			setAutoRefreshRunResult_("inProgress", "Auto-refresh worker deferred due to overlap with another active roster refresh/publish flow.", "", 0, "", startedAt, new Date().toISOString());
-			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "overlap" };
+			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "overlap", lockRecovery: lockRecovery };
 			return resultForLog;
 		}
 		const message = errorMessage_(err);

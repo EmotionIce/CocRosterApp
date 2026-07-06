@@ -126,6 +126,49 @@ function releaseActiveRosterJobLock_(tokenRaw) {
 	}
 }
 
+// Read the current active roster job lock without mutating it.
+function readActiveRosterJobLockState_() {
+	const props = PropertiesService.getScriptProperties();
+	return parseActiveRosterJobLockState_(props.getProperty(ACTIVE_ROSTER_JOB_LOCK_KEY));
+}
+
+// Clear the active roster job lock when the caller has already proven the owner
+// is safe to release, for example after a stale auto-refresh worker timeout.
+function clearActiveRosterJobLockForOwners_(ownerMapRaw, labelRaw) {
+	const ownerMap = ownerMapRaw && typeof ownerMapRaw === "object" ? ownerMapRaw : {};
+	const label = String(labelRaw == null ? "active roster lock owner cleanup" : labelRaw).trim() || "active roster lock owner cleanup";
+	const props = PropertiesService.getScriptProperties();
+	const scriptLock = LockService.getScriptLock();
+	const didLock = scriptLock.tryLock(5000);
+	if (!didLock) return { cleared: false, reason: "scriptLockBusy" };
+	try {
+		const current = parseActiveRosterJobLockState_(props.getProperty(ACTIVE_ROSTER_JOB_LOCK_KEY));
+		if (!current) return { cleared: false, reason: "missing" };
+		if (ownerMap[current.owner] !== true) {
+			return {
+				cleared: false,
+				reason: "ownerMismatch",
+				owner: current.owner,
+				expiresAt: new Date(current.expiresAt).toISOString(),
+			};
+		}
+		props.deleteProperty(ACTIVE_ROSTER_JOB_LOCK_KEY);
+		Logger.log(
+			"%s: cleared active roster lock owner=%s expiresAt=%s",
+			label,
+			current.owner,
+			new Date(current.expiresAt).toISOString(),
+		);
+		return {
+			cleared: true,
+			owner: current.owner,
+			expiresAt: new Date(current.expiresAt).toISOString(),
+		};
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
 // Handle with active roster job lock.
 function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 	if (typeof callback !== "function") {

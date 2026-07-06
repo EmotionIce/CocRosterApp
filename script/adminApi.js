@@ -11,6 +11,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return verifyAdminPassword(args[0]);
 		case "getAutoRefreshSettings":
 			return getAutoRefreshSettings(args[0]);
+		case "getAutoRefreshDiagnostics":
+			return getAutoRefreshDiagnostics(args[0]);
 		case "setAutoRefreshEnabled":
 			return setAutoRefreshEnabled(args[0], args[1]);
 		case "getDonationRefreshSettings":
@@ -490,6 +492,12 @@ function getAutoRefreshSettings(password) {
 	} finally {
 		scriptLock.releaseLock();
 	}
+}
+
+// Get read-only auto-refresh queue diagnostics.
+function getAutoRefreshDiagnostics(password) {
+	assertAdminPassword_(password);
+	return buildAutoRefreshDiagnostics_();
 }
 
 // Set auto refresh enabled.
