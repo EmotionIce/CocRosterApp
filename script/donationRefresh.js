@@ -472,7 +472,6 @@ function runDonationRefreshCore_(optionsRaw) {
 		if (typeof repairCloudflareActiveRosterMirrorIfStale_ === "function") {
 			cloudflareActiveMirrorRepair = repairCloudflareActiveRosterMirrorIfStale_({
 				label: "donation-refresh-active-mirror",
-				expectedVersionId: source.versionId,
 			});
 			if (cloudflareActiveMirrorRepair && cloudflareActiveMirrorRepair.ok !== true && cloudflareActiveMirrorRepair.skipped !== true) {
 				Logger.log(
