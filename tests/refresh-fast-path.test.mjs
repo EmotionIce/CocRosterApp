@@ -31,6 +31,7 @@ const loadBackend = () => {
     .map((file) => fs.readFileSync(new URL(file, repoRoot), "utf8"))
     .join("\n");
   const properties = new Map([["DISCORD_BOT_API_SECRET", "secret"]]);
+  let uuidCounter = 0;
   const context = {
     Buffer,
     Logger: { log() {} },
@@ -53,7 +54,7 @@ const loadBackend = () => {
       }),
     },
     Utilities: {
-      getUuid: () => "test-uuid-" + Math.random().toString(16).slice(2),
+      getUuid: () => "uuid" + String(++uuidCounter).padStart(8, "0") + "-test",
       sleep() {},
       newBlob(value) {
         const bytes = Array.isArray(value)

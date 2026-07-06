@@ -168,6 +168,9 @@ function writePublishedRosterData_(rosterDataRaw) {
 			lastPublishArchiveKey: meta.publishArchiveKey,
 			lastPublishArchiveCleanupDeleted: publishArchiveCleanupDeleted,
 		});
+		if (typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
+			ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_("", validated, new Date().toISOString());
+		}
 		Logger.log(
 			"publishRosterData ok rosters=%s players=%s notes=%s metricEntries=%s backupCreated=%s backupKey=%s backupCleanupDeleted=%s",
 			meta.rosterCount,
@@ -284,6 +287,9 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 	Logger.log("autoRefresh write compare done changed=%s durationMs=%s", changed, Math.max(0, Date.now() - compareStartMs));
 	if (!changed) {
 		const sourceCounts = countRosterPayload_(sourceData);
+		if (typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
+			ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_("", sourceData, new Date().toISOString());
+		}
 		return {
 			changed: false,
 			written: false,
@@ -321,6 +327,9 @@ function writeAutoRefreshedActiveRosterData_(sourceSnapshotRaw, refreshedRosterD
 		lastAutoRefreshArchiveDate: String((archiveResult && archiveResult.archiveDate) || archiveDate || ""),
 		lastAutoRefreshArchiveCleanupDeleted: archiveCleanupDeleted,
 	});
+	if (typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
+		ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_("", payloadToWrite, new Date().toISOString());
+	}
 	Logger.log("autoRefresh write meta patch done durationMs=%s", Math.max(0, Date.now() - metaPatchStartMs));
 
 	return {
@@ -2411,9 +2420,27 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const runId = current && current.runId;
 	if (!runId) throw new Error("Auto-refresh finalize task is missing run id.");
 	if (readPublishedActiveVersionId_() === runId) {
+		let alreadyPublishedRosterData = null;
+		let sourceMetaForCwl = null;
+		try {
+			sourceMetaForCwl = readAutoRefreshRunShard_(runId, "source/meta");
+			const activeSnapshot = readActiveRosterSnapshot_();
+			alreadyPublishedRosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : null;
+		} catch (err) {
+			Logger.log("autoRefresh already-published recovery read skipped: %s", errorMessage_(err));
+		}
+		const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(alreadyPublishedRosterData, sourceMetaForCwl, runId);
+		current.cwlSeasonEventRefresh = cwlSeasonEventRefresh;
 		const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize-already-published");
 		if (cloudflareMirror && cloudflareMirror.deferred) return cloudflareMirror;
 		current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
+		if (alreadyPublishedRosterData && typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
+			ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_(
+				cwlSeasonEventRefresh && cwlSeasonEventRefresh.eventId,
+				alreadyPublishedRosterData,
+				new Date().toISOString(),
+			);
+		}
 		const summary = "Auto-refresh version was already published; cleared completed queue state.";
 		current.status = "completed";
 		current.phase = "completed";
@@ -2685,6 +2712,13 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const cloudflareMirror = ensureAutoRefreshCloudflarePublicDataPublished_(current, "auto-refresh-finalize");
 	if (cloudflareMirror && cloudflareMirror.deferred) return cloudflareMirror;
 	current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
+	if (typeof ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_ === "function") {
+		ackFinalizedCwlRuntimeRosterConsumptionFromRosterData_(
+			cwlSeasonEventRefresh && cwlSeasonEventRefresh.eventId,
+			finalRosterData,
+			new Date().toISOString(),
+		);
+	}
 	setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 	current.status = "completed";
 	current.phase = "completed";

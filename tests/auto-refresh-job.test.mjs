@@ -34,6 +34,7 @@ const loadBackend = () => {
     .join("\n");
   const properties = new Map([["DISCORD_BOT_API_SECRET", "secret"]]);
   const triggers = [];
+  let uuidCounter = 0;
   const makeTrigger = (handler) => ({
     id: "trigger-" + (triggers.length + 1),
     handler,
@@ -93,7 +94,7 @@ const loadBackend = () => {
         return Array.from(crypto.createHash("sha256").update(String(value), "utf8").digest())
           .map((byte) => byte > 127 ? byte - 256 : byte);
       },
-      getUuid: () => "test-uuid-" + Math.random().toString(16).slice(2),
+      getUuid: () => "uuid" + String(++uuidCounter).padStart(8, "0") + "-test",
       sleep() {},
       newBlob(value) {
         const bytes = Array.isArray(value)
