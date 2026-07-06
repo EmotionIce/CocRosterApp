@@ -875,6 +875,7 @@ test("season events model includes an active CWL leaderboard card", () => {
                 successfulDefensiveAttacks: 1,
                 attackedDefenseDays: 1,
                 defenseHolds: 1,
+                defenseStarsConceded: 2,
                 bestStarsConceded: 2,
                 bestDestructionConceded: 88,
               },
@@ -893,7 +894,7 @@ test("season events model includes an active CWL leaderboard card", () => {
   assert.equal(cwlCard.rows.length, 1);
   assert.equal(cwlCard.rows[0].displayName, "Alpha");
   assert.equal(cwlCard.rows[0].score, 7);
-  assert.equal(cwlCard.rows[0].cwlStats.defenseHolds, 1);
+  assert.equal(cwlCard.rows[0].cwlStats.defenseStarsConceded, 2);
 });
 
 test("season events model shows latest completed CWL when the current CWL is waiting", () => {
@@ -937,7 +938,7 @@ test("season events model shows latest completed CWL when the current CWL is wai
             kind: "final",
             rankedTags: ["#WIN"],
             byTag: {
-              "#WIN": { starsTotal: 21, defenseHolds: 2, attackedDefenseDays: 2 },
+              "#WIN": { starsTotal: 21, defenseStarsConceded: 4, bestStarsConceded: 4, attackedDefenseDays: 2 },
             },
           },
         },

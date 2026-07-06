@@ -1156,7 +1156,10 @@
         const countedAttacks = toNonNegativeInt(entry.countedAttacks);
         const totalDestruction = toNonNegativeInt(entry.totalDestruction);
         const attackedDefenseDays = toNonNegativeInt(entry.attackedDefenseDays);
-        const bestStarsConceded = toNonNegativeInt(entry.bestStarsConceded);
+        const defenseStarsConceded = entry.defenseStarsConceded != null
+            ? toNonNegativeInt(entry.defenseStarsConceded)
+            : toNonNegativeInt(entry.bestStarsConceded);
+        const bestStarsConceded = defenseStarsConceded;
         const bestDestructionConceded = toNonNegativeInt(entry.bestDestructionConceded);
         const possibleStars = 3 * resolvedWarDays;
         return {
@@ -1178,9 +1181,11 @@
             attackedDefenseDays: attackedDefenseDays,
             defenseHolds: toNonNegativeInt(entry.defenseHolds),
             threeStarAttacksConceded: toNonNegativeInt(entry.threeStarAttacksConceded),
+            defenseStarsConceded: defenseStarsConceded,
             bestStarsConceded: bestStarsConceded,
             bestDestructionConceded: bestDestructionConceded,
             unattackedDefenseDays: toNonNegativeInt(entry.unattackedDefenseDays),
+            avgDefenseStarsConceded: attackedDefenseDays > 0 ? (defenseStarsConceded / attackedDefenseDays) : null,
             avgBestStarsConceded: attackedDefenseDays > 0 ? (bestStarsConceded / attackedDefenseDays) : null,
             avgBestDestructionConceded: attackedDefenseDays > 0 ? (bestDestructionConceded / attackedDefenseDays) : null,
             possibleStars,
@@ -5495,7 +5500,10 @@
     const sanitizeCwlAggregateStat = (entryRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
         const attackedDefenseDays = toNonNegativeInt(entry.attackedDefenseDays);
-        const bestStarsConceded = toNonNegativeInt(entry.bestStarsConceded);
+        const defenseStarsConceded = entry.defenseStarsConceded != null
+            ? toNonNegativeInt(entry.defenseStarsConceded)
+            : toNonNegativeInt(entry.bestStarsConceded);
+        const bestStarsConceded = defenseStarsConceded;
         const bestDestructionConceded = toNonNegativeInt(entry.bestDestructionConceded);
         return {
             starsTotal: toNonNegativeInt(entry.starsTotal),
@@ -5510,9 +5518,11 @@
             attackedDefenseDays: attackedDefenseDays,
             defenseHolds: toNonNegativeInt(entry.defenseHolds),
             threeStarAttacksConceded: toNonNegativeInt(entry.threeStarAttacksConceded),
+            defenseStarsConceded: defenseStarsConceded,
             bestStarsConceded: bestStarsConceded,
             bestDestructionConceded: bestDestructionConceded,
             unattackedDefenseDays: toNonNegativeInt(entry.unattackedDefenseDays),
+            avgDefenseStarsConceded: attackedDefenseDays > 0 ? (defenseStarsConceded / attackedDefenseDays) : null,
             avgBestStarsConceded: attackedDefenseDays > 0 ? (bestStarsConceded / attackedDefenseDays) : null,
             avgBestDestructionConceded: attackedDefenseDays > 0 ? (bestDestructionConceded / attackedDefenseDays) : null,
         };
@@ -5570,7 +5580,7 @@
                 discordUsername: toStr(participant.discordUsername).trim(),
                 accounts: [Object.assign({}, account, { tag: tag, cwlStats: stats })],
                 score: stats.starsTotal,
-                scoreLabel: formatNumber(stats.starsTotal) + " stars, " + formatNumber(stats.defenseHolds) + " holds",
+                scoreLabel: formatNumber(stats.starsTotal) + " stars, " + formatNumber(stats.defenseStarsConceded) + " defense stars",
                 scoreValueLabel: formatNumber(stats.starsTotal) + " stars",
                 leagueBadgeLabel: "",
                 metric: "cwl",
@@ -5853,7 +5863,7 @@
         score.appendChild(el("div", "season-event-row__score-value", toStr(row.scoreValueLabel).trim() || buildSeasonEventScoreValueLabel(eventType, row.score)));
         if (eventType === "cwl") {
             const stats = row.cwlStats && typeof row.cwlStats === "object" ? row.cwlStats : {};
-            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(stats.defenseHolds) + " holds \u00b7 " + formatNumber(stats.successfulDefensiveAttacks) + " defenses"));
+            score.appendChild(el("div", "season-event-row__score-sub", formatNumber(stats.defenseStarsConceded) + " defensive stars conceded"));
         } else if (eventType !== "push") {
             score.appendChild(el("div", "season-event-row__score-sub", accounts.length + " " + pluralize(accounts.length, "account", "accounts")));
         }

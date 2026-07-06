@@ -2397,6 +2397,7 @@ function sanitizeCwlSeasonEventAggregate_(aggregateRaw) {
 		staleSince: sanitizeSeasonEventTimestampOrEmpty_(aggregate.staleSince),
 		staleReason: sanitizeSeasonEventText_(aggregate.staleReason, 160),
 		hash: sanitizeSeasonEventText_(aggregate.hash, 120),
+		scoreSchema: sanitizeSeasonEventText_(aggregate.scoreSchema, 80) || "cwl-offense-stars-defense-stars-v2",
 		playerCount: Object.keys(byTag).length,
 		warTags: warTags,
 		byTag: byTag,
@@ -2451,6 +2452,12 @@ function hasCwlSeasonEventDefenseResults_(statsRaw) {
 	return stats.attackedDefenseDays > 0;
 }
 
+// Return the canonical CWL defensive-star tie-break value.
+function getCwlSeasonEventDefenseStarsConceded_(statsRaw) {
+	const stats = sanitizeCwlStatEntry_(statsRaw);
+	return toNonNegativeInt_(stats.defenseStarsConceded != null ? stats.defenseStarsConceded : stats.bestStarsConceded);
+}
+
 // Compare CWL leaderboard rows canonically.
 function compareCwlSeasonEventLeaderboardRows_(leftRaw, rightRaw) {
 	const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
@@ -2461,24 +2468,9 @@ function compareCwlSeasonEventLeaderboardRows_(leftRaw, rightRaw) {
 	const rightParticipated = hasCwlSeasonEventParticipation_(rightStats);
 	if (leftParticipated !== rightParticipated) return leftParticipated ? -1 : 1;
 	if (leftStats.starsTotal !== rightStats.starsTotal) return rightStats.starsTotal - leftStats.starsTotal;
-	const leftDefense = hasCwlSeasonEventDefenseResults_(leftStats);
-	const rightDefense = hasCwlSeasonEventDefenseResults_(rightStats);
-	if (leftDefense !== rightDefense) return leftDefense ? -1 : 1;
-	if (leftStats.defenseHolds !== rightStats.defenseHolds) return rightStats.defenseHolds - leftStats.defenseHolds;
-	if (leftStats.successfulDefensiveAttacks !== rightStats.successfulDefensiveAttacks) {
-		return rightStats.successfulDefensiveAttacks - leftStats.successfulDefensiveAttacks;
-	}
-	if (leftStats.threeStarAttacksConceded !== rightStats.threeStarAttacksConceded) {
-		return leftStats.threeStarAttacksConceded - rightStats.threeStarAttacksConceded;
-	}
-	const leftAvgStars = leftStats.attackedDefenseDays > 0 ? leftStats.bestStarsConceded / leftStats.attackedDefenseDays : Number.POSITIVE_INFINITY;
-	const rightAvgStars = rightStats.attackedDefenseDays > 0 ? rightStats.bestStarsConceded / rightStats.attackedDefenseDays : Number.POSITIVE_INFINITY;
-	if (leftAvgStars !== rightAvgStars) return leftAvgStars < rightAvgStars ? -1 : 1;
-	const leftAvgDestruction = leftStats.attackedDefenseDays > 0 ? leftStats.bestDestructionConceded / leftStats.attackedDefenseDays : Number.POSITIVE_INFINITY;
-	const rightAvgDestruction = rightStats.attackedDefenseDays > 0 ? rightStats.bestDestructionConceded / rightStats.attackedDefenseDays : Number.POSITIVE_INFINITY;
-	if (leftAvgDestruction !== rightAvgDestruction) return leftAvgDestruction < rightAvgDestruction ? -1 : 1;
-	if (leftStats.totalDestruction !== rightStats.totalDestruction) return rightStats.totalDestruction - leftStats.totalDestruction;
-	if (leftStats.missedAttacks !== rightStats.missedAttacks) return leftStats.missedAttacks - rightStats.missedAttacks;
+	const leftDefenseStars = getCwlSeasonEventDefenseStarsConceded_(leftStats);
+	const rightDefenseStars = getCwlSeasonEventDefenseStarsConceded_(rightStats);
+	if (leftDefenseStars !== rightDefenseStars) return leftDefenseStars - rightDefenseStars;
 	const leftName = String(left._sortName || "").toLowerCase();
 	const rightName = String(right._sortName || "").toLowerCase();
 	if (leftName !== rightName) return leftName < rightName ? -1 : 1;
@@ -2493,10 +2485,8 @@ function buildCwlSeasonEventScoreLabel_(statsRaw) {
 	return (
 		String(stats.starsTotal) +
 		" stars, " +
-		String(stats.defenseHolds) +
-		" holds, " +
-		String(stats.successfulDefensiveAttacks) +
-		" defenses"
+		String(getCwlSeasonEventDefenseStarsConceded_(stats)) +
+		" defense stars"
 	);
 }
 
@@ -3308,6 +3298,7 @@ function buildCwlSeasonEventAggregateFromSnapshot_(eventRaw, rosterDataRaw, snap
 			staleSince: "",
 			staleReason: "",
 			hash: hash,
+			scoreSchema: "cwl-offense-stars-defense-stars-v2",
 			playerCount: Object.keys(byTag).length,
 			warTags: relevantWarTags,
 			byTag: byTag,
@@ -3357,11 +3348,87 @@ function filterCwlAggregateToRegisteredParticipants_(eventRaw, aggregateRaw) {
 		staleSince: "",
 		staleReason: "",
 		hash: buildSeasonEventStableHash_({ eventId: aggregate.eventId, byTag: byTag, warTags: aggregate.warTags }),
+		scoreSchema: "cwl-offense-stars-defense-stars-v2",
 		playerCount: Object.keys(byTag).length,
 		warTags: aggregate.warTags,
 		rankedTags: rankedRows.map((row) => row.tag),
 		byTag: byTag,
 	};
+}
+
+// Rewrite stored CWL season-event aggregates through the current stat schema.
+function migrateCwlSeasonEventDefenseStarsStorage_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const dryRun = options.dryRun === true;
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.nowIso || options.now) || new Date().toISOString();
+	const eventKeys = listFirebaseChildKeys_(SEASON_EVENTS_CWL_AGGREGATES_PATH);
+	const kinds = ["live", "final"];
+	const writes = [];
+	const changed = [];
+	let scannedAggregateCount = 0;
+
+	for (let i = 0; i < eventKeys.length; i++) {
+		const eventId = sanitizeSeasonEventText_(decodeFirebaseObjectKey_(eventKeys[i]), 180);
+		if (!eventId) continue;
+		const event = readSeasonEventById_(eventId);
+		for (let j = 0; j < kinds.length; j++) {
+			const kind = kinds[j];
+			const path = buildCwlSeasonEventAggregatePath_(eventId, kind);
+			const aggregateRaw = readCwlSeasonEventAggregate_(eventId, kind);
+			if (!aggregateRaw || typeof aggregateRaw !== "object" || !aggregateRaw.eventId) continue;
+			scannedAggregateCount++;
+			const next = sanitizeCwlSeasonEventAggregate_(aggregateRaw);
+			next.eventId = next.eventId || eventId;
+			next.kind = kind;
+			next.scoreSchema = "cwl-offense-stars-defense-stars-v2";
+			if (event) next.rankedTags = filterCwlAggregateToRegisteredParticipants_(event, next).rankedTags;
+			const beforeJson = JSON.stringify(aggregateRaw);
+			const afterJson = JSON.stringify(next);
+			if (beforeJson === afterJson) continue;
+			changed.push({
+				eventId: eventId,
+				kind: kind,
+				playerCount: next.playerCount,
+			});
+			if (!dryRun) {
+				writes.push({
+					path: path,
+					method: "PUT",
+					payload: encodeFirebaseObjectKeysRecursive_(next),
+				});
+			}
+		}
+	}
+
+	if (writes.length) {
+		firebaseBatchWriteJson_(writes);
+		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
+			cwlDefenseStarsMigrationAt: nowIso,
+			cwlDefenseStarsMigrationAggregateCount: writes.length,
+		});
+		publishCloudflareSeasonEventsAfterMutation_("migrate-cwl-defense-stars");
+	}
+
+	return {
+		ok: true,
+		dryRun: dryRun,
+		scannedEventCount: eventKeys.length,
+		scannedAggregateCount: scannedAggregateCount,
+		changedAggregateCount: changed.length,
+		writtenAggregateCount: dryRun ? 0 : writes.length,
+		changed: changed.slice(0, 50),
+	};
+}
+
+// Public Apps Script run-menu wrapper for the one-time CWL defensive-star schema migration.
+function runCwlSeasonEventDefenseStarsMigrationOnce() {
+	return migrateCwlSeasonEventDefenseStarsStorage_({ dryRun: false });
+}
+
+// Admin API wrapper for the one-time CWL defensive-star schema migration.
+function migrateCwlSeasonEventDefenseStarsStorage(payloadRaw, password) {
+	assertAdminPassword_(password);
+	return migrateCwlSeasonEventDefenseStarsStorage_(payloadRaw);
 }
 
 // Mark the live CWL aggregate stale without replacing scores.

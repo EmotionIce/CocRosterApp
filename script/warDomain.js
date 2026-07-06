@@ -20,6 +20,7 @@ function createEmptyCwlStatEntry_() {
 		attackedDefenseDays: 0,
 		defenseHolds: 0,
 		threeStarAttacksConceded: 0,
+		defenseStarsConceded: 0,
 		bestStarsConceded: 0,
 		bestDestructionConceded: 0,
 		unattackedDefenseDays: 0,
@@ -1238,6 +1239,7 @@ function mergeCwlStatEntry_(dest, srcRaw) {
 	dest.attackedDefenseDays = toNonNegativeInt_(dest.attackedDefenseDays) + src.attackedDefenseDays;
 	dest.defenseHolds = toNonNegativeInt_(dest.defenseHolds) + src.defenseHolds;
 	dest.threeStarAttacksConceded = toNonNegativeInt_(dest.threeStarAttacksConceded) + src.threeStarAttacksConceded;
+	dest.defenseStarsConceded = toNonNegativeInt_(dest.defenseStarsConceded) + src.defenseStarsConceded;
 	dest.bestStarsConceded = toNonNegativeInt_(dest.bestStarsConceded) + src.bestStarsConceded;
 	dest.bestDestructionConceded = toNonNegativeInt_(dest.bestDestructionConceded) + src.bestDestructionConceded;
 	dest.unattackedDefenseDays = toNonNegativeInt_(dest.unattackedDefenseDays) + src.unattackedDefenseDays;
@@ -1329,6 +1331,7 @@ function applyCwlDefenseToStatEntry_(stats, incomingAttacksRaw, warStateRaw) {
 		}
 	}
 	if (bestStars >= 0) {
+		stats.defenseStarsConceded += bestStars;
 		stats.bestStarsConceded += bestStars;
 		stats.bestDestructionConceded += Math.max(0, bestDestruction);
 	}
@@ -2504,7 +2507,10 @@ function sanitizeCwlStatEntry_(entryRaw) {
 	out.attackedDefenseDays = toNonNegativeInt_(entry.attackedDefenseDays);
 	out.defenseHolds = toNonNegativeInt_(entry.defenseHolds);
 	out.threeStarAttacksConceded = toNonNegativeInt_(entry.threeStarAttacksConceded);
-	out.bestStarsConceded = toNonNegativeInt_(entry.bestStarsConceded);
+	out.defenseStarsConceded = entry.defenseStarsConceded != null
+		? toNonNegativeInt_(entry.defenseStarsConceded)
+		: toNonNegativeInt_(entry.bestStarsConceded);
+	out.bestStarsConceded = out.defenseStarsConceded;
 	out.bestDestructionConceded = toNonNegativeInt_(entry.bestDestructionConceded);
 	out.unattackedDefenseDays = toNonNegativeInt_(entry.unattackedDefenseDays);
 	return out;
@@ -2532,9 +2538,11 @@ function deriveCwlMetrics_(entryRaw) {
 		attackedDefenseDays: entry.attackedDefenseDays,
 		defenseHolds: entry.defenseHolds,
 		threeStarAttacksConceded: entry.threeStarAttacksConceded,
+		defenseStarsConceded: entry.defenseStarsConceded,
 		bestStarsConceded: entry.bestStarsConceded,
 		bestDestructionConceded: entry.bestDestructionConceded,
 		unattackedDefenseDays: entry.unattackedDefenseDays,
+		avgDefenseStarsConceded: entry.attackedDefenseDays > 0 ? entry.defenseStarsConceded / entry.attackedDefenseDays : null,
 		avgBestStarsConceded: entry.attackedDefenseDays > 0 ? entry.bestStarsConceded / entry.attackedDefenseDays : null,
 		avgBestDestructionConceded: entry.attackedDefenseDays > 0 ? entry.bestDestructionConceded / entry.attackedDefenseDays : null,
 		possibleStars: possibleStars,

@@ -2802,18 +2802,21 @@ test("CWL aggregation tracks offense and defense independently", () => {
   assert.equal(stats["#A"].successfulDefensiveAttacks, 2);
   assert.equal(stats["#A"].threeStarAttacksConceded, 1);
   assert.equal(stats["#A"].defenseHolds, 0);
+  assert.equal(stats["#A"].defenseStarsConceded, 3);
   assert.equal(stats["#A"].bestStarsConceded, 3);
   assert.equal(stats["#A"].bestDestructionConceded, 90);
 
   assert.equal(stats["#B"].missedAttacks, 1);
   assert.equal(stats["#B"].unattackedDefenseDays, 1);
   assert.equal(stats["#B"].defenseHolds, 0);
+  assert.equal(stats["#B"].defenseStarsConceded, 0);
 
   assert.equal(stats["#C"].attacksMade, 0);
   assert.equal(stats["#C"].missedAttacks, 1);
   assert.equal(stats["#C"].defenseAttacksReceived, 1);
   assert.equal(stats["#C"].successfulDefensiveAttacks, 1);
   assert.equal(stats["#C"].defenseHolds, 1);
+  assert.equal(stats["#C"].defenseStarsConceded, 2);
 });
 
 test("CWL active war missed attacks and unattacked defenses stay provisional", () => {
@@ -2844,84 +2847,85 @@ test("CWL active war missed attacks and unattacked defenses stay provisional", (
   assert.equal(stats["#B"].currentWarAttackPending, 1);
   assert.equal(stats["#B"].defenseAttacksReceived, 1);
   assert.equal(stats["#B"].defenseHolds, 0);
+  assert.equal(stats["#B"].defenseStarsConceded, 2);
 });
 
-test("CWL ranking uses backend comparator and does not give no-defense perfect credit", () => {
+test("CWL ranking uses offensive stars then defensive stars conceded", () => {
   const backend = loadBackend();
   const rows = [
-    { tag: "#NODEF", _sortName: "NoDef", cwlStats: { starsTotal: 6, totalDestruction: 180, attackedDefenseDays: 0 } },
     {
-      tag: "#DEF",
-      _sortName: "Def",
+      tag: "#MORESTARS",
+      _sortName: "MoreStars",
+      cwlStats: {
+        starsTotal: 7,
+        attacksMade: 3,
+        defenseStarsConceded: 21,
+        bestStarsConceded: 21,
+      },
+    },
+    {
+      tag: "#BETTERDEF",
+      _sortName: "BetterDef",
       cwlStats: {
         starsTotal: 6,
-        totalDestruction: 150,
+        attacksMade: 3,
         attackedDefenseDays: 1,
-        defenseHolds: 0,
-        successfulDefensiveAttacks: 1,
-        threeStarAttacksConceded: 1,
+        defenseStarsConceded: 1,
+        bestStarsConceded: 1,
+        bestDestructionConceded: 100,
+      },
+    },
+    {
+      tag: "#WORSEDEF",
+      _sortName: "WorseDef",
+      cwlStats: {
+        starsTotal: 6,
+        attacksMade: 3,
+        attackedDefenseDays: 1,
+        defenseStarsConceded: 3,
         bestStarsConceded: 3,
         bestDestructionConceded: 100,
       },
     },
-    { tag: "#NONE", _sortName: "None", cwlStats: {} },
   ];
 
   rows.sort(backend.compareCwlSeasonEventLeaderboardRows_);
 
-  assert.deepEqual(rows.map((row) => row.tag), ["#DEF", "#NODEF", "#NONE"]);
+  assert.deepEqual(rows.map((row) => row.tag), ["#MORESTARS", "#BETTERDEF", "#WORSEDEF"]);
 });
 
-test("CWL ranking applies defensive average stars before defensive destruction", () => {
+test("CWL ranking ignores defensive destruction after defensive stars tie", () => {
   const backend = loadBackend();
   const rows = [
     {
-      tag: "#LOWPCT",
-      _sortName: "LowPct",
+      tag: "#ALPHA",
+      _sortName: "Alpha",
       cwlStats: {
         starsTotal: 9,
-        totalDestruction: 260,
+        attacksMade: 3,
         attackedDefenseDays: 2,
-        defenseHolds: 0,
-        successfulDefensiveAttacks: 1,
-        threeStarAttacksConceded: 0,
+        defenseStarsConceded: 4,
         bestStarsConceded: 4,
-        bestDestructionConceded: 170,
+        bestDestructionConceded: 300,
       },
     },
     {
-      tag: "#LOWSTARS",
-      _sortName: "LowStars",
+      tag: "#BRAVO",
+      _sortName: "Bravo",
       cwlStats: {
         starsTotal: 9,
-        totalDestruction: 260,
+        attacksMade: 3,
         attackedDefenseDays: 2,
-        defenseHolds: 0,
-        successfulDefensiveAttacks: 1,
-        threeStarAttacksConceded: 0,
-        bestStarsConceded: 3,
-        bestDestructionConceded: 199,
-      },
-    },
-    {
-      tag: "#HIGHPCT",
-      _sortName: "HighPct",
-      cwlStats: {
-        starsTotal: 9,
-        totalDestruction: 260,
-        attackedDefenseDays: 2,
-        defenseHolds: 0,
-        successfulDefensiveAttacks: 1,
-        threeStarAttacksConceded: 0,
+        defenseStarsConceded: 4,
         bestStarsConceded: 4,
-        bestDestructionConceded: 190,
+        bestDestructionConceded: 100,
       },
     },
   ];
 
   rows.sort(backend.compareCwlSeasonEventLeaderboardRows_);
 
-  assert.deepEqual(rows.map((row) => row.tag), ["#LOWSTARS", "#LOWPCT", "#HIGHPCT"]);
+  assert.deepEqual(rows.map((row) => row.tag), ["#ALPHA", "#BRAVO"]);
 });
 
 test("CWL participant-filtered aggregate ranked tags use backend display-name tie-break", () => {
@@ -2998,6 +3002,56 @@ test("CWL final aggregate remains compact for a large synthetic leaderboard", ()
   assert.ok(Buffer.byteLength(JSON.stringify(finalAggregate), "utf8") < 128 * 1024);
   assert.equal(Object.keys(finalAggregate.byTag).length, 200);
   assert.equal(finalAggregate.rankedTags.length, 200);
+});
+
+test("CWL defense-stars migration backfills stored aggregates", () => {
+  const backend = loadBackend();
+  const encodedEventId = backend.encodeFirebaseObjectKey_("cwl-old");
+  const initialAggregate = backend.encodeFirebaseObjectKeysRecursive_({
+    eventId: "cwl-old",
+    kind: "live",
+    cwlTrackingState: "active",
+    generatedAt: "2026-07-05T00:00:00.000Z",
+    lastSuccessfulRefreshAt: "2026-07-05T00:00:00.000Z",
+    hash: "old-hash",
+    warTags: ["#WAR1"],
+    byTag: {
+      "#AAA": {
+        starsTotal: 6,
+        attacksMade: 2,
+        attackedDefenseDays: 1,
+        bestStarsConceded: 3,
+        bestDestructionConceded: 100,
+      },
+    },
+  });
+  installMemoryFirebase(backend, {
+    events: {
+      seasonEvents: {
+        cwlAggregates: {
+          byEvent: {
+            [encodedEventId]: {
+              live: initialAggregate,
+            },
+          },
+        },
+      },
+    },
+  });
+  backend.publishCloudflareSeasonEventsAfterMutation_ = () => ({ ok: true });
+
+  const result = backend.migrateCwlSeasonEventDefenseStarsStorage_({
+    nowIso: "2026-07-06T00:00:00.000Z",
+  });
+  const stored = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.__getFirebaseDb().events.seasonEvents.cwlAggregates.byEvent[encodedEventId].live,
+  );
+
+  assert.equal(result.changedAggregateCount, 1);
+  assert.equal(result.writtenAggregateCount, 1);
+  assert.equal(stored.scoreSchema, "cwl-offense-stars-defense-stars-v2");
+  assert.equal(stored.byTag["#AAA"].defenseStarsConceded, 3);
+  assert.equal(stored.byTag["#AAA"].bestStarsConceded, 3);
 });
 
 test("CWL snapshot planning adds zero CWL requests without roster or event need", () => {

@@ -3503,6 +3503,7 @@
     attackedDefenseDays: 0,
     defenseHolds: 0,
     threeStarAttacksConceded: 0,
+    defenseStarsConceded: 0,
     bestStarsConceded: 0,
     bestDestructionConceded: 0,
     unattackedDefenseDays: 0,
@@ -3532,7 +3533,10 @@
     out.attackedDefenseDays = toNonNegativeIntLocal_(entry.attackedDefenseDays);
     out.defenseHolds = toNonNegativeIntLocal_(entry.defenseHolds);
     out.threeStarAttacksConceded = toNonNegativeIntLocal_(entry.threeStarAttacksConceded);
-    out.bestStarsConceded = toNonNegativeIntLocal_(entry.bestStarsConceded);
+    out.defenseStarsConceded = entry.defenseStarsConceded != null
+      ? toNonNegativeIntLocal_(entry.defenseStarsConceded)
+      : toNonNegativeIntLocal_(entry.bestStarsConceded);
+    out.bestStarsConceded = out.defenseStarsConceded;
     out.bestDestructionConceded = toNonNegativeIntLocal_(entry.bestDestructionConceded);
     out.unattackedDefenseDays = toNonNegativeIntLocal_(entry.unattackedDefenseDays);
     return out;
@@ -3560,9 +3564,11 @@
       attackedDefenseDays: entry.attackedDefenseDays,
       defenseHolds: entry.defenseHolds,
       threeStarAttacksConceded: entry.threeStarAttacksConceded,
+      defenseStarsConceded: entry.defenseStarsConceded,
       bestStarsConceded: entry.bestStarsConceded,
       bestDestructionConceded: entry.bestDestructionConceded,
       unattackedDefenseDays: entry.unattackedDefenseDays,
+      avgDefenseStarsConceded: entry.attackedDefenseDays > 0 ? (entry.defenseStarsConceded / entry.attackedDefenseDays) : null,
       avgBestStarsConceded: entry.attackedDefenseDays > 0 ? (entry.bestStarsConceded / entry.attackedDefenseDays) : null,
       avgBestDestructionConceded: entry.attackedDefenseDays > 0 ? (entry.bestDestructionConceded / entry.attackedDefenseDays) : null,
       starsPerf: possibleStars > 0 ? (entry.starsTotal / possibleStars) : null,
