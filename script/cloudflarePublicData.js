@@ -639,6 +639,128 @@ function verifyCloudflarePublicActiveVersionId_(expectedVersionIdRaw) {
 	}
 }
 
+function getCloudflarePublicDataResultError_(resultRaw, fallbackRaw) {
+	const fallback = String(fallbackRaw || "Cloudflare public data operation failed.").trim() || "Cloudflare public data operation failed.";
+	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
+	if (!result) return fallback;
+	const parts = [];
+	const push = function (label, itemRaw) {
+		const item = itemRaw && typeof itemRaw === "object" ? itemRaw : null;
+		if (!item || item.ok === true) return;
+		const reason = String(item.error || item.reason || "").trim();
+		if (reason) parts.push(label ? label + ": " + reason : reason);
+	};
+	push("", result);
+	push("active", result.active);
+	if (result.active && typeof result.active === "object") {
+		push("active public", result.active.publicResult);
+		push("active bot", result.active.botResult);
+	}
+	push("cwlLeagueSignups", result.cwlLeagueSignups);
+	push("seasonEvents", result.seasonEvents);
+	return (parts.join("; ") || fallback).slice(0, 1000);
+}
+
+function repairCloudflareActiveRosterMirrorIfStale_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const label = String(options.label || "active-mirror-repair").trim() || "active-mirror-repair";
+	const startedAt = new Date().toISOString();
+	try {
+		const expectedVersionId = normalizeActiveVersionId_(options.expectedVersionId) || readPublishedActiveVersionId_();
+		if (!expectedVersionId) {
+			return { ok: true, skipped: true, reason: "missing-active-version", repaired: false, label: label, startedAt: startedAt };
+		}
+		const beforeVerify = verifyCloudflarePublicActiveVersionId_(expectedVersionId);
+		if (beforeVerify && beforeVerify.ok === true) {
+			return {
+				ok: true,
+				status: "inSync",
+				repaired: false,
+				label: label,
+				expectedVersionId: expectedVersionId,
+				verifyResult: beforeVerify,
+				startedAt: startedAt,
+				finishedAt: new Date().toISOString(),
+			};
+		}
+		if (beforeVerify && beforeVerify.skipped === true) {
+			return {
+				ok: false,
+				skipped: true,
+				repaired: false,
+				label: label,
+				expectedVersionId: expectedVersionId,
+				verifyResult: beforeVerify,
+				reason: beforeVerify.reason || beforeVerify.error || "verification-skipped",
+				startedAt: startedAt,
+				finishedAt: new Date().toISOString(),
+			};
+		}
+		const publishResult = publishCloudflarePublicDataSnapshot_({ label: label });
+		if (!publishResult || publishResult.ok !== true) {
+			return {
+				ok: false,
+				status: "publishFailed",
+				repaired: false,
+				label: label,
+				expectedVersionId: expectedVersionId,
+				verifyResult: beforeVerify || null,
+				publishResult: publishResult || null,
+				error: getCloudflarePublicDataResultError_(publishResult, "Cloudflare active mirror repair publish failed."),
+				startedAt: startedAt,
+				finishedAt: new Date().toISOString(),
+			};
+		}
+		const afterVerify = verifyCloudflarePublicActiveVersionId_(expectedVersionId);
+		if (!afterVerify || afterVerify.ok !== true) {
+			const message = afterVerify && (afterVerify.error || afterVerify.reason)
+				? String(afterVerify.error || afterVerify.reason)
+				: "Cloudflare active version pointer did not verify after repair.";
+			return {
+				ok: false,
+				status: "verifyFailed",
+				repaired: true,
+				label: label,
+				expectedVersionId: expectedVersionId,
+				verifyResult: beforeVerify || null,
+				publishResult: publishResult,
+				afterVerifyResult: afterVerify || null,
+				error: message.slice(0, 1000),
+				startedAt: startedAt,
+				finishedAt: new Date().toISOString(),
+			};
+		}
+		Logger.log(
+			"Cloudflare active mirror repaired label=%s expectedVersionId=%s previousVersionId=%s",
+			label,
+			expectedVersionId,
+			String((beforeVerify && beforeVerify.actualVersionId) || ""),
+		);
+		return {
+			ok: true,
+			status: "repaired",
+			repaired: true,
+			label: label,
+			expectedVersionId: expectedVersionId,
+			verifyResult: beforeVerify,
+			publishResult: publishResult,
+			afterVerifyResult: afterVerify,
+			startedAt: startedAt,
+			finishedAt: new Date().toISOString(),
+		};
+	} catch (err) {
+		return {
+			ok: false,
+			status: "error",
+			repaired: false,
+			label: label,
+			error: errorMessage_(err),
+			startedAt: startedAt,
+			finishedAt: new Date().toISOString(),
+		};
+	}
+}
+
 function assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw) {
 	try {
 		assertDiscordBotApiSecret_(secretOrPasswordRaw);
@@ -654,5 +776,14 @@ function publishCloudflarePublicDataSnapshot(payloadRaw, secretOrPasswordRaw) {
 	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
 	return publishCloudflarePublicDataSnapshot_({
 		label: String(payload.label || "api-snapshot").trim() || "api-snapshot",
+	});
+}
+
+function repairCloudflareActiveRosterMirror(payloadRaw, secretOrPasswordRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" && !Array.isArray(payloadRaw) ? payloadRaw : {};
+	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
+	return repairCloudflareActiveRosterMirrorIfStale_({
+		label: String(payload.label || "api-active-mirror-repair").trim() || "api-active-mirror-repair",
+		expectedVersionId: payload.expectedVersionId,
 	});
 }

@@ -83,6 +83,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return migrateCwlSeasonEventDefenseStarsStorage(args[0], args[1]);
 		case "publishCloudflarePublicDataSnapshot":
 			return publishCloudflarePublicDataSnapshot(args[0], args[1]);
+		case "repairCloudflareActiveRosterMirror":
+			return repairCloudflareActiveRosterMirror(args[0], args[1]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}

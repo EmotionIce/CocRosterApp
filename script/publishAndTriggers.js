@@ -3149,6 +3149,28 @@ function readAutoRefreshSettings_() {
 	};
 }
 
+function maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_(labelRaw, resultRaw) {
+	const label = String(labelRaw || "auto-refresh-active-mirror").trim() || "auto-refresh-active-mirror";
+	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
+	if (typeof repairCloudflareActiveRosterMirrorIfStale_ !== "function") return null;
+	if (!result || result.ok === false || result.inProgress === true || String(result.status || "") === "error") return null;
+	if (String(result.reason || "") === "overlap") return null;
+	try {
+		const repair = repairCloudflareActiveRosterMirrorIfStale_({ label: label });
+		if (repair && repair.ok !== true && repair.skipped !== true) {
+			Logger.log(
+				"autoRefresh active mirror repair failed label=%s error=%s",
+				label,
+				String(repair.error || repair.reason || ""),
+			);
+		}
+		return repair;
+	} catch (err) {
+		Logger.log("autoRefresh active mirror repair threw label=%s error=%s", label, errorMessage_(err));
+		return { ok: false, status: "error", error: errorMessage_(err), label: label };
+	}
+}
+
 // Handle auto refresh active roster tick.
 function autoRefreshActiveRosterTick() {
 	const tickStartMs = Date.now();
@@ -3198,6 +3220,7 @@ function autoRefreshActiveRosterTick() {
 		resultForLog = { ok: false, status: "error", error: message };
 		return resultForLog;
 	} finally {
+		maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_("auto-refresh-active-tick-mirror", resultForLog);
 		Logger.log(
 			"autoRefreshActiveRosterTick end status=%s reason=%s elapsedMs=%s",
 			String((resultForLog && resultForLog.status) || ""),
@@ -3250,6 +3273,7 @@ function autoRefreshWorkerTick() {
 		resultForLog = { ok: false, status: "error", error: message };
 		return resultForLog;
 	} finally {
+		maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_("auto-refresh-worker-tick-mirror", resultForLog);
 		Logger.log(
 			"autoRefreshWorkerTick end status=%s reason=%s elapsedMs=%s",
 			String((resultForLog && resultForLog.status) || ""),

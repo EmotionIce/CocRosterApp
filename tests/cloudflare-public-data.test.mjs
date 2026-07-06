@@ -59,3 +59,69 @@ test("bot-scoped entries are not mirrored a second time", () => {
     { path: "active/legacy", scope: "bot" },
   ]);
 });
+
+test("active mirror repair skips publish when Cloudflare already matches Firebase", () => {
+  const backend = loadPublisher();
+  backend.Logger = { log() {} };
+  backend.normalizeActiveVersionId_ = (value) => String(value || "").trim();
+  backend.readPublishedActiveVersionId_ = () => "version-1";
+  let verifyCalls = 0;
+  let publishCalls = 0;
+  backend.verifyCloudflarePublicActiveVersionId_ = (expectedVersionId) => {
+    verifyCalls++;
+    return { ok: true, expectedVersionId, actualVersionId: expectedVersionId };
+  };
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishCalls++;
+    return { ok: true };
+  };
+
+  const result = backend.repairCloudflareActiveRosterMirrorIfStale_({ label: "test-repair" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "inSync");
+  assert.equal(result.repaired, false);
+  assert.equal(result.expectedVersionId, "version-1");
+  assert.equal(verifyCalls, 1);
+  assert.equal(publishCalls, 0);
+});
+
+test("active mirror repair republishes and verifies a stale Cloudflare pointer", () => {
+  const backend = loadPublisher();
+  backend.Logger = { log() {} };
+  backend.normalizeActiveVersionId_ = (value) => String(value || "").trim();
+  backend.readPublishedActiveVersionId_ = () => "version-2";
+  let cloudflareVersionId = "version-1";
+  let verifyCalls = 0;
+  let publishCalls = 0;
+  backend.verifyCloudflarePublicActiveVersionId_ = (expectedVersionId) => {
+    verifyCalls++;
+    return {
+      ok: cloudflareVersionId === expectedVersionId,
+      expectedVersionId,
+      actualVersionId: cloudflareVersionId,
+      error: cloudflareVersionId === expectedVersionId ? "" : "Cloudflare active version pointer mismatch.",
+    };
+  };
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishCalls++;
+    cloudflareVersionId = "version-2";
+    return {
+      ok: true,
+      active: { ok: true, versionId: "version-2", publicResult: { ok: true }, botResult: { ok: true } },
+      cwlLeagueSignups: { ok: true, skipped: true },
+      seasonEvents: { ok: true, skipped: true },
+    };
+  };
+
+  const result = backend.repairCloudflareActiveRosterMirrorIfStale_({ label: "test-repair" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "repaired");
+  assert.equal(result.repaired, true);
+  assert.equal(result.expectedVersionId, "version-2");
+  assert.equal(result.verifyResult.actualVersionId, "version-1");
+  assert.equal(result.afterVerifyResult.actualVersionId, "version-2");
+  assert.equal(verifyCalls, 2);
+  assert.equal(publishCalls, 1);
+});

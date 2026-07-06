@@ -1,3 +1,8 @@
 drive/roster-data.json
 __pycache__/
 *.pyc
+node_modules/
+.wrangler/
+_cloudflare_remote_metadata/
+_cloudflare_worker_import/
+.cloudflare-worker-summary.json

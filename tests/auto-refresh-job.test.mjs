@@ -390,6 +390,50 @@ test("autoRefreshActiveRosterTick schedules worker retry when overlap blocks coo
   assert.equal(resumeTriggers.length, 1);
 });
 
+test("autoRefreshActiveRosterTick repairs Cloudflare active mirror after non-queue outcome", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.startAutoRefreshQueueCoordinator_ = () => ({
+    ok: true,
+    status: "skipped",
+    skipped: true,
+    reason: "cooldown",
+  });
+  let repairCalls = 0;
+  backend.repairCloudflareActiveRosterMirrorIfStale_ = (options) => {
+    repairCalls++;
+    return { ok: true, status: "inSync", label: options.label };
+  };
+
+  const result = backend.autoRefreshActiveRosterTick();
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "cooldown");
+  assert.equal(repairCalls, 1);
+});
+
+test("autoRefreshActiveRosterTick does not repair Cloudflare active mirror while queue is active", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.startAutoRefreshQueueCoordinator_ = () => ({
+    ok: true,
+    status: "inProgress",
+    inProgress: true,
+    processedRosters: 0,
+    totalRosters: 2,
+  });
+  let repairCalls = 0;
+  backend.repairCloudflareActiveRosterMirrorIfStale_ = () => {
+    repairCalls++;
+    return { ok: true };
+  };
+
+  const result = backend.autoRefreshActiveRosterTick();
+
+  assert.equal(result.inProgress, true);
+  assert.equal(repairCalls, 0);
+});
+
 test("autoRefreshJobResumeTick delegates to the queue worker without pre-reading legacy job state", () => {
   const backend = loadBackend();
   backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
@@ -404,6 +448,28 @@ test("autoRefreshJobResumeTick delegates to the queue worker without pre-reading
   assert.equal(result.skipped, true);
   assert.equal(result.reason, "noJob");
   assert.equal(workerCalls, 1);
+});
+
+test("autoRefreshWorkerTick repairs Cloudflare active mirror after skipped worker outcome", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.continueAutoRefreshQueueWorker_ = () => ({
+    ok: true,
+    status: "skipped",
+    skipped: true,
+    reason: "noRun",
+  });
+  let repairCalls = 0;
+  backend.repairCloudflareActiveRosterMirrorIfStale_ = (options) => {
+    repairCalls++;
+    return { ok: true, status: "repaired", label: options.label };
+  };
+
+  const result = backend.autoRefreshWorkerTick();
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "noRun");
+  assert.equal(repairCalls, 1);
 });
 
 test("legacy full-state auto-refresh APIs are not available", () => {
