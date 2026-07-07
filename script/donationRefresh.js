@@ -468,19 +468,7 @@ function runDonationRefreshCore_(optionsRaw) {
 		if (typeof publishCloudflareDonationRefreshSeasonBestEffort_ === "function") {
 			cloudflareDonationPublish = publishCloudflareDonationRefreshSeasonBestEffort_(seasonId, "donation-refresh-write");
 		}
-		let cloudflareActiveMirrorRepair = { ok: true, skipped: true, reason: "unavailable" };
-		if (typeof repairCloudflareActiveRosterMirrorIfStale_ === "function") {
-			cloudflareActiveMirrorRepair = repairCloudflareActiveRosterMirrorIfStale_({
-				label: "donation-refresh-active-mirror",
-			});
-			if (cloudflareActiveMirrorRepair && cloudflareActiveMirrorRepair.ok !== true && cloudflareActiveMirrorRepair.skipped !== true) {
-				Logger.log(
-					"donationRefresh active mirror repair failed sourceVersionId=%s error=%s",
-					source.versionId,
-					String(cloudflareActiveMirrorRepair.error || cloudflareActiveMirrorRepair.reason || ""),
-				);
-			}
-		}
+		const cloudflareActiveMirrorRepair = { ok: true, skipped: true, reason: "not-run-for-donation-refresh" };
 		return {
 			ok: errorKeys.length < clanTags.length,
 			status: errorKeys.length ? "partial" : "ok",

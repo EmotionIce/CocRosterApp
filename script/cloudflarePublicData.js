@@ -1,5 +1,9 @@
-// Cloudflare R2 public/bot data publisher. Firebase remains canonical storage;
-// this module mirrors read-optimized JSON objects after successful writes.
+// Cloudflare R2/KV public/bot data publisher. Firebase remains canonical
+// storage; this module mirrors read-optimized JSON objects after successful
+// writes.
+
+const CLOUDFLARE_PUBLIC_DATA_BOOTSTRAP_PATH = "bootstrap/current";
+const CLOUDFLARE_PUBLIC_DATA_HASH_PROPERTY_PREFIX = "CLOUDFLARE_PUBLIC_DATA_HASH_";
 
 function getOptionalScriptProperty_(keyRaw) {
 	const key = String(keyRaw == null ? "" : keyRaw).trim();
@@ -84,6 +88,93 @@ function normalizeCloudflareDataObjectPath_(pathRaw) {
 	return parts.join("/");
 }
 
+function stableCloudflareJsonStringify_(valueRaw) {
+	if (valueRaw === null || valueRaw === undefined) return "null";
+	if (typeof valueRaw !== "object") return JSON.stringify(valueRaw);
+	if (Array.isArray(valueRaw)) {
+		const values = [];
+		for (let i = 0; i < valueRaw.length; i++) {
+			values.push(stableCloudflareJsonStringify_(valueRaw[i]));
+		}
+		return "[" + values.join(",") + "]";
+	}
+	const keys = Object.keys(valueRaw).sort();
+	const parts = [];
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		const value = valueRaw[key];
+		if (value === undefined) continue;
+		parts.push(JSON.stringify(key) + ":" + stableCloudflareJsonStringify_(value));
+	}
+	return "{" + parts.join(",") + "}";
+}
+
+function hashCloudflareText_(textRaw) {
+	const text = String(textRaw == null ? "" : textRaw);
+	if (typeof Utilities !== "undefined" && Utilities && typeof Utilities.computeDigest === "function") {
+		const algorithm = Utilities.DigestAlgorithm && Utilities.DigestAlgorithm.SHA_256 ? Utilities.DigestAlgorithm.SHA_256 : "SHA_256";
+		const charset = Utilities.Charset && Utilities.Charset.UTF_8 ? Utilities.Charset.UTF_8 : "UTF-8";
+		const bytes = Utilities.computeDigest(algorithm, text, charset);
+		let out = "";
+		for (let i = 0; i < bytes.length; i++) {
+			const n = (Number(bytes[i]) + 256) % 256;
+			out += (n < 16 ? "0" : "") + n.toString(16);
+		}
+		return out;
+	}
+	let hash = 2166136261;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+	}
+	return ("00000000" + (hash >>> 0).toString(16)).slice(-8);
+}
+
+function buildCloudflareDataObjectHash_(scopeRaw, pathRaw, payloadRaw) {
+	const scope = normalizeCloudflareDataScope_(scopeRaw);
+	const path = normalizeCloudflareDataObjectPath_(pathRaw);
+	return hashCloudflareText_(scope + "\n" + path + "\n" + stableCloudflareJsonStringify_(payloadRaw));
+}
+
+function buildCloudflareDataObjectDeleteHash_(scopeRaw, pathRaw) {
+	const scope = normalizeCloudflareDataScope_(scopeRaw);
+	const path = normalizeCloudflareDataObjectPath_(pathRaw);
+	return hashCloudflareText_(scope + "\n" + path + "\n__DELETE__");
+}
+
+function getCloudflareDataObjectHashPropertyKey_(scopeRaw, pathRaw) {
+	const scope = normalizeCloudflareDataScope_(scopeRaw);
+	const path = normalizeCloudflareDataObjectPath_(pathRaw);
+	return CLOUDFLARE_PUBLIC_DATA_HASH_PROPERTY_PREFIX + hashCloudflareText_(scope + "\n" + path);
+}
+
+function readCloudflareDataObjectPublishedHash_(scopeRaw, pathRaw) {
+	try {
+		return String(PropertiesService.getScriptProperties().getProperty(
+			getCloudflareDataObjectHashPropertyKey_(scopeRaw, pathRaw),
+		) || "").trim();
+	} catch (err) {
+		return "";
+	}
+}
+
+function recordCloudflareDataObjectPublishedHashes_(itemsRaw) {
+	const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+	if (!items.length) return;
+	try {
+		const props = {};
+		for (let i = 0; i < items.length; i++) {
+			const item = items[i] && typeof items[i] === "object" ? items[i] : null;
+			if (!item || !item.hash) continue;
+			props[getCloudflareDataObjectHashPropertyKey_(item.scope, item.path)] = String(item.hash || "");
+		}
+		const keys = Object.keys(props);
+		if (keys.length) PropertiesService.getScriptProperties().setProperties(props, false);
+	} catch (err) {
+		// Hash telemetry is only an optimization; publish success is authoritative.
+	}
+}
+
 function makeCloudflareDataObject_(pathRaw, payloadRaw, scopeRaw) {
 	return {
 		path: normalizeCloudflareDataObjectPath_(pathRaw),
@@ -113,6 +204,7 @@ function publishCloudflareDataObjectsBestEffort_(scopeRaw, objectsRaw, optionsRa
 	const scope = normalizeCloudflareDataScope_(scopeRaw);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const label = String(options.label || scope).trim() || scope;
+	const force = options.force === true;
 	const objectsIn = Array.isArray(objectsRaw) ? objectsRaw : [];
 	const deletePathsIn = Array.isArray(options.deletePaths) ? options.deletePaths : [];
 	if (!objectsIn.length && !deletePathsIn.length) {
@@ -145,20 +237,59 @@ function publishCloudflareDataObjectsBestEffort_(scopeRaw, objectsRaw, optionsRa
 
 	try {
 		const objects = [];
+		const publishedHashItems = [];
+		let skippedPutCount = 0;
 		for (let i = 0; i < objectsIn.length; i++) {
 			const item = objectsIn[i] && typeof objectsIn[i] === "object" ? objectsIn[i] : null;
 			if (!item) continue;
-			objects.push(makeCloudflareDataObject_(item.path, item.payload, item.scope || scope));
+			const object = makeCloudflareDataObject_(item.path, item.payload, item.scope || scope);
+			const hash = buildCloudflareDataObjectHash_(object.scope, object.path, object.payload);
+			if (!force && readCloudflareDataObjectPublishedHash_(object.scope, object.path) === hash) {
+				skippedPutCount++;
+				continue;
+			}
+			objects.push(object);
+			publishedHashItems.push({
+				scope: object.scope,
+				path: object.path,
+				hash: hash,
+			});
 		}
 		const deletePaths = [];
+		let skippedDeleteCount = 0;
 		for (let i = 0; i < deletePathsIn.length; i++) {
 			const item = deletePathsIn[i] && typeof deletePathsIn[i] === "object"
 				? deletePathsIn[i]
 				: { path: deletePathsIn[i] };
-			deletePaths.push({
+			const deleteItem = {
 				path: normalizeCloudflareDataObjectPath_(item.path),
 				scope: normalizeCloudflareDataScope_(item.scope || scope),
+			};
+			const hash = buildCloudflareDataObjectDeleteHash_(deleteItem.scope, deleteItem.path);
+			if (!force && readCloudflareDataObjectPublishedHash_(deleteItem.scope, deleteItem.path) === hash) {
+				skippedDeleteCount++;
+				continue;
+			}
+			deletePaths.push(deleteItem);
+			publishedHashItems.push({
+				scope: deleteItem.scope,
+				path: deleteItem.path,
+				hash: hash,
 			});
+		}
+		if (!objects.length && !deletePaths.length) {
+			const unchanged = {
+				ok: true,
+				skipped: true,
+				reason: "unchanged",
+				scope: scope,
+				putCount: 0,
+				deleteCount: 0,
+				skippedPutCount: skippedPutCount,
+				skippedDeleteCount: skippedDeleteCount,
+			};
+			recordCloudflarePublicDataPublishResult_(unchanged, label);
+			return unchanged;
 		}
 		const response = UrlFetchApp.fetch(endpoint, {
 			method: "post",
@@ -191,8 +322,11 @@ function publishCloudflareDataObjectsBestEffort_(scopeRaw, objectsRaw, optionsRa
 			scope: scope,
 			putCount: parsed.putCount || objects.length,
 			deleteCount: parsed.deleteCount || deletePaths.length,
+			skippedPutCount: skippedPutCount,
+			skippedDeleteCount: skippedDeleteCount,
 			publishedAt: parsed.publishedAt || "",
 		};
+		recordCloudflareDataObjectPublishedHashes_(publishedHashItems);
 		recordCloudflarePublicDataPublishResult_(ok, label);
 		return ok;
 	} catch (err) {
@@ -327,6 +461,12 @@ function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 		{ path: "active", payload: encodedActive },
 		{ path: "activePublished/currentManifest", payload: encodedManifest },
 		{ path: "activePublished/currentVersionId", payload: versionId },
+		buildCloudflarePublicBootstrapObject_({
+			versionWrite: {
+				versionId: versionId,
+				manifest: manifest,
+			},
+		}),
 	];
 	const linkedIndexes = buildCloudflareLinkedAccountIndexes_(rosterData);
 	const botObjects = [
@@ -345,11 +485,16 @@ function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 function publishCloudflareActiveRosterDataBestEffort_(versionWriteRaw, labelRaw) {
 	try {
 		const objects = buildCloudflareActiveRosterPublishObjects_(versionWriteRaw);
+		const options = versionWriteRaw && typeof versionWriteRaw === "object" && versionWriteRaw.options && typeof versionWriteRaw.options === "object"
+			? versionWriteRaw.options
+			: {};
 		const publicResult = publishCloudflareDataObjectsBestEffort_("public", objects.publicObjects, {
 			label: String(labelRaw || "active-roster-public"),
+			force: options.force === true,
 		});
 		const botResult = publishCloudflareDataObjectsBestEffort_("bot", objects.botObjects, {
 			label: String(labelRaw || "active-roster-bot"),
+			force: options.force === true,
 		});
 		return {
 			ok: publicResult.ok === true && botResult.ok === true,
@@ -385,6 +530,232 @@ function readDecodedCloudflareFirebaseObject_(pathRaw) {
 	const encoded = firebaseRequestJson_(pathRaw, "GET");
 	if (encoded == null) return null;
 	return decodeFirebaseObjectKeysRecursive_(encoded);
+}
+
+function asCloudflarePlainObject_(valueRaw) {
+	return valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw) ? valueRaw : {};
+}
+
+function buildCloudflareEventPointerMap_(currentRaw, currentCwlRaw, latestCompletedCwlRaw) {
+	const current = asCloudflarePlainObject_(currentRaw);
+	const out = {};
+	const keys = Object.keys(current);
+	for (let i = 0; i < keys.length; i++) {
+		const value = current[keys[i]];
+		if (value && typeof value === "object" && !Array.isArray(value)) out[keys[i]] = value;
+	}
+	if (currentCwlRaw && typeof currentCwlRaw === "object" && !Array.isArray(currentCwlRaw)) out.cwl = currentCwlRaw;
+	if (latestCompletedCwlRaw && typeof latestCompletedCwlRaw === "object" && !Array.isArray(latestCompletedCwlRaw)) {
+		out.latestCompletedCwl = latestCompletedCwlRaw;
+	}
+	return out;
+}
+
+function addCloudflareCwlAggregatesForEvent_(outRaw, eventRaw) {
+	const out = outRaw && typeof outRaw === "object" ? outRaw : {};
+	const event = eventRaw && typeof eventRaw === "object" && !Array.isArray(eventRaw) ? eventRaw : null;
+	const eventId = event ? sanitizeSeasonEventText_(event.eventId, 180) : "";
+	if (!eventId || normalizeSeasonEventType_(event.type) !== "cwl") return out;
+	const byKind = {};
+	try {
+		const live = readCwlSeasonEventAggregate_(eventId, "live");
+		if (live && typeof live === "object" && !Array.isArray(live) && live.eventId) byKind.live = live;
+	} catch (err) {
+		// Missing live aggregates are allowed for completed or not-yet-started CWL events.
+	}
+	try {
+		const finalAggregate = readCwlSeasonEventAggregate_(eventId, "final");
+		if (finalAggregate && typeof finalAggregate === "object" && !Array.isArray(finalAggregate) && finalAggregate.eventId) {
+			byKind.final = finalAggregate;
+		}
+	} catch (err) {
+		// Missing final aggregates are allowed for active CWL events.
+	}
+	if (Object.keys(byKind).length) out[eventId] = byKind;
+	return out;
+}
+
+function buildCloudflareSeasonEventsBundleFromPointers_(pointersRaw, seasonStateRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const current = asCloudflarePlainObject_(pointersRaw);
+	const seasonState = asCloudflarePlainObject_(seasonStateRaw);
+	const loadErrors = [];
+	const byId = {};
+	const cwlAggregatesByEventId = {};
+	const eventIds = {};
+	collectCloudflareSeasonEventIdsFromPointerMap_(current, eventIds);
+	const eventIdList = Object.keys(eventIds);
+	for (let i = 0; i < eventIdList.length; i++) {
+		const eventId = eventIdList[i];
+		try {
+			const event = readSeasonEventById_(eventId);
+			if (event && typeof event === "object" && !Array.isArray(event)) {
+				byId[eventId] = event;
+				addCloudflareCwlAggregatesForEvent_(cwlAggregatesByEventId, event);
+			}
+		} catch (err) {
+			loadErrors.push({
+				path: "/" + buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodeFirebaseObjectKey_(eventId)),
+				message: errorMessage_(err),
+			});
+		}
+	}
+	const latestCompletedCwl = current.latestCompletedCwl && typeof current.latestCompletedCwl === "object"
+		? current.latestCompletedCwl
+		: null;
+	const publicCurrent = {};
+	const currentKeys = Object.keys(current);
+	for (let i = 0; i < currentKeys.length; i++) {
+		const key = currentKeys[i];
+		if (key === "latestCompletedCwl") continue;
+		publicCurrent[key] = current[key];
+	}
+	return {
+		current: publicCurrent,
+		seasonState: seasonState,
+		byId: byId,
+		cwlAggregatesByEventId: cwlAggregatesByEventId,
+		latestCompletedCwl: latestCompletedCwl,
+		loadErrors: loadErrors,
+		loadedAt: String(options.loadedAt || new Date().toISOString()),
+	};
+}
+
+function buildCloudflareCurrentSeasonEventsBundle_() {
+	const current = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_PATH);
+	const currentCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_CWL_PATH);
+	const latestCompletedCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+	const seasonState = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH);
+	return buildCloudflareSeasonEventsBundleFromPointers_(
+		buildCloudflareEventPointerMap_(current, currentCwl, latestCompletedCwl),
+		seasonState,
+	);
+}
+
+function buildCloudflareSeasonEventsBundleForSeason_(seasonRaw) {
+	const season = seasonRaw && typeof seasonRaw === "object" ? seasonRaw : {};
+	const seasonId = String(season.seasonId == null ? "" : season.seasonId).trim();
+	if (!seasonId) return null;
+	const path = buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, encodeFirebaseObjectKey_(seasonId));
+	const pointers = readDecodedCloudflareFirebaseObject_(path);
+	if (!pointers || typeof pointers !== "object" || Array.isArray(pointers)) return null;
+	return buildCloudflareSeasonEventsBundleFromPointers_(pointers, {
+		seasonId: seasonId,
+		startsAt: String(season.startsAt || ""),
+		endsAt: String(season.endsAt || ""),
+	});
+}
+
+function resolveCloudflarePreviousSeasonFromBundle_(bundleRaw) {
+	const bundle = bundleRaw && typeof bundleRaw === "object" ? bundleRaw : {};
+	const seasonState = asCloudflarePlainObject_(bundle.seasonState);
+	const current = asCloudflarePlainObject_(bundle.current);
+	const push = asCloudflarePlainObject_(current.push);
+	const donation = asCloudflarePlainObject_(current.donation);
+	const startsAt = String(seasonState.startsAt || push.startsAt || donation.startsAt || "").trim();
+	const startsMs = parseIsoToMs_(startsAt);
+	if (startsMs > 0 && typeof resolveLegendIRankedSeasonCycle_ === "function") {
+		return resolveLegendIRankedSeasonCycle_(startsMs - 1);
+	}
+	return null;
+}
+
+function attachCloudflarePreviousSeasonBundle_(bundleRaw) {
+	const bundle = bundleRaw && typeof bundleRaw === "object" ? bundleRaw : {};
+	try {
+		const previousSeason = resolveCloudflarePreviousSeasonFromBundle_(bundle);
+		const previous = previousSeason ? buildCloudflareSeasonEventsBundleForSeason_(previousSeason) : null;
+		if (previous) bundle.previous = previous;
+	} catch (err) {
+		if (!Array.isArray(bundle.loadErrors)) bundle.loadErrors = [];
+		bundle.loadErrors.push({
+			path: "/" + SEASON_EVENTS_BY_SEASON_PATH,
+			message: errorMessage_(err),
+		});
+	}
+	return bundle;
+}
+
+function collectCloudflareDonationRefreshSeasonIdsFromBundle_(bundleRaw, seenRaw) {
+	const bundle = bundleRaw && typeof bundleRaw === "object" ? bundleRaw : {};
+	const seen = seenRaw && typeof seenRaw === "object" ? seenRaw : {};
+	const ids = [];
+	const collect = function (valueRaw) {
+		const value = sanitizeDonationCycleKey_(valueRaw);
+		if (!value || seen[value]) return;
+		seen[value] = true;
+		ids.push(value);
+	};
+	const current = asCloudflarePlainObject_(bundle.current);
+	const donation = asCloudflarePlainObject_(current.donation);
+	collect(donation.seasonId);
+	const seasonState = asCloudflarePlainObject_(bundle.seasonState);
+	collect(seasonState.seasonId);
+	const byId = asCloudflarePlainObject_(bundle.byId);
+	const eventIds = Object.keys(byId);
+	for (let i = 0; i < eventIds.length; i++) {
+		const event = asCloudflarePlainObject_(byId[eventIds[i]]);
+		if (normalizeSeasonEventType_(event.type) === "donation") collect(event.seasonId);
+	}
+	if (bundle.previous && typeof bundle.previous === "object" && !Array.isArray(bundle.previous)) {
+		const nested = collectCloudflareDonationRefreshSeasonIdsFromBundle_(bundle.previous, seen);
+		for (let i = 0; i < nested.length; i++) ids.push(nested[i]);
+	}
+	return ids;
+}
+
+function buildCloudflareDonationRefreshBundleForSeasonEvents_(seasonEventsRaw) {
+	const seasonIds = collectCloudflareDonationRefreshSeasonIdsFromBundle_(seasonEventsRaw, {});
+	const bySeason = {};
+	for (let i = 0; i < seasonIds.length; i++) {
+		const overlay = readDonationRefreshOverlayBySeason_(seasonIds[i]);
+		if (overlay && overlay.seasonId) bySeason[overlay.seasonId] = overlay;
+	}
+	return {
+		current: readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current")),
+		bySeason: bySeason,
+	};
+}
+
+function readCloudflarePublishedActiveManifest_(versionIdRaw) {
+	const currentManifest = readDecodedCloudflareFirebaseObject_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_MANIFEST_PATH);
+	if (currentManifest && typeof currentManifest === "object" && !Array.isArray(currentManifest)) return currentManifest;
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	if (!versionId) return null;
+	const encoded = firebaseRequestJson_(buildActiveVersionPath_(versionId, "manifest"), "GET");
+	return encoded && typeof encoded === "object" && !Array.isArray(encoded)
+		? decodeFirebaseObjectKeysRecursive_(encoded)
+		: null;
+}
+
+function buildCloudflarePublicBootstrapPayload_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const versionWrite = options.versionWrite && typeof options.versionWrite === "object" ? options.versionWrite : {};
+	const activeVersionId = normalizeActiveVersionId_(versionWrite.versionId) || readPublishedActiveVersionId_();
+	const manifest = versionWrite.manifest && typeof versionWrite.manifest === "object" && !Array.isArray(versionWrite.manifest)
+		? versionWrite.manifest
+		: readCloudflarePublishedActiveManifest_(activeVersionId);
+	const seasonEvents = attachCloudflarePreviousSeasonBundle_(buildCloudflareCurrentSeasonEventsBundle_());
+	const donationRefresh = buildCloudflareDonationRefreshBundleForSeasonEvents_(seasonEvents);
+	const generatedAt = String(options.generatedAt || new Date().toISOString());
+	return {
+		schemaVersion: 1,
+		generatedAt: generatedAt,
+		activeVersionId: activeVersionId,
+		active: {
+			versionId: activeVersionId,
+			manifest: manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : null,
+		},
+		seasonEvents: seasonEvents,
+		donationRefresh: donationRefresh,
+	};
+}
+
+function buildCloudflarePublicBootstrapObject_(optionsRaw) {
+	return {
+		path: CLOUDFLARE_PUBLIC_DATA_BOOTSTRAP_PATH,
+		payload: encodeFirebaseObjectKeysRecursive_(buildCloudflarePublicBootstrapPayload_(optionsRaw)),
+	};
 }
 
 function addCloudflarePublishObjectIfPresent_(objects, pathRaw, payloadRaw) {
@@ -445,29 +816,32 @@ function collectCloudflareSeasonEventIdsFromPointerMap_(pointerMapRaw, setRaw) {
 function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 	const label = String(labelRaw || "season-events").trim() || "season-events";
 	try {
-		const objects = [];
+		const publicObjects = [
+			buildCloudflarePublicBootstrapObject_(),
+		];
+		const botObjects = [];
 		const deletePaths = [];
 		const eventIds = {};
 		const current = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_PATH);
-		if (addCloudflarePublishObjectIfPresent_(objects, SEASON_EVENTS_CURRENT_PATH, current)) {
+		if (addCloudflarePublishObjectIfPresent_(botObjects, SEASON_EVENTS_CURRENT_PATH, current)) {
 			collectCloudflareSeasonEventIdsFromPointerMap_(current, eventIds);
 		}
 		const currentCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_CWL_PATH);
 		if (currentCwl) {
-			addCloudflarePublishObjectIfPresent_(objects, SEASON_EVENTS_CURRENT_CWL_PATH, currentCwl);
+			addCloudflarePublishObjectIfPresent_(botObjects, SEASON_EVENTS_CURRENT_CWL_PATH, currentCwl);
 			collectCloudflareSeasonEventIdsFromPointerMap_({ cwl: currentCwl }, eventIds);
 		} else {
 			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_CURRENT_CWL_PATH);
 		}
 		const latestCompletedCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
 		if (latestCompletedCwl) {
-			addCloudflarePublishObjectIfPresent_(objects, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, latestCompletedCwl);
+			addCloudflarePublishObjectIfPresent_(botObjects, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, latestCompletedCwl);
 			collectCloudflareSeasonEventIdsFromPointerMap_({ latestCompletedCwl: latestCompletedCwl }, eventIds);
 		} else {
 			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
 		}
 		addCloudflarePublishObjectIfPresent_(
-			objects,
+			botObjects,
 			SEASON_EVENTS_SEASON_STATE_CURRENT_PATH,
 			readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH),
 		);
@@ -477,7 +851,7 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 			const key = bySeasonKeys[i];
 			const seasonPayload = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, key));
 			if (seasonPayload) {
-				addCloudflarePublishObjectIfPresent_(objects, buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, key), seasonPayload);
+				addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, key), seasonPayload);
 				collectCloudflareSeasonEventIdsFromPointerMap_(seasonPayload, eventIds);
 			}
 		}
@@ -488,17 +862,17 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 			const event = readSeasonEventById_(eventId);
 			const encodedEventId = encodeFirebaseObjectKey_(eventId);
 			if (event) {
-				addCloudflarePublishObjectIfPresent_(objects, buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodedEventId), event);
+				addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodedEventId), event);
 				if (normalizeSeasonEventType_(event.type) === "cwl") {
 					const live = readCwlSeasonEventAggregate_(eventId, "live");
 					const final = readCwlSeasonEventAggregate_(eventId, "final");
 					if (live && live.eventId) {
-						addCloudflarePublishObjectIfPresent_(objects, buildCwlSeasonEventAggregatePath_(eventId, "live"), live);
+						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "live"), live);
 					} else {
 						addCloudflareDeletePath_(deletePaths, buildCwlSeasonEventAggregatePath_(eventId, "live"));
 					}
 					if (final && final.eventId) {
-						addCloudflarePublishObjectIfPresent_(objects, buildCwlSeasonEventAggregatePath_(eventId, "final"), final);
+						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "final"), final);
 					} else {
 						addCloudflareDeletePath_(deletePaths, buildCwlSeasonEventAggregatePath_(eventId, "final"));
 					}
@@ -509,19 +883,26 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 		}
 
 		const donationCurrent = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"));
-		addCloudflarePublishObjectIfPresent_(objects, buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), donationCurrent);
+		addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), donationCurrent);
 		const donationBySeasonPath = buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason");
 		const donationSeasonKeys = listFirebaseChildKeys_(donationBySeasonPath);
 		for (let i = 0; i < donationSeasonKeys.length; i++) {
 			const key = donationSeasonKeys[i];
 			const overlay = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(donationBySeasonPath, key));
-			addCloudflarePublishObjectIfPresent_(objects, buildFirebaseChildPath_(donationBySeasonPath, key), overlay);
+			addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(donationBySeasonPath, key), overlay);
 		}
-		const mirrored = buildCloudflareBotScopeMirroredPublishBatch_(objects, deletePaths);
-		return publishCloudflareDataObjectsBestEffort_("public", mirrored.objects, {
-			label: label,
-			deletePaths: mirrored.deletePaths,
+		const publicResult = publishCloudflareDataObjectsBestEffort_("public", publicObjects, {
+			label: label + ":bootstrap",
 		});
+		const botResult = publishCloudflareDataObjectsBestEffort_("bot", botObjects, {
+			label: label + ":bot",
+			deletePaths: deletePaths,
+		});
+		return {
+			ok: publicResult.ok === true && botResult.ok === true,
+			publicResult: publicResult,
+			botResult: botResult,
+		};
 	} catch (err) {
 		const failed = { ok: false, error: errorMessage_(err) };
 		recordCloudflarePublicDataPublishResult_(failed, label);
@@ -534,24 +915,34 @@ function publishCloudflareDonationRefreshSeasonBestEffort_(seasonIdRaw, labelRaw
 	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw);
 	if (!seasonId) return { ok: false, skipped: true, reason: "missing-season-id" };
 	try {
-		const objects = [];
+		const publicObjects = [
+			buildCloudflarePublicBootstrapObject_(),
+		];
+		const botObjects = [];
 		const encodedSeasonId = encodeFirebaseObjectKey_(seasonId);
 		const seasonPath = buildFirebaseChildPath_(
 			buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason"),
 			encodedSeasonId,
 		);
 		const overlay = readDecodedCloudflareFirebaseObject_(seasonPath);
-		addCloudflarePublishObjectIfPresent_(objects, seasonPath, overlay);
+		addCloudflarePublishObjectIfPresent_(botObjects, seasonPath, overlay);
 		addCloudflarePublishObjectIfPresent_(
-			objects,
+			botObjects,
 			buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"),
 			readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current")),
 		);
-		const mirrored = buildCloudflareBotScopeMirroredPublishBatch_(objects, []);
-		return publishCloudflareDataObjectsBestEffort_("public", mirrored.objects, {
-			label: String(labelRaw || "donation-refresh"),
-			deletePaths: mirrored.deletePaths,
+		const publicResult = publishCloudflareDataObjectsBestEffort_("public", publicObjects, {
+			label: String(labelRaw || "donation-refresh") + ":bootstrap",
 		});
+		const botResult = publishCloudflareDataObjectsBestEffort_("bot", botObjects, {
+			label: String(labelRaw || "donation-refresh") + ":bot",
+		});
+		return {
+			ok: publicResult.ok === true && botResult.ok === true,
+			seasonId: seasonId,
+			publicResult: publicResult,
+			botResult: botResult,
+		};
 	} catch (err) {
 		const failed = { ok: false, error: errorMessage_(err) };
 		recordCloudflarePublicDataPublishResult_(failed, String(labelRaw || "donation-refresh"));
@@ -568,6 +959,9 @@ function publishCloudflarePublicDataSnapshot_(optionsRaw) {
 		versionId: normalizeActiveVersionId_(snapshot && snapshot.versionId) || readPublishedActiveVersionId_() || createCloudflarePublicDataVersionId_(label),
 		manifest: snapshot && snapshot.manifest && typeof snapshot.manifest === "object" ? snapshot.manifest : null,
 		rosterData: snapshot && snapshot.rosterData ? snapshot.rosterData : parseRosterDataText_(snapshot && snapshot.text, ACTIVE_ROSTER_FILENAME),
+		options: {
+			force: options.force === true,
+		},
 	};
 	const active = publishCloudflareActiveRosterDataBestEffort_(versionWrite, label + ":active");
 	let signups = { ok: true, skipped: true, reason: "unavailable" };
@@ -658,6 +1052,14 @@ function getCloudflarePublicDataResultError_(resultRaw, fallbackRaw) {
 	}
 	push("cwlLeagueSignups", result.cwlLeagueSignups);
 	push("seasonEvents", result.seasonEvents);
+	if (result.seasonEvents && typeof result.seasonEvents === "object") {
+		push("seasonEvents public", result.seasonEvents.publicResult);
+		push("seasonEvents bot", result.seasonEvents.botResult);
+	}
+	if (result.publicResult || result.botResult) {
+		push("public", result.publicResult);
+		push("bot", result.botResult);
+	}
 	return (parts.join("; ") || fallback).slice(0, 1000);
 }
 
@@ -696,7 +1098,7 @@ function repairCloudflareActiveRosterMirrorIfStale_(optionsRaw) {
 				finishedAt: new Date().toISOString(),
 			};
 		}
-		const publishResult = publishCloudflarePublicDataSnapshot_({ label: label });
+		const publishResult = publishCloudflarePublicDataSnapshot_({ label: label, force: true });
 		if (!publishResult || publishResult.ok !== true) {
 			return {
 				ok: false,

@@ -8,6 +8,8 @@ const BOT_DATA_ROUTE_PREFIX = "/api/bot-data";
 const DATA_PUBLISH_ROUTE = "/api/internal/public-data/publish";
 const PUBLIC_DATA_STORE_PREFIX = "public-data";
 const BOT_DATA_STORE_PREFIX = "bot-data";
+const PUBLIC_BOOTSTRAP_DATA_PATH = "bootstrap/current.json";
+const PUBLIC_BOOTSTRAP_DATA_KEY = PUBLIC_DATA_STORE_PREFIX + "/" + PUBLIC_BOOTSTRAP_DATA_PATH;
 
 // Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
@@ -679,6 +681,251 @@ const getDataObjectCacheControl = (scopeRaw, logicalPathRaw) => {
   return "public, max-age=30, stale-while-revalidate=120";
 };
 
+// Return a nested object value only when it exists as a direct own property.
+const readOwnObjectValue = (sourceRaw, keyRaw) => {
+  const source = sourceRaw && typeof sourceRaw === "object" && !Array.isArray(sourceRaw) ? sourceRaw : {};
+  const key = String(keyRaw == null ? "" : keyRaw);
+  return key && Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined;
+};
+
+// Read and parse the public bootstrap bundle.
+const readPublicBootstrapPayload = async (store) => {
+  const object = await getDataStoreObject(store, PUBLIC_BOOTSTRAP_DATA_KEY);
+  if (!object) return null;
+  try {
+    const payload = JSON.parse(await object.text());
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+  } catch (err) {
+    return null;
+  }
+};
+
+// Read a legacy public JSON object by logical path.
+const readLegacyPublicJsonObject = async (store, pathRaw) => {
+  let key = "";
+  try {
+    key = buildDataObjectKey("public", pathRaw);
+  } catch (err) {
+    return undefined;
+  }
+  const object = await getDataStoreObject(store, key);
+  if (!object) return undefined;
+  try {
+    return JSON.parse(await object.text());
+  } catch (err) {
+    return undefined;
+  }
+};
+
+const collectEventIdsFromPointerMap = (pointersRaw, seenRaw) => {
+  const pointers = pointersRaw && typeof pointersRaw === "object" && !Array.isArray(pointersRaw) ? pointersRaw : {};
+  const seen = seenRaw && typeof seenRaw === "object" ? seenRaw : {};
+  const keys = Object.keys(pointers);
+  for (let i = 0; i < keys.length; i++) {
+    const pointer = pointers[keys[i]] && typeof pointers[keys[i]] === "object" ? pointers[keys[i]] : null;
+    const eventId = pointer ? String(pointer.eventId || "").trim() : "";
+    if (eventId) seen[eventId] = true;
+  }
+  return seen;
+};
+
+const collectDonationSeasonIdsFromBundle = (seasonEventsRaw, seenRaw) => {
+  const seasonEvents = seasonEventsRaw && typeof seasonEventsRaw === "object" ? seasonEventsRaw : {};
+  const seen = seenRaw && typeof seenRaw === "object" ? seenRaw : {};
+  const ids = [];
+  const collect = (valueRaw) => {
+    const value = String(valueRaw == null ? "" : valueRaw).trim();
+    if (!value || seen[value]) return;
+    seen[value] = true;
+    ids.push(value);
+  };
+  const current = seasonEvents.current && typeof seasonEvents.current === "object" ? seasonEvents.current : {};
+  const donation = current.donation && typeof current.donation === "object" ? current.donation : {};
+  collect(donation.seasonId);
+  const seasonState = seasonEvents.seasonState && typeof seasonEvents.seasonState === "object" ? seasonEvents.seasonState : {};
+  collect(seasonState.seasonId);
+  const byId = seasonEvents.byId && typeof seasonEvents.byId === "object" ? seasonEvents.byId : {};
+  const eventIds = Object.keys(byId);
+  for (let i = 0; i < eventIds.length; i++) {
+    const event = byId[eventIds[i]] && typeof byId[eventIds[i]] === "object" ? byId[eventIds[i]] : {};
+    if (String(event.type || "").trim().toLowerCase() === "donation") collect(event.seasonId);
+  }
+  return ids;
+};
+
+// Compose bootstrap from legacy public objects during rollout if the real object is absent.
+const synthesizePublicBootstrapFromLegacyObjects = async (store) => {
+  const [currentVersionIdRaw, manifestRaw, currentRaw, currentCwlRaw, latestCompletedCwlRaw, seasonStateRaw] = await Promise.all([
+    readLegacyPublicJsonObject(store, "activePublished/currentVersionId"),
+    readLegacyPublicJsonObject(store, "activePublished/currentManifest"),
+    readLegacyPublicJsonObject(store, "events/seasonEvents/current"),
+    readLegacyPublicJsonObject(store, "events/seasonEvents/currentCwl"),
+    readLegacyPublicJsonObject(store, "events/seasonEvents/latestCompletedCwl"),
+    readLegacyPublicJsonObject(store, "events/seasonEvents/seasonState/current"),
+  ]);
+  const activeVersionId = String(currentVersionIdRaw || "").trim();
+  if (!activeVersionId) return null;
+  const current = currentRaw && typeof currentRaw === "object" && !Array.isArray(currentRaw) ? currentRaw : {};
+  if (currentCwlRaw && typeof currentCwlRaw === "object" && !Array.isArray(currentCwlRaw)) current.cwl = currentCwlRaw;
+  const eventPointerMap = Object.assign({}, current);
+  if (latestCompletedCwlRaw && typeof latestCompletedCwlRaw === "object" && !Array.isArray(latestCompletedCwlRaw)) {
+    eventPointerMap.latestCompletedCwl = latestCompletedCwlRaw;
+  }
+  const eventIdsByKey = collectEventIdsFromPointerMap(eventPointerMap, {});
+  const eventIds = Object.keys(eventIdsByKey);
+  const byId = {};
+  const cwlAggregatesByEventId = {};
+  await Promise.all(eventIds.map(async (eventId) => {
+    const event = await readLegacyPublicJsonObject(store, "events/seasonEvents/byId/" + eventId);
+    if (event && typeof event === "object" && !Array.isArray(event)) {
+      byId[eventId] = event;
+      if (String(event.type || "").trim().toLowerCase() === "cwl") {
+        const [live, finalAggregate] = await Promise.all([
+          readLegacyPublicJsonObject(store, "events/seasonEvents/cwlAggregates/byEvent/" + eventId + "/live"),
+          readLegacyPublicJsonObject(store, "events/seasonEvents/cwlAggregates/byEvent/" + eventId + "/final"),
+        ]);
+        const byKind = {};
+        if (live && typeof live === "object" && !Array.isArray(live)) byKind.live = live;
+        if (finalAggregate && typeof finalAggregate === "object" && !Array.isArray(finalAggregate)) byKind.final = finalAggregate;
+        if (Object.keys(byKind).length) cwlAggregatesByEventId[eventId] = byKind;
+      }
+    }
+  }));
+  const seasonEvents = {
+    current,
+    seasonState: seasonStateRaw && typeof seasonStateRaw === "object" && !Array.isArray(seasonStateRaw) ? seasonStateRaw : {},
+    byId,
+    cwlAggregatesByEventId,
+    latestCompletedCwl: latestCompletedCwlRaw && typeof latestCompletedCwlRaw === "object" && !Array.isArray(latestCompletedCwlRaw)
+      ? latestCompletedCwlRaw
+      : null,
+    loadErrors: [],
+    loadedAt: new Date().toISOString(),
+  };
+  const donationSeasonIds = collectDonationSeasonIdsFromBundle(seasonEvents, {});
+  const donationBySeasonPairs = await Promise.all(donationSeasonIds.map(async (seasonId) => [
+    seasonId,
+    await readLegacyPublicJsonObject(store, "donationRefresh/bySeason/" + seasonId),
+  ]));
+  const donationBySeason = {};
+  for (let i = 0; i < donationBySeasonPairs.length; i++) {
+    const seasonId = donationBySeasonPairs[i][0];
+    const overlay = donationBySeasonPairs[i][1];
+    if (overlay && typeof overlay === "object" && !Array.isArray(overlay)) donationBySeason[seasonId] = overlay;
+  }
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    activeVersionId,
+    active: {
+      versionId: activeVersionId,
+      manifest: manifestRaw && typeof manifestRaw === "object" && !Array.isArray(manifestRaw) ? manifestRaw : null,
+    },
+    seasonEvents,
+    donationRefresh: {
+      current: await readLegacyPublicJsonObject(store, "donationRefresh/current"),
+      bySeason: donationBySeason,
+    },
+  };
+};
+
+// Project one legacy public-data object from the bootstrap bundle.
+const projectPublicBootstrapDataPath = (bootstrapRaw, objectPathRaw) => {
+  const bootstrap = bootstrapRaw && typeof bootstrapRaw === "object" && !Array.isArray(bootstrapRaw) ? bootstrapRaw : null;
+  if (!bootstrap) return undefined;
+  const path = String(objectPathRaw == null ? "" : objectPathRaw).replace(/\.json$/i, "");
+  const active = bootstrap.active && typeof bootstrap.active === "object" ? bootstrap.active : {};
+  const seasonEvents = bootstrap.seasonEvents && typeof bootstrap.seasonEvents === "object" ? bootstrap.seasonEvents : {};
+  const donationRefresh = bootstrap.donationRefresh && typeof bootstrap.donationRefresh === "object" ? bootstrap.donationRefresh : {};
+
+  if (path === "activePublished/currentVersionId") return bootstrap.activeVersionId || active.versionId || undefined;
+  if (path === "activePublished/currentManifest") return active.manifest || undefined;
+
+  if (path === "events/seasonEvents/current") return seasonEvents.current || undefined;
+  if (path === "events/seasonEvents/currentCwl") {
+    const current = seasonEvents.current && typeof seasonEvents.current === "object" ? seasonEvents.current : {};
+    return current.cwl || undefined;
+  }
+  if (path === "events/seasonEvents/latestCompletedCwl") return seasonEvents.latestCompletedCwl || undefined;
+  if (path === "events/seasonEvents/seasonState/current") return seasonEvents.seasonState || undefined;
+
+  const byIdPrefix = "events/seasonEvents/byId/";
+  if (path.startsWith(byIdPrefix)) {
+    const eventId = path.slice(byIdPrefix.length);
+    return readOwnObjectValue(seasonEvents.byId, eventId);
+  }
+
+  const aggregatePrefix = "events/seasonEvents/cwlAggregates/byEvent/";
+  if (path.startsWith(aggregatePrefix)) {
+    const parts = path.slice(aggregatePrefix.length).split("/");
+    const eventId = parts[0] || "";
+    const kind = parts[1] || "";
+    const byEvent = readOwnObjectValue(seasonEvents.cwlAggregatesByEventId, eventId);
+    return byEvent && typeof byEvent === "object" ? readOwnObjectValue(byEvent, kind) : undefined;
+  }
+
+  const bySeasonPrefix = "events/seasonEvents/bySeason/";
+  if (path.startsWith(bySeasonPrefix)) {
+    const seasonId = path.slice(bySeasonPrefix.length);
+    const currentSeasonState = seasonEvents.seasonState && typeof seasonEvents.seasonState === "object" ? seasonEvents.seasonState : {};
+    if (seasonId && currentSeasonState.seasonId === seasonId) return seasonEvents.current || undefined;
+    const previous = seasonEvents.previous && typeof seasonEvents.previous === "object" ? seasonEvents.previous : {};
+    const previousSeasonState = previous.seasonState && typeof previous.seasonState === "object" ? previous.seasonState : {};
+    if (seasonId && previousSeasonState.seasonId === seasonId) return previous.current || undefined;
+  }
+
+  if (path === "donationRefresh/current") return donationRefresh.current || undefined;
+  const donationSeasonPrefix = "donationRefresh/bySeason/";
+  if (path.startsWith(donationSeasonPrefix)) {
+    const seasonId = path.slice(donationSeasonPrefix.length);
+    return readOwnObjectValue(donationRefresh.bySeason, seasonId);
+  }
+
+  return undefined;
+};
+
+// Return whether a mutable public-data path should be served from bootstrap first.
+const shouldPreferPublicBootstrapPath = (objectPathRaw) => {
+  const path = String(objectPathRaw == null ? "" : objectPathRaw).replace(/\.json$/i, "");
+  return (
+    path.startsWith("activePublished/") ||
+    path.startsWith("events/seasonEvents/") ||
+    path.startsWith("donationRefresh/")
+  );
+};
+
+// Build a data-store-like object from a bootstrap projection.
+const buildProjectedDataStoreObject = async (valueRaw) => {
+  if (valueRaw === undefined) return null;
+  const body = JSON.stringify(valueRaw == null ? null : valueRaw);
+  const etag = "\"" + bytesToHex(await sha256Bytes(body)) + "\"";
+  return {
+    body,
+    text: async () => body,
+    httpEtag: etag,
+    etag,
+    httpMetadata: {
+      contentType: "application/json; charset=utf-8",
+      cacheControl: "",
+    },
+  };
+};
+
+// Read a public object from bootstrap first, falling back to its legacy key.
+const getPublicDataObjectWithBootstrapFallback = async (store, key, objectPath) => {
+  if (String(objectPath || "") === PUBLIC_BOOTSTRAP_DATA_PATH) {
+    const direct = await getDataStoreObject(store, key);
+    if (direct) return direct;
+    return buildProjectedDataStoreObject(await synthesizePublicBootstrapFromLegacyObjects(store));
+  }
+  if (shouldPreferPublicBootstrapPath(objectPath)) {
+    const bootstrap = await readPublicBootstrapPayload(store);
+    const projected = await buildProjectedDataStoreObject(projectPublicBootstrapDataPath(bootstrap, objectPath));
+    if (projected) return projected;
+  }
+  return getDataStoreObject(store, key);
+};
+
 // Return CORS headers for public data routes.
 const publicDataCorsHeaders = () => ({
   "access-control-allow-origin": "*",
@@ -788,7 +1035,9 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
     return jsonResponse(503, { ok: false, error: "Roster data store is not configured." }, cors);
   }
 
-  const object = await getDataStoreObject(store, key);
+  const object = scope === "public"
+    ? await getPublicDataObjectWithBootstrapFallback(store, key, objectPath)
+    : await getDataStoreObject(store, key);
   if (!object) {
     return jsonResponse(404, {
       ok: false,

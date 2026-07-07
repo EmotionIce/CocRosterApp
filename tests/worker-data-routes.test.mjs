@@ -113,3 +113,97 @@ test("mutable public pointers are no-store while version shards stay immutable",
   assert.equal(manifestResponse.status, 200);
   assert.equal(manifestResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
 });
+
+test("mutable public data paths are projected from bootstrap before legacy keys", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/bootstrap/current.json": JSON.stringify({
+        activeVersionId: "version-bootstrap",
+        active: {
+          versionId: "version-bootstrap",
+          manifest: { versionId: "version-bootstrap", pageTitle: "Bootstrap" },
+        },
+        seasonEvents: {
+          current: {
+            donation: { eventId: "donation-current", seasonId: "season-1" },
+          },
+          seasonState: { seasonId: "season-1" },
+          byId: {
+            "donation-current": { eventId: "donation-current", type: "donation", title: "Donation" },
+          },
+          cwlAggregatesByEventId: {},
+          latestCompletedCwl: null,
+        },
+        donationRefresh: {
+          current: { seasonId: "season-1", updatedAt: "2026-07-07T00:00:00.000Z" },
+          bySeason: {
+            "season-1": { seasonId: "season-1", byTag: {} },
+          },
+        },
+      }),
+      "public-data/activePublished/currentVersionId.json": JSON.stringify("stale-version"),
+      "public-data/events/seasonEvents/current.json": JSON.stringify({
+        donation: { eventId: "stale-donation" },
+      }),
+    }),
+  };
+
+  const pointerResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activePublished/currentVersionId.json"),
+    env,
+    {},
+  );
+  const currentResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/events/seasonEvents/current.json"),
+    env,
+    {},
+  );
+  const donationResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/donationRefresh/bySeason/season-1.json"),
+    env,
+    {},
+  );
+
+  assert.equal(pointerResponse.status, 200);
+  assert.equal(await pointerResponse.json(), "version-bootstrap");
+  assert.equal((await currentResponse.json()).donation.eventId, "donation-current");
+  assert.deepEqual(await donationResponse.json(), { seasonId: "season-1", byTag: {} });
+});
+
+test("bootstrap route can synthesize from legacy public objects during rollout", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentVersionId.json": JSON.stringify("version-legacy"),
+      "public-data/activePublished/currentManifest.json": JSON.stringify({ versionId: "version-legacy" }),
+      "public-data/events/seasonEvents/current.json": JSON.stringify({
+        donation: { eventId: "donation-current", seasonId: "season-1" },
+      }),
+      "public-data/events/seasonEvents/seasonState/current.json": JSON.stringify({ seasonId: "season-1" }),
+      "public-data/events/seasonEvents/byId/donation-current.json": JSON.stringify({
+        eventId: "donation-current",
+        type: "donation",
+        seasonId: "season-1",
+      }),
+      "public-data/donationRefresh/current.json": JSON.stringify({ seasonId: "season-1" }),
+      "public-data/donationRefresh/bySeason/season-1.json": JSON.stringify({
+        seasonId: "season-1",
+        byTag: {},
+      }),
+    }),
+  };
+
+  const response = await worker.fetch(
+    new Request("https://worker.test/api/public-data/bootstrap/current.json"),
+    env,
+    {},
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.activeVersionId, "version-legacy");
+  assert.equal(payload.seasonEvents.current.donation.eventId, "donation-current");
+  assert.equal(payload.seasonEvents.byId["donation-current"].type, "donation");
+  assert.equal(payload.donationRefresh.bySeason["season-1"].seasonId, "season-1");
+});

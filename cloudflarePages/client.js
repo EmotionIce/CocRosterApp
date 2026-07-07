@@ -12,6 +12,7 @@
     const PUBLIC_DATA_KEY_ENCODING_PREFIX = "__FB64__";
     const ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";
     const ACTIVE_VERSIONS_PATH = "activeVersions";
+    const PUBLIC_BOOTSTRAP_CURRENT_PATH = "bootstrap/current";
     const DONATION_REFRESH_BASE_PATH = "donationRefresh";
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
@@ -8707,6 +8708,47 @@
         };
     };
 
+    // Load the composed public bootstrap bundle.
+    const loadCloudflarePublicBootstrap = async () => {
+        const payload = decodePublicDataObjectKeysRecursive(await fetchCloudflarePublicJson(PUBLIC_BOOTSTRAP_CURRENT_PATH));
+        const source = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+        if (!source) throw new Error("Cloudflare public bootstrap returned an invalid payload.");
+        const active = source.active && typeof source.active === "object" && !Array.isArray(source.active) ? source.active : {};
+        const activeVersionId = toStr(source.activeVersionId || active.versionId).trim();
+        if (!activeVersionId) throw new Error("Cloudflare public bootstrap is missing activeVersionId.");
+        return {
+            schemaVersion: Number.isFinite(Number(source.schemaVersion)) ? Number(source.schemaVersion) : 1,
+            generatedAt: toStr(source.generatedAt).trim(),
+            activeVersionId: activeVersionId,
+            active: active,
+            seasonEvents: source.seasonEvents && typeof source.seasonEvents === "object" && !Array.isArray(source.seasonEvents)
+                ? source.seasonEvents
+                : null,
+            donationRefresh: source.donationRefresh && typeof source.donationRefresh === "object" && !Array.isArray(source.donationRefresh)
+                ? source.donationRefresh
+                : null,
+        };
+    };
+
+    const hasCloudflareBootstrapPublicModel = (bootstrapRaw) => {
+        const bootstrap = bootstrapRaw && typeof bootstrapRaw === "object" ? bootstrapRaw : {};
+        return !!(bootstrap.seasonEvents && typeof bootstrap.seasonEvents === "object" && !Array.isArray(bootstrap.seasonEvents));
+    };
+
+    const applyCloudflareBootstrapPublicModel = (dataRaw, bootstrapRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : null;
+        const bootstrap = bootstrapRaw && typeof bootstrapRaw === "object" ? bootstrapRaw : null;
+        if (!data || !hasCloudflareBootstrapPublicModel(bootstrap)) return false;
+        data.seasonEvents = cloneJsonValue(bootstrap.seasonEvents);
+        data.donationRefresh = bootstrap.donationRefresh && typeof bootstrap.donationRefresh === "object" && !Array.isArray(bootstrap.donationRefresh)
+            ? cloneJsonValue(bootstrap.donationRefresh)
+            : { bySeason: {} };
+        if (!data.donationRefresh.bySeason || typeof data.donationRefresh.bySeason !== "object" || Array.isArray(data.donationRefresh.bySeason)) {
+            data.donationRefresh.bySeason = {};
+        }
+        return true;
+    };
+
     // Return public event path by event id.
     const buildSeasonEventByIdPublicPath = (eventIdRaw) => {
         const eventId = toStr(eventIdRaw).trim();
@@ -9010,25 +9052,27 @@
     };
 
     // Reuse cached roster/playerMetrics when the active published version is unchanged.
-    const loadCachedActiveVersionSnapshotViaCloudflarePublic = async (cachedSnapshotRaw, activeVersionIdRaw) => {
+    const loadCachedActiveVersionSnapshotViaCloudflarePublic = async (cachedSnapshotRaw, activeVersionIdRaw, bootstrapRaw) => {
         const cachedSnapshot = cachedSnapshotRaw && typeof cachedSnapshotRaw === "object" ? cachedSnapshotRaw : null;
         const activeVersionId = toStr(activeVersionIdRaw).trim();
         if (!cachedSnapshot || !cachedSnapshot.data || !activeVersionId) return null;
         if (toStr(cachedSnapshot.activeVersionId).trim() !== activeVersionId) return null;
 
         const data = cloneJsonValue(cachedSnapshot.data);
-        try {
-            data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
-            await hydrateDonationRefreshForLoadedSeasonEvents(data);
-        } catch (err) {
-            if (!data.seasonEvents || typeof data.seasonEvents !== "object" || Array.isArray(data.seasonEvents)) {
-                data.seasonEvents = buildEmptySeasonEventsBundle([{
-                    path: "/" + SEASON_EVENTS_BASE_PATH,
-                    message: err && err.message ? err.message : toStr(err),
-                }]);
-            }
-            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[SeasonEvents] Public data event hydration failed while reusing cached active version.", err);
+        if (!applyCloudflareBootstrapPublicModel(data, bootstrapRaw)) {
+            try {
+                data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
+                await hydrateDonationRefreshForLoadedSeasonEvents(data);
+            } catch (err) {
+                if (!data.seasonEvents || typeof data.seasonEvents !== "object" || Array.isArray(data.seasonEvents)) {
+                    data.seasonEvents = buildEmptySeasonEventsBundle([{
+                        path: "/" + SEASON_EVENTS_BASE_PATH,
+                        message: err && err.message ? err.message : toStr(err),
+                    }]);
+                }
+                if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                    console.warn("[SeasonEvents] Public data event hydration failed while reusing cached active version.", err);
+                }
             }
         }
 
@@ -9044,25 +9088,37 @@
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const cachedSnapshot = options.cachedSnapshot && typeof options.cachedSnapshot === "object" ? options.cachedSnapshot : null;
         let activeVersionId = "";
+        let bootstrap = null;
+        try {
+            bootstrap = await loadCloudflarePublicBootstrap();
+            activeVersionId = toStr(bootstrap.activeVersionId).trim();
+        } catch (err) {
+            bootstrap = null;
+            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                console.warn("[RosterBoot] Cloudflare public bootstrap unavailable; falling back to legacy public-data paths.", err);
+            }
+        }
         if (cachedSnapshot && cachedSnapshot.activeVersionId) {
-            activeVersionId = await loadActivePublishedVersionIdViaCloudflarePublic();
-            const cachedLoaded = await loadCachedActiveVersionSnapshotViaCloudflarePublic(cachedSnapshot, activeVersionId);
+            if (!activeVersionId) activeVersionId = await loadActivePublishedVersionIdViaCloudflarePublic();
+            const cachedLoaded = await loadCachedActiveVersionSnapshotViaCloudflarePublic(cachedSnapshot, activeVersionId, bootstrap);
             if (cachedLoaded) return cachedLoaded;
         }
 
         const versionedLoaded = await loadPublishedActiveVersionViaCloudflarePublic(activeVersionId);
         const data = versionedLoaded.data;
         activeVersionId = toStr(versionedLoaded.activeVersionId).trim();
-        try {
-            data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
-            await hydrateDonationRefreshForLoadedSeasonEvents(data);
-        } catch (err) {
-            data.seasonEvents = buildEmptySeasonEventsBundle([{
-                path: "/" + SEASON_EVENTS_BASE_PATH,
-                message: err && err.message ? err.message : toStr(err),
-            }]);
-            if (typeof console !== "undefined" && console && typeof console.warn === "function") {
-                console.warn("[SeasonEvents] Public data event hydration failed; continuing without event data.", err);
+        if (!applyCloudflareBootstrapPublicModel(data, bootstrap)) {
+            try {
+                data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
+                await hydrateDonationRefreshForLoadedSeasonEvents(data);
+            } catch (err) {
+                data.seasonEvents = buildEmptySeasonEventsBundle([{
+                    path: "/" + SEASON_EVENTS_BASE_PATH,
+                    message: err && err.message ? err.message : toStr(err),
+                }]);
+                if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                    console.warn("[SeasonEvents] Public data event hydration failed; continuing without event data.", err);
+                }
             }
         }
         return {

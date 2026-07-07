@@ -60,6 +60,64 @@ test("bot-scoped entries are not mirrored a second time", () => {
   ]);
 });
 
+test("publish skips unchanged objects using stored hashes", () => {
+  const backend = loadPublisher();
+  backend.CLOUDFLARE_PUBLIC_DATA_ENABLED_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_ENABLED";
+  backend.CLOUDFLARE_PUBLIC_DATA_BASE_URL_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_BASE_URL";
+  backend.CLOUDFLARE_PUBLIC_DATA_PUBLISH_SECRET_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_PUBLISH_SECRET";
+  backend.CLOUDFLARE_PUBLIC_DATA_LAST_PUBLISH_AT_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_LAST_PUBLISH_AT";
+  backend.CLOUDFLARE_PUBLIC_DATA_LAST_PUBLISH_STATUS_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_LAST_PUBLISH_STATUS";
+  backend.CLOUDFLARE_PUBLIC_DATA_LAST_PUBLISH_ERROR_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_LAST_PUBLISH_ERROR";
+  backend.STATIC_ASSET_BASE_URL = "";
+  backend.Logger = { log() {} };
+  backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
+
+  const properties = new Map([
+    ["CLOUDFLARE_PUBLIC_DATA_ENABLED", "true"],
+    ["CLOUDFLARE_PUBLIC_DATA_BASE_URL", "https://worker.test"],
+    ["CLOUDFLARE_PUBLIC_DATA_PUBLISH_SECRET", "secret"],
+  ]);
+  backend.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => properties.has(key) ? properties.get(key) : "",
+      setProperties: (values) => {
+        for (const [key, value] of Object.entries(values)) properties.set(key, String(value));
+      },
+    }),
+  };
+  const publishCalls = [];
+  backend.UrlFetchApp = {
+    fetch: (url, options) => {
+      const body = JSON.parse(options.payload);
+      publishCalls.push({ url, body });
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          ok: true,
+          putCount: body.objects.length,
+          deleteCount: body.deletePaths.length,
+        }),
+      };
+    },
+  };
+
+  const first = backend.publishCloudflareDataObjectsBestEffort_("public", [
+    { path: "bootstrap/current", payload: { activeVersionId: "version-1", nested: { b: 1, a: 2 } } },
+  ], { label: "test" });
+  const second = backend.publishCloudflareDataObjectsBestEffort_("public", [
+    { path: "bootstrap/current", payload: { nested: { a: 2, b: 1 }, activeVersionId: "version-1" } },
+  ], { label: "test" });
+
+  assert.equal(first.ok, true);
+  assert.equal(first.putCount, 1);
+  assert.equal(second.ok, true);
+  assert.equal(second.skipped, true);
+  assert.equal(second.reason, "unchanged");
+  assert.equal(second.skippedPutCount, 1);
+  assert.equal(publishCalls.length, 1);
+  assert.equal(publishCalls[0].url, "https://worker.test/api/internal/public-data/publish");
+});
+
 test("active mirror repair skips publish when Cloudflare already matches Firebase", () => {
   const backend = loadPublisher();
   backend.Logger = { log() {} };

@@ -415,6 +415,91 @@ test("loads published active version shards without requesting legacy active", a
   assert.equal(requested.includes("https://public-data.test/api/public-data/active.json"), false);
 });
 
+test("uses bootstrap for current public state without granular event reads", async () => {
+  const responses = new Map([
+    ["https://public-data.test/api/public-data/bootstrap/current.json", {
+      activeVersionId: "version-1",
+      seasonEvents: {
+        current: {
+          donation: {
+            eventId: "donation-season-1",
+            seasonId: "season-1",
+          },
+        },
+        seasonState: { seasonId: "season-1" },
+        byId: {
+          "donation-season-1": {
+            eventId: "donation-season-1",
+            type: "donation",
+            seasonId: "season-1",
+            status: "open",
+            startsAt: "2026-05-18T05:00:00.000Z",
+            endsAt: "2026-06-15T05:00:00.000Z",
+            participantsByDiscordId: {},
+          },
+        },
+        cwlAggregatesByEventId: {},
+        latestCompletedCwl: null,
+        loadErrors: [],
+      },
+      donationRefresh: {
+        bySeason: {
+          "season-1": {
+            seasonId: "season-1",
+            byTag: {},
+          },
+        },
+      },
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/version-1/manifest.json", {
+      versionId: "version-1",
+      schemaVersion: 1,
+      pageTitle: "Bootstrap Version",
+      rosterOrder: ["main"],
+      rosterIds: ["main"],
+      lastUpdatedAt: "2026-05-25T00:00:00.000Z",
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/version-1/rosters.json", {
+      main: {
+        id: "main",
+        title: "Main",
+        main: [],
+        subs: [],
+        missing: [],
+      },
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/version-1/playerMetrics.json", {
+      schemaVersion: 1,
+      updatedAt: "2026-05-25T00:00:00.000Z",
+      byTag: {},
+    }],
+  ]);
+  const requested = [];
+  const { loadRosterDataViaCloudflarePublic } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: {
+      fetch: async (url) => {
+        requested.push(url);
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await loadRosterDataViaCloudflarePublic();
+
+  assert.equal(loaded.source, "cloudflare-public");
+  assert.equal(loaded.activeVersionId, "version-1");
+  assert.equal(loaded.data.pageTitle, "Bootstrap Version");
+  assert.equal(loaded.data.seasonEvents.current.donation.eventId, "donation-season-1");
+  assert.equal(requested.includes("https://public-data.test/api/public-data/activePublished/currentVersionId.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/events/seasonEvents/current.json"), false);
+  assert.equal(requested.includes("https://public-data.test/api/public-data/donationRefresh/bySeason/season-1.json"), false);
+});
+
 test("does not fall back to legacy active when the published version shard is missing", async () => {
   const responses = new Map([
     ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-missing"],
