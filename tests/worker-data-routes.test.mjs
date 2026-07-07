@@ -114,6 +114,61 @@ test("mutable public pointers are no-store while version shards stay immutable",
   assert.equal(manifestResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
 });
 
+test("missing current active version shards are projected from legacy active data", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/bootstrap/current.json": JSON.stringify({
+        activeVersionId: "version-3",
+        active: {
+          versionId: "version-3",
+          manifest: {
+            versionId: "version-3",
+            pageTitle: "Projected",
+            rosterIds: ["main"],
+          },
+        },
+      }),
+      "public-data/active.json": JSON.stringify({
+        schemaVersion: 1,
+        pageTitle: "Projected",
+        rosterOrder: ["main"],
+        rosters: [{ id: "main", title: "Main" }],
+        playerMetrics: { schemaVersion: 1, byTag: { "__FB64__I1BMQVlFUg": { identity: { tag: "#PLAYER" } } } },
+      }),
+    }),
+  };
+
+  const manifestResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-3/manifest.json"),
+    env,
+    {},
+  );
+  const rostersResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-3/rosters.json"),
+    env,
+    {},
+  );
+  const metricsResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-3/playerMetrics.json"),
+    env,
+    {},
+  );
+  const staleResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-old/manifest.json"),
+    env,
+    {},
+  );
+
+  assert.equal(manifestResponse.status, 200);
+  assert.equal((await manifestResponse.json()).pageTitle, "Projected");
+  assert.equal(rostersResponse.status, 200);
+  assert.deepEqual(await rostersResponse.json(), { main: { id: "main", title: "Main" } });
+  assert.equal(metricsResponse.status, 200);
+  assert.equal((await metricsResponse.json()).byTag.__FB64__I1BMQVlFUg.identity.tag, "#PLAYER");
+  assert.equal(staleResponse.status, 404);
+});
+
 test("mutable public data paths are projected from bootstrap before legacy keys", async () => {
   const worker = loadWorker();
   const env = {

@@ -911,6 +911,48 @@ const buildProjectedDataStoreObject = async (valueRaw) => {
   };
 };
 
+// Return the requested active-version shard if it can be projected from legacy active data.
+const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathRaw) => {
+  const path = String(objectPathRaw == null ? "" : objectPathRaw).replace(/\.json$/i, "");
+  const match = /^activeVersions\/([^/]+)\/(manifest|rosters|playerMetrics)$/.exec(path);
+  if (!match) return undefined;
+  const versionId = match[1] || "";
+  const child = match[2] || "";
+  const bootstrap = await readPublicBootstrapPayload(store);
+  const bootstrapActive = bootstrap && bootstrap.active && typeof bootstrap.active === "object" && !Array.isArray(bootstrap.active)
+    ? bootstrap.active
+    : {};
+  const pointerVersionId = String(
+    (bootstrap && (bootstrap.activeVersionId || bootstrapActive.versionId)) ||
+    await readLegacyPublicJsonObject(store, "activePublished/currentVersionId") ||
+    ""
+  ).trim();
+  if (!versionId || versionId !== pointerVersionId) return undefined;
+
+  if (child === "manifest") {
+    const manifest = bootstrapActive.manifest && typeof bootstrapActive.manifest === "object" && !Array.isArray(bootstrapActive.manifest)
+      ? bootstrapActive.manifest
+      : await readLegacyPublicJsonObject(store, "activePublished/currentManifest");
+    return manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : undefined;
+  }
+
+  const active = await readLegacyPublicJsonObject(store, "active");
+  if (!active || typeof active !== "object" || Array.isArray(active)) return undefined;
+  if (child === "playerMetrics") {
+    return active.playerMetrics && typeof active.playerMetrics === "object" && !Array.isArray(active.playerMetrics)
+      ? active.playerMetrics
+      : {};
+  }
+  const rosters = Array.isArray(active.rosters) ? active.rosters : [];
+  const rosterMap = {};
+  for (let i = 0; i < rosters.length; i++) {
+    const roster = rosters[i] && typeof rosters[i] === "object" && !Array.isArray(rosters[i]) ? rosters[i] : null;
+    const rosterId = roster ? String(roster.id || "").trim() : "";
+    if (rosterId) rosterMap[rosterId] = roster;
+  }
+  return rosterMap;
+};
+
 // Read a public object from bootstrap first, falling back to its legacy key.
 const getPublicDataObjectWithBootstrapFallback = async (store, key, objectPath) => {
   if (String(objectPath || "") === PUBLIC_BOOTSTRAP_DATA_PATH) {
@@ -923,7 +965,9 @@ const getPublicDataObjectWithBootstrapFallback = async (store, key, objectPath) 
     const projected = await buildProjectedDataStoreObject(projectPublicBootstrapDataPath(bootstrap, objectPath));
     if (projected) return projected;
   }
-  return getDataStoreObject(store, key);
+  const direct = await getDataStoreObject(store, key);
+  if (direct) return direct;
+  return buildProjectedDataStoreObject(await projectCurrentActiveVersionShardFromLegacyData(store, objectPath));
 };
 
 // Return CORS headers for public data routes.
