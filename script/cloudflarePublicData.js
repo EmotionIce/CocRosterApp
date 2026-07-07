@@ -987,17 +987,23 @@ function verifyCloudflarePublicActiveVersionId_(expectedVersionIdRaw) {
 	if (typeof UrlFetchApp === "undefined" || !UrlFetchApp || typeof UrlFetchApp.fetch !== "function") {
 		return { ok: false, skipped: true, reason: "urlfetch-unavailable" };
 	}
-	const endpoint = getCloudflarePublicDataReadEndpoint_("activePublished/currentVersionId");
+	const endpoint = getCloudflarePublicDataReadEndpoint_("health");
 	if (!endpoint) return { ok: false, skipped: true, reason: "missing-cloudflare-url" };
 	try {
 		const separator = endpoint.indexOf("?") >= 0 ? "&" : "?";
-		const response = UrlFetchApp.fetch(endpoint + separator + "_verify=" + encodeURIComponent(new Date().toISOString()), {
-			method: "get",
-			headers: {
-				"Cache-Control": "no-cache",
+		const response = UrlFetchApp.fetch(
+			endpoint
+				+ separator
+				+ "_verify=" + encodeURIComponent(new Date().toISOString())
+				+ "&expectedVersionId=" + encodeURIComponent(expectedVersionId),
+			{
+				method: "get",
+				headers: {
+					"Cache-Control": "no-cache",
+				},
+				muteHttpExceptions: true,
 			},
-			muteHttpExceptions: true,
-		});
+		);
 		const code = typeof response.getResponseCode === "function" ? response.getResponseCode() : 0;
 		const text = typeof response.getContentText === "function" ? response.getContentText() : "";
 		if (code < 200 || code >= 300) {
@@ -1012,7 +1018,10 @@ function verifyCloudflarePublicActiveVersionId_(expectedVersionIdRaw) {
 		const payload = parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "data")
 			? parsed.data
 			: parsed;
-		const actualVersionId = normalizeActiveVersionId_(payload);
+		const health = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+		const actualVersionId = health
+			? normalizeActiveVersionId_(health.currentVersionId)
+			: normalizeActiveVersionId_(payload);
 		if (actualVersionId !== expectedVersionId) {
 			return {
 				ok: false,
@@ -1022,11 +1031,25 @@ function verifyCloudflarePublicActiveVersionId_(expectedVersionIdRaw) {
 				error: "Cloudflare active version pointer mismatch.",
 			};
 		}
+		const shards = health && health.activeVersionShards && typeof health.activeVersionShards === "object"
+			? health.activeVersionShards
+			: null;
+		if (shards && shards.complete === false) {
+			return {
+				ok: false,
+				statusCode: code,
+				expectedVersionId: expectedVersionId,
+				actualVersionId: actualVersionId,
+				activeVersionShards: shards,
+				error: "Cloudflare active version shards missing.",
+			};
+		}
 		return {
 			ok: true,
 			statusCode: code,
 			expectedVersionId: expectedVersionId,
 			actualVersionId: actualVersionId,
+			activeVersionShards: shards || null,
 		};
 	} catch (err) {
 		return { ok: false, error: errorMessage_(err) };

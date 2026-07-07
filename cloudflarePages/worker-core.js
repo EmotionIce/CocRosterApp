@@ -995,6 +995,32 @@ const requestEtagMatches = (request, etagRaw) => {
   return header.split(",").map((part) => part.trim()).includes(etag);
 };
 
+// Read direct active-version shard presence from the data store.
+const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
+  const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+  const status = {
+    versionId,
+    manifest: false,
+    rosters: false,
+    playerMetrics: false,
+    complete: false,
+    missing: [],
+  };
+  if (!versionId) {
+    status.missing = ["manifest", "rosters", "playerMetrics"];
+    return status;
+  }
+  const names = ["manifest", "rosters", "playerMetrics"];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const object = await getDataStoreObject(store, buildDataObjectKey("public", "activeVersions/" + versionId + "/" + name));
+    status[name] = !!object;
+    if (!object) status.missing.push(name);
+  }
+  status.complete = status.missing.length === 0;
+  return status;
+};
+
 // Handle public/bot data health.
 const handleDataHealth = async (request, env, scopeRaw) => {
   const method = String(request.method || "").toUpperCase();
@@ -1028,13 +1054,22 @@ const handleDataHealth = async (request, env, scopeRaw) => {
       currentVersionId = "";
     }
   }
+  const url = new URL(request.url);
+  const expectedVersionId = String(url.searchParams.get("expectedVersionId") || "").trim();
+  const checkedVersionId = expectedVersionId || currentVersionId;
+  const activeVersionShards = normalizeDataScope(scopeRaw) === "public"
+    ? await readDirectActiveVersionShardStatus(store, checkedVersionId)
+    : null;
   const response = jsonResponse(200, {
     ok: true,
     scope: normalizeDataScope(scopeRaw),
     storeConfigured: true,
     storeKind: store.kind,
     currentVersionId,
+    expectedVersionId,
+    currentVersionMatchesExpected: expectedVersionId ? currentVersionId === expectedVersionId : undefined,
     hasCurrentVersion: !!currentVersionId,
+    activeVersionShards,
   }, scopeRaw === "public" ? publicDataCorsHeaders() : {});
   if (method === "HEAD") return new Response(null, { status: response.status, headers: response.headers });
   return response;

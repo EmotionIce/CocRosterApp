@@ -114,6 +114,34 @@ test("mutable public pointers are no-store while version shards stay immutable",
   assert.equal(manifestResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
 });
 
+test("public health reports direct active version shard presence", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentVersionId.json": JSON.stringify("version-4"),
+      "public-data/activeVersions/version-4/manifest.json": JSON.stringify({ versionId: "version-4" }),
+      "public-data/activeVersions/version-4/rosters.json": JSON.stringify({ main: { id: "main" } }),
+    }),
+  };
+
+  const response = await worker.fetch(
+    new Request("https://worker.test/api/public-data/health?expectedVersionId=version-4"),
+    env,
+    {},
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.currentVersionId, "version-4");
+  assert.equal(payload.currentVersionMatchesExpected, true);
+  assert.equal(payload.activeVersionShards.versionId, "version-4");
+  assert.equal(payload.activeVersionShards.manifest, true);
+  assert.equal(payload.activeVersionShards.rosters, true);
+  assert.equal(payload.activeVersionShards.playerMetrics, false);
+  assert.equal(payload.activeVersionShards.complete, false);
+  assert.deepEqual(payload.activeVersionShards.missing, ["playerMetrics"]);
+});
+
 test("missing current active version shards are projected from legacy active data", async () => {
   const worker = loadWorker();
   const env = {

@@ -118,6 +118,53 @@ test("publish skips unchanged objects using stored hashes", () => {
   assert.equal(publishCalls[0].url, "https://worker.test/api/internal/public-data/publish");
 });
 
+test("active version verification uses direct health and rejects missing shards", () => {
+  const backend = loadPublisher();
+  backend.CLOUDFLARE_PUBLIC_DATA_ENABLED_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_ENABLED";
+  backend.CLOUDFLARE_PUBLIC_DATA_BASE_URL_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_BASE_URL";
+  backend.STATIC_ASSET_BASE_URL = "";
+  backend.normalizeActiveVersionId_ = (value) => String(value || "").trim();
+  const properties = new Map([
+    ["CLOUDFLARE_PUBLIC_DATA_ENABLED", "true"],
+    ["CLOUDFLARE_PUBLIC_DATA_BASE_URL", "https://worker.test"],
+  ]);
+  backend.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => properties.has(key) ? properties.get(key) : "",
+    }),
+  };
+  let requestedUrl = "";
+  backend.UrlFetchApp = {
+    fetch: (url) => {
+      requestedUrl = url;
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          ok: true,
+          currentVersionId: "version-5",
+          activeVersionShards: {
+            versionId: "version-5",
+            manifest: true,
+            rosters: true,
+            playerMetrics: false,
+            complete: false,
+            missing: ["playerMetrics"],
+          },
+        }),
+      };
+    },
+  };
+
+  const result = backend.verifyCloudflarePublicActiveVersionId_("version-5");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Cloudflare active version shards missing.");
+  assert.equal(result.actualVersionId, "version-5");
+  assert.deepEqual(Array.from(result.activeVersionShards.missing), ["playerMetrics"]);
+  assert.match(requestedUrl, /^https:\/\/worker\.test\/api\/public-data\/health\?/);
+  assert.match(requestedUrl, /expectedVersionId=version-5/);
+});
+
 test("active mirror repair skips publish when Cloudflare already matches Firebase", () => {
   const backend = loadPublisher();
   backend.Logger = { log() {} };
