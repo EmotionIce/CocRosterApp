@@ -445,6 +445,19 @@ const installCwlFetch = (backend, getWarRaw, options = {}) => {
   return paths;
 };
 
+const stageCompletedRosterOutputs = (backend, runId, dataRaw, rosterIdsRaw = ["main"]) => {
+  const data = backend.validateRosterData_(dataRaw || buildRosterData());
+  const rosterIds = Array.isArray(rosterIdsRaw) ? rosterIdsRaw : ["main"];
+  for (const rosterId of rosterIds) {
+    const roster = data.rosters.find((entry) => entry.id === rosterId);
+    if (!roster) continue;
+    backend.firebaseRequestJson_("activeVersions/" + runId + "/rosters/" + rosterId, "PUT", backend.encodeFirebaseObjectKeysRecursive_(roster));
+    backend.writeAutoRefreshRunShard_(runId, "rosterWrites/" + rosterId, { rosterId, versionId: runId, playerTags: (roster.main || []).map((player) => backend.normalizeTag_(player.tag)).filter(Boolean) }, "PUT");
+    backend.writeAutoRefreshRunShard_(runId, "warResults/" + rosterId, { rosterId, rosterShardWritten: true, issues: [] }, "PUT");
+    backend.writeAutoRefreshRunShard_(runId, "metricResults/" + rosterId, { metricResultMode: "activeVersionPatches", metricsStaged: true, tags: [] }, "PUT");
+  }
+};
+
 test("scheduleAutoRefreshJobResume keeps exactly one resume trigger", () => {
   const backend = loadBackend();
 
@@ -467,7 +480,7 @@ test("admin diagnostics exposes current auto-refresh queue state without roster 
   }));
   const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), {
     rosterIds: ["main"],
-    currentTaskIndex: 2,
+    currentTaskIndex: 3,
     processedTasks: 2,
     processedRosters: 1,
   });
@@ -489,7 +502,7 @@ test("admin diagnostics exposes current auto-refresh queue state without roster 
   assert.equal(result.current.runId, runId);
   assert.equal(result.current.status, "finalizing");
   assert.equal(result.current.phase, "cloudflare-publish");
-  assert.equal(result.current.currentTaskIndex, 2);
+  assert.equal(result.current.currentTaskIndex, finalizeTask.index);
   assert.equal(result.current.taskSummary.taskId, finalizeTask.taskId);
   assert.equal(result.current.cloudflarePublicDataPublish.status, "publishing");
   assert.equal(result.currentTask.taskId, finalizeTask.taskId);
@@ -852,7 +865,7 @@ test("queue coordinator stores tiny current state and sharded run data", () => {
 
   assert.equal(result.inProgress, true);
   assert.equal(current.kind, "auto-refresh-queue");
-  assert.equal(current.taskCount, 4);
+  assert.equal(current.taskCount, 5);
   assert.equal(current.rosterIds.length, 2);
   assert.equal(backend.readAutoRefreshTask_(current.runId, current.taskIds[0]).type, "cwlCoordinator");
   assert.equal(backend.readAutoRefreshTask_(current.runId, current.taskIds[1]).type, "roster");
@@ -2139,8 +2152,232 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   assert.equal(lastJob.cwlSeasonEventRefresh.status, "active");
   assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.leagueGroup, 1);
   assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.cwlWar, 1);
-  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 0);
-  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 0);
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 1);
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
+  assert.equal(lastJob.cwlFinalCoordinatorCapture.status, "captured");
+});
+
+test("queue finalization recaptures CWL after roster processing and publishes the latest aggregate once", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 3,
+    processedTasks: 3,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  let war = buildOneRoundCwlWar({ state: "inWar", stars: 1, destruction: 40 });
+  installCwlFetch(backend, () => war);
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("late CWL finalization should not read the full active payload");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  let publishCalls = 0;
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishCalls++;
+    const versionId = backend.readPublishedActiveVersionId_();
+    return {
+      ok: true,
+      active: { ok: true, versionId, publicResult: { ok: true, putCount: 6 }, botResult: { ok: true, putCount: 4 } },
+      cwlLeagueSignups: { ok: true, putCount: 1 },
+      seasonEvents: { ok: true, putCount: 3, deleteCount: 0 },
+    };
+  };
+  backend.verifyCloudflarePublicActiveVersionId_ = (versionId) => ({ ok: true, statusCode: 200, expectedVersionId: versionId, actualVersionId: versionId });
+  backend.executeAutoRefreshCwlCoordinatorTask_(current, tasks.find((task) => task.type === "cwlCoordinator"), Date.now());
+  const earlySummary = backend.readAutoRefreshRunShard_(runId, "cwl/summary");
+  war = buildOneRoundCwlWar({ state: "inWar", stars: 3, destruction: 100 });
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+  const live = backend.readCwlSeasonEventAggregate_("cwl-active", "live");
+  const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
+
+  assert.equal(result.status, "completed");
+  assert.equal(publishCalls, 1);
+  assert.equal(live.byTag["#PLAYER"].starsTotal, 3);
+  assert.notEqual(live.hash, earlySummary.aggregateHash);
+  assert.equal(lastJob.cwlFinalCoordinatorCapture.status, "captured");
+  assert.equal(lastJob.cwlFinalCoordinatorCapture.aggregateHash, live.hash);
+});
+
+test("queue finalization forces final CWL capture for runs without the new task", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 2,
+    processedTasks: 2,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  const legacyTaskIds = current.taskIds.filter((taskId) => backend.readAutoRefreshTask_(runId, taskId).type !== "cwlFinalCoordinator");
+  current.taskIds = legacyTaskIds;
+  current.taskCount = legacyTaskIds.length;
+  current.currentTaskIndex = legacyTaskIds.findIndex((taskId) => backend.readAutoRefreshTask_(runId, taskId).type === "finalize");
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  const paths = installCwlFetch(backend, () => buildOneRoundCwlWar({ state: "inWar", stars: 2, destruction: 90 }));
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("legacy finalization should use source metadata and run shards");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  installCloudflareMirrorSuccess(backend);
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+  const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
+
+  assert.equal(result.status, "completed");
+  assert.equal(lastJob.cwlFinalCoordinatorCapture.status, "captured");
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 1);
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
+});
+
+test("queue finalization defers on failed final CWL refresh and preserves run shards", () => {
+  const initial = buildCurrentCwlEventDb();
+  initial.events.seasonEvents.byId["cwl-active"].cwl.groups = {
+    "grp-existing": { groupId: "grp-existing", clanTags: ["#CLAN"], warTags: ["#WAR1"], expectedRounds: 1 },
+  };
+  const backend = installMemoryFirebase(loadBackend(), initial);
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 3,
+    processedTasks: 3,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  installCwlFetch(backend, () => buildOneRoundCwlWar(), { warError: true });
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("failed final CWL refresh should not read full active payload");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  let publishCalls = 0;
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishCalls++;
+    return { ok: true };
+  };
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+  const queue = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "cwl-season-event-refresh");
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(queue.status, "finalizing");
+  assert.equal(queue.phase, "cwl-season-event-refresh");
+  assert.equal(queue.cwlFinalCoordinatorCapture.aggregateOk, false);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET") !== null, true);
+  assert.equal(publishCalls, 0);
+});
+
+test("queue finalization preserves state after Cloudflare failure and reuses fresh final CWL capture on retry", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 3,
+    processedTasks: 3,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  const paths = installCwlFetch(backend, () => buildOneRoundCwlWar({ state: "inWar", stars: 3, destruction: 100 }));
+  let activeSnapshotReads = 0;
+  backend.readActiveRosterSnapshot_ = () => {
+    activeSnapshotReads++;
+    throw new Error("already-published recovery should not read the full active snapshot");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  let publishAttempts = 0;
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishAttempts++;
+    if (publishAttempts === 1) return { ok: false, error: "temporary KV failure" };
+    const versionId = backend.readPublishedActiveVersionId_();
+    return {
+      ok: true,
+      active: { ok: true, versionId, publicResult: { ok: true, putCount: 6 }, botResult: { ok: true, putCount: 4 } },
+      cwlLeagueSignups: { ok: true, putCount: 1 },
+      seasonEvents: { ok: true, putCount: 3, deleteCount: 0 },
+    };
+  };
+  backend.verifyCloudflarePublicActiveVersionId_ = (versionId) => ({ ok: true, statusCode: 200, expectedVersionId: versionId, actualVersionId: versionId });
+
+  const first = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+  const firstCwlRequests = paths.filter((path) => path.includes("/currentwar/leaguegroup") || path.includes("/clanwarleagues/wars/")).length;
+  const retainedQueue = backend.readAutoRefreshQueueCurrent_();
+  const retainedRunAfterFirst = backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET") !== null;
+  paths.length = 0;
+  const retry = backend.executeAutoRefreshFinalizeTask_(retainedQueue, tasks.find((task) => task.type === "finalize"), Date.now());
+
+  assert.equal(first.deferred, true);
+  assert.equal(first.reason, "cloudflarePublicDataMirror");
+  assert.equal(firstCwlRequests, 2);
+  assert.equal(retainedRunAfterFirst, true);
+  assert.equal(retry.status, "completed");
+  assert.equal(publishAttempts, 2);
+  assert.equal(activeSnapshotReads, 0);
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup") || path.includes("/clanwarleagues/wars/")).length, 0);
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
+});
+
+test("queue finalization skips CWL collection when there is no current CWL event", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 3,
+    processedTasks: 3,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  let cwlRequests = 0;
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    cwlRequests += entries.filter((entry) => String(entry.path || "").includes("/currentwar/leaguegroup") || String(entry.path || "").includes("/clanwarleagues/wars/")).length;
+    return { dataByKey: {}, errorByKey: {}, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("no-current-CWL finalization should not read full active payload");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  let publishCalls = 0;
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishCalls++;
+    const versionId = backend.readPublishedActiveVersionId_();
+    return {
+      ok: true,
+      active: { ok: true, versionId, publicResult: { ok: true, putCount: 6 }, botResult: { ok: true, putCount: 4 } },
+      cwlLeagueSignups: { ok: true, putCount: 0 },
+      seasonEvents: { ok: true, putCount: 0, deleteCount: 0 },
+    };
+  };
+  backend.verifyCloudflarePublicActiveVersionId_ = (versionId) => ({ ok: true, statusCode: 200, expectedVersionId: versionId, actualVersionId: versionId });
+
+  const finalCwlTaskResult = backend.executeAutoRefreshFinalCwlCoordinatorTask_(current, tasks.find((task) => task.type === "cwlFinalCoordinator"), Date.now());
+  const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+  const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
+
+  assert.equal(finalCwlTaskResult.skipped, true);
+  assert.equal(finalCwlTaskResult.reason, "no-current-cwl-event");
+  assert.equal(result.status, "completed");
+  assert.equal(cwlRequests, 0);
+  assert.equal(publishCalls, 1);
+  assert.equal(lastJob.cwlFinalCoordinatorCapture.status, "no-current-cwl-event");
+  assert.equal(lastJob.cwlSeasonEventRefresh.status, "no-current-cwl-event");
 });
 
 test("queue finalization refuses duplicate player tags before publishing staged active version", () => {
@@ -2255,23 +2492,35 @@ test("queue finalization aborts when the active source fingerprint changed", () 
   assert.equal(backend.firebaseRequestJson_("activeVersions/run-1", "GET"), null);
 });
 
-test("queue finalization clears current state when the version is already published", () => {
+test("queue finalization completes already-published recovery without reading the full active snapshot", () => {
   const backend = installMemoryFirebase(loadBackend());
-  const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), {
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
-    currentTaskIndex: 2,
+    currentTaskIndex: 3,
     processedTasks: 2,
     processedRosters: 1,
   });
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  backend.firebaseRequestJson_("activeVersions/" + runId + "/manifest", "PUT", backend.encodeFirebaseObjectKeysRecursive_({
+    versionId: runId,
+    publishedAt: "2026-05-25T00:00:00.000Z",
+    schemaVersion: 1,
+    pageTitle: data.pageTitle,
+    rosterOrder: ["main"],
+    rosterIds: ["main"],
+    connectedClanTags: ["#CLAN"],
+    lastUpdatedAt: data.lastUpdatedAt,
+  }));
   backend.publishActiveRosterVersionPointer_(runId, {
     versionId: runId,
     publishedAt: "2026-05-25T00:00:00.000Z",
     rosterIds: ["main"],
   });
-  let activeReadSawClearedQueue = false;
+  let activeReads = 0;
   let cloudflarePublishSawClearedQueue = false;
   backend.readActiveRosterSnapshot_ = () => {
-    activeReadSawClearedQueue = backend.readAutoRefreshQueueCurrent_() === null;
+    activeReads++;
     throw new Error("active read intentionally skipped in test");
   };
   backend.publishCloudflarePublicDataSnapshot_ = () => {
@@ -2300,8 +2549,8 @@ test("queue finalization clears current state when the version is already publis
 
   assert.equal(result.status, "completed");
   assert.equal(result.alreadyPublished, true);
-  assert.equal(activeReadSawClearedQueue, true);
-  assert.equal(cloudflarePublishSawClearedQueue, true);
+  assert.equal(activeReads, 0);
+  assert.equal(cloudflarePublishSawClearedQueue, false);
   assert.equal(result.skipPostTickMirrorRepair, true);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
@@ -2346,7 +2595,7 @@ test("queue worker clears stale auto-refresh lock after timeout-shaped finalizat
   backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
   const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), {
     rosterIds: ["main"],
-    currentTaskIndex: 2,
+    currentTaskIndex: 3,
     processedTasks: 2,
     processedRosters: 1,
     status: "finalizing",

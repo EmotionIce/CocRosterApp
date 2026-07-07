@@ -3934,6 +3934,75 @@ test("CWL immediate ended-war retry does not settle until the confirmation delay
   assert.equal(delayed.lastValidContribution.members.length, 0);
 });
 
+test("CWL settled-war post-delay audit reopens changed contributions once and then stops", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-active", type: "cwl" },
+        byId: {
+          "cwl-active": {
+            eventId: "cwl-active",
+            type: "cwl",
+            status: "open",
+            cwlTrackingState: "active",
+            cwl: { groups: {} },
+            participantsByDiscordId: {
+              "100": { discordId: "100", status: "signed_up", accounts: [{ tag: "#PLAYER", name: "Player" }] },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  let war = buildOneRoundCwlWar({ state: "warEnded", stars: 2, destruction: 80 });
+  const warRequests = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    let warRequestCount = 0;
+    for (const entry of entries) {
+      if (entry.path.includes("/currentwar/leaguegroup")) dataByKey[entry.key] = buildOneRoundCwlLeagueGroup();
+      else if (entry.path.includes("/clanwarleagues/wars/")) {
+        warRequestCount++;
+        dataByKey[entry.key] = war;
+      }
+    }
+    warRequests.push(warRequestCount);
+    return { dataByKey, errorByKey: {}, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  const runAt = (nowIso) => {
+    const before = warRequests.length;
+    backend.buildCwlCoordinatorResult_(rosterData, { nowIso });
+    return warRequests.slice(before).reduce((sum, count) => sum + count, 0);
+  };
+
+  assert.equal(runAt("2026-07-05T20:00:00.000Z"), 1);
+  assert.equal(runAt("2026-07-05T20:03:00.000Z"), 1);
+  let record = backend.readCwlRuntime_("cwl-active").warRecords["#WAR1|#CLAN"];
+  assert.equal(record.status, "settled");
+  assert.equal(record.lastValidContribution.aggregateByTag["#PLAYER"].starsTotal, 2);
+  war = buildOneRoundCwlWar({ state: "warEnded", stars: 3, destruction: 100 });
+  assert.equal(runAt("2026-07-05T20:04:00.000Z"), 0);
+  record = backend.readCwlRuntime_("cwl-active").warRecords["#WAR1|#CLAN"];
+  assert.equal(record.status, "settled");
+  assert.equal(record.lastValidContribution.aggregateByTag["#PLAYER"].starsTotal, 2);
+  assert.equal(runAt("2026-07-05T20:05:30.000Z"), 1);
+  record = backend.readCwlRuntime_("cwl-active").warRecords["#WAR1|#CLAN"];
+  assert.equal(record.status, "confirming");
+  assert.equal(record.auditStatus, "changed-reopened");
+  assert.equal(record.lastValidContribution.aggregateByTag["#PLAYER"].starsTotal, 3);
+  assert.equal(runAt("2026-07-05T20:08:00.000Z"), 1);
+  record = backend.readCwlRuntime_("cwl-active").warRecords["#WAR1|#CLAN"];
+  assert.equal(record.status, "settled");
+  assert.equal(record.auditStatus, "");
+  assert.equal(runAt("2026-07-05T20:09:00.000Z"), 0);
+  assert.equal(runAt("2026-07-05T20:10:30.000Z"), 1);
+  record = backend.readCwlRuntime_("cwl-active").warRecords["#WAR1|#CLAN"];
+  assert.equal(record.auditStatus, "matched");
+  assert.equal(runAt("2026-07-05T20:13:00.000Z"), 0);
+});
+
 test("CWL audit failure remains retryable and reopened data completes after clean audit", () => {
   const backend = installMemoryFirebase(loadBackend(), {
     events: {

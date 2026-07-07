@@ -13,6 +13,7 @@ const SEASON_EVENTS_SEASON_STATE_MANUAL_PATH = SEASON_EVENTS_BASE_PATH + "/seaso
 const CWL_RUNTIME_SCHEMA_VERSION = 1;
 const CWL_RUNTIME_DIAGNOSTIC_LIMIT = 40;
 const CWL_RUNTIME_CONFIRMATION_MIN_DELAY_MS = 2 * 60 * 1000;
+const CWL_RUNTIME_POST_SETTLEMENT_AUDIT_DELAY_MS = 2 * 60 * 1000;
 const SEASON_EVENT_SEASON_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const SEASON_EVENT_LOCK_WAIT_MS = 30 * 1000;
 const SEASON_EVENT_CWL_GROUP_BIND_TOLERANCE_MS = 72 * 60 * 60 * 1000;
@@ -3382,6 +3383,20 @@ function updateKnownCwlRuntimeWar_(runtimeRaw, recordRaw, fetchCacheRaw, errorCa
 	return updateCwlRuntimeWarRecordFromContribution_(runtime, contribution, record.groupId, nowIsoRaw, { audit: auditRaw === true });
 }
 
+function shouldAuditSettledCwlRuntimeWar_(recordRaw, finalAuditRaw, nowIsoRaw) {
+	const record = sanitizeCwlRuntimeWarRecord_(recordRaw);
+	if (record.status !== "settled" || record.auditStatus === "matched") return false;
+	if (finalAuditRaw === true) return true;
+	const nowMs = parseIsoToMs_(nowIsoRaw);
+	const settledMs = parseIsoToMs_(record.settledAt);
+	if (!nowMs || !settledMs || nowMs - settledMs < CWL_RUNTIME_POST_SETTLEMENT_AUDIT_DELAY_MS) return false;
+	if (record.auditStatus === "fetch-failed") {
+		const lastErrorMs = parseIsoToMs_(record.lastErrorAt);
+		return !lastErrorMs || nowMs - lastErrorMs >= CWL_RUNTIME_POST_SETTLEMENT_AUDIT_DELAY_MS;
+	}
+	return true;
+}
+
 function buildCwlRuntimeSeasonContextForClan_(runtimeRaw, clanTagRaw) {
 	const runtime = sanitizeCwlRuntime_(runtimeRaw, runtimeRaw && runtimeRaw.eventId);
 	const clanTag = normalizeTag_(clanTagRaw);
@@ -3695,7 +3710,8 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 		const record = sanitizeCwlRuntimeWarRecord_(runtime.warRecords[recordKeys[i]]);
 		if (!record.warTag || !record.clanTag) continue;
 		if (record.lastFetchedAt === nowIso) continue;
-		const shouldPoll = record.status === "active" || record.status === "confirming" || (finalAudit && record.status === "settled" && record.auditStatus !== "matched");
+		const shouldAuditSettled = shouldAuditSettledCwlRuntimeWar_(record, finalAudit, nowIso);
+		const shouldPoll = record.status === "active" || record.status === "confirming" || shouldAuditSettled;
 		if (!shouldPoll) continue;
 		pollWarTags.push(record.warTag);
 		pollRecords.push(record);
@@ -3703,7 +3719,8 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 	prefetchCwlCoordinatorWarsByTag_(pollWarTags, fetchCache, errorCache, requestCounts);
 	for (let i = 0; i < pollRecords.length; i++) {
 		const record = sanitizeCwlRuntimeWarRecord_(pollRecords[i]);
-		updateKnownCwlRuntimeWar_(runtime, record, fetchCache, errorCache, requestCounts, nowIso, finalAudit && record.status === "settled");
+		const auditSettled = shouldAuditSettledCwlRuntimeWar_(record, finalAudit, nowIso);
+		updateKnownCwlRuntimeWar_(runtime, record, fetchCache, errorCache, requestCounts, nowIso, auditSettled);
 	}
 
 	let currentRunDataSuccess = false;
