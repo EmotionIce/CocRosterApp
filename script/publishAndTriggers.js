@@ -2095,6 +2095,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			const lastWriteSource = String(getLastSuccessfulActiveWriteSource_() || "").trim();
 			const sourceSuffix = lastWriteSource ? " by " + lastWriteSource : "";
 			let cwlSeasonEventRefresh = { ok: true, status: "not-needed" };
+			let cwlSeasonEventCloudflarePublish = { ok: true, skipped: true, reason: "cwl-refresh-not-attempted" };
 			try {
 				const need = typeof getCurrentCwlSeasonEventRefreshNeed_ === "function" ? getCurrentCwlSeasonEventRefreshNeed_() : { needsCwl: false };
 				if (need && need.needsCwl === true && typeof buildCwlCoordinatorResult_ === "function" && typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function") {
@@ -2110,10 +2111,15 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 					if (cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
 						cwlSeasonEventRefresh.requestCounts = coordinator.requestCounts || {};
 					}
+					cwlSeasonEventCloudflarePublish = publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(
+						cwlSeasonEventRefresh,
+						"auto-refresh-cooldown-cwl",
+					);
 				}
 			} catch (err) {
 				Logger.log("Auto-refresh cooldown CWL event update failed: %s", errorMessage_(err));
 				cwlSeasonEventRefresh = { ok: false, status: "error", error: errorMessage_(err) };
+				cwlSeasonEventCloudflarePublish = { ok: true, skipped: true, reason: "cwl-refresh-failed" };
 			}
 			let summary = "Auto-refresh skipped: active data was written recently" + sourceSuffix + " (" + (lastWriteAt || "unknown") + ").";
 			const cleanupResult = maybeCleanupOldAutoRefreshDailyArchives_(getServerDateString_(new Date()));
@@ -2121,7 +2127,15 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			if (cleanupDeleted > 0) summary += " Cleaned " + cleanupDeleted + " stale daily archive(s).";
 			setAutoRefreshRunResult_("skipped", summary, "", 0, "", startedAt, new Date().toISOString());
 			tryReconcileRegularWarFinalizationTriggerState_();
-			return { ok: true, status: "skipped", skipped: true, reason: "cooldown", lastWriteAt: lastWriteAt, cwlSeasonEventRefresh: cwlSeasonEventRefresh };
+			return {
+				ok: true,
+				status: "skipped",
+				skipped: true,
+				reason: "cooldown",
+				lastWriteAt: lastWriteAt,
+				cwlSeasonEventRefresh: cwlSeasonEventRefresh,
+				cwlSeasonEventCloudflarePublish: cwlSeasonEventCloudflarePublish,
+			};
 		}
 		const sourceReadStartMs = Date.now();
 		const sourceSnapshot = readAutoRefreshCoordinatorSourceSnapshot_();
@@ -2479,6 +2493,43 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 	} catch (err) {
 		Logger.log("Auto-refresh queue CWL season event refresh skipped: %s", errorMessage_(err));
 		return { ok: false, status: "error", error: errorMessage_(err) };
+	}
+}
+
+function shouldPublishCloudflareAfterAutoRefreshCwlSeasonEventRefresh_(refreshRaw) {
+	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : null;
+	if (!refresh || refresh.ok === false) return false;
+	const status = String(refresh.status || "")
+		.trim()
+		.toLowerCase();
+	if (!status) return true;
+	return status !== "not-needed" && status !== "unavailable" && status !== "no-current-cwl-event";
+}
+
+function publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(refreshRaw, labelRaw) {
+	if (!shouldPublishCloudflareAfterAutoRefreshCwlSeasonEventRefresh_(refreshRaw)) {
+		return { ok: true, skipped: true, reason: "cwl-refresh-not-publishable" };
+	}
+	const label = String(labelRaw || "auto-refresh-cwl-season-events").trim() || "auto-refresh-cwl-season-events";
+	if (typeof publishCloudflareSeasonEventsAndDonationDataBestEffort_ !== "function") {
+		const unavailable = { ok: false, skipped: true, reason: "unavailable", label: label };
+		Logger.log("Auto-refresh CWL Cloudflare season-event publish unavailable label=%s", label);
+		return unavailable;
+	}
+	try {
+		const result = publishCloudflareSeasonEventsAndDonationDataBestEffort_(label);
+		if (!result || result.ok !== true) {
+			Logger.log(
+				"Auto-refresh CWL Cloudflare season-event publish failed label=%s error=%s",
+				label,
+				getCloudflareAutoRefreshResultError_(result),
+			);
+		}
+		return result || { ok: false, status: "empty", label: label };
+	} catch (err) {
+		const failed = { ok: false, status: "error", error: errorMessage_(err), label: label };
+		Logger.log("Auto-refresh CWL Cloudflare season-event publish threw label=%s error=%s", label, failed.error);
+		return failed;
 	}
 }
 

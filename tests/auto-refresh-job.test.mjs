@@ -350,6 +350,101 @@ const setupQueueRun = (backend, sourceDataRaw, options = {}) => {
 const firstRosterTask = (tasks) => tasks.find((task) => task.type === "roster");
 const rosterTaskById = (tasks, rosterId) => tasks.find((task) => task.type === "roster" && task.rosterId === rosterId);
 
+const buildOneRoundCwlLeagueGroup = (options = {}) => ({
+  state: options.state || "inWar",
+  season: options.season || "2026-07",
+  clans: [{ tag: options.clanTag || "#CLAN" }, { tag: options.opponentTag || "#OPP" }],
+  rounds: [{ warTags: [options.warTag || "#WAR1"] }],
+});
+
+const buildOneRoundCwlWar = (options = {}) => ({
+  state: options.state || "inWar",
+  startTime: options.startTime || "2026-07-04T20:00:00.000Z",
+  endTime: options.endTime || "2026-07-05T20:00:00.000Z",
+  clan: {
+    tag: options.clanTag || "#CLAN",
+    members: [{
+      tag: options.playerTag || "#PLAYER",
+      name: options.playerName || "Player",
+      attacks: [{
+        defenderTag: options.defenderTag || "#BASE",
+        stars: options.stars == null ? 3 : options.stars,
+        destructionPercentage: options.destruction == null ? 100 : options.destruction,
+      }],
+    }],
+  },
+  opponent: {
+    tag: options.opponentTag || "#OPP",
+    members: [{ tag: options.defenderTag || "#BASE", name: "Base", attacks: [] }],
+  },
+});
+
+const buildCurrentCwlEventDb = () => ({
+  events: {
+    seasonEvents: {
+      currentCwl: { eventId: "cwl-active", type: "cwl" },
+      byId: {
+        "cwl-active": {
+          eventId: "cwl-active",
+          type: "cwl",
+          status: "open",
+          visibility: "public",
+          signupsOpen: true,
+          startsAt: "",
+          endsAt: "",
+          cwlTrackingState: "active",
+          cwl: { groups: {} },
+          participantsByDiscordId: {
+            "100": {
+              discordId: "100",
+              status: "signed_up",
+              accounts: [{ tag: "#PLAYER", name: "Player" }],
+            },
+          },
+        },
+      },
+    },
+  },
+});
+
+const installPublishedActiveVersion = (backend, dataRaw) => {
+  const data = backend.validateRosterData_(dataRaw || buildRosterData());
+  return backend.writeActiveRosterVersionShards_("source-1", data, {
+    source: "test",
+    runId: "source-1",
+    publishedAt: "2026-07-04T00:00:00.000Z",
+    sourceFingerprint: "fingerprint-source-1",
+    publish: true,
+  });
+};
+
+const installCwlFetch = (backend, getWarRaw, options = {}) => {
+  const paths = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    const errorByKey = {};
+    const leaguegroup = options.leaguegroup || buildOneRoundCwlLeagueGroup(options);
+    const getWar = typeof getWarRaw === "function" ? getWarRaw : () => (getWarRaw || buildOneRoundCwlWar(options));
+    for (const entry of entries) {
+      paths.push(entry.path);
+      if (entry.path.includes("/currentwar/leaguegroup")) {
+        if (options.groupError) errorByKey[entry.key] = Object.assign(new Error("group failed"), { statusCode: 500 });
+        else dataByKey[entry.key] = leaguegroup;
+      } else if (entry.path.includes("/clanwarleagues/wars/")) {
+        if (options.warError) errorByKey[entry.key] = Object.assign(new Error("war failed"), { statusCode: 500 });
+        else dataByKey[entry.key] = getWar(entry.key);
+      } else if (entry.path.endsWith("/members")) {
+        dataByKey[entry.key] = { items: [] };
+      } else if (entry.path.endsWith("/currentwar")) {
+        errorByKey[entry.key] = Object.assign(new Error("not in war"), { statusCode: 404 });
+      }
+    }
+    return { dataByKey, errorByKey, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  return paths;
+};
+
 test("scheduleAutoRefreshJobResume keeps exactly one resume trigger", () => {
   const backend = loadBackend();
 
@@ -479,6 +574,149 @@ test("autoRefreshActiveRosterTick does not repair Cloudflare active mirror while
 
   assert.equal(result.inProgress, true);
   assert.equal(repairCalls, 0);
+});
+
+test("cooldown CWL refresh publishes season events exactly once and updates active-war hash", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const sourceData = buildRosterData();
+  sourceData.rosters = [sourceData.rosters[0]];
+  sourceData.rosterOrder = ["main"];
+  installPublishedActiveVersion(backend, sourceData);
+  backend.isRecentSuccessfulActiveWrite_ = () => true;
+  backend.getLastSuccessfulActiveWriteAt_ = () => "2026-07-04T00:00:00.000Z";
+  backend.getLastSuccessfulActiveWriteSource_ = () => "manual";
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  let activeSnapshotReads = 0;
+  backend.readActiveRosterSnapshot_ = () => {
+    activeSnapshotReads++;
+    throw new Error("cooldown CWL refresh should use active-version coordinator-light source");
+  };
+  let war = buildOneRoundCwlWar({ state: "inWar", stars: 2, destruction: 80 });
+  installCwlFetch(backend, () => war);
+  const publishLabels = [];
+  backend.publishCloudflareSeasonEventsAndDonationDataBestEffort_ = (label) => {
+    publishLabels.push(label);
+    return {
+      ok: true,
+      publicResult: { ok: true, putCount: 1 },
+      botResult: { ok: true, putCount: 4 },
+    };
+  };
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  const getPaths = [];
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw, payloadRaw, queryParamsRaw) => {
+    if (String(methodRaw || "GET").toUpperCase() === "GET") getPaths.push(String(pathRaw || ""));
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
+
+  const first = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-04T00:00:00.000Z",
+  });
+  assert.equal(publishLabels.length, 1);
+  const firstTickGetPaths = getPaths.slice();
+  const firstLive = backend.readCwlSeasonEventAggregate_("cwl-active", "live");
+  const firstHash = firstLive.hash;
+  war = buildOneRoundCwlWar({ state: "inWar", stars: 3, destruction: 100 });
+  getPaths.length = 0;
+  const second = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-04T02:00:00.000Z",
+  });
+  const secondLive = backend.readCwlSeasonEventAggregate_("cwl-active", "live");
+
+  assert.equal(first.skipped, true);
+  assert.equal(first.reason, "cooldown");
+  assert.equal(first.cwlSeasonEventRefresh.ok, true);
+  assert.equal(first.cwlSeasonEventRefresh.status, "active");
+  assert.equal(first.cwlSeasonEventCloudflarePublish.ok, true);
+  assert.equal(publishLabels.length, 2);
+  assert.deepEqual(publishLabels, ["auto-refresh-cooldown-cwl", "auto-refresh-cooldown-cwl"]);
+  assert.equal(activeSnapshotReads, 0);
+  assert.equal(firstTickGetPaths.some((path) => path.startsWith("activeVersions/source-1/playerMetrics")), false);
+  assert.equal(firstLive.byTag["#PLAYER"].starsTotal, 2);
+  assert.equal(second.cwlSeasonEventRefresh.status, "active");
+  assert.equal(second.cwlSeasonEventCloudflarePublish.ok, true);
+  assert.equal(secondLive.byTag["#PLAYER"].starsTotal, 3);
+  assert.notEqual(secondLive.hash, firstHash);
+});
+
+test("cooldown CWL refresh does not publish when not needed or collection fails", () => {
+  const notNeeded = installMemoryFirebase(loadBackend());
+  installPublishedActiveVersion(notNeeded, buildRosterData());
+  notNeeded.isRecentSuccessfulActiveWrite_ = () => true;
+  notNeeded.getLastSuccessfulActiveWriteAt_ = () => "2026-07-04T00:00:00.000Z";
+  notNeeded.getLastSuccessfulActiveWriteSource_ = () => "manual";
+  notNeeded.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  let publishCalls = 0;
+  notNeeded.publishCloudflareSeasonEventsAndDonationDataBestEffort_ = () => {
+    publishCalls++;
+    return { ok: true };
+  };
+
+  const notNeededResult = notNeeded.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-04T00:00:00.000Z",
+  });
+
+  assert.equal(notNeededResult.cwlSeasonEventRefresh.status, "not-needed");
+  assert.equal(notNeededResult.cwlSeasonEventCloudflarePublish.reason, "cwl-refresh-not-attempted");
+  assert.equal(publishCalls, 0);
+
+  const failed = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  installPublishedActiveVersion(failed, buildRosterData());
+  failed.isRecentSuccessfulActiveWrite_ = () => true;
+  failed.getLastSuccessfulActiveWriteAt_ = () => "2026-07-04T00:00:00.000Z";
+  failed.getLastSuccessfulActiveWriteSource_ = () => "manual";
+  failed.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  failed.buildCwlCoordinatorResult_ = () => {
+    throw new Error("collection failed");
+  };
+  failed.publishCloudflareSeasonEventsAndDonationDataBestEffort_ = () => {
+    publishCalls++;
+    return { ok: true };
+  };
+
+  const failedResult = failed.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-04T02:00:00.000Z",
+  });
+
+  assert.equal(failedResult.cwlSeasonEventRefresh.ok, false);
+  assert.match(failedResult.cwlSeasonEventRefresh.error, /collection failed/);
+  assert.equal(failedResult.cwlSeasonEventCloudflarePublish.reason, "cwl-refresh-failed");
+  assert.equal(publishCalls, 0);
+});
+
+test("cooldown CWL Cloudflare publication failure remains separate from Firebase refresh success", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const sourceData = buildRosterData();
+  sourceData.rosters = [sourceData.rosters[0]];
+  sourceData.rosterOrder = ["main"];
+  installPublishedActiveVersion(backend, sourceData);
+  backend.isRecentSuccessfulActiveWrite_ = () => true;
+  backend.getLastSuccessfulActiveWriteAt_ = () => "2026-07-04T00:00:00.000Z";
+  backend.getLastSuccessfulActiveWriteSource_ = () => "manual";
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  installCwlFetch(backend, buildOneRoundCwlWar({ state: "inWar", stars: 3 }));
+  backend.publishCloudflareSeasonEventsAndDonationDataBestEffort_ = () => ({
+    ok: false,
+    publicResult: { ok: false, error: "kv public failed" },
+    botResult: { ok: true, putCount: 4 },
+  });
+
+  const result = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-04T00:00:00.000Z",
+  });
+  const live = backend.readCwlSeasonEventAggregate_("cwl-active", "live");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cwlSeasonEventRefresh.ok, true);
+  assert.equal(result.cwlSeasonEventRefresh.status, "active");
+  assert.equal(result.cwlSeasonEventCloudflarePublish.ok, false);
+  assert.equal(result.cwlSeasonEventCloudflarePublish.publicResult.error, "kv public failed");
+  assert.equal(live.byTag["#PLAYER"].starsTotal, 3);
 });
 
 test("autoRefreshJobResumeTick delegates to the queue worker without pre-reading legacy job state", () => {

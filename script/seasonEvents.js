@@ -1733,6 +1733,24 @@ function getSeasonEventAccountDisplayName_(metricsEntryRaw, accountRaw) {
 	return sanitizeSeasonEventText_(identity.name || latest.name || account.name, 120);
 }
 
+function getSeasonEventParticipantDiscordDisplayName_(participantRaw) {
+	const participant = participantRaw && typeof participantRaw === "object" ? participantRaw : {};
+	return (
+		sanitizeSeasonEventText_(participant.discordDisplayName, 120) ||
+		sanitizeSeasonEventText_(participant.discordGlobalName, 120) ||
+		sanitizeDiscordUsernameValue_(participant.discordUsername) ||
+		sanitizeDiscordIdValue_(participant.discordId)
+	);
+}
+
+function getCwlSeasonEventAccountDisplayName_(metricsEntryRaw, accountRaw, participantRaw, tagRaw) {
+	return (
+		getSeasonEventAccountDisplayName_(metricsEntryRaw, accountRaw) ||
+		getSeasonEventParticipantDiscordDisplayName_(participantRaw) ||
+		normalizeTag_(tagRaw || (accountRaw && accountRaw.tag))
+	);
+}
+
 // Return preferred league name for a metrics entry or signup account.
 function getSeasonEventAccountLeagueName_(metricsEntryRaw, accountRaw) {
 	const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
@@ -4024,7 +4042,7 @@ function buildCwlSeasonEventScoreLabel_(statsRaw) {
 }
 
 // Build a CWL leaderboard from the stored compact aggregate.
-function buildCwlSeasonEventLeaderboard_(eventRaw, optionsRaw) {
+function buildCwlSeasonEventLeaderboard_(eventRaw, rosterDataRaw, optionsRaw) {
 	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.now || options.nowIso) || new Date().toISOString();
@@ -4042,13 +4060,15 @@ function buildCwlSeasonEventLeaderboard_(eventRaw, optionsRaw) {
 	const aggregateKind = state === "completed" ? "final" : "live";
 	const aggregate = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(event.eventId, aggregateKind));
 	const registered = listCwlSeasonEventRegisteredAccounts_(event);
+	const playerMetricsByTag = buildSeasonEventPlayerMetricsByTag_(rosterDataRaw);
 	const rows = [];
 	for (let i = 0; i < registered.length; i++) {
 		const item = registered[i];
 		const stats = sanitizeCwlStatEntry_(aggregate.byTag[item.tag]);
 		const participant = item.participant;
 		const account = item.account;
-		const displayName = sanitizeSeasonEventText_(account.name, 120) || participant.discordDisplayName || participant.discordGlobalName || participant.discordUsername || participant.discordId;
+		const metricsEntry = playerMetricsByTag[item.tag] && typeof playerMetricsByTag[item.tag] === "object" ? playerMetricsByTag[item.tag] : null;
+		const displayName = getCwlSeasonEventAccountDisplayName_(metricsEntry, account, participant, item.tag);
 		const metrics = deriveCwlMetrics_(stats);
 		const row = {
 			rank: 0,
@@ -4058,6 +4078,7 @@ function buildCwlSeasonEventLeaderboard_(eventRaw, optionsRaw) {
 			discordUsername: participant.discordUsername,
 			accounts: [
 				Object.assign({}, account, {
+					name: displayName,
 					score: stats.starsTotal,
 					coverage: hasCwlSeasonEventParticipation_(stats) ? "full" : "no-cwl-participation",
 					cwlStats: stats,
@@ -4322,7 +4343,7 @@ function buildSeasonEventLeaderboard_(eventRaw, rosterDataRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const eventType = normalizeSeasonEventType_(event.type);
 	if (eventType === "cwl") {
-		return buildCwlSeasonEventLeaderboard_(event, options);
+		return buildCwlSeasonEventLeaderboard_(event, rosterDataRaw, options);
 	}
 	if (eventType !== "push" && eventType !== "donation") {
 		throw new Error("Unsupported season event leaderboard type: " + (eventType || "unknown"));

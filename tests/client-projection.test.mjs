@@ -935,10 +935,8 @@ test("season events model includes an active CWL leaderboard card", () => {
           cwlTrackingState: "active",
           participantsByDiscordId: {
             "100": {
-              discordDisplayName: "Alpha",
-              discordUsername: "alpha",
               status: "signed_up",
-              accounts: [{ tag: "#AAA", name: "Alpha" }],
+              accounts: [{ tag: "#AAA" }],
             },
           },
         },
@@ -969,6 +967,14 @@ test("season events model includes an active CWL leaderboard card", () => {
         },
       },
     },
+    playerMetrics: {
+      byTag: {
+        "#AAA": {
+          identity: { tag: "#AAA", name: "Current Alpha" },
+          latestSnapshot: { tag: "#AAA", name: "Latest Alpha" },
+        },
+      },
+    },
   };
 
   const model = buildSeasonEventsPublicModel(data);
@@ -977,7 +983,8 @@ test("season events model includes an active CWL leaderboard card", () => {
   assert.ok(cwlCard);
   assert.equal(cwlCard.status, "active");
   assert.equal(cwlCard.rows.length, 1);
-  assert.equal(cwlCard.rows[0].displayName, "Alpha");
+  assert.equal(cwlCard.rows[0].displayName, "Current Alpha");
+  assert.equal(cwlCard.rows[0].accounts[0].name, "Current Alpha");
   assert.equal(cwlCard.rows[0].score, 7);
   assert.equal(cwlCard.rows[0].cwlStats.defenseStarsConceded, 2);
 });

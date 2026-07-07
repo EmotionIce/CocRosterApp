@@ -2993,6 +2993,44 @@ test("CWL participant-filtered aggregate ranked tags use backend display-name ti
   assert.equal(JSON.stringify(finalAggregate.rankedTags), JSON.stringify(["#AAA", "#BBB"]));
 });
 
+test("CWL backend leaderboard resolves display names from current player metrics before tag fallback", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  rosterData.playerMetrics.byTag["#PLAYER"].identity.name = "Current Clash";
+  rosterData.playerMetrics.byTag["#PLAYER"].latestSnapshot.name = "Latest Clash";
+  const event = {
+    eventId: "cwl-name",
+    type: "cwl",
+    status: "open",
+    cwlTrackingState: "active",
+    participantsByDiscordId: {
+      "100": {
+        discordId: "100",
+        status: "signed_up",
+        accounts: [{ tag: "#PLAYER" }],
+      },
+    },
+  };
+  backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_("cwl-name", "live"), "PUT", {
+    eventId: "cwl-name",
+    kind: "live",
+    hash: "hash-1",
+    scoreSchema: "cwl-offense-stars-defense-stars-v2",
+    warTags: ["#WAR1"],
+    byTag: {
+      "#PLAYER": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
+    },
+  });
+
+  const leaderboard = backend.buildSeasonEventLeaderboard_(event, rosterData, {
+    nowIso: "2026-07-05T00:00:00.000Z",
+  });
+
+  assert.equal(leaderboard.leaderboard.length, 1);
+  assert.equal(leaderboard.leaderboard[0].displayName, "Current Clash");
+  assert.equal(leaderboard.leaderboard[0].accounts[0].name, "Current Clash");
+});
+
 test("CWL final aggregate remains compact for a large synthetic leaderboard", () => {
   const backend = loadBackend();
   const participantsByDiscordId = {};

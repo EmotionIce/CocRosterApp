@@ -5128,6 +5128,14 @@
             || "Unknown player";
     };
 
+    const getSeasonEventParticipantDiscordDisplayName = (participantRaw) => {
+        const participant = participantRaw && typeof participantRaw === "object" ? participantRaw : {};
+        return toStr(participant.discordDisplayName).trim()
+            || toStr(participant.discordGlobalName).trim()
+            || toStr(participant.discordUsername).trim()
+            || toStr(participant.discordId).trim();
+    };
+
     // Normalize participant status using the backend's stored values.
     const normalizeSeasonEventParticipantStatus = (statusRaw) => {
         const status = toStr(statusRaw).trim().toLowerCase().replace(/-/g, "_");
@@ -5181,12 +5189,26 @@
     };
 
     // Get event account display name.
-    const getSeasonEventAccountDisplayName = (accountRaw, metricsEntryRaw) => {
+    const getSeasonEventAccountNameCandidate = (accountRaw, metricsEntryRaw) => {
         const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
         const metricsEntry = metricsEntryRaw && typeof metricsEntryRaw === "object" ? metricsEntryRaw : {};
         const identity = metricsEntry.identity && typeof metricsEntry.identity === "object" ? metricsEntry.identity : {};
         const latest = readMetricsLatestSnapshot(metricsEntry) || {};
-        return toStr(identity.name).trim() || toStr(latest.name).trim() || toStr(account.name).trim() || normalizeClanTag(account.tag);
+        return toStr(identity.name).trim() || toStr(latest.name).trim() || toStr(account.name).trim();
+    };
+
+    const getSeasonEventAccountDisplayName = (accountRaw, metricsEntryRaw) => {
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        return getSeasonEventAccountNameCandidate(account, metricsEntryRaw) || normalizeClanTag(account.tag);
+    };
+
+    const getCwlSeasonEventAccountDisplayName = (accountRaw, participantRaw, dataRaw) => {
+        const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
+        const tag = normalizeClanTag(account.tag);
+        const metricsEntry = tag ? getPlayerMetricsEntry(tag, dataRaw) : null;
+        return getSeasonEventAccountNameCandidate(account, metricsEntry)
+            || getSeasonEventParticipantDiscordDisplayName(participantRaw)
+            || tag;
     };
 
     // Get event account town hall.
@@ -5572,14 +5594,14 @@
             const account = registration.account || {};
             const participant = registration.participant || {};
             const stats = sanitizeCwlAggregateStat(byTag[tag]);
-            const displayName = toStr(account.name).trim() || getSeasonEventParticipantDisplayName(participant) || tag;
+            const displayName = getCwlSeasonEventAccountDisplayName(account, participant, dataRaw);
             rows.push({
                 rank: i + 1,
                 tag: tag,
                 playerTag: tag,
                 displayName: displayName,
                 discordUsername: toStr(participant.discordUsername).trim(),
-                accounts: [Object.assign({}, account, { tag: tag, cwlStats: stats })],
+                accounts: [Object.assign({}, account, { tag: tag, name: displayName, cwlStats: stats })],
                 score: stats.starsTotal,
                 scoreLabel: formatNumber(stats.starsTotal) + " stars, " + formatNumber(stats.defenseStarsConceded) + " defense stars",
                 scoreValueLabel: formatNumber(stats.starsTotal) + " stars",
