@@ -1342,18 +1342,23 @@ test("detached donation refresh writes season overlay without mutating active me
     for (const entry of entries) backend.firebaseRequestJson_(entry.path, "PUT", entry.payload);
     return null;
   };
+  let donationRefreshFetchCalls = 0;
   backend.prefetchClanMembersSnapshotsByTag_ = (clanTags) => {
     assert.equal(JSON.stringify(clanTags.slice().sort()), JSON.stringify(["#CLAN", "#CLAN2"]));
+    donationRefreshFetchCalls++;
+    const capturedAt = donationRefreshFetchCalls === 1
+      ? "2026-05-25T00:00:00.000Z"
+      : "2026-05-25T00:15:00.000Z";
     return {
       snapshotByClanTag: {
         "#CLAN": {
           clanTag: "#CLAN",
-          capturedAt: "2026-05-25T00:00:00.000Z",
+          capturedAt,
           metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000, donations: 125, donationsReceived: 25 }],
         },
         "#CLAN2": {
           clanTag: "#CLAN2",
-          capturedAt: "2026-05-25T00:00:00.000Z",
+          capturedAt,
           metricsMembers: [{ tag: "#SECOND", name: "Second", trophies: 4900, donations: 5, donationsReceived: 1 }],
         },
       },
@@ -1379,9 +1384,15 @@ test("detached donation refresh writes season overlay without mutating active me
 
   assert.equal(result.status, "ok");
   assert.equal(result.playerCount, 2);
+  assert.equal(result.updatedPlayerCount, 2);
   assert.equal(batchWrites.length, 1);
   assert.equal(playerOverlay.donationCycle.cycleTotalDonations, 125);
   assert.equal(playerOverlay.donationCycle.rawDonationsLastSeen, 125);
+  assert.equal(playerOverlay.updatedAt, "2026-05-25T00:00:00.000Z");
+  const firstMeta = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("donationRefresh/current", "GET"),
+  );
+  assert.equal(firstMeta.updatedAt, "2026-05-25T00:00:00.000Z");
   assert.equal(activeLedger.cycleTotalDonations, 100);
   assert.equal(backend.__properties.has("ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT"), false);
 
@@ -1394,8 +1405,20 @@ test("detached donation refresh writes season overlay without mutating active me
   };
 
   const secondResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  const secondPlayerOverlay = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_(
+      "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"),
+      "GET",
+    ),
+  );
+  const secondMeta = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("donationRefresh/current", "GET"),
+  );
 
   assert.equal(secondResult.status, "ok");
+  assert.equal(secondResult.updatedPlayerCount, 0);
+  assert.equal(secondPlayerOverlay.updatedAt, "2026-05-25T00:00:00.000Z");
+  assert.equal(secondMeta.updatedAt, "2026-05-25T00:00:00.000Z");
   assert.equal(activeBaseLedgerReadCount, 0);
 });
 

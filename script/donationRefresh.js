@@ -302,7 +302,7 @@ function buildDonationRefreshEntryForSnapshot_(snapshotRaw, clanTagRaw, seasonId
 			name: String(snapshot.name || "").trim(),
 			seasonId: seasonId,
 			donationCycle: ledger,
-			updatedAt: captureCtx.capturedAt,
+			updatedAt: ledger.lastSeenAt || captureCtx.capturedAt,
 			clanTag: clanTag,
 			sourceVersionId: sourceVersionId,
 		},
@@ -413,6 +413,8 @@ function runDonationRefreshCore_(optionsRaw) {
 
 		const overlay = readDonationRefreshOverlayBySeason_(seasonId);
 		const overlayEntries = overlay && overlay.byTag && typeof overlay.byTag === "object" ? overlay.byTag : {};
+		const overlayMeta = overlay && overlay.meta && typeof overlay.meta === "object" ? overlay.meta : {};
+		let latestDataUpdatedAtMs = parseIsoToMs_(overlayMeta.updatedAt);
 		const baseReadTags = [];
 		for (let i = 0; i < touchedTags.length; i++) {
 			const tag = normalizeTag_(touchedTags[i]);
@@ -434,6 +436,8 @@ function runDonationRefreshCore_(optionsRaw) {
 			);
 			if (!entry) continue;
 			if (entry.changed) updatedPlayers++;
+			const entryUpdatedAtMs = parseIsoToMs_(entry.updatedAt);
+			if (entry.changed && entryUpdatedAtMs > latestDataUpdatedAtMs) latestDataUpdatedAtMs = entryUpdatedAtMs;
 			delete entry.changed;
 			writes.push({
 				path: buildDonationRefreshSeasonTagPath_(seasonId, tag),
@@ -441,12 +445,13 @@ function runDonationRefreshCore_(optionsRaw) {
 			});
 		}
 		const finishedAt = new Date().toISOString();
+		const dataUpdatedAt = latestDataUpdatedAtMs > 0 ? new Date(latestDataUpdatedAtMs).toISOString() : finishedAt;
 		const errorKeys = Object.keys(errorByClanTag);
 		const meta = {
 			seasonId: seasonId,
 			startsAt: cycle.startsAt,
 			endsAt: cycle.endsAt,
-			updatedAt: finishedAt,
+			updatedAt: dataUpdatedAt,
 			sourceVersionId: source.versionId,
 			clanCount: clanTags.length,
 			capturedClanCount: capturedClans,
