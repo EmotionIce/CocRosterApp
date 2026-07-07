@@ -938,6 +938,8 @@ const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathR
 
   const active = await readLegacyPublicJsonObject(store, "active");
   if (!active || typeof active !== "object" || Array.isArray(active)) return undefined;
+  const activeVersionMarker = String(active.activeVersionId || active.versionId || active.sourceVersionId || "").trim();
+  if (activeVersionMarker !== versionId) return undefined;
   if (child === "playerMetrics") {
     return active.playerMetrics && typeof active.playerMetrics === "object" && !Array.isArray(active.playerMetrics)
       ? active.playerMetrics
@@ -1046,17 +1048,30 @@ const handleDataHealth = async (request, env, scopeRaw) => {
 
   const pointerKey = buildDataObjectKey("public", "activePublished/currentVersionId");
   const pointer = await getDataStoreObject(store, pointerKey);
-  let currentVersionId = "";
+  let directCurrentVersionId = "";
   if (pointer) {
     try {
-      currentVersionId = String(JSON.parse(await pointer.text()) || "").trim();
+      directCurrentVersionId = String(JSON.parse(await pointer.text()) || "").trim();
     } catch (err) {
-      currentVersionId = "";
+      directCurrentVersionId = "";
+    }
+  }
+  let projectedCurrentVersionId = directCurrentVersionId;
+  if (normalizeDataScope(scopeRaw) === "public") {
+    try {
+      const projectedPointer = await getPublicDataObjectWithBootstrapFallback(
+        store,
+        pointerKey,
+        "activePublished/currentVersionId"
+      );
+      if (projectedPointer) projectedCurrentVersionId = String(JSON.parse(await projectedPointer.text()) || "").trim();
+    } catch (err) {
+      projectedCurrentVersionId = directCurrentVersionId;
     }
   }
   const url = new URL(request.url);
   const expectedVersionId = String(url.searchParams.get("expectedVersionId") || "").trim();
-  const checkedVersionId = expectedVersionId || currentVersionId;
+  const checkedVersionId = expectedVersionId || directCurrentVersionId;
   const activeVersionShards = normalizeDataScope(scopeRaw) === "public"
     ? await readDirectActiveVersionShardStatus(store, checkedVersionId)
     : null;
@@ -1065,10 +1080,13 @@ const handleDataHealth = async (request, env, scopeRaw) => {
     scope: normalizeDataScope(scopeRaw),
     storeConfigured: true,
     storeKind: store.kind,
-    currentVersionId,
+    currentVersionId: directCurrentVersionId,
+    directCurrentVersionId,
+    projectedCurrentVersionId,
     expectedVersionId,
-    currentVersionMatchesExpected: expectedVersionId ? currentVersionId === expectedVersionId : undefined,
-    hasCurrentVersion: !!currentVersionId,
+    currentVersionMatchesExpected: expectedVersionId ? directCurrentVersionId === expectedVersionId : undefined,
+    projectedCurrentVersionMatchesExpected: expectedVersionId ? projectedCurrentVersionId === expectedVersionId : undefined,
+    hasCurrentVersion: !!directCurrentVersionId,
     activeVersionShards,
   }, scopeRaw === "public" ? publicDataCorsHeaders() : {});
   if (method === "HEAD") return new Response(null, { status: response.status, headers: response.headers });

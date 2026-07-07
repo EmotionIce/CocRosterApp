@@ -2299,12 +2299,15 @@ test("queue finalization preserves state after Cloudflare failure and reuses fre
   backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
   backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
   let publishAttempts = 0;
-  backend.publishCloudflarePublicDataSnapshot_ = () => {
+  const publishOptions = [];
+  backend.publishCloudflarePublicDataSnapshot_ = (options) => {
     publishAttempts++;
+    publishOptions.push(clone(options));
     if (publishAttempts === 1) return { ok: false, error: "temporary KV failure" };
     const versionId = backend.readPublishedActiveVersionId_();
     return {
       ok: true,
+      force: options && options.force === true,
       active: { ok: true, versionId, publicResult: { ok: true, putCount: 6 }, botResult: { ok: true, putCount: 4 } },
       cwlLeagueSignups: { ok: true, putCount: 1 },
       seasonEvents: { ok: true, putCount: 3, deleteCount: 0 },
@@ -2325,6 +2328,10 @@ test("queue finalization preserves state after Cloudflare failure and reuses fre
   assert.equal(retainedRunAfterFirst, true);
   assert.equal(retry.status, "completed");
   assert.equal(publishAttempts, 2);
+  assert.equal(publishOptions[0].versionId, runId);
+  assert.equal(publishOptions[0].force, false);
+  assert.equal(publishOptions[1].versionId, runId);
+  assert.equal(publishOptions[1].force, true);
   assert.equal(activeSnapshotReads, 0);
   assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup") || path.includes("/clanwarleagues/wars/")).length, 0);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
@@ -2523,7 +2530,9 @@ test("queue finalization completes already-published recovery without reading th
     activeReads++;
     throw new Error("active read intentionally skipped in test");
   };
-  backend.publishCloudflarePublicDataSnapshot_ = () => {
+  const publishOptions = [];
+  backend.publishCloudflarePublicDataSnapshot_ = (options) => {
+    publishOptions.push(clone(options));
     cloudflarePublishSawClearedQueue = backend.readAutoRefreshQueueCurrent_() === null;
     return {
       ok: true,
@@ -2550,6 +2559,9 @@ test("queue finalization completes already-published recovery without reading th
   assert.equal(result.status, "completed");
   assert.equal(result.alreadyPublished, true);
   assert.equal(activeReads, 0);
+  assert.equal(publishOptions.length, 1);
+  assert.equal(publishOptions[0].versionId, runId);
+  assert.equal(publishOptions[0].force, false);
   assert.equal(cloudflarePublishSawClearedQueue, false);
   assert.equal(result.skipPostTickMirrorRepair, true);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
@@ -2588,6 +2600,45 @@ test("queue worker recovers after partial completion by continuing at the next p
   assert.equal(processedRosterId, "second");
   assert.equal(current.currentTaskIndex, 3);
   assert.equal(current.processedRosters, 2);
+});
+
+test("queue worker synthesizes finalization when persisted task list has no finalize task", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  const keptTaskIds = [];
+  for (const taskId of current.taskIds) {
+    const task = backend.readAutoRefreshTask_(runId, taskId);
+    if (task.type === "finalize") continue;
+    task.status = "completed";
+    task.completedAt = "2026-05-25T00:00:00.000Z";
+    backend.writeAutoRefreshTask_(runId, task);
+    keptTaskIds.push(taskId);
+  }
+  current.taskIds = keptTaskIds;
+  current.taskCount = keptTaskIds.length;
+  current.currentTaskIndex = keptTaskIds.length;
+  current.processedTasks = keptTaskIds.length;
+  current.processedRosters = 1;
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("synthetic finalization should use source metadata and run shards");
+  };
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  installCloudflareMirrorSuccess(backend);
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.equal(result.status, "completed");
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
 });
 
 test("queue worker clears stale auto-refresh lock after timeout-shaped finalization", () => {

@@ -118,6 +118,56 @@ test("publish skips unchanged objects using stored hashes", () => {
   assert.equal(publishCalls[0].url, "https://worker.test/api/internal/public-data/publish");
 });
 
+test("snapshot publish can use supplied active version data without reading active snapshot", () => {
+  const backend = loadPublisher();
+  backend.normalizeActiveVersionId_ = (value) => String(value || "").trim();
+  backend.validateRosterData_ = (value) => value;
+  backend.readPublishedActiveVersionId_ = () => "published-version";
+  backend.ACTIVE_ROSTER_FILENAME = "active.json";
+  let activeSnapshotReads = 0;
+  let activePublish = null;
+  backend.readActiveRosterSnapshot_ = () => {
+    activeSnapshotReads++;
+    throw new Error("must not read active snapshot");
+  };
+  backend.publishCloudflareActiveRosterDataBestEffort_ = (versionWrite, label) => {
+    activePublish = { versionWrite: plain(versionWrite), label };
+    return {
+      ok: true,
+      versionId: versionWrite.versionId,
+      publicResult: { ok: true, force: versionWrite.options.force === true },
+      botResult: { ok: true, force: versionWrite.options.force === true },
+    };
+  };
+  backend.readActiveCwlLeagueSignups_ = () => ({ accounts: [] });
+  backend.publishCloudflareCwlLeagueSignupsBestEffort_ = () => ({ ok: true, skipped: true });
+  backend.publishCloudflareSeasonEventsAndDonationDataBestEffort_ = () => ({ ok: true, skipped: true });
+
+  const result = backend.publishCloudflarePublicDataSnapshot_({
+    label: "queue-finalize",
+    force: true,
+    versionWrite: {
+      versionId: "run-1",
+      manifest: { versionId: "run-1", rosterIds: ["main"] },
+      rosterData: {
+        schemaVersion: 1,
+        pageTitle: "Roster",
+        rosterOrder: ["main"],
+        rosters: [{ id: "main", main: [], subs: [], missing: [] }],
+        playerMetrics: { schemaVersion: 1, byTag: {} },
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.force, true);
+  assert.equal(activeSnapshotReads, 0);
+  assert.equal(activePublish.label, "queue-finalize:active");
+  assert.equal(activePublish.versionWrite.versionId, "run-1");
+  assert.equal(activePublish.versionWrite.options.force, true);
+  assert.equal(activePublish.versionWrite.rosterData.pageTitle, "Roster");
+});
+
 test("active version verification uses direct health and rejects missing shards", () => {
   const backend = loadPublisher();
   backend.CLOUDFLARE_PUBLIC_DATA_ENABLED_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_ENABLED";

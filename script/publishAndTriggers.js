@@ -2674,6 +2674,7 @@ function summarizeCloudflareAutoRefreshResult_(publishResultRaw, verifyResultRaw
 		ok: publishResult.ok === true && verifyResult.ok === true,
 		versionId: normalizeActiveVersionId_(active.versionId || verifyResult.actualVersionId || verifyResult.expectedVersionId),
 		verifiedAt: new Date().toISOString(),
+		force: publishResult.force === true || publicResult.force === true || botResult.force === true,
 		verifyStatusCode: toNonNegativeInt_(verifyResult.statusCode),
 		activePublicPutCount: toNonNegativeInt_(publicResult.putCount),
 		activeBotPutCount: toNonNegativeInt_(botResult.putCount),
@@ -2696,6 +2697,7 @@ function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRa
 			ok: false,
 			label: String(labelRaw || "").slice(0, 120),
 			error: message,
+			forceNext: true,
 			updatedAt: new Date().toISOString(),
 		};
 		writeAutoRefreshQueueCurrent_(current, false);
@@ -2730,6 +2732,20 @@ function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRa
 	};
 }
 
+function shouldForceAutoRefreshCloudflarePublish_(currentRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (options.force === true) return true;
+	const current = currentRaw && typeof currentRaw === "object" ? currentRaw : {};
+	const previous = current.cloudflarePublicDataPublish && typeof current.cloudflarePublicDataPublish === "object"
+		? current.cloudflarePublicDataPublish
+		: null;
+	if (!previous) return false;
+	if (previous.forceNext === true) return true;
+	if (previous.ok === false) return true;
+	const status = String(previous.status || "").trim().toLowerCase();
+	return status === "verifyfailed" || status === "publishfailed";
+}
+
 function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const updateQueue = options.updateQueue !== false;
@@ -2740,6 +2756,7 @@ function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw, o
 	if (typeof publishCloudflarePublicDataSnapshot_ !== "function") {
 		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data publisher is unavailable.", label, options);
 	}
+	const forcePublish = shouldForceAutoRefreshCloudflarePublish_(current, options);
 	if (updateQueue) {
 		current.status = "finalizing";
 		current.phase = "cloudflare-publish";
@@ -2747,12 +2764,26 @@ function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw, o
 			ok: false,
 			label: label.slice(0, 120),
 			status: "publishing",
+			force: forcePublish,
 			updatedAt: new Date().toISOString(),
 		};
 		writeAutoRefreshQueueCurrent_(current, false);
 		scheduleAutoRefreshJobResume_();
 	}
-	const publishResult = publishCloudflarePublicDataSnapshot_({ label: label });
+	const versionWrite = options.rosterData && typeof options.rosterData === "object"
+		? {
+				versionId: runId,
+				manifest: options.manifest && typeof options.manifest === "object" ? options.manifest : null,
+				rosterData: options.rosterData,
+			}
+		: null;
+	const publishOptions = {
+		label: label,
+		force: forcePublish,
+		versionId: runId,
+	};
+	if (versionWrite) publishOptions.versionWrite = versionWrite;
+	const publishResult = publishCloudflarePublicDataSnapshot_(publishOptions);
 	if (!publishResult || publishResult.ok !== true) {
 		return buildCloudflareAutoRefreshDeferredResult_(current, getCloudflareAutoRefreshResultError_(publishResult), label, options);
 	}
@@ -3423,6 +3454,36 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 		}
 		const task = next && next.task ? next.task : null;
 		if (!task) {
+			let hasFinalizeTask = false;
+			for (let i = 0; i < current.taskIds.length; i++) {
+				const existingTask = readAutoRefreshTask_(current.runId, current.taskIds[i]);
+				if (existingTask && String(existingTask.type || "") === "finalize") {
+					hasFinalizeTask = true;
+					break;
+				}
+			}
+			if (!hasFinalizeTask || current.status === "finalizing" || readPublishedActiveVersionId_() === current.runId) {
+				const syntheticTask = {
+					taskId: buildAutoRefreshTaskId_(current.taskIds.length, "finalize", ""),
+					runId: current.runId,
+					type: "finalize",
+					status: "running",
+					rosterId: "",
+					index: current.taskIds.length,
+					attempts: 1,
+					startedAt: new Date().toISOString(),
+					updatedAt: new Date().toISOString(),
+					completedAt: "",
+					error: "",
+					summary: "synthetic-finalize",
+				};
+				const finalResult = executeAutoRefreshFinalizeTask_(current, syntheticTask, executionStartMs);
+				if (finalResult && finalResult.deferred) {
+					scheduleAutoRefreshJobResume_();
+					return { ok: true, status: "inProgress", inProgress: true, reason: finalResult.reason, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
+				}
+				return finalResult;
+			}
 			const summary = "Auto-refresh completed; no pending queue tasks remain.";
 			current.status = "completed";
 			current.phase = "completed";

@@ -133,13 +133,50 @@ test("public health reports direct active version shard presence", async () => {
 
   assert.equal(response.status, 200);
   assert.equal(payload.currentVersionId, "version-4");
+  assert.equal(payload.directCurrentVersionId, "version-4");
+  assert.equal(payload.projectedCurrentVersionId, "version-4");
   assert.equal(payload.currentVersionMatchesExpected, true);
+  assert.equal(payload.projectedCurrentVersionMatchesExpected, true);
   assert.equal(payload.activeVersionShards.versionId, "version-4");
   assert.equal(payload.activeVersionShards.manifest, true);
   assert.equal(payload.activeVersionShards.rosters, true);
   assert.equal(payload.activeVersionShards.playerMetrics, false);
   assert.equal(payload.activeVersionShards.complete, false);
   assert.deepEqual(payload.activeVersionShards.missing, ["playerMetrics"]);
+});
+
+test("public health exposes bootstrap-projected pointer without relaxing direct verification", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentVersionId.json": JSON.stringify("version-old"),
+      "public-data/bootstrap/current.json": JSON.stringify({
+        activeVersionId: "version-new",
+        active: {
+          versionId: "version-new",
+          manifest: { versionId: "version-new" },
+        },
+      }),
+      "public-data/activeVersions/version-new/manifest.json": JSON.stringify({ versionId: "version-new" }),
+      "public-data/activeVersions/version-new/rosters.json": JSON.stringify({ main: { id: "main" } }),
+      "public-data/activeVersions/version-new/playerMetrics.json": JSON.stringify({ byTag: {} }),
+    }),
+  };
+
+  const response = await worker.fetch(
+    new Request("https://worker.test/api/public-data/health?expectedVersionId=version-new"),
+    env,
+    {},
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.currentVersionId, "version-old");
+  assert.equal(payload.directCurrentVersionId, "version-old");
+  assert.equal(payload.projectedCurrentVersionId, "version-new");
+  assert.equal(payload.currentVersionMatchesExpected, false);
+  assert.equal(payload.projectedCurrentVersionMatchesExpected, true);
+  assert.equal(payload.activeVersionShards.complete, true);
 });
 
 test("missing current active version shards are projected from legacy active data", async () => {
@@ -158,6 +195,7 @@ test("missing current active version shards are projected from legacy active dat
         },
       }),
       "public-data/active.json": JSON.stringify({
+        activeVersionId: "version-3",
         schemaVersion: 1,
         pageTitle: "Projected",
         rosterOrder: ["main"],
@@ -195,6 +233,54 @@ test("missing current active version shards are projected from legacy active dat
   assert.equal(metricsResponse.status, 200);
   assert.equal((await metricsResponse.json()).byTag.__FB64__I1BMQVlFUg.identity.tag, "#PLAYER");
   assert.equal(staleResponse.status, 404);
+});
+
+test("missing active version shards are not projected from stale legacy active data", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/bootstrap/current.json": JSON.stringify({
+        activeVersionId: "version-5",
+        active: {
+          versionId: "version-5",
+          manifest: {
+            versionId: "version-5",
+            pageTitle: "Projected",
+            rosterIds: ["main"],
+          },
+        },
+      }),
+      "public-data/active.json": JSON.stringify({
+        activeVersionId: "version-old",
+        schemaVersion: 1,
+        pageTitle: "Old",
+        rosterOrder: ["main"],
+        rosters: [{ id: "main", title: "Old Main" }],
+        playerMetrics: { schemaVersion: 1, byTag: {} },
+      }),
+    }),
+  };
+
+  const manifestResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-5/manifest.json"),
+    env,
+    {},
+  );
+  const rostersResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-5/rosters.json"),
+    env,
+    {},
+  );
+  const metricsResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-5/playerMetrics.json"),
+    env,
+    {},
+  );
+
+  assert.equal(manifestResponse.status, 200);
+  assert.equal((await manifestResponse.json()).versionId, "version-5");
+  assert.equal(rostersResponse.status, 404);
+  assert.equal(metricsResponse.status, 404);
 });
 
 test("mutable public data paths are projected from bootstrap before legacy keys", async () => {

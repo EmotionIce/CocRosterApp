@@ -320,6 +320,7 @@ function publishCloudflareDataObjectsBestEffort_(scopeRaw, objectsRaw, optionsRa
 		const ok = {
 			ok: true,
 			scope: scope,
+			force: force,
 			putCount: parsed.putCount || objects.length,
 			deleteCount: parsed.deleteCount || deletePaths.length,
 			skippedPutCount: skippedPutCount,
@@ -449,7 +450,8 @@ function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 		rosterData.lastUpdatedAt || new Date().toISOString(),
 	);
 	const rosterMap = buildCloudflareRosterMapById_(rosterData.rosters);
-	const encodedActive = encodeFirebaseObjectKeysRecursive_(rosterData);
+	const activePayload = Object.assign({}, rosterData, { activeVersionId: versionId });
+	const encodedActive = encodeFirebaseObjectKeysRecursive_(activePayload);
 	const encodedManifest = encodeFirebaseObjectKeysRecursive_(manifest);
 	const encodedRosters = encodeFirebaseObjectKeysRecursive_(rosterMap);
 	const encodedPlayerMetrics = encodeFirebaseObjectKeysRecursive_(playerMetrics);
@@ -954,11 +956,30 @@ function publishCloudflareDonationRefreshSeasonBestEffort_(seasonIdRaw, labelRaw
 function publishCloudflarePublicDataSnapshot_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const label = String(options.label || "manual-snapshot").trim() || "manual-snapshot";
-	const snapshot = readActiveRosterSnapshot_();
+	const suppliedVersionWrite = options.versionWrite && typeof options.versionWrite === "object" ? options.versionWrite : null;
+	let snapshot = null;
+	if (!suppliedVersionWrite || !suppliedVersionWrite.rosterData) {
+		const versionId = normalizeActiveVersionId_(options.versionId);
+		snapshot = versionId && typeof readActiveRosterSnapshotFromVersion_ === "function"
+			? readActiveRosterSnapshotFromVersion_(versionId)
+			: readActiveRosterSnapshot_();
+	}
+	const suppliedRosterData = suppliedVersionWrite && suppliedVersionWrite.rosterData
+		? validateRosterData_(suppliedVersionWrite.rosterData)
+		: null;
 	const versionWrite = {
-		versionId: normalizeActiveVersionId_(snapshot && snapshot.versionId) || readPublishedActiveVersionId_() || createCloudflarePublicDataVersionId_(label),
-		manifest: snapshot && snapshot.manifest && typeof snapshot.manifest === "object" ? snapshot.manifest : null,
-		rosterData: snapshot && snapshot.rosterData ? snapshot.rosterData : parseRosterDataText_(snapshot && snapshot.text, ACTIVE_ROSTER_FILENAME),
+		versionId:
+			normalizeActiveVersionId_(suppliedVersionWrite && suppliedVersionWrite.versionId) ||
+			normalizeActiveVersionId_(snapshot && snapshot.versionId) ||
+			readPublishedActiveVersionId_() ||
+			createCloudflarePublicDataVersionId_(label),
+		manifest:
+			suppliedVersionWrite && suppliedVersionWrite.manifest && typeof suppliedVersionWrite.manifest === "object"
+				? suppliedVersionWrite.manifest
+				: snapshot && snapshot.manifest && typeof snapshot.manifest === "object"
+					? snapshot.manifest
+					: null,
+		rosterData: suppliedRosterData || (snapshot && snapshot.rosterData ? snapshot.rosterData : parseRosterDataText_(snapshot && snapshot.text, ACTIVE_ROSTER_FILENAME)),
 		options: {
 			force: options.force === true,
 		},
@@ -974,6 +995,7 @@ function publishCloudflarePublicDataSnapshot_(optionsRaw) {
 	}
 	return {
 		ok: active.ok === true && signups.ok === true && seasonEvents.ok === true,
+		force: options.force === true,
 		active: active,
 		cwlLeagueSignups: signups,
 		seasonEvents: seasonEvents,
