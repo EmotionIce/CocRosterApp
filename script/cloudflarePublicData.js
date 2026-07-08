@@ -838,29 +838,29 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 		const publicObjects = [
 			buildCloudflarePublicBootstrapObject_(),
 		];
-		const botObjects = [];
+		const seasonObjects = [];
 		const deletePaths = [];
 		const eventIds = {};
 		const current = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_PATH);
-		if (addCloudflarePublishObjectIfPresent_(botObjects, SEASON_EVENTS_CURRENT_PATH, current)) {
+		if (addCloudflarePublishObjectIfPresent_(seasonObjects, SEASON_EVENTS_CURRENT_PATH, current)) {
 			collectCloudflareSeasonEventIdsFromPointerMap_(current, eventIds);
 		}
 		const currentCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_CWL_PATH);
 		if (currentCwl) {
-			addCloudflarePublishObjectIfPresent_(botObjects, SEASON_EVENTS_CURRENT_CWL_PATH, currentCwl);
+			addCloudflarePublishObjectIfPresent_(seasonObjects, SEASON_EVENTS_CURRENT_CWL_PATH, currentCwl);
 			collectCloudflareSeasonEventIdsFromPointerMap_({ cwl: currentCwl }, eventIds);
 		} else {
 			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_CURRENT_CWL_PATH);
 		}
 		const latestCompletedCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
 		if (latestCompletedCwl) {
-			addCloudflarePublishObjectIfPresent_(botObjects, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, latestCompletedCwl);
+			addCloudflarePublishObjectIfPresent_(seasonObjects, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, latestCompletedCwl);
 			collectCloudflareSeasonEventIdsFromPointerMap_({ latestCompletedCwl: latestCompletedCwl }, eventIds);
 		} else {
 			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
 		}
 		addCloudflarePublishObjectIfPresent_(
-			botObjects,
+			seasonObjects,
 			SEASON_EVENTS_SEASON_STATE_CURRENT_PATH,
 			readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH),
 		);
@@ -870,7 +870,7 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 			const key = bySeasonKeys[i];
 			const seasonPayload = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, key));
 			if (seasonPayload) {
-				addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, key), seasonPayload);
+				addCloudflarePublishObjectIfPresent_(seasonObjects, buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, key), seasonPayload);
 				collectCloudflareSeasonEventIdsFromPointerMap_(seasonPayload, eventIds);
 			}
 		}
@@ -881,17 +881,17 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 			const event = readSeasonEventById_(eventId);
 			const encodedEventId = encodeFirebaseObjectKey_(eventId);
 			if (event) {
-				addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodedEventId), event);
+				addCloudflarePublishObjectIfPresent_(seasonObjects, buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodedEventId), event);
 				if (normalizeSeasonEventType_(event.type) === "cwl") {
 					const live = readCwlSeasonEventAggregate_(eventId, "live");
 					const final = readCwlSeasonEventAggregate_(eventId, "final");
 					if (live && live.eventId) {
-						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "live"), projectCloudflareCwlAggregateForEvent_(event, live, "live"));
+						addCloudflarePublishObjectIfPresent_(seasonObjects, buildCwlSeasonEventAggregatePath_(eventId, "live"), projectCloudflareCwlAggregateForEvent_(event, live, "live"));
 					} else {
 						addCloudflareDeletePath_(deletePaths, buildCwlSeasonEventAggregatePath_(eventId, "live"));
 					}
 					if (final && final.eventId) {
-						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "final"), projectCloudflareCwlAggregateForEvent_(event, final, "final"));
+						addCloudflarePublishObjectIfPresent_(seasonObjects, buildCwlSeasonEventAggregatePath_(eventId, "final"), projectCloudflareCwlAggregateForEvent_(event, final, "final"));
 					} else {
 						addCloudflareDeletePath_(deletePaths, buildCwlSeasonEventAggregatePath_(eventId, "final"));
 					}
@@ -902,25 +902,24 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 		}
 
 		const donationCurrent = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"));
-		addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), donationCurrent);
+		addCloudflarePublishObjectIfPresent_(seasonObjects, buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), donationCurrent);
 		const donationBySeasonPath = buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason");
 		const donationSeasonKeys = listFirebaseChildKeys_(donationBySeasonPath);
 		for (let i = 0; i < donationSeasonKeys.length; i++) {
 			const key = donationSeasonKeys[i];
 			const overlay = readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(donationBySeasonPath, key));
-			addCloudflarePublishObjectIfPresent_(botObjects, buildFirebaseChildPath_(donationBySeasonPath, key), overlay);
+			addCloudflarePublishObjectIfPresent_(seasonObjects, buildFirebaseChildPath_(donationBySeasonPath, key), overlay);
 		}
-		const publicResult = publishCloudflareDataObjectsBestEffort_("public", publicObjects, {
-			label: label + ":bootstrap",
-		});
-		const botResult = publishCloudflareDataObjectsBestEffort_("bot", botObjects, {
-			label: label + ":bot",
-			deletePaths: deletePaths,
+		const mirroredSeasonBatch = buildCloudflareBotScopeMirroredPublishBatch_(seasonObjects, deletePaths);
+		const publishResult = publishCloudflareDataObjectsBestEffort_("public", publicObjects.concat(mirroredSeasonBatch.objects), {
+			label: label + ":season-data",
+			deletePaths: mirroredSeasonBatch.deletePaths,
 		});
 		return {
-			ok: publicResult.ok === true && botResult.ok === true,
-			publicResult: publicResult,
-			botResult: botResult,
+			ok: publishResult.ok === true,
+			publicResult: publishResult,
+			botResult: publishResult,
+			batchResult: publishResult,
 		};
 	} catch (err) {
 		const failed = { ok: false, error: errorMessage_(err) };
@@ -937,30 +936,29 @@ function publishCloudflareDonationRefreshSeasonBestEffort_(seasonIdRaw, labelRaw
 		const publicObjects = [
 			buildCloudflarePublicBootstrapObject_(),
 		];
-		const botObjects = [];
+		const donationObjects = [];
 		const encodedSeasonId = encodeFirebaseObjectKey_(seasonId);
 		const seasonPath = buildFirebaseChildPath_(
 			buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason"),
 			encodedSeasonId,
 		);
 		const overlay = readDecodedCloudflareFirebaseObject_(seasonPath);
-		addCloudflarePublishObjectIfPresent_(botObjects, seasonPath, overlay);
+		addCloudflarePublishObjectIfPresent_(donationObjects, seasonPath, overlay);
 		addCloudflarePublishObjectIfPresent_(
-			botObjects,
+			donationObjects,
 			buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"),
 			readDecodedCloudflareFirebaseObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current")),
 		);
-		const publicResult = publishCloudflareDataObjectsBestEffort_("public", publicObjects, {
-			label: String(labelRaw || "donation-refresh") + ":bootstrap",
-		});
-		const botResult = publishCloudflareDataObjectsBestEffort_("bot", botObjects, {
-			label: String(labelRaw || "donation-refresh") + ":bot",
+		const mirroredDonationBatch = buildCloudflareBotScopeMirroredPublishBatch_(donationObjects, []);
+		const publishResult = publishCloudflareDataObjectsBestEffort_("public", publicObjects.concat(mirroredDonationBatch.objects), {
+			label: String(labelRaw || "donation-refresh") + ":season-data",
 		});
 		return {
-			ok: publicResult.ok === true && botResult.ok === true,
+			ok: publishResult.ok === true,
 			seasonId: seasonId,
-			publicResult: publicResult,
-			botResult: botResult,
+			publicResult: publishResult,
+			botResult: publishResult,
+			batchResult: publishResult,
 		};
 	} catch (err) {
 		const failed = { ok: false, error: errorMessage_(err) };

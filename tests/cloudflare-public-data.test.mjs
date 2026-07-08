@@ -60,6 +60,141 @@ test("bot-scoped entries are not mirrored a second time", () => {
   ]);
 });
 
+test("season-event publication writes detailed CWL objects to public and bot scopes", () => {
+  const backend = loadPublisher();
+  backend.Logger = { log() {} };
+  backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
+  backend.SEASON_EVENTS_CURRENT_PATH = "events/seasonEvents/current";
+  backend.SEASON_EVENTS_CURRENT_CWL_PATH = "events/seasonEvents/currentCwl";
+  backend.SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH = "events/seasonEvents/latestCompletedCwl";
+  backend.SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = "events/seasonEvents/seasonState/current";
+  backend.SEASON_EVENTS_BY_SEASON_PATH = "events/seasonEvents/bySeason";
+  backend.SEASON_EVENTS_BY_ID_PATH = "events/seasonEvents/byId";
+  backend.FIREBASE_DONATION_REFRESH_PATH = "donationRefresh";
+  backend.encodeFirebaseObjectKeysRecursive_ = (value) => value;
+  backend.encodeFirebaseObjectKey_ = (value) => String(value || "");
+  backend.buildFirebaseChildPath_ = (...parts) => parts.map((part) => String(part || "").replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
+  backend.sanitizeSeasonEventText_ = (value) => String(value || "").trim();
+  backend.normalizeSeasonEventType_ = (value) => String(value || "").trim().toLowerCase();
+  backend.buildCwlSeasonEventAggregatePath_ = (eventId, kind) => `events/seasonEvents/cwlAggregates/byEvent/${eventId}/${kind}`;
+  backend.buildCloudflarePublicBootstrapObject_ = () => ({
+    path: "bootstrap/current",
+    payload: { schemaVersion: 1, activeVersionId: "version-1" },
+  });
+  backend.readDecodedCloudflareFirebaseObject_ = (path) => {
+    if (path === "events/seasonEvents/current") return { push: { eventId: "push-1" } };
+    if (path === "events/seasonEvents/currentCwl") return { eventId: "cwl-1", type: "cwl" };
+    if (path === "events/seasonEvents/latestCompletedCwl") return null;
+    if (path === "events/seasonEvents/seasonState/current") return { seasonId: "season-1" };
+    if (path === "events/seasonEvents/bySeason/season-1") return { push: { eventId: "push-1" }, cwl: { eventId: "cwl-1" } };
+    if (path === "donationRefresh/current") return { seasonId: "season-1", refreshedAt: "2026-07-08T10:00:00.000Z" };
+    if (path === "donationRefresh/bySeason/season-1") return { seasonId: "season-1", entries: [] };
+    return null;
+  };
+  backend.listFirebaseChildKeys_ = (path) => {
+    if (path === "events/seasonEvents/bySeason") return ["season-1"];
+    if (path === "donationRefresh/bySeason") return ["season-1"];
+    return [];
+  };
+  backend.readSeasonEventById_ = (eventId) => {
+    if (eventId === "cwl-1") return { eventId: "cwl-1", type: "cwl", participantsByDiscordId: {} };
+    if (eventId === "push-1") return { eventId: "push-1", type: "push" };
+    return null;
+  };
+  backend.readCwlSeasonEventAggregate_ = (eventId, kind) => kind === "live" ? {
+    eventId,
+    kind: "live",
+    hash: "live-hash",
+    rankedTags: ["#AAA"],
+    byTag: { "#AAA": { starsTotal: 3 } },
+  } : null;
+
+  const publishCalls = [];
+  backend.publishCloudflareDataObjectsBestEffort_ = (scope, objects, options) => {
+    publishCalls.push({
+      scope,
+      objects: plain(objects),
+      deletePaths: plain(options && options.deletePaths || []),
+      label: options && options.label,
+    });
+    return {
+      ok: true,
+      scope,
+      putCount: objects.length,
+      deleteCount: options && options.deletePaths ? options.deletePaths.length : 0,
+      scopes: ["bot", "public"],
+    };
+  };
+
+  const result = backend.publishCloudflareSeasonEventsAndDonationDataBestEffort_("test-season");
+
+  assert.equal(result.ok, true);
+  assert.equal(publishCalls.length, 1);
+  assert.equal(publishCalls[0].scope, "public");
+  assert.equal(publishCalls[0].label, "test-season:season-data");
+  const objectPaths = publishCalls[0].objects.map((item) => `${item.scope || publishCalls[0].scope}:${item.path}`).sort();
+  assert.ok(objectPaths.includes("public:bootstrap/current"));
+  assert.ok(!objectPaths.includes("bot:bootstrap/current"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/current"));
+  assert.ok(objectPaths.includes("bot:events/seasonEvents/current"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/currentCwl"));
+  assert.ok(objectPaths.includes("bot:events/seasonEvents/currentCwl"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/byId/cwl-1"));
+  assert.ok(objectPaths.includes("bot:events/seasonEvents/byId/cwl-1"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
+  assert.ok(objectPaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
+  assert.ok(objectPaths.includes("public:donationRefresh/current"));
+  assert.ok(objectPaths.includes("bot:donationRefresh/current"));
+  const deletePaths = publishCalls[0].deletePaths.map((item) => {
+    const entry = item && typeof item === "object" ? item : { path: item };
+    return `${entry.scope || publishCalls[0].scope}:${entry.path}`;
+  }).sort();
+  assert.ok(deletePaths.includes("public:events/seasonEvents/latestCompletedCwl"));
+  assert.ok(deletePaths.includes("bot:events/seasonEvents/latestCompletedCwl"));
+  assert.ok(deletePaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));
+  assert.ok(deletePaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));
+});
+
+test("donation refresh publication writes detailed objects to public and bot scopes", () => {
+  const backend = loadPublisher();
+  backend.Logger = { log() {} };
+  backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
+  backend.FIREBASE_DONATION_REFRESH_PATH = "donationRefresh";
+  backend.encodeFirebaseObjectKeysRecursive_ = (value) => value;
+  backend.encodeFirebaseObjectKey_ = (value) => String(value || "");
+  backend.buildFirebaseChildPath_ = (...parts) => parts.map((part) => String(part || "").replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
+  backend.sanitizeDonationCycleKey_ = (value) => String(value || "").trim();
+  backend.buildCloudflarePublicBootstrapObject_ = () => ({
+    path: "bootstrap/current",
+    payload: { schemaVersion: 1, activeVersionId: "version-1" },
+  });
+  backend.readDecodedCloudflareFirebaseObject_ = (path) => {
+    if (path === "donationRefresh/current") return { seasonId: "season-1" };
+    if (path === "donationRefresh/bySeason/season-1") return { seasonId: "season-1", entries: [{ tag: "#AAA" }] };
+    return null;
+  };
+
+  const publishCalls = [];
+  backend.publishCloudflareDataObjectsBestEffort_ = (scope, objects, options) => {
+    publishCalls.push({ scope, objects: plain(objects), label: options && options.label });
+    return { ok: true, scope, putCount: objects.length, deleteCount: 0, scopes: ["bot", "public"] };
+  };
+
+  const result = backend.publishCloudflareDonationRefreshSeasonBestEffort_("season-1", "donation-test");
+
+  assert.equal(result.ok, true);
+  assert.equal(publishCalls.length, 1);
+  assert.equal(publishCalls[0].scope, "public");
+  assert.equal(publishCalls[0].label, "donation-test:season-data");
+  const objectPaths = publishCalls[0].objects.map((item) => `${item.scope || publishCalls[0].scope}:${item.path}`).sort();
+  assert.ok(objectPaths.includes("public:bootstrap/current"));
+  assert.ok(!objectPaths.includes("bot:bootstrap/current"));
+  assert.ok(objectPaths.includes("public:donationRefresh/current"));
+  assert.ok(objectPaths.includes("bot:donationRefresh/current"));
+  assert.ok(objectPaths.includes("public:donationRefresh/bySeason/season-1"));
+  assert.ok(objectPaths.includes("bot:donationRefresh/bySeason/season-1"));
+});
+
 test("Cloudflare CWL aggregate projection refreshes ranked tags from current registrations", () => {
   const backend = loadPublisher();
   backend.Logger = { log() {} };
