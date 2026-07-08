@@ -5498,6 +5498,118 @@ function bindEligibleCwlSeasonEventGroupsFromCoordinator_(eventRaw, coordinatorR
 	return pruneCwlSeasonEventMetaToTarget_(meta, target);
 }
 
+function buildCwlSeasonEventAggregateFromCoordinatorView_(eventRaw, coordinatorResultRaw, metaRaw, nowIsoRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const coordinator = coordinatorResultRaw && typeof coordinatorResultRaw === "object" ? coordinatorResultRaw : {};
+	const meta = sanitizeCwlSeasonEventMeta_(metaRaw || event.cwl);
+	const target = getResolvedCwlSeasonEventTarget_(Object.assign({}, event, { cwl: meta }));
+	if (!target) {
+		return {
+			ok: true,
+			status: "target-unresolved",
+			reason: "cwl-target-unresolved",
+			aggregate: null,
+			hash: "",
+			complete: false,
+			currentRunDataSuccess: true,
+			currentRunDataSuccessAt: "",
+		};
+	}
+	const views = coordinator.viewsByClanTag && typeof coordinator.viewsByClanTag === "object" ? coordinator.viewsByClanTag : {};
+	const view = views[target.clanTag] && typeof views[target.clanTag] === "object" ? views[target.clanTag] : null;
+	if (!view) {
+		return {
+			ok: false,
+			status: "missing-target-view",
+			reason: "missing-target-view",
+			aggregate: null,
+			hash: "",
+			complete: false,
+			currentRunDataSuccess: false,
+			currentRunDataSuccessAt: "",
+		};
+	}
+	const byTag = {};
+	const aggregateByTag = view.aggregateByTag && typeof view.aggregateByTag === "object" ? view.aggregateByTag : {};
+	const aggregateTags = Object.keys(aggregateByTag).sort();
+	for (let i = 0; i < aggregateTags.length; i++) {
+		const tag = normalizeTag_(aggregateTags[i]);
+		if (tag) byTag[tag] = sanitizeCwlStatEntry_(aggregateByTag[aggregateTags[i]]);
+	}
+	const relevantWarTagSet = {};
+	const groupStates = Array.isArray(view.groupStates) ? view.groupStates : [];
+	let expectedRelevantRounds = 0;
+	let materializedRelevantRounds = 0;
+	for (let i = 0; i < groupStates.length; i++) {
+		const groupState = groupStates[i] && typeof groupStates[i] === "object" ? groupStates[i] : {};
+		expectedRelevantRounds = Math.max(expectedRelevantRounds, toNonNegativeInt_(groupState.expectedRounds));
+		const warTags = Array.isArray(groupState.relevantWarTags) ? groupState.relevantWarTags : [];
+		for (let j = 0; j < warTags.length; j++) {
+			const warTag = normalizeTag_(warTags[j]);
+			if (warTag && warTag !== "#0") relevantWarTagSet[warTag] = true;
+		}
+		const rounds = groupState.rounds && typeof groupState.rounds === "object" ? groupState.rounds : {};
+		const roundKeys = Object.keys(rounds);
+		for (let j = 0; j < roundKeys.length; j++) {
+			const round = rounds[roundKeys[j]] && typeof rounds[roundKeys[j]] === "object" ? rounds[roundKeys[j]] : {};
+			if (normalizeTag_(round.warTag)) materializedRelevantRounds++;
+		}
+	}
+	const fallbackAggregate =
+		coordinator.eventAggregateResult &&
+		coordinator.eventAggregateResult.aggregate &&
+		typeof coordinator.eventAggregateResult.aggregate === "object"
+			? coordinator.eventAggregateResult.aggregate
+			: null;
+	if (!Object.keys(relevantWarTagSet).length && Array.isArray(fallbackAggregate && fallbackAggregate.warTags)) {
+		for (let i = 0; i < fallbackAggregate.warTags.length; i++) {
+			const warTag = normalizeTag_(fallbackAggregate.warTags[i]);
+			if (warTag && warTag !== "#0") relevantWarTagSet[warTag] = true;
+		}
+	}
+	const relevantWarTags = Object.keys(relevantWarTagSet).sort();
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
+	const hash = buildSeasonEventStableHash_({
+		eventId: sanitizeSeasonEventText_(event.eventId, 180),
+		warTags: relevantWarTags,
+		byTag: byTag,
+	});
+	const runtimeState = coordinator.runtimeState && typeof coordinator.runtimeState === "object" ? coordinator.runtimeState : {};
+	const hasData = relevantWarTags.length > 0 && Object.keys(byTag).length > 0;
+	return {
+		ok: hasData,
+		status: hasData ? "ok" : "no-current-cwl-data",
+		reason: hasData ? "" : "no-current-cwl-data",
+		partial: false,
+		aggregate: {
+			eventId: sanitizeSeasonEventText_(event.eventId, 180),
+			kind: "live",
+			cwlTrackingState: normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting",
+			generatedAt: nowIso,
+			lastSuccessfulRefreshAt: sanitizeSeasonEventTimestampOrEmpty_(runtimeState.lastDataSuccessAt) || (hasData ? nowIso : ""),
+			stale: false,
+			staleSince: "",
+			staleReason: "",
+			hash: hash,
+			scoreSchema: "cwl-offense-stars-defense-stars-v2",
+			playerCount: Object.keys(byTag).length,
+			warTags: relevantWarTags,
+			byTag: byTag,
+		},
+		hash: hash,
+		complete: false,
+		relevantWarCount: relevantWarTags.length,
+		expectedRelevantRounds: expectedRelevantRounds,
+		materializedRelevantRounds: materializedRelevantRounds,
+		unsettledRelevantRounds: relevantWarTags.length,
+		discoveryIncomplete: false,
+		auditIncomplete: false,
+		bootstrapBlocked: false,
+		currentRunDataSuccess: hasData,
+		currentRunDataSuccessAt: hasData ? sanitizeSeasonEventTimestampOrEmpty_(runtimeState.currentRunDataSuccessAt) || nowIso : "",
+	};
+}
+
 // Filter a compact CWL aggregate down to registered participant tags.
 function filterCwlAggregateToRegisteredParticipants_(eventRaw, aggregateRaw) {
 	const aggregate = sanitizeCwlSeasonEventAggregate_(aggregateRaw);
@@ -5779,8 +5891,13 @@ function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, o
 		(snapshot.cwlWarRawByTag && typeof snapshot.cwlWarRawByTag === "object" && Object.keys(snapshot.cwlWarRawByTag).length > 0) ||
 		(snapshot.cwlWarErrorByTag && typeof snapshot.cwlWarErrorByTag === "object" && Object.keys(snapshot.cwlWarErrorByTag).length > 0);
 	const snapshotCoordinator = snapshot.cwlCoordinator && typeof snapshot.cwlCoordinator === "object" ? snapshot.cwlCoordinator : null;
-	let coordinator = snapshotCoordinator && !targetResult.targetChanged ? snapshotCoordinator : null;
-	if (!coordinator && (!hasLegacyCwlSnapshot || (targetResult.targetChanged && !!snapshotCoordinator)) && typeof buildCwlCoordinatorResult_ === "function") {
+	const allowSnapshotCoordinatorAfterTargetChange = options.allowSnapshotCoordinatorAfterTargetChange === true;
+	let coordinator = snapshotCoordinator && (!targetResult.targetChanged || allowSnapshotCoordinatorAfterTargetChange) ? snapshotCoordinator : null;
+	if (
+		!coordinator &&
+		(!hasLegacyCwlSnapshot || (targetResult.targetChanged && !!snapshotCoordinator && !allowSnapshotCoordinatorAfterTargetChange)) &&
+		typeof buildCwlCoordinatorResult_ === "function"
+	) {
 		coordinator = buildCwlCoordinatorResult_(rosterDataRaw, {
 			event: event,
 			nowIso: nowIso,
@@ -5797,7 +5914,18 @@ function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, o
 			});
 			return { ok: true, status: "waiting", event: summarizeSeasonEvent_(Object.assign({}, event, { cwl: meta })) };
 		}
-		const aggregateResult = coordinator.eventAggregateResult;
+		let aggregateResult = coordinator.eventAggregateResult;
+		if (
+			allowSnapshotCoordinatorAfterTargetChange &&
+			(
+				!aggregateResult ||
+				typeof aggregateResult !== "object" ||
+				!aggregateResult.aggregate ||
+				aggregateResult.status === "target-unresolved"
+			)
+		) {
+			aggregateResult = buildCwlSeasonEventAggregateFromCoordinatorView_(event, coordinator, meta, nowIso);
+		}
 		if (coordinator.runtimeState && typeof coordinator.runtimeState === "object") aggregateResult.runtimeState = coordinator.runtimeState;
 		if (aggregateResult.bootstrapBlocked || aggregateResult.status === "bootstrap-incomplete") {
 			meta.lastAttemptedRefreshAt = nowIso;

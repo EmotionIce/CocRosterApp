@@ -429,8 +429,22 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 	return parseFirebaseJsonResponse_(response, { method: method, path: path });
 }
 
+// Build an error for queue phases that must retry instead of expanding failed
+// batches into many serial Firebase calls.
+function buildFirebaseBatchFallbackDisabledError_(operationRaw, detailRaw) {
+	const operation = String(operationRaw == null ? "Firebase batch" : operationRaw).trim() || "Firebase batch";
+	const detail = String(detailRaw == null ? "" : detailRaw).trim();
+	const err = new Error(operation + " failed with queue fallback disabled" + (detail ? ": " + detail : "") + ".");
+	err.name = "FirebaseBatchFallbackDisabledError";
+	err.autoRefreshDefer = true;
+	err.reason = "firebaseBatch";
+	return err;
+}
+
 // Batch Firebase GET requests with per-entry fallback to the single-request path.
-function firebaseBatchGetJson_(pathsRaw) {
+function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const disableFallback = options.disableFallback === true;
 	const input = Array.isArray(pathsRaw) ? pathsRaw : [];
 	const paths = [];
 	const seen = {};
@@ -462,6 +476,9 @@ function firebaseBatchGetJson_(pathsRaw) {
 	};
 	const fallbackOne = (pathRaw) => firebaseRequestJson_(pathRaw, "GET");
 	const fallbackAll = () => {
+		if (disableFallback && typeof UrlFetchApp !== "undefined" && UrlFetchApp && typeof UrlFetchApp.fetchAll === "function") {
+			throw buildFirebaseBatchFallbackDisabledError_("Firebase batch GET", "fetchAll failed");
+		}
 		for (let i = 0; i < paths.length; i++) {
 			results[paths[i]] = fallbackOne(paths[i]);
 		}
@@ -472,6 +489,7 @@ function firebaseBatchGetJson_(pathsRaw) {
 	try {
 		responses = UrlFetchApp.fetchAll(buildRequests(false));
 	} catch (err) {
+		if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch GET", errorMessage_(err));
 		Logger.log("Firebase batch GET fetchAll failed; falling back to single GETs: %s", errorMessage_(err));
 		return fallbackAll();
 	}
@@ -489,6 +507,7 @@ function firebaseBatchGetJson_(pathsRaw) {
 		try {
 			responses = UrlFetchApp.fetchAll(buildRequests(true));
 		} catch (err) {
+			if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch GET auth retry", errorMessage_(err));
 			Logger.log("Firebase batch GET auth retry failed; falling back to single GETs: %s", errorMessage_(err));
 			return fallbackAll();
 		}
@@ -499,6 +518,7 @@ function firebaseBatchGetJson_(pathsRaw) {
 		try {
 			results[path] = parseFirebaseJsonResponse_(responses[i], { method: "GET", path: path });
 		} catch (err) {
+			if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch GET entry " + path, errorMessage_(err));
 			Logger.log("Firebase batch GET entry failed path=%s; falling back to single GET: %s", path, errorMessage_(err));
 			results[path] = fallbackOne(path);
 		}
@@ -507,7 +527,9 @@ function firebaseBatchGetJson_(pathsRaw) {
 }
 
 // Batch Firebase write requests with per-entry fallback to the single-request path.
-function firebaseBatchWriteJson_(entriesRaw) {
+function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const disableFallback = options.disableFallback === true;
 	const input = Array.isArray(entriesRaw) ? entriesRaw : [];
 	const entries = [];
 	for (let i = 0; i < input.length; i++) {
@@ -524,6 +546,9 @@ function firebaseBatchWriteJson_(entriesRaw) {
 	if (!entries.length) return [];
 
 	const fallbackAll = () => {
+		if (disableFallback && typeof UrlFetchApp !== "undefined" && UrlFetchApp && typeof UrlFetchApp.fetchAll === "function") {
+			throw buildFirebaseBatchFallbackDisabledError_("Firebase batch write", "fetchAll failed");
+		}
 		const results = [];
 		for (let i = 0; i < entries.length; i++) {
 			results.push(firebaseRequestJson_(entries[i].path, entries[i].method, entries[i].payload));
@@ -562,6 +587,7 @@ function firebaseBatchWriteJson_(entriesRaw) {
 	try {
 		responses = UrlFetchApp.fetchAll(buildRequests(false));
 	} catch (err) {
+		if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch write", errorMessage_(err));
 		Logger.log("Firebase batch write fetchAll failed; falling back to single writes: %s", errorMessage_(err));
 		return fallbackAll();
 	}
@@ -579,6 +605,7 @@ function firebaseBatchWriteJson_(entriesRaw) {
 		try {
 			responses = UrlFetchApp.fetchAll(buildRequests(true));
 		} catch (err) {
+			if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch write auth retry", errorMessage_(err));
 			Logger.log("Firebase batch write auth retry failed; falling back to single writes: %s", errorMessage_(err));
 			return fallbackAll();
 		}
@@ -590,6 +617,7 @@ function firebaseBatchWriteJson_(entriesRaw) {
 		try {
 			results.push(parseFirebaseJsonResponse_(responses[i], { method: entry.method, path: entry.path }));
 		} catch (err) {
+			if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch write entry " + entry.path, errorMessage_(err));
 			Logger.log("Firebase batch write entry failed path=%s method=%s; falling back to single write: %s", entry.path, entry.method, errorMessage_(err));
 			results.push(firebaseRequestJson_(entry.path, entry.method, entry.payload));
 		}
@@ -598,7 +626,9 @@ function firebaseBatchWriteJson_(entriesRaw) {
 }
 
 // Write multiple exact child paths with one Firebase multi-location PATCH.
-function firebaseBatchPutJson_(entriesRaw) {
+function firebaseBatchPutJson_(entriesRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const disableFallback = options.disableFallback === true;
 	const input = Array.isArray(entriesRaw) ? entriesRaw : [];
 	const entries = [];
 	for (let i = 0; i < input.length; i++) {
@@ -613,6 +643,9 @@ function firebaseBatchPutJson_(entriesRaw) {
 	if (!entries.length) return null;
 
 	const fallbackAll = () => {
+		if (disableFallback && typeof UrlFetchApp !== "undefined" && UrlFetchApp && typeof UrlFetchApp.fetch === "function") {
+			throw buildFirebaseBatchFallbackDisabledError_("Firebase multi-location PUT", "root PATCH failed");
+		}
 		const results = [];
 		for (let i = 0; i < entries.length; i++) {
 			results.push(firebaseRequestJson_(entries[i].path, "PUT", entries[i].payload));
@@ -630,6 +663,7 @@ function firebaseBatchPutJson_(entriesRaw) {
 	try {
 		return firebaseRequestJson_("", "PATCH", patch);
 	} catch (err) {
+		if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase multi-location PUT", errorMessage_(err));
 		Logger.log("Firebase multi-location PUT failed; falling back to single writes: %s", errorMessage_(err));
 		return fallbackAll();
 	}

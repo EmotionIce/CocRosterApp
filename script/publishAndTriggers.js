@@ -1115,7 +1115,7 @@ function writeAutoRefreshRunSourceShards_(runIdRaw, rosterDataRaw, sourceFingerp
 			payload: encodeFirebaseObjectKeysRecursive_(sanitizePlayerMetricsStore_(sourceMetrics, source.lastUpdatedAt || new Date().toISOString())),
 		});
 	}
-	firebaseBatchPutJson_(writes);
+	firebaseBatchPutJson_(writes, { disableFallback: true });
 	return sourceMeta;
 }
 
@@ -1141,7 +1141,8 @@ function buildAutoRefreshRosterWorkingData_(sourceMetaRaw, sourceRosterRaw, sour
 }
 
 // Read source map entries for only the player tags a bounded roster task can touch.
-function readAutoRefreshSourceEntriesForTags_(runIdRaw, basePathRaw, tagsRaw) {
+function readAutoRefreshSourceEntriesForTags_(runIdRaw, basePathRaw, tagsRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
 	const byTag = {};
 	const seen = {};
@@ -1159,7 +1160,9 @@ function readAutoRefreshSourceEntriesForTags_(runIdRaw, basePathRaw, tagsRaw) {
 		pathByTag[tag] = path;
 		paths.push(path);
 	}
-	const encodedByPath = firebaseBatchGetJson_(paths);
+	const encodedByPath = firebaseBatchGetJson_(paths, {
+		disableFallback: options.disableFirebaseFallback === true,
+	});
 	const outTags = Object.keys(pathByTag);
 	for (let i = 0; i < outTags.length; i++) {
 		const tag = outTags[i];
@@ -1170,12 +1173,12 @@ function readAutoRefreshSourceEntriesForTags_(runIdRaw, basePathRaw, tagsRaw) {
 }
 
 // Read source metrics for only the player tags a bounded roster task can touch.
-function readAutoRefreshSourceMetricEntriesForTags_(runIdRaw, tagsRaw, sourceVersionIdRaw) {
+function readAutoRefreshSourceMetricEntriesForTags_(runIdRaw, tagsRaw, sourceVersionIdRaw, optionsRaw) {
 	const sourceVersionId = normalizeActiveVersionId_(sourceVersionIdRaw);
 	const basePath = sourceVersionId
 		? buildActiveVersionPath_(sourceVersionId, "playerMetrics/byTag")
 		: buildAutoRefreshRunPath_(runIdRaw, "source/playerMetrics/byTag");
-	return readAutoRefreshSourceEntriesForTags_(runIdRaw, basePath, tagsRaw);
+	return readAutoRefreshSourceEntriesForTags_(runIdRaw, basePath, tagsRaw, optionsRaw);
 }
 
 // List encoded player-metric child keys from an immutable source version without
@@ -1231,7 +1234,7 @@ function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMs
 			sourcePathByKey[metricKeys[i]] = path;
 			sourcePaths.push(path);
 		}
-		encodedByPath = firebaseBatchGetJson_(sourcePaths);
+		encodedByPath = firebaseBatchGetJson_(sourcePaths, { disableFallback: true });
 	}
 	const fetchMs = Math.max(0, Date.now() - fetchStartMs);
 	const writeStartMs = Date.now();
@@ -1267,7 +1270,7 @@ function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMs
 			writtenAt: new Date().toISOString(),
 		}),
 	});
-	firebaseBatchPutJson_(writes);
+	firebaseBatchPutJson_(writes, { disableFallback: true });
 	const shardWriteMs = Math.max(0, Date.now() - writeStartMs);
 	const totalMs = Math.max(0, Date.now() - taskStartMs);
 	Logger.log(
@@ -1288,8 +1291,8 @@ function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMs
 }
 
 // Read source roster seed players for only live clan tags in this task.
-function readAutoRefreshSourcePlayerSeedEntriesForTags_(runIdRaw, tagsRaw) {
-	return readAutoRefreshSourceEntriesForTags_(runIdRaw, buildAutoRefreshRunPath_(runIdRaw, "source/playerSeeds/byTag"), tagsRaw);
+function readAutoRefreshSourcePlayerSeedEntriesForTags_(runIdRaw, tagsRaw, optionsRaw) {
+	return readAutoRefreshSourceEntriesForTags_(runIdRaw, buildAutoRefreshRunPath_(runIdRaw, "source/playerSeeds/byTag"), tagsRaw, optionsRaw);
 }
 
 // Build a per-roster ownership snapshot from compact source indexes plus the
@@ -1379,7 +1382,7 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 		connectedRosterIds: connectedRosterIds,
 		poolSyncErrorByTag: {},
 		seedPlayerByTag: seedPlayerByTag,
-		autoRefreshSnapshotMode: false,
+		autoRefreshSnapshotMode: true,
 	};
 }
 
@@ -1621,7 +1624,7 @@ function writeAutoRefreshCwlCoordinatorResult_(runIdRaw, coordinatorRaw, options
 		method: "PUT",
 		payload: encodeFirebaseObjectKeysRecursive_(compact),
 	});
-	if (writes.length) firebaseBatchPutJson_(writes);
+	if (writes.length) firebaseBatchPutJson_(writes, { disableFallback: true });
 	return compact;
 }
 
@@ -1729,7 +1732,14 @@ function ensureAutoRefreshRosterCwlCoordinatorView_(currentRaw, sourceMetaRaw, s
 			processMs: Math.max(0, Date.now() - captureStartMs),
 		};
 	}
-	summary = writeAutoRefreshCwlCoordinatorResult_(runId, coordinator, { capturePhase: "early" });
+	try {
+		summary = writeAutoRefreshCwlCoordinatorResult_(runId, coordinator, { capturePhase: "early" });
+	} catch (err) {
+		if (err && err.autoRefreshDefer) {
+			return { deferred: true, reason: "firebase-cwl-coordinator-write", view: null, summary: null, coordinatorResult: null };
+		}
+		throw err;
+	}
 	view = readAutoRefreshCwlClanView_(runId, clanTag);
 	Logger.log(
 		"autoRefresh roster ensured cwl coordinator runId=%s rosterId=%s clanTag=%s eventId=%s aggregateHash=%s elapsedMs=%s leagueGroupRequests=%s cwlWarRequests=%s",
@@ -1839,12 +1849,371 @@ function writeAutoRefreshPreparedRosterInput_(runIdRaw, rosterIdRaw, inputRaw) {
 		sourceMetricByTag: input.sourceMetricByTag && typeof input.sourceMetricByTag === "object" ? input.sourceMetricByTag : {},
 		sourceSeedByTag: input.sourceSeedByTag && typeof input.sourceSeedByTag === "object" ? input.sourceSeedByTag : {},
 		metricTags: Array.isArray(input.metricTags) ? input.metricTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [],
+		metricReadTags: Array.isArray(input.metricReadTags) ? input.metricReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [],
+		seedReadTags: Array.isArray(input.seedReadTags) ? input.seedReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [],
+		targetSeedByTag: input.targetSeedByTag && typeof input.targetSeedByTag === "object" ? input.targetSeedByTag : {},
+		currentRegularWarByClanTag: input.currentRegularWarByClanTag && typeof input.currentRegularWarByClanTag === "object" ? input.currentRegularWarByClanTag : {},
+		currentRegularWarErrorByClanTag: input.currentRegularWarErrorByClanTag && typeof input.currentRegularWarErrorByClanTag === "object" ? input.currentRegularWarErrorByClanTag : {},
+		regularWarLogByClanTag: input.regularWarLogByClanTag && typeof input.regularWarLogByClanTag === "object" ? input.regularWarLogByClanTag : {},
+		regularWarLogErrorByClanTag: input.regularWarLogErrorByClanTag && typeof input.regularWarLogErrorByClanTag === "object" ? input.regularWarLogErrorByClanTag : {},
+		requestCounts: input.requestCounts && typeof input.requestCounts === "object" ? input.requestCounts : {},
 		cwlCoordinatorClanView: input.cwlCoordinatorClanView && typeof input.cwlCoordinatorClanView === "object" ? input.cwlCoordinatorClanView : null,
 		cwlCoordinatorResult: input.cwlCoordinatorResult && typeof input.cwlCoordinatorResult === "object" ? input.cwlCoordinatorResult : null,
 		writtenAt: new Date().toISOString(),
 	};
 	writeAutoRefreshRunShard_(runIdRaw, "rosterInputs/" + encodeFirebaseObjectKey_(rosterId), payload, "PUT");
 	return payload;
+}
+
+function readAutoRefreshRosterPhaseState_(runIdRaw, rosterIdRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) return null;
+	const state = readAutoRefreshRunShard_(runIdRaw, "rosterStates/" + encodeFirebaseObjectKey_(rosterId));
+	return state && typeof state === "object" ? state : null;
+}
+
+function writeAutoRefreshRosterPhaseState_(runIdRaw, rosterIdRaw, stateRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) return null;
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : {};
+	writeAutoRefreshRunShard_(runIdRaw, "rosterStates/" + encodeFirebaseObjectKey_(rosterId), state, "PUT");
+	return state;
+}
+
+function normalizeAutoRefreshRosterPhase_(phaseRaw) {
+	const phase = String(phaseRaw == null ? "" : phaseRaw).trim();
+	if (
+		phase === "source" ||
+		phase === "primarySnapshot" ||
+		phase === "warInputs" ||
+		phase === "metricSeedInputs" ||
+		phase === "processSnapshot" ||
+		phase === "commit" ||
+		phase === "completed"
+	) {
+		return phase;
+	}
+	return "source";
+}
+
+function hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInputRaw) {
+	const preparedInput = preparedInputRaw && typeof preparedInputRaw === "object" ? preparedInputRaw : null;
+	if (!preparedInput) return false;
+	return (
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarByClanTag") &&
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarErrorByClanTag") &&
+		Array.isArray(preparedInput.metricReadTags) &&
+		Array.isArray(preparedInput.seedReadTags) &&
+		preparedInput.targetSeedByTag &&
+		typeof preparedInput.targetSeedByTag === "object"
+	);
+}
+
+function buildInitialAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInputRaw) {
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	const rosterId = String(task.rosterId || "").trim();
+	const preparedInput = preparedInputRaw && typeof preparedInputRaw === "object" ? preparedInputRaw : null;
+	let phase = normalizeAutoRefreshRosterPhase_(task.phase);
+	if (!task.phase) {
+		if (isAutoRefreshTaskResultComplete_(runIdRaw, task)) {
+			phase = "completed";
+		} else if (preparedInput && preparedInput.sourceMeta && preparedInput.sourceRoster && preparedInput.clanSnapshot) {
+			if (!hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInput)) {
+				phase = "primarySnapshot";
+			} else {
+				const metricTags = Array.isArray(preparedInput.metricReadTags) ? preparedInput.metricReadTags : [];
+				const seedTags = Array.isArray(preparedInput.seedReadTags) ? preparedInput.seedReadTags : [];
+				const metricCount = Object.keys(preparedInput.sourceMetricByTag || {}).length;
+				const seedCount = Object.keys(preparedInput.sourceSeedByTag || {}).length;
+				phase = metricCount < metricTags.length || seedCount < seedTags.length
+					? "metricSeedInputs"
+					: "processSnapshot";
+			}
+		} else if (preparedInput && preparedInput.sourceMeta && preparedInput.sourceRoster) {
+			phase = "primarySnapshot";
+		} else {
+			phase = "source";
+		}
+	}
+	return {
+		runId: normalizeActiveVersionId_(runIdRaw),
+		taskId: String(task.taskId || ""),
+		rosterId: rosterId,
+		phase: phase,
+		cursor: task.phaseCursor && typeof task.phaseCursor === "object" ? task.phaseCursor : {},
+		attemptByPhase: task.phaseAttempts && typeof task.phaseAttempts === "object" ? task.phaseAttempts : {},
+		lease: task.phaseLease && typeof task.phaseLease === "object" ? task.phaseLease : null,
+		error: String(task.phaseError || task.error || ""),
+		updatedAt: new Date().toISOString(),
+	};
+}
+
+function getAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInputRaw) {
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	const rosterId = String(task.rosterId || "").trim();
+	const stored = readAutoRefreshRosterPhaseState_(runIdRaw, rosterId);
+	const state = stored && typeof stored === "object" ? stored : buildInitialAutoRefreshRosterPhaseState_(runIdRaw, task, preparedInputRaw);
+	state.runId = normalizeActiveVersionId_(runIdRaw);
+	state.taskId = String(task.taskId || state.taskId || "");
+	state.rosterId = rosterId;
+	state.phase = normalizeAutoRefreshRosterPhase_(state.phase);
+	state.cursor = state.cursor && typeof state.cursor === "object" ? state.cursor : {};
+	state.attemptByPhase = state.attemptByPhase && typeof state.attemptByPhase === "object" ? state.attemptByPhase : {};
+	if (
+		(state.phase === "metricSeedInputs" || state.phase === "processSnapshot" || state.phase === "commit") &&
+		!hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInputRaw) &&
+		!isAutoRefreshTaskResultComplete_(runIdRaw, task)
+	) {
+		state.phase = "primarySnapshot";
+		state.cursor = {};
+		state.error = "migrated-missing-snapshot-plan";
+	}
+	return state;
+}
+
+function approximateAutoRefreshPayloadSize_(valueRaw) {
+	try {
+		return JSON.stringify(valueRaw == null ? null : valueRaw).length;
+	} catch (err) {
+		return -1;
+	}
+}
+
+function logAutoRefreshRosterPhase_(labelRaw, currentRaw, taskRaw, stateRaw, detailsRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : {};
+	const details = detailsRaw && typeof detailsRaw === "object" ? detailsRaw : {};
+	const cursor = state.cursor && typeof state.cursor === "object" ? state.cursor : {};
+	Logger.log(
+		"autoRefresh roster phase %s runId=%s taskId=%s rosterId=%s phase=%s cursorMetric=%s cursorSeed=%s requestCount=%s tagCount=%s payloadBytes=%s attempt=%s elapsedMs=%s reason=%s forbiddenLiveFetch=%s",
+		String(labelRaw || ""),
+		current ? current.runId : String(state.runId || ""),
+		String(task.taskId || state.taskId || ""),
+		String(task.rosterId || state.rosterId || ""),
+		String(state.phase || ""),
+		toNonNegativeInt_(cursor.metricOffset),
+		toNonNegativeInt_(cursor.seedOffset),
+		toNonNegativeInt_(details.requestCount),
+		toNonNegativeInt_(details.tagCount),
+		isFinite(Number(details.payloadBytes)) ? Number(details.payloadBytes) : -1,
+		toNonNegativeInt_(details.attempt || (state.attemptByPhase && state.attemptByPhase[state.phase])),
+		toNonNegativeInt_(details.elapsedMs),
+		String(details.reason || ""),
+		details.forbiddenLiveFetch === true,
+	);
+}
+
+function checkpointAutoRefreshRosterPhase_(currentRaw, taskRaw, stateRaw, phaseRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : {};
+	const phase = normalizeAutoRefreshRosterPhase_(phaseRaw);
+	const nowIso = new Date().toISOString();
+	state.phase = phase;
+	state.cursor = options.cursor && typeof options.cursor === "object" ? options.cursor : state.cursor && typeof state.cursor === "object" ? state.cursor : {};
+	state.attemptByPhase = state.attemptByPhase && typeof state.attemptByPhase === "object" ? state.attemptByPhase : {};
+	if (options.start === true) {
+		state.attemptByPhase[phase] = toNonNegativeInt_(state.attemptByPhase[phase]) + 1;
+	}
+	const phaseAttempt = toNonNegativeInt_(state.attemptByPhase[phase]);
+	state.lease = {
+		owner: "auto-refresh-worker",
+		taskId: String(task.taskId || ""),
+		phase: phase,
+		attempt: phaseAttempt,
+		updatedAt: nowIso,
+	};
+	state.error = String(options.error || "");
+	state.updatedAt = nowIso;
+	writeAutoRefreshRosterPhaseState_(current ? current.runId : state.runId, task.rosterId || state.rosterId, state);
+	task.phase = phase;
+	task.phaseCursor = state.cursor;
+	task.phaseAttempts = state.attemptByPhase;
+	task.phaseLease = state.lease;
+	task.phaseError = state.error;
+	task.updatedAt = nowIso;
+	if (current && current.runId && task.taskId) writeAutoRefreshTask_(current.runId, task);
+	if (current && current.runId) {
+		current.taskSummary = {
+			taskId: task.taskId,
+			type: task.type,
+			rosterId: String(task.rosterId || ""),
+			phase: phase,
+			cursor: state.cursor,
+			attempts: phaseAttempt,
+			updatedAt: nowIso,
+		};
+		current.updatedAt = nowIso;
+		writeAutoRefreshQueueCurrent_(current, false);
+	}
+	return state;
+}
+
+function shouldFailAutoRefreshRosterPhaseAfterAttempts_(stateRaw, phaseRaw) {
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : {};
+	const phase = normalizeAutoRefreshRosterPhase_(phaseRaw);
+	const attempts = state.attemptByPhase && typeof state.attemptByPhase === "object" ? toNonNegativeInt_(state.attemptByPhase[phase]) : 0;
+	return attempts >= AUTO_REFRESH_ROSTER_PHASE_MAX_ATTEMPTS;
+}
+
+function serializeAutoRefreshPhaseError_(errRaw) {
+	const err = errRaw && typeof errRaw === "object" ? errRaw : null;
+	return {
+		name: String((err && err.name) || "Error"),
+		message: errorMessage_(errRaw),
+		statusCode: Number(err && err.statusCode) || 0,
+		retryAfter: String((err && err.retryAfter) || ""),
+		autoRefreshSnapshotMiss: !!(err && err.autoRefreshSnapshotMiss),
+	};
+}
+
+function reviveAutoRefreshPhaseError_(errorRaw) {
+	const raw = errorRaw && typeof errorRaw === "object" ? errorRaw : null;
+	if (!raw) return null;
+	const err = new Error(String(raw.message || "Auto-refresh phase error."));
+	err.name = String(raw.name || "Error");
+	if (raw.statusCode != null) err.statusCode = Number(raw.statusCode) || 0;
+	if (raw.retryAfter != null) err.retryAfter = String(raw.retryAfter || "");
+	if (raw.autoRefreshSnapshotMiss) err.autoRefreshSnapshotMiss = true;
+	return err;
+}
+
+function reviveAutoRefreshPhaseErrorMap_(mapRaw) {
+	const map = mapRaw && typeof mapRaw === "object" ? mapRaw : {};
+	const out = {};
+	const keys = Object.keys(map);
+	for (let i = 0; i < keys.length; i++) {
+		const tag = normalizeTag_(keys[i]) || String(keys[i] || "");
+		if (!tag) continue;
+		out[tag] = reviveAutoRefreshPhaseError_(map[keys[i]]) || map[keys[i]];
+	}
+	return out;
+}
+
+function isRetryableAutoRefreshExternalError_(errRaw) {
+	if (errRaw && errRaw.autoRefreshDefer) return true;
+	const statusCode = Number(errRaw && errRaw.statusCode);
+	if (isFinite(statusCode) && statusCode > 0) {
+		return statusCode === 429 || statusCode >= 500;
+	}
+	return true;
+}
+
+function markAutoRefreshRosterPhaseDeferred_(currentRaw, taskRaw, stateRaw, reasonRaw, errRaw, executionStartMsRaw) {
+	const reason = String(reasonRaw || "rosterPhaseDeferred").trim() || "rosterPhaseDeferred";
+	const message = errRaw ? errorMessage_(errRaw) : reason;
+	checkpointAutoRefreshRosterPhase_(currentRaw, taskRaw, stateRaw, stateRaw && stateRaw.phase, {
+		error: message,
+	});
+	logAutoRefreshRosterPhase_("deferred", currentRaw, taskRaw, stateRaw, {
+		reason: reason,
+		elapsedMs: getAutoRefreshJobElapsedMs_(executionStartMsRaw),
+	});
+	scheduleAutoRefreshJobResume_();
+	return { deferred: true, reason: reason, rosterId: String((taskRaw && taskRaw.rosterId) || ""), error: message };
+}
+
+function collectAutoRefreshRosterInputReadPlan_(sourceRosterRaw, clanSnapshotRaw) {
+	const sourceRoster = sourceRosterRaw && typeof sourceRosterRaw === "object" ? sourceRosterRaw : {};
+	const clanSnapshot = clanSnapshotRaw && typeof clanSnapshotRaw === "object" ? clanSnapshotRaw : {};
+	const liveTags = [];
+	const liveSeen = {};
+	const liveMembers = Array.isArray(clanSnapshot.members) ? clanSnapshot.members : [];
+	for (let i = 0; i < liveMembers.length; i++) {
+		const tag = normalizeTag_(liveMembers[i] && liveMembers[i].tag);
+		if (!tag || liveSeen[tag]) continue;
+		liveSeen[tag] = true;
+		liveTags.push(tag);
+	}
+	const metricTags = [];
+	const metricSeen = {};
+	const metricsMembers = Array.isArray(clanSnapshot.metricsMembers) ? clanSnapshot.metricsMembers : [];
+	for (let i = 0; i < metricsMembers.length; i++) {
+		const tag = normalizeTag_(metricsMembers[i] && metricsMembers[i].tag);
+		if (!tag || metricSeen[tag]) continue;
+		metricSeen[tag] = true;
+		metricTags.push(tag);
+	}
+	const targetSeedByTag = buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
+	const targetSeedTags = Object.keys(targetSeedByTag);
+	const metricReadTags = metricTags.slice();
+	const metricReadSet = {};
+	for (let i = 0; i < metricReadTags.length; i++) {
+		const tag = normalizeTag_(metricReadTags[i]);
+		if (tag) metricReadSet[tag] = true;
+	}
+	for (let i = 0; i < targetSeedTags.length; i++) {
+		const tag = normalizeTag_(targetSeedTags[i]);
+		if (!tag || metricReadSet[tag]) continue;
+		metricReadSet[tag] = true;
+		metricReadTags.push(tag);
+	}
+	const seedReadTags = [];
+	const seedReadSeen = {};
+	for (let i = 0; i < liveTags.length; i++) {
+		const tag = normalizeTag_(liveTags[i]);
+		if (!tag || seedReadSeen[tag] || targetSeedByTag[tag]) continue;
+		seedReadSeen[tag] = true;
+		seedReadTags.push(tag);
+	}
+	return {
+		liveTags: liveTags,
+		metricTags: metricTags,
+		metricReadTags: metricReadTags,
+		seedReadTags: seedReadTags,
+		targetSeedByTag: targetSeedByTag,
+	};
+}
+
+function hasAutoRefreshSnapshotMissIssue_(issuesRaw) {
+	const issues = Array.isArray(issuesRaw) ? issuesRaw : [];
+	for (let i = 0; i < issues.length; i++) {
+		const issue = issues[i] && typeof issues[i] === "object" ? issues[i] : {};
+		const message = String(issue.message || "");
+		if (message.indexOf("Auto-refresh snapshot missing") >= 0) return true;
+	}
+	return false;
+}
+
+function withAutoRefreshQueueLiveFetchGuard_(fn) {
+	const root = typeof globalThis !== "undefined" ? globalThis : this;
+	const names = [
+		"cocFetch_",
+		"cocFetchAllByPathEntries_",
+		"fetchClanMembersSnapshot_",
+		"fetchClanMembers_",
+		"prefetchClanMembersSnapshotsByTag_",
+		"fetchLeagueGroupData_",
+		"prefetchLeagueGroupRawByClanTag_",
+		"fetchCurrentRegularWar_",
+		"prefetchCurrentRegularWarByClanTag_",
+		"prefetchCwlWarRawByTag_",
+		"fetchClanWarLog_",
+		"prefetchRegularWarLogByClanTag_",
+	];
+	const originals = {};
+	const guard = { attempted: false, labels: [] };
+	for (let i = 0; i < names.length; i++) {
+		const name = names[i];
+		if (!root || typeof root[name] !== "function") continue;
+		originals[name] = root[name];
+		root[name] = function () {
+			guard.attempted = true;
+			guard.labels.push(name);
+			throw buildAutoRefreshSnapshotMissError_("forbiddenLiveFetch", name, "queue roster processing");
+		};
+	}
+	try {
+		const result = fn(guard);
+		return { result: result, guard: guard };
+	} finally {
+		const originalNames = Object.keys(originals);
+		for (let i = 0; i < originalNames.length; i++) {
+			root[originalNames[i]] = originals[originalNames[i]];
+		}
+	}
 }
 
 function executeAutoRefreshCwlCoordinatorCaptureTask_(currentRaw, taskRaw, executionStartMsRaw, optionsRaw) {
@@ -1904,7 +2273,15 @@ function executeAutoRefreshCwlCoordinatorCaptureTask_(currentRaw, taskRaw, execu
 		return { deferred: true, reason: "beforeCwlCoordinatorWrite", processMs: processMs };
 	}
 	const writeStartMs = Date.now();
-	const compact = writeAutoRefreshCwlCoordinatorResult_(runId, coordinator, { capturePhase: capturePhase });
+	let compact = null;
+	try {
+		compact = writeAutoRefreshCwlCoordinatorResult_(runId, coordinator, { capturePhase: capturePhase });
+	} catch (err) {
+		if (err && err.autoRefreshDefer) {
+			return { deferred: true, reason: "firebase-cwl-coordinator-write", error: errorMessage_(err), processMs: processMs };
+		}
+		throw err;
+	}
 	const writeMs = Math.max(0, Date.now() - writeStartMs);
 	Logger.log(
 		"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s cwlLeagueGroupRequests=%s cwlWarRequests=%s eventId=%s aggregateHash=%s",
@@ -1948,7 +2325,7 @@ function executeAutoRefreshFinalCwlCoordinatorTask_(currentRaw, taskRaw, executi
 	});
 }
 
-// Execute one bounded per-roster task.
+// Execute one resumable per-roster task.
 function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
@@ -1957,12 +2334,13 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 	const taskStartMs = Date.now();
 	if (!runId || !rosterId) throw new Error("Auto-refresh roster task is missing runId or rosterId.");
 	if (isAutoRefreshTaskResultComplete_(runId, task)) {
+		checkpointAutoRefreshRosterPhase_(current, task, getAutoRefreshRosterPhaseState_(runId, task, null), "completed", {});
 		Logger.log(
 			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
 			runId,
 			String(task.taskId || ""),
 			rosterId,
-			String(task.type || "roster"),
+			"completed",
 			0,
 			0,
 			0,
@@ -1972,246 +2350,512 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		);
 		return { skipped: true, reason: "resultExists", rosterId: rosterId };
 	}
-	const fetchStartMs = Date.now();
-	const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
-	const sourceVersionId = normalizeActiveVersionId_(current.sourceVersionId);
-	const preparedInput = readAutoRefreshPreparedRosterInput_(runId, rosterId);
-	const preparedInputUsed = !!preparedInput;
-	let sourceMeta = null;
-	let sourceRoster = null;
-	let sourceOwnership = {};
-	let sourceFetchMs = 0;
-	let clanTag = "";
-	let cwlCoordinatorClanView = null;
-	let cwlCoordinatorResult = null;
-	let clanSnapshot = null;
-	let clanFetchMs = 0;
-	let metricTags = [];
-	let sourceMetricByTag = {};
-	let sourceSeedByTag = {};
-	let metricReadMs = 0;
 
-	if (preparedInputUsed) {
-		sourceMeta = preparedInput.sourceMeta && typeof preparedInput.sourceMeta === "object" ? preparedInput.sourceMeta : null;
-		sourceRoster = preparedInput.sourceRoster && typeof preparedInput.sourceRoster === "object" ? preparedInput.sourceRoster : null;
-		sourceOwnership = preparedInput.sourceOwnership && typeof preparedInput.sourceOwnership === "object" ? preparedInput.sourceOwnership : {};
-		clanSnapshot = preparedInput.clanSnapshot && typeof preparedInput.clanSnapshot === "object" ? preparedInput.clanSnapshot : null;
-		sourceMetricByTag = preparedInput.sourceMetricByTag && typeof preparedInput.sourceMetricByTag === "object" ? preparedInput.sourceMetricByTag : {};
-		sourceSeedByTag = preparedInput.sourceSeedByTag && typeof preparedInput.sourceSeedByTag === "object" ? preparedInput.sourceSeedByTag : {};
-		metricTags = Array.isArray(preparedInput.metricTags) ? preparedInput.metricTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
-		cwlCoordinatorClanView = preparedInput.cwlCoordinatorClanView && typeof preparedInput.cwlCoordinatorClanView === "object" ? preparedInput.cwlCoordinatorClanView : null;
-		cwlCoordinatorResult = preparedInput.cwlCoordinatorResult && typeof preparedInput.cwlCoordinatorResult === "object" ? preparedInput.cwlCoordinatorResult : null;
-		sourceFetchMs = Math.max(0, Date.now() - fetchStartMs);
-	} else {
-		const sourcePaths = [
-			buildAutoRefreshRunPath_(runId, "source/meta"),
-			sourceVersionId
-				? buildActiveVersionPath_(sourceVersionId, "rosters/" + encodedRosterId)
-				: buildAutoRefreshRunPath_(runId, "source/rosters/" + encodedRosterId),
-			buildAutoRefreshRunPath_(runId, "source/ownership"),
-		];
-		const encodedSource = firebaseBatchGetJson_(sourcePaths);
-		sourceMeta = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[0]]);
-		sourceRoster = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[1]]);
-		sourceOwnership = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[2]]) || {};
-		sourceFetchMs = Math.max(0, Date.now() - fetchStartMs);
-		if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
-		if (!sourceRoster) throw new Error("Auto-refresh source roster shard is missing: " + rosterId + ".");
-		clanTag = normalizeTag_(sourceRoster.connectedClanTag);
-		const cwlCoordinator = ensureAutoRefreshRosterCwlCoordinatorView_(current, sourceMeta, sourceRoster, clanTag, executionStartMsRaw);
-		if (cwlCoordinator && cwlCoordinator.deferred) {
-			Logger.log(
-				"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
-				runId,
-				String(task.taskId || ""),
-				rosterId,
-				String(task.type || "roster"),
-				sourceFetchMs,
-				0,
-				0,
-				toNonNegativeInt_(cwlCoordinator.processMs),
-				0,
-				Math.max(0, Date.now() - taskStartMs),
-				getAutoRefreshJobRemainingMs_(executionStartMsRaw),
-				String(cwlCoordinator.reason || "beforeRosterCwlCoordinator"),
-			);
-			return { deferred: true, reason: cwlCoordinator.reason || "beforeRosterCwlCoordinator", rosterId: rosterId };
-		}
-		cwlCoordinatorClanView = cwlCoordinator && cwlCoordinator.view ? cwlCoordinator.view : null;
-		cwlCoordinatorResult = cwlCoordinator && cwlCoordinator.coordinatorResult ? cwlCoordinator.coordinatorResult : null;
-		if (clanTag) {
-			const clanFetchStartMs = Date.now();
-			clanSnapshot = fetchClanMembersSnapshot_(clanTag);
-			clanFetchMs = Math.max(0, Date.now() - clanFetchStartMs);
-		}
-		const liveTags = [];
-		const liveMembers = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
-		for (let i = 0; i < liveMembers.length; i++) {
-			const tag = normalizeTag_(liveMembers[i] && liveMembers[i].tag);
-			if (tag) liveTags.push(tag);
-		}
-		const metricsMembers = Array.isArray(clanSnapshot && clanSnapshot.metricsMembers) ? clanSnapshot.metricsMembers : [];
-		for (let i = 0; i < metricsMembers.length; i++) {
-			const tag = normalizeTag_(metricsMembers[i] && metricsMembers[i].tag);
-			if (tag) metricTags.push(tag);
-		}
-		const targetSeedByTag = buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
-		const targetSeedTags = Object.keys(targetSeedByTag);
-		const metricReadTags = metricTags.slice();
-		const metricReadTagSet = {};
-		for (let i = 0; i < metricReadTags.length; i++) {
-			const tag = normalizeTag_(metricReadTags[i]);
-			if (tag) metricReadTagSet[tag] = true;
-		}
-		for (let i = 0; i < targetSeedTags.length; i++) {
-			const tag = normalizeTag_(targetSeedTags[i]);
-			if (!tag || metricReadTagSet[tag]) continue;
-			metricReadTagSet[tag] = true;
-			metricReadTags.push(tag);
-		}
-		const metricReadStartMs = Date.now();
-		sourceMetricByTag = readAutoRefreshSourceMetricEntriesForTags_(runId, metricReadTags, sourceVersionId);
-		const seedReadTags = [];
-		const seedReadSeen = {};
-		for (let i = 0; i < liveTags.length; i++) {
-			const tag = normalizeTag_(liveTags[i]);
-			if (!tag || seedReadSeen[tag] || targetSeedByTag[tag]) continue;
-			seedReadSeen[tag] = true;
-			seedReadTags.push(tag);
-		}
-		sourceSeedByTag = readAutoRefreshSourcePlayerSeedEntriesForTags_(runId, seedReadTags);
-		for (let i = 0; i < targetSeedTags.length; i++) {
-			const tag = normalizeTag_(targetSeedTags[i]);
-			if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];
-		}
-		metricReadMs = Math.max(0, Date.now() - metricReadStartMs);
-		writeAutoRefreshPreparedRosterInput_(runId, rosterId, {
-			sourceMeta: sourceMeta,
-			sourceRoster: sourceRoster,
-			sourceOwnership: sourceOwnership,
-			clanSnapshot: clanSnapshot,
-			sourceMetricByTag: sourceMetricByTag,
-			sourceSeedByTag: sourceSeedByTag,
-			metricTags: metricTags,
-			cwlCoordinatorClanView: cwlCoordinatorClanView,
-			cwlCoordinatorResult: cwlCoordinatorResult,
-		});
-	}
-	if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
-	if (!sourceRoster) throw new Error("Auto-refresh source roster shard is missing: " + rosterId + ".");
-	clanTag = normalizeTag_(sourceRoster.connectedClanTag);
-	if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
-		Logger.log(
-			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
-			runId,
-			String(task.taskId || ""),
-			rosterId,
-			String(task.type || "roster"),
-			sourceFetchMs,
-			clanFetchMs,
-			metricReadMs,
-			0,
-			0,
-			Math.max(0, Date.now() - taskStartMs),
-			getAutoRefreshJobRemainingMs_(executionStartMsRaw),
-			"beforeRosterProcess",
-		);
-		return { deferred: true, reason: "beforeRosterProcess", rosterId: rosterId };
-	}
-	const processStartMs = Date.now();
-	const workingRosterData = buildAutoRefreshRosterWorkingData_(sourceMeta, sourceRoster, sourceMetricByTag);
-	const prefetchedClanSnapshotsByTag = {};
-	if (clanTag && clanSnapshot) prefetchedClanSnapshotsByTag[clanTag] = clanSnapshot;
-	const ownershipSnapshot = buildAutoRefreshRosterOwnershipSnapshot_(sourceMeta, sourceRoster, rosterId, clanSnapshot, sourceSeedByTag, sourceOwnership);
-	const accumulator = createRefreshAllAccumulator_();
-	const pipelineOptions = {
-		ownershipSnapshot: ownershipSnapshot,
-		skipInitialValidation: true,
-		metricsRunState: { seenClanTags: {}, metricsStorePrepared: true },
-		allowRegularWarHistoryRepair: false,
-		allowRegularWarProvisionalFallback: false,
-		statsOnlyRegularWarFinalization: false,
-		autoRefreshFinalValidationMode: true,
-		prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
-		prefetchedClanErrorsByTag: {},
-		cwlCoordinatorClanView: cwlCoordinatorClanView,
+	const sourceVersionId = normalizeActiveVersionId_(current.sourceVersionId);
+	const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
+	let preparedInput = readAutoRefreshPreparedRosterInput_(runId, rosterId);
+	let state = getAutoRefreshRosterPhaseState_(runId, task, preparedInput);
+	let sourceFetchMs = 0;
+	let clanFetchMs = 0;
+	let metricReadMs = 0;
+	let processMs = 0;
+	let shardWriteMs = 0;
+	let processedSummary = null;
+
+	const reloadInput = () => {
+		preparedInput = readAutoRefreshPreparedRosterInput_(runId, rosterId);
+		return preparedInput && typeof preparedInput === "object" ? preparedInput : {};
 	};
-	if (cwlCoordinatorResult) pipelineOptions.cwlCoordinatorResult = cwlCoordinatorResult;
-	const processed = processRefreshAllRosterPipelineIntoAccumulator_(workingRosterData, rosterId, pipelineOptions, accumulator);
-	const processMs = Math.max(0, Date.now() - processStartMs);
-	if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
-		Logger.log(
-			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
-			runId,
-			String(task.taskId || ""),
-			rosterId,
-			String(task.type || "roster"),
-			sourceFetchMs,
-			clanFetchMs,
-			metricReadMs,
-			processMs,
-			0,
-			Math.max(0, Date.now() - taskStartMs),
-			getAutoRefreshJobRemainingMs_(executionStartMsRaw),
-			"beforeRosterShardWrite",
-		);
-		return { deferred: true, reason: "beforeRosterShardWrite", rosterId: rosterId };
-	}
-	const shardWriteStartMs = Date.now();
-	const validatedProcessedRosterData = validateRosterData_(processed.rosterData);
-	const metricResult = buildRosterMetricResult_(validatedProcessedRosterData, metricTags, processed.pipelineResult && processed.pipelineResult.memberTracking);
-	const warResult = buildRosterWarResult_(validatedProcessedRosterData, rosterId, processed.pipelineResult, accumulator, {
-		sourceFetchMs: sourceFetchMs,
-		clanFetchMs: clanFetchMs,
-		metricReadMs: metricReadMs,
-		processMs: processMs,
-	});
-	const activeRoster = findRosterInDataById_(validatedProcessedRosterData, rosterId);
-	if (!activeRoster) throw new Error("Active roster shard missing after pipeline: " + rosterId + ".");
-	const writtenAt = new Date().toISOString();
-	const stagedMetricWrites = buildActiveVersionPlayerMetricEntryWrites_(runId, metricResult, writtenAt);
-	const rosterWrites = [
-		{
-			path: buildActiveVersionPath_(runId, "rosters/" + encodedRosterId),
-			method: "PUT",
-			payload: encodeFirebaseObjectKeysRecursive_(activeRoster),
-		},
-		{
-			path: buildAutoRefreshRunPath_(runId, "rosterWrites/" + encodedRosterId),
-			method: "PUT",
-			payload: encodeFirebaseObjectKeysRecursive_({
+
+	const persistInput = (patchRaw) => {
+		const previous = reloadInput();
+		const patch = patchRaw && typeof patchRaw === "object" ? patchRaw : {};
+		preparedInput = writeAutoRefreshPreparedRosterInput_(runId, rosterId, Object.assign({}, previous, patch));
+		return preparedInput;
+	};
+
+	while (state.phase !== "completed") {
+		if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+			return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterPhaseBudget", null, executionStartMsRaw);
+		}
+
+		if (state.phase === "source") {
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterSourceRead", null, executionStartMsRaw);
+			}
+			checkpointAutoRefreshRosterPhase_(current, task, state, "source", { start: true, cursor: {} });
+			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "source")) {
+				throw new Error("Auto-refresh roster source phase exceeded retry limit for " + rosterId + ".");
+			}
+			scheduleAutoRefreshJobResume_();
+			const phaseStartMs = Date.now();
+			logAutoRefreshRosterPhase_("start", current, task, state, { reason: "source-read" });
+			const sourcePaths = [
+				buildAutoRefreshRunPath_(runId, "source/meta"),
+				sourceVersionId
+					? buildActiveVersionPath_(sourceVersionId, "rosters/" + encodedRosterId)
+					: buildAutoRefreshRunPath_(runId, "source/rosters/" + encodedRosterId),
+				buildAutoRefreshRunPath_(runId, "source/ownership"),
+			];
+			let encodedSource = null;
+			try {
+				encodedSource = firebaseBatchGetJson_(sourcePaths, { disableFallback: true });
+			} catch (err) {
+				if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-source-read", err, executionStartMsRaw);
+				throw err;
+			}
+			const sourceMeta = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[0]]);
+			const sourceRoster = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[1]]);
+			const sourceOwnership = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[2]]) || {};
+			sourceFetchMs += Math.max(0, Date.now() - phaseStartMs);
+			if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
+			persistInput({
+				sourceMeta: sourceMeta,
+				sourceRoster: sourceRoster,
+				sourceOwnership: sourceOwnership,
+				requestCounts: {},
+			});
+			logAutoRefreshRosterPhase_("done", current, task, state, {
+				payloadBytes: approximateAutoRefreshPayloadSize_({ sourceMeta: sourceMeta, sourceRoster: sourceRoster, sourceOwnership: sourceOwnership }),
+				elapsedMs: Math.max(0, Date.now() - phaseStartMs),
+			});
+			checkpointAutoRefreshRosterPhase_(current, task, state, "primarySnapshot", { cursor: {} });
+			continue;
+		}
+
+		if (state.phase === "primarySnapshot") {
+			const input = reloadInput();
+			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
+			if (!sourceRoster) {
+				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
+				continue;
+			}
+			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
+			checkpointAutoRefreshRosterPhase_(current, task, state, "primarySnapshot", { start: true, cursor: {} });
+			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "primarySnapshot")) {
+				throw new Error("Auto-refresh roster primary snapshot phase exceeded retry limit for " + rosterId + ".");
+			}
+			scheduleAutoRefreshJobResume_();
+			const phaseStartMs = Date.now();
+			logAutoRefreshRosterPhase_("start", current, task, state, { requestCount: clanTag ? 2 : 0, reason: "primary-snapshot" });
+			let clanSnapshot = null;
+			const currentRegularWarByClanTag = {};
+			const currentRegularWarErrorByClanTag = {};
+			if (clanTag) {
+				try {
+					clanSnapshot = fetchClanMembersSnapshot_(clanTag);
+				} catch (err) {
+					if (isRetryableAutoRefreshExternalError_(err)) {
+						return markAutoRefreshRosterPhaseDeferred_(current, task, state, "clan-members-snapshot", err, executionStartMsRaw);
+					}
+					throw err;
+				}
+				try {
+					currentRegularWarByClanTag[clanTag] = fetchCurrentRegularWar_(clanTag);
+				} catch (err) {
+					if (isRetryableAutoRefreshExternalError_(err)) {
+						return markAutoRefreshRosterPhaseDeferred_(current, task, state, "current-war-snapshot", err, executionStartMsRaw);
+					}
+					currentRegularWarErrorByClanTag[clanTag] = serializeAutoRefreshPhaseError_(err);
+				}
+			}
+			if (clanTag && !clanSnapshot) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "missing-clan-members-snapshot", null, executionStartMsRaw);
+			}
+			const plan = collectAutoRefreshRosterInputReadPlan_(sourceRoster, clanSnapshot);
+			const requestCounts = Object.assign({}, input.requestCounts || {}, {
+				members: clanTag ? 1 : 0,
+				currentWar: clanTag ? 1 : 0,
+			});
+			persistInput({
+				clanSnapshot: clanSnapshot,
+				currentRegularWarByClanTag: currentRegularWarByClanTag,
+				currentRegularWarErrorByClanTag: currentRegularWarErrorByClanTag,
+				metricTags: plan.metricTags,
+				metricReadTags: plan.metricReadTags,
+				seedReadTags: plan.seedReadTags,
+				targetSeedByTag: plan.targetSeedByTag,
+				sourceMetricByTag: input.sourceMetricByTag || {},
+				sourceSeedByTag: input.sourceSeedByTag || {},
+				requestCounts: requestCounts,
+			});
+			clanFetchMs += Math.max(0, Date.now() - phaseStartMs);
+			logAutoRefreshRosterPhase_("done", current, task, state, {
+				requestCount: toNonNegativeInt_(requestCounts.members) + toNonNegativeInt_(requestCounts.currentWar),
+				tagCount: plan.metricReadTags.length + plan.seedReadTags.length,
+				payloadBytes: approximateAutoRefreshPayloadSize_(clanSnapshot),
+				elapsedMs: Math.max(0, Date.now() - phaseStartMs),
+			});
+			checkpointAutoRefreshRosterPhase_(current, task, state, "warInputs", { cursor: {} });
+			continue;
+		}
+
+		if (state.phase === "warInputs") {
+			const input = reloadInput();
+			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
+			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
+			if (!sourceMeta || !sourceRoster) {
+				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
+				continue;
+			}
+			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
+			checkpointAutoRefreshRosterPhase_(current, task, state, "warInputs", { start: true, cursor: {} });
+			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "warInputs")) {
+				throw new Error("Auto-refresh roster war-input phase exceeded retry limit for " + rosterId + ".");
+			}
+			scheduleAutoRefreshJobResume_();
+			const phaseStartMs = Date.now();
+			logAutoRefreshRosterPhase_("start", current, task, state, { reason: "war-inputs" });
+			let cwlCoordinatorClanView = input.cwlCoordinatorClanView && typeof input.cwlCoordinatorClanView === "object" ? input.cwlCoordinatorClanView : null;
+			let cwlCoordinatorResult = input.cwlCoordinatorResult && typeof input.cwlCoordinatorResult === "object" ? input.cwlCoordinatorResult : null;
+			if (clanTag && getRosterTrackingMode_(sourceRoster) === "cwl" && !cwlCoordinatorClanView && !cwlCoordinatorResult) {
+				const cwlCoordinator = ensureAutoRefreshRosterCwlCoordinatorView_(current, sourceMeta, sourceRoster, clanTag, executionStartMsRaw);
+				if (cwlCoordinator && cwlCoordinator.deferred) {
+					return markAutoRefreshRosterPhaseDeferred_(current, task, state, cwlCoordinator.reason || "beforeRosterCwlCoordinator", null, executionStartMsRaw);
+				}
+				cwlCoordinatorClanView = cwlCoordinator && cwlCoordinator.view ? cwlCoordinator.view : null;
+				cwlCoordinatorResult = cwlCoordinator && cwlCoordinator.coordinatorResult ? cwlCoordinator.coordinatorResult : null;
+			}
+			const currentRegularWarByClanTag = input.currentRegularWarByClanTag && typeof input.currentRegularWarByClanTag === "object" ? input.currentRegularWarByClanTag : {};
+			const currentRegularWarErrorByClanTag = reviveAutoRefreshPhaseErrorMap_(input.currentRegularWarErrorByClanTag);
+			let regularWarLogByClanTag = input.regularWarLogByClanTag && typeof input.regularWarLogByClanTag === "object" ? input.regularWarLogByClanTag : {};
+			let regularWarLogErrorByClanTag = input.regularWarLogErrorByClanTag && typeof input.regularWarLogErrorByClanTag === "object" ? input.regularWarLogErrorByClanTag : {};
+			let warLogRequests = 0;
+			if (
+				clanTag &&
+				!Object.prototype.hasOwnProperty.call(regularWarLogByClanTag, clanTag) &&
+				!Object.prototype.hasOwnProperty.call(regularWarLogErrorByClanTag, clanTag) &&
+				shouldPrefetchRegularWarLogForRoster_(
+					sourceRoster,
+					currentRegularWarByClanTag,
+					currentRegularWarErrorByClanTag,
+					{
+						allowRegularWarHistoryRepair: false,
+						allowRegularWarProvisionalFallback: false,
+					},
+					new Date().toISOString(),
+				)
+			) {
+				const warLog = prefetchRegularWarLogByClanTag_([clanTag], {
+					batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
+					batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
+				});
+				warLogRequests = toNonNegativeInt_(warLog && warLog.requestCount);
+				regularWarLogByClanTag = warLog && warLog.entriesByClanTag && typeof warLog.entriesByClanTag === "object" ? warLog.entriesByClanTag : {};
+				const rawErrors = warLog && warLog.errorByClanTag && typeof warLog.errorByClanTag === "object" ? warLog.errorByClanTag : {};
+				const errorTags = Object.keys(rawErrors);
+				regularWarLogErrorByClanTag = {};
+				for (let i = 0; i < errorTags.length; i++) {
+					const tag = normalizeTag_(errorTags[i]);
+					const err = rawErrors[errorTags[i]];
+					if (!tag) continue;
+					if (!isPrivateWarLogError_(err) && isRetryableAutoRefreshExternalError_(err)) {
+						return markAutoRefreshRosterPhaseDeferred_(current, task, state, "regular-war-log-snapshot", err, executionStartMsRaw);
+					}
+					regularWarLogErrorByClanTag[tag] = serializeAutoRefreshPhaseError_(err);
+				}
+			}
+			const requestCounts = Object.assign({}, input.requestCounts || {}, {
+				regularWarLog: toNonNegativeInt_((input.requestCounts || {}).regularWarLog) + warLogRequests,
+			});
+			persistInput({
+				cwlCoordinatorClanView: cwlCoordinatorClanView,
+				cwlCoordinatorResult: cwlCoordinatorResult,
+				regularWarLogByClanTag: regularWarLogByClanTag,
+				regularWarLogErrorByClanTag: regularWarLogErrorByClanTag,
+				requestCounts: requestCounts,
+			});
+			logAutoRefreshRosterPhase_("done", current, task, state, {
+				requestCount: warLogRequests,
+				payloadBytes: approximateAutoRefreshPayloadSize_({ cwlCoordinatorClanView: cwlCoordinatorClanView, regularWarLogByClanTag: regularWarLogByClanTag }),
+				elapsedMs: Math.max(0, Date.now() - phaseStartMs),
+			});
+			checkpointAutoRefreshRosterPhase_(current, task, state, "metricSeedInputs", {
+				cursor: { metricOffset: 0, seedOffset: 0 },
+			});
+			continue;
+		}
+
+		if (state.phase === "metricSeedInputs") {
+			const input = reloadInput();
+			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
+			if (!sourceRoster) {
+				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
+				continue;
+			}
+			const cursor = state.cursor && typeof state.cursor === "object" ? state.cursor : {};
+			let metricOffset = toNonNegativeInt_(cursor.metricOffset);
+			let seedOffset = toNonNegativeInt_(cursor.seedOffset);
+			const metricReadTags = Array.isArray(input.metricReadTags) ? input.metricReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
+			const seedReadTags = Array.isArray(input.seedReadTags) ? input.seedReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
+			let sourceMetricByTag = input.sourceMetricByTag && typeof input.sourceMetricByTag === "object" ? input.sourceMetricByTag : {};
+			let sourceSeedByTag = input.sourceSeedByTag && typeof input.sourceSeedByTag === "object" ? input.sourceSeedByTag : {};
+			const targetSeedByTag = input.targetSeedByTag && typeof input.targetSeedByTag === "object" ? input.targetSeedByTag : buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
+			const targetSeedTags = Object.keys(targetSeedByTag);
+			checkpointAutoRefreshRosterPhase_(current, task, state, "metricSeedInputs", {
+				start: true,
+				cursor: { metricOffset: metricOffset, seedOffset: seedOffset },
+			});
+			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "metricSeedInputs")) {
+				throw new Error("Auto-refresh roster metric/seed input phase exceeded retry limit for " + rosterId + ".");
+			}
+			const phaseStartMs = Date.now();
+			let chunkTagCount = 0;
+			let reason = "";
+			if (metricOffset < metricReadTags.length) {
+				if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
+					return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeMetricInputChunk", null, executionStartMsRaw);
+				}
+				const chunk = metricReadTags.slice(metricOffset, metricOffset + AUTO_REFRESH_ROSTER_INPUT_READ_CHUNK_TAG_LIMIT);
+				chunkTagCount = chunk.length;
+				reason = "metric-inputs";
+				scheduleAutoRefreshJobResume_();
+				logAutoRefreshRosterPhase_("start", current, task, state, { tagCount: chunk.length, reason: reason });
+				let chunkEntries = null;
+				try {
+					chunkEntries = readAutoRefreshSourceMetricEntriesForTags_(runId, chunk, sourceVersionId, { disableFirebaseFallback: true });
+				} catch (err) {
+					if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-metric-inputs", err, executionStartMsRaw);
+					throw err;
+				}
+				sourceMetricByTag = Object.assign({}, sourceMetricByTag, chunkEntries);
+				metricOffset += chunk.length;
+			} else if (seedOffset < seedReadTags.length) {
+				if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
+					return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeSeedInputChunk", null, executionStartMsRaw);
+				}
+				const chunk = seedReadTags.slice(seedOffset, seedOffset + AUTO_REFRESH_ROSTER_INPUT_READ_CHUNK_TAG_LIMIT);
+				chunkTagCount = chunk.length;
+				reason = "seed-inputs";
+				scheduleAutoRefreshJobResume_();
+				logAutoRefreshRosterPhase_("start", current, task, state, { tagCount: chunk.length, reason: reason });
+				let chunkEntries = null;
+				try {
+					chunkEntries = readAutoRefreshSourcePlayerSeedEntriesForTags_(runId, chunk, { disableFirebaseFallback: true });
+				} catch (err) {
+					if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-seed-inputs", err, executionStartMsRaw);
+					throw err;
+				}
+				sourceSeedByTag = Object.assign({}, sourceSeedByTag, chunkEntries);
+				seedOffset += chunk.length;
+			}
+			for (let i = 0; i < targetSeedTags.length; i++) {
+				const tag = normalizeTag_(targetSeedTags[i]);
+				if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];
+			}
+			persistInput({
+				sourceMetricByTag: sourceMetricByTag,
+				sourceSeedByTag: sourceSeedByTag,
+				targetSeedByTag: targetSeedByTag,
+			});
+			metricReadMs += Math.max(0, Date.now() - phaseStartMs);
+			const nextCursor = { metricOffset: metricOffset, seedOffset: seedOffset };
+			logAutoRefreshRosterPhase_("done", current, task, state, {
+				tagCount: chunkTagCount,
+				payloadBytes: approximateAutoRefreshPayloadSize_({ sourceMetricByTag: sourceMetricByTag, sourceSeedByTag: sourceSeedByTag }),
+				elapsedMs: Math.max(0, Date.now() - phaseStartMs),
+				reason: reason || "input-read-complete",
+			});
+			if (metricOffset < metricReadTags.length || seedOffset < seedReadTags.length) {
+				checkpointAutoRefreshRosterPhase_(current, task, state, "metricSeedInputs", { cursor: nextCursor });
+				if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
+					return markAutoRefreshRosterPhaseDeferred_(current, task, state, "afterInputChunkBudget", null, executionStartMsRaw);
+				}
+				continue;
+			}
+			checkpointAutoRefreshRosterPhase_(current, task, state, "processSnapshot", { cursor: nextCursor });
+			continue;
+		}
+
+		if (state.phase === "processSnapshot") {
+			const input = reloadInput();
+			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
+			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
+			if (!sourceMeta || !sourceRoster) {
+				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
+				continue;
+			}
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterProcess", null, executionStartMsRaw);
+			}
+			checkpointAutoRefreshRosterPhase_(current, task, state, "processSnapshot", { start: true });
+			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "processSnapshot")) {
+				throw new Error("Auto-refresh roster processing phase exceeded retry limit for " + rosterId + ".");
+			}
+			scheduleAutoRefreshJobResume_();
+			const processStartMs = Date.now();
+			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
+			logAutoRefreshRosterPhase_("start", current, task, state, {
+				tagCount: Object.keys(input.sourceMetricByTag || {}).length,
+				reason: "snapshot-process",
+			});
+			const workingRosterData = buildAutoRefreshRosterWorkingData_(sourceMeta, sourceRoster, input.sourceMetricByTag || {});
+			const prefetchedClanSnapshotsByTag = {};
+			if (clanTag && input.clanSnapshot) prefetchedClanSnapshotsByTag[clanTag] = input.clanSnapshot;
+			const ownershipSnapshot = buildAutoRefreshRosterOwnershipSnapshot_(
+				sourceMeta,
+				sourceRoster,
+				rosterId,
+				input.clanSnapshot,
+				input.sourceSeedByTag || {},
+				input.sourceOwnership || {},
+			);
+			const accumulator = createRefreshAllAccumulator_();
+			const pipelineOptions = {
+				ownershipSnapshot: ownershipSnapshot,
+				skipInitialValidation: true,
+				metricsRunState: { seenClanTags: {}, metricsStorePrepared: true },
+				allowRegularWarHistoryRepair: false,
+				allowRegularWarProvisionalFallback: false,
+				statsOnlyRegularWarFinalization: false,
+				autoRefreshFinalValidationMode: true,
+				autoRefreshSnapshotMode: true,
+				prefetchedClanSnapshotsByTag: prefetchedClanSnapshotsByTag,
+				prefetchedClanErrorsByTag: {},
+				prefetchedCurrentRegularWarByClanTag: input.currentRegularWarByClanTag || {},
+				prefetchedRegularWarErrorByClanTag: reviveAutoRefreshPhaseErrorMap_(input.currentRegularWarErrorByClanTag),
+				prefetchedRegularWarLogByClanTag: input.regularWarLogByClanTag || {},
+				prefetchedRegularWarLogErrorByClanTag: reviveAutoRefreshPhaseErrorMap_(input.regularWarLogErrorByClanTag),
+				cwlCoordinatorClanView: input.cwlCoordinatorClanView || null,
+			};
+			if (input.cwlCoordinatorResult) pipelineOptions.cwlCoordinatorResult = input.cwlCoordinatorResult;
+			const guarded = withAutoRefreshQueueLiveFetchGuard_(() =>
+				processRefreshAllRosterPipelineIntoAccumulator_(workingRosterData, rosterId, pipelineOptions, accumulator),
+			);
+			const processed = guarded.result;
+			processMs += Math.max(0, Date.now() - processStartMs);
+			if (guarded.guard && guarded.guard.attempted) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "forbidden-live-fetch", new Error("Roster processing attempted forbidden live fetch: " + guarded.guard.labels.join(",")), executionStartMsRaw);
+			}
+			const pipelineIssues = Array.isArray(accumulator.issues) ? accumulator.issues : [];
+			if (hasAutoRefreshSnapshotMissIssue_(pipelineIssues)) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "snapshot-miss", new Error(buildAutoRefreshIssueSummary_(pipelineIssues) || "Auto-refresh snapshot missing required input."), executionStartMsRaw);
+			}
+			const validatedProcessedRosterData = validateRosterData_(processed.rosterData);
+			const metricTags = Array.isArray(input.metricTags) ? input.metricTags : [];
+			const metricResult = buildRosterMetricResult_(validatedProcessedRosterData, metricTags, processed.pipelineResult && processed.pipelineResult.memberTracking);
+			const warResult = buildRosterWarResult_(validatedProcessedRosterData, rosterId, processed.pipelineResult, accumulator, {
+				sourceFetchMs: sourceFetchMs,
+				clanFetchMs: clanFetchMs,
+				metricReadMs: metricReadMs,
+				processMs: processMs,
+			});
+			const activeRoster = findRosterInDataById_(validatedProcessedRosterData, rosterId);
+			if (!activeRoster) throw new Error("Active roster shard missing after pipeline: " + rosterId + ".");
+			const processOutput = {
 				rosterId: rosterId,
-				versionId: runId,
-				path: buildActiveVersionPath_(runId, "rosters/" + encodedRosterId),
-				playerTags: collectAutoRefreshRosterPlayerTags_(activeRoster),
-				writtenAt: writtenAt,
-			}),
-		},
-		{
-			path: buildAutoRefreshRunPath_(runId, "warResults/" + encodedRosterId),
-			method: "PUT",
-			payload: encodeFirebaseObjectKeysRecursive_(warResult),
-		},
-	];
-	for (let i = 0; i < stagedMetricWrites.writes.length; i++) {
-		rosterWrites.push(stagedMetricWrites.writes[i]);
+				activeRoster: activeRoster,
+				metricResult: metricResult,
+				warResult: warResult,
+				issueCount: pipelineIssues.length,
+				issueSummary: buildAutoRefreshIssueSummary_(pipelineIssues),
+				timings: {
+					sourceFetchMs: sourceFetchMs,
+					clanFetchMs: clanFetchMs,
+					metricReadMs: metricReadMs,
+					processMs: processMs,
+				},
+				writtenAt: new Date().toISOString(),
+			};
+			writeAutoRefreshRunShard_(runId, "rosterProcessResults/" + encodedRosterId, processOutput, "PUT");
+			processedSummary = {
+				issueCount: processOutput.issueCount,
+				issueSummary: processOutput.issueSummary,
+			};
+			logAutoRefreshRosterPhase_("done", current, task, state, {
+				tagCount: Object.keys(metricResult.byTag || {}).length,
+				payloadBytes: approximateAutoRefreshPayloadSize_(processOutput),
+				elapsedMs: Math.max(0, Date.now() - processStartMs),
+				forbiddenLiveFetch: false,
+			});
+			checkpointAutoRefreshRosterPhase_(current, task, state, "commit", {});
+			continue;
+		}
+
+		if (state.phase === "commit") {
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterCommit", null, executionStartMsRaw);
+			}
+			checkpointAutoRefreshRosterPhase_(current, task, state, "commit", { start: true });
+			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "commit")) {
+				throw new Error("Auto-refresh roster commit phase exceeded retry limit for " + rosterId + ".");
+			}
+			scheduleAutoRefreshJobResume_();
+			const commitStartMs = Date.now();
+			const processOutput = readAutoRefreshRunShard_(runId, "rosterProcessResults/" + encodedRosterId);
+			if (!processOutput || typeof processOutput !== "object") {
+				checkpointAutoRefreshRosterPhase_(current, task, state, "processSnapshot", {});
+				continue;
+			}
+			logAutoRefreshRosterPhase_("start", current, task, state, {
+				tagCount: Object.keys((processOutput.metricResult && processOutput.metricResult.byTag) || {}).length,
+				payloadBytes: approximateAutoRefreshPayloadSize_(processOutput),
+				reason: "commit",
+			});
+			const activeRoster = processOutput.activeRoster && typeof processOutput.activeRoster === "object" ? processOutput.activeRoster : null;
+			if (!activeRoster) throw new Error("Processed roster output is missing for " + rosterId + ".");
+			const writtenAt = new Date().toISOString();
+			const stagedMetricWrites = buildActiveVersionPlayerMetricEntryWrites_(runId, processOutput.metricResult, writtenAt);
+			const rosterWrites = [
+				{
+					path: buildActiveVersionPath_(runId, "rosters/" + encodedRosterId),
+					method: "PUT",
+					payload: encodeFirebaseObjectKeysRecursive_(activeRoster),
+				},
+				{
+					path: buildAutoRefreshRunPath_(runId, "rosterWrites/" + encodedRosterId),
+					method: "PUT",
+					payload: encodeFirebaseObjectKeysRecursive_({
+						rosterId: rosterId,
+						versionId: runId,
+						path: buildActiveVersionPath_(runId, "rosters/" + encodedRosterId),
+						playerTags: collectAutoRefreshRosterPlayerTags_(activeRoster),
+						writtenAt: writtenAt,
+					}),
+				},
+				{
+					path: buildAutoRefreshRunPath_(runId, "warResults/" + encodedRosterId),
+					method: "PUT",
+					payload: encodeFirebaseObjectKeysRecursive_(processOutput.warResult),
+				},
+			];
+			for (let i = 0; i < stagedMetricWrites.writes.length; i++) rosterWrites.push(stagedMetricWrites.writes[i]);
+			rosterWrites.push({
+				path: buildAutoRefreshRunPath_(runId, "metricResults/" + encodedRosterId),
+				method: "PUT",
+				payload: encodeFirebaseObjectKeysRecursive_(buildRosterMetricResultSummary_(processOutput.metricResult, stagedMetricWrites, writtenAt)),
+			});
+			try {
+				firebaseBatchPutJson_(rosterWrites, { disableFallback: true });
+			} catch (err) {
+				if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-roster-commit", err, executionStartMsRaw);
+				throw err;
+			}
+			shardWriteMs += Math.max(0, Date.now() - commitStartMs);
+			processedSummary = {
+				issueCount: toNonNegativeInt_(processOutput.issueCount),
+				issueSummary: String(processOutput.issueSummary || ""),
+				metricTags: stagedMetricWrites.entryCount,
+			};
+			logAutoRefreshRosterPhase_("done", current, task, state, {
+				tagCount: stagedMetricWrites.entryCount,
+				payloadBytes: approximateAutoRefreshPayloadSize_(rosterWrites),
+				elapsedMs: Math.max(0, Date.now() - commitStartMs),
+			});
+			checkpointAutoRefreshRosterPhase_(current, task, state, "completed", {});
+			continue;
+		}
+
+		throw new Error("Unknown auto-refresh roster phase: " + state.phase + ".");
 	}
-	rosterWrites.push(
-		{
-			path: buildAutoRefreshRunPath_(runId, "metricResults/" + encodedRosterId),
-			method: "PUT",
-			payload: encodeFirebaseObjectKeysRecursive_(buildRosterMetricResultSummary_(metricResult, stagedMetricWrites, writtenAt)),
-		},
-	);
-	firebaseBatchPutJson_(rosterWrites);
-	const shardWriteMs = Math.max(0, Date.now() - shardWriteStartMs);
+
 	const totalMs = Math.max(0, Date.now() - taskStartMs);
 	Logger.log(
 		"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s",
 		runId,
 		String(task.taskId || ""),
 		rosterId,
-		String(task.type || "roster"),
+		"completed",
 		sourceFetchMs,
 		clanFetchMs,
 		metricReadMs,
@@ -2222,9 +2866,9 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 	);
 	return {
 		rosterId: rosterId,
-		issueCount: Array.isArray(accumulator.issues) ? accumulator.issues.length : 0,
-		issueSummary: buildAutoRefreshIssueSummary_(accumulator.issues),
-		metricTags: stagedMetricWrites.entryCount,
+		issueCount: toNonNegativeInt_(processedSummary && processedSummary.issueCount),
+		issueSummary: String((processedSummary && processedSummary.issueSummary) || ""),
+		metricTags: toNonNegativeInt_(processedSummary && processedSummary.metricTags),
 		totalMs: totalMs,
 	};
 }
@@ -2253,7 +2897,7 @@ function readAutoRefreshMetricResultsByRosterId_(runIdRaw, rosterIdsRaw) {
 		paths.push(path);
 		rosterIdByPath[path] = rosterId;
 	}
-	const encodedByPath = firebaseBatchGetJson_(paths);
+	const encodedByPath = firebaseBatchGetJson_(paths, { disableFallback: true });
 	const out = {};
 	for (let i = 0; i < paths.length; i++) {
 		const path = paths[i];
@@ -2313,7 +2957,7 @@ function buildAutoRefreshFinalRosterDataFromShards_(runIdRaw, rosterIdsRaw, last
 			rosterPathById[rosterId] = path;
 			rosterPaths.push(path);
 		}
-		encodedRosterByPath = firebaseBatchGetJson_(rosterPaths);
+		encodedRosterByPath = firebaseBatchGetJson_(rosterPaths, { disableFallback: true });
 	}
 	const rosters = [];
 	for (let i = 0; i < rosterIds.length; i++) {
@@ -2534,7 +3178,15 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 		}
 		const runId = createActiveVersionId_("auto-refresh");
 		const shardWriteStartMs = Date.now();
-		const sourceMeta = writeAutoRefreshRunSourceShards_(runId, rosterData, sourceFingerprint, runPlan, sourceOwnershipIndex, sourceVersionId);
+		let sourceMeta = null;
+		try {
+			sourceMeta = writeAutoRefreshRunSourceShards_(runId, rosterData, sourceFingerprint, runPlan, sourceOwnershipIndex, sourceVersionId);
+		} catch (err) {
+			if (err && err.autoRefreshDefer) {
+				return deferFreshAutoRefreshStartForBudget_("firebaseSourceShardWrite", startedAt, executionStartMs, AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS);
+			}
+			throw err;
+		}
 		const tasks = buildAutoRefreshQueueTasks_(runId, runPlan.rosterIds, { metricCopyKeys: metricCopyKeys });
 		const taskIds = writeAutoRefreshQueueTasks_(runId, tasks);
 		const current = writeAutoRefreshQueueCurrent_({
@@ -2633,7 +3285,7 @@ function verifyAutoRefreshFinalizeResultMarkers_(runIdRaw, rosterIdsRaw, options
 			? buildActiveVersionPath_(runIdRaw, "rosters/" + encodedRosterId)
 			: buildAutoRefreshRunPath_(runIdRaw, "rosterWrites/" + encodedRosterId));
 	}
-	const verifyPayloadByPath = firebaseBatchGetJson_(verifyPaths);
+	const verifyPayloadByPath = firebaseBatchGetJson_(verifyPaths, { disableFallback: true });
 	const activeRosterById = {};
 	const metricResultByRosterId = {};
 	const rosterWriteByRosterId = {};
@@ -2705,7 +3357,7 @@ function assertAutoRefreshActiveRosterShardTagsUnique_(runIdRaw, rosterIdsRaw) {
 		paths.push(path);
 		rosterIdByPath[path] = rosterId;
 	}
-	const encodedByPath = firebaseBatchGetJson_(paths);
+	const encodedByPath = firebaseBatchGetJson_(paths, { disableFallback: true });
 	const seen = {};
 	for (let i = 0; i < paths.length; i++) {
 		const path = paths[i];
@@ -2821,6 +3473,32 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 		if (!summary || typeof summary !== "object" || summary.completed !== true) {
 			return { ok: false, status: "missing-cwl-coordinator-result", eventId: need.eventId || "", runId: runId };
 		}
+		const stored = runId ? readAutoRefreshRunShard_(runId, "final/cwlSeasonEventRefresh") : null;
+		const storedEventId = String((stored && stored.eventId) || "");
+		const neededEventId = String(need.eventId || "");
+		const storedAggregateHash = String((stored && stored.aggregateHash) || "");
+		const summaryAggregateHash = String(summary.aggregateHash || "");
+		if (
+			stored &&
+			typeof stored === "object" &&
+			stored.completed === true &&
+			stored.ok !== false &&
+			(!neededEventId || storedEventId === neededEventId) &&
+			(!summaryAggregateHash || storedAggregateHash === summaryAggregateHash)
+		) {
+			const reused = Object.assign({}, stored, {
+				reused: true,
+				requestCounts: stored.requestCounts && typeof stored.requestCounts === "object" ? stored.requestCounts : summary.requestCounts || {},
+			});
+			Logger.log(
+				"Auto-refresh queue CWL season event refresh reused runId=%s eventId=%s aggregateHash=%s status=%s",
+				runId,
+				storedEventId,
+				storedAggregateHash,
+				String(stored.status || ""),
+			);
+			return reused;
+		}
 		const viewClanTags = Array.isArray(summary.viewClanTags) ? summary.viewClanTags : [];
 		const viewsByClanTag = {};
 		for (let i = 0; i < viewClanTags.length; i++) {
@@ -2840,6 +3518,7 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 		const result = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, {
 			source: "refresh-all-queue",
 			runId: runId,
+			allowSnapshotCoordinatorAfterTargetChange: true,
 		});
 		if (result && typeof result === "object") {
 			result.requestCounts = summary && summary.requestCounts && typeof summary.requestCounts === "object"
@@ -2850,7 +3529,21 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 				}
 				: {};
 		}
-		return result || { ok: false, status: "unknown" };
+		const out = result || { ok: false, status: "unknown" };
+		const outStatus = String(out.status || "");
+		const completed = out.ok !== false && outStatus !== "stale";
+		const persisted = Object.assign({}, out, {
+			ok: completed ? out.ok : false,
+			completed: completed,
+			runId: runId,
+			eventId: String(out.eventId || need.eventId || summary.eventId || ""),
+			aggregateHash: String(out.aggregateHash || summary.aggregateHash || ""),
+			cwlSummaryWrittenAt: String(summary.writtenAt || ""),
+			writtenAt: new Date().toISOString(),
+			reused: false,
+		});
+		if (runId) writeAutoRefreshRunShard_(runId, "final/cwlSeasonEventRefresh", persisted, "PUT");
+		return persisted;
 	} catch (err) {
 		Logger.log("Auto-refresh queue CWL season event refresh skipped: %s", errorMessage_(err));
 		return { ok: false, status: "error", error: errorMessage_(err) };
@@ -3149,6 +3842,20 @@ function ensureAutoRefreshFinalCwlCoordinatorCapture_(currentRaw, sourceMetaRaw,
 		});
 	}
 	const existingSummary = readAutoRefreshCwlCoordinatorSummary_(runId);
+	const previousCloudflare = current.cloudflarePublicDataPublish && typeof current.cloudflarePublicDataPublish === "object" ? current.cloudflarePublicDataPublish : null;
+	const storedSeasonRefresh = readAutoRefreshRunShard_(runId, "final/cwlSeasonEventRefresh");
+	const cloudflareRetryNeedsStableCwl =
+		!!(previousCloudflare && (previousCloudflare.ok === false || previousCloudflare.forceNext === true || String(previousCloudflare.status || "").trim())) ||
+		!!(storedSeasonRefresh && typeof storedSeasonRefresh === "object" && storedSeasonRefresh.completed === true && storedSeasonRefresh.ok !== false);
+	if (
+		cloudflareRetryNeedsStableCwl &&
+		existingSummary &&
+		existingSummary.completed === true &&
+		existingSummary.finalCapture === true &&
+		(!String(need.eventId || "") || String(existingSummary.eventId || "") === String(need.eventId || ""))
+	) {
+		return buildAutoRefreshFinalCwlCaptureFromSummary_(existingSummary, "reused", true);
+	}
 	if (isAutoRefreshFinalCwlCoordinatorSummaryFresh_(existingSummary, need, Date.now())) {
 		return buildAutoRefreshFinalCwlCaptureFromSummary_(existingSummary, "reused", true);
 	}
@@ -3186,6 +3893,16 @@ function ensureAutoRefreshFinalCwlCoordinatorCapture_(currentRaw, sourceMetaRaw,
 		);
 		return capture;
 	} catch (err) {
+		if (err && err.autoRefreshDefer) {
+			return {
+				ok: false,
+				status: "deferred",
+				reason: "firebase-final-cwl-coordinator-write",
+				eventId: String(need.eventId || ""),
+				error: errorMessage_(err),
+				processMs: Math.max(0, Date.now() - processStartMs),
+			};
+		}
 		return { ok: false, status: "error", eventId: String(need.eventId || ""), error: errorMessage_(err), processMs: Math.max(0, Date.now() - processStartMs) };
 	}
 }
@@ -3296,6 +4013,15 @@ function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRa
 	const cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(options.rosterData || null, sourceMeta, runId);
 	current.cwlSeasonEventRefresh = cwlSeasonEventRefresh || null;
 	const refreshStatus = String((cwlSeasonEventRefresh && cwlSeasonEventRefresh.status) || "");
+	if (current.cwlFinalCoordinatorCapture && cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
+		if (!current.cwlFinalCoordinatorCapture.aggregateHash && cwlSeasonEventRefresh.aggregateHash) {
+			current.cwlFinalCoordinatorCapture.aggregateHash = String(cwlSeasonEventRefresh.aggregateHash || "");
+		}
+		if (cwlSeasonEventRefresh.ok === false) {
+			current.cwlFinalCoordinatorCapture.aggregateOk = false;
+			current.cwlFinalCoordinatorCapture.aggregateStatus = refreshStatus || current.cwlFinalCoordinatorCapture.aggregateStatus;
+		}
+	}
 	const captureAggregateFailed =
 		capture &&
 		capture.skipped !== true &&
@@ -3538,7 +4264,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 				method: "PUT",
 				payload: encodeFirebaseObjectKeysRecursive_(manifest),
 			},
-		]);
+		], { disableFallback: true });
 		publishActiveRosterVersionPointer_(runId, manifest);
 		clearActiveRosterDataCache_();
 		markActiveDataWriteSuccess_(writtenAt, ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH);
@@ -3909,6 +4635,26 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			scheduleAutoRefreshJobResume_();
 			return { ok: true, status: "inProgress", inProgress: true, runId: current.runId, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length, lastTaskId: task.taskId };
 		} catch (err) {
+			if (err && err.autoRefreshDefer) {
+				const message = errorMessage_(err);
+				task.status = "pending";
+				task.error = message;
+				task.summary = String(err.reason || "deferred");
+				task.updatedAt = new Date().toISOString();
+				writeAutoRefreshTask_(current.runId, task);
+				current.error = message;
+				current.updatedAt = new Date().toISOString();
+				writeAutoRefreshQueueCurrent_(current, false);
+				scheduleAutoRefreshJobResume_();
+				return {
+					ok: true,
+					status: "inProgress",
+					inProgress: true,
+					reason: String(err.reason || "autoRefreshDefer"),
+					processedRosters: current.processedRosters,
+					totalRosters: current.rosterIds.length,
+				};
+			}
 			const message = errorMessage_(err);
 			task.status = "failed";
 			task.error = message;

@@ -231,6 +231,7 @@ const installMemoryFirebase = (backend, initial = {}) => {
     return out;
   };
   backend.__getFirebaseDb = () => db;
+  backend.fetchCurrentRegularWar_ = (clanTag) => backend.buildNoCurrentRegularWarResult_(clanTag);
   return backend;
 };
 
@@ -1594,6 +1595,45 @@ test("firebaseBatchPutJson uses one multi-location root patch for exact child wr
   });
 });
 
+test("queue-mode Firebase batches defer instead of serial fallback", () => {
+  const backend = loadBackend();
+  const response = {
+    getResponseCode: () => 500,
+    getContentText: () => "server-error",
+  };
+  const fallbackCalls = [];
+  backend.getFirebaseConfig_ = () => ({ dbUrl: "https://firebase.test/db" });
+  backend.getFirebaseAccessToken_ = () => "token";
+  backend.UrlFetchApp = {
+    fetchAll() {
+      return [response, response];
+    },
+    fetch() {
+      return response;
+    },
+  };
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw, payloadRaw) => {
+    fallbackCalls.push({ path: pathRaw, method: methodRaw, payload: payloadRaw });
+    if (!String(pathRaw || "") && String(methodRaw || "").toUpperCase() === "PATCH") {
+      throw new Error("root patch failed");
+    }
+    return { fallback: String(pathRaw) };
+  };
+
+  assert.throws(
+    () => backend.firebaseBatchGetJson_(["bad/one", "bad/two"], { disableFallback: true }),
+    (err) => err && err.autoRefreshDefer === true && err.reason === "firebaseBatch",
+  );
+  assert.throws(
+    () => backend.firebaseBatchPutJson_([{ path: "bad/one", payload: { ok: true } }], { disableFallback: true }),
+    (err) => err && err.autoRefreshDefer === true && err.reason === "firebaseBatch",
+  );
+  assert.equal(fallbackCalls.length, 1);
+  assert.equal(fallbackCalls[0].path, "");
+  assert.equal(fallbackCalls[0].method, "PATCH");
+  assert.equal(fallbackCalls[0].payload["bad/one"].ok, true);
+});
+
 test("detached donation refresh writes season overlay without mutating active metrics", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());
@@ -2031,13 +2071,18 @@ test("roster queue task defers before pipeline when pre-process reads consume th
   );
 
   assert.equal(result.deferred, true);
-  assert.equal(result.reason, "beforeRosterProcess");
+  assert.equal(result.reason, "beforeRosterPhaseBudget");
   assert.equal(processCalls, 0);
-  assert.equal(clanFetchCalls, 1);
-  assert.equal(backend.readAutoRefreshPreparedRosterInput_(runId, "main").rosterId, "main");
+  assert.equal(clanFetchCalls, 0);
+  assert.equal(backend.readAutoRefreshPreparedRosterInput_(runId, "main"), null);
 
   backend.fetchClanMembersSnapshot_ = () => {
-    throw new Error("prepared roster retry should not fetch clan members again");
+    clanFetchCalls++;
+    return {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    };
   };
   backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
     processCalls++;
@@ -2052,6 +2097,174 @@ test("roster queue task defers before pipeline when pre-process reads consume th
 
   assert.equal(retry.rosterId, "main");
   assert.equal(processCalls, 1);
+  assert.equal(clanFetchCalls, 1);
+});
+
+test("roster queue task resumes from persisted primary snapshot phase after transient failure", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  const originalBatchGet = backend.firebaseBatchGetJson_;
+  let sourceBatchReads = 0;
+  backend.firebaseBatchGetJson_ = (pathsRaw, optionsRaw) => {
+    const paths = Array.isArray(pathsRaw) ? pathsRaw : [];
+    if (paths.some((path) => String(path).includes("/source/meta"))) sourceBatchReads++;
+    return originalBatchGet(pathsRaw, optionsRaw);
+  };
+  let clanFetchCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => {
+    clanFetchCalls++;
+    if (clanFetchCalls === 1) throw Object.assign(new Error("temporary clan timeout"), { statusCode: 500 });
+    return {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    };
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const first = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+  const stateAfterFailure = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+  const preparedAfterFailure = backend.readAutoRefreshPreparedRosterInput_(runId, "main");
+  const retry = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+
+  assert.equal(first.deferred, true);
+  assert.equal(first.reason, "clan-members-snapshot");
+  assert.equal(stateAfterFailure.phase, "primarySnapshot");
+  assert.equal(stateAfterFailure.attemptByPhase.primarySnapshot, 1);
+  assert.equal(preparedAfterFailure.sourceRoster.id, "main");
+  assert.equal(retry.rosterId, "main");
+  assert.equal(clanFetchCalls, 2);
+  assert.equal(sourceBatchReads, 1);
+});
+
+test("roster queue migrates old prepared inputs back to snapshot collection", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const rosterTask = firstRosterTask(tasks);
+  rosterTask.phase = "processSnapshot";
+  backend.writeAutoRefreshTask_(runId, rosterTask);
+  backend.writeAutoRefreshRunShard_(runId, "rosterInputs/main", {
+    rosterId: "main",
+    sourceMeta: backend.readAutoRefreshRunShard_(runId, "source/meta"),
+    sourceRoster: sourceData.rosters[0],
+    sourceOwnership: {},
+    clanSnapshot: {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    },
+    sourceMetricByTag: {},
+    sourceSeedByTag: {},
+  }, "PUT");
+  let clanFetchCalls = 0;
+  let sawSnapshotPlan = false;
+  backend.fetchClanMembersSnapshot_ = () => {
+    clanFetchCalls++;
+    return {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    };
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    sawSnapshotPlan = Array.isArray(backend.readAutoRefreshPreparedRosterInput_(runId, "main").metricReadTags) &&
+      options.autoRefreshSnapshotMode === true;
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, rosterTask, Date.now());
+
+  assert.equal(result.rosterId, "main");
+  assert.equal(clanFetchCalls, 1);
+  assert.equal(sawSnapshotPlan, true);
+});
+
+test("roster queue processing is snapshot-only and defers forbidden live fetches", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  let sawSnapshotMode = false;
+  let sawPrefetchedClan = false;
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    sawSnapshotMode = options && options.autoRefreshSnapshotMode === true;
+    sawPrefetchedClan = !!(options && options.prefetchedClanSnapshotsByTag && options.prefetchedClanSnapshotsByTag["#CLAN"]);
+    try {
+      backend.fetchClanMembersSnapshot_("#CLAN");
+    } catch (err) {
+      accumulator.issues.push({ severity: "error", message: String(err && err.message || err) });
+    }
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "forbidden-live-fetch");
+  assert.equal(sawSnapshotMode, true);
+  assert.equal(sawPrefetchedClan, true);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/" + runId + "/rosters/main", "GET"), null);
+});
+
+test("roster queue reads metric and seed inputs in cursor chunks", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  const metricTags = Array.from({ length: 30 }, (_, index) => "#P" + String(index + 1).padStart(2, "0"));
+  const seedTags = Array.from({ length: 30 }, (_, index) => "#L" + String(index + 1).padStart(2, "0"));
+  sourceData.rosters[0].main[0].tag = metricTags[0];
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const metricChunks = [];
+  const seedChunks = [];
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: seedTags.map((tag) => ({ tag, name: tag, townHallLevel: 16 })),
+    metricsMembers: metricTags.map((tag) => ({ tag, name: tag, trophies: 5000 })),
+  });
+  backend.readAutoRefreshSourceMetricEntriesForTags_ = (_runId, tagsRaw, _sourceVersionId, optionsRaw) => {
+    const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
+    metricChunks.push(tags.slice());
+    assert.equal(optionsRaw.disableFirebaseFallback, true);
+    return Object.fromEntries(tags.map((tag) => [tag, { latestSnapshot: { tag, trophies: 5000 } }]));
+  };
+  backend.readAutoRefreshSourcePlayerSeedEntriesForTags_ = (_runId, tagsRaw, optionsRaw) => {
+    const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
+    seedChunks.push(tags.slice());
+    assert.equal(optionsRaw.disableFirebaseFallback, true);
+    return Object.fromEntries(tags.map((tag) => [tag, { tag, name: tag, th: 16 }]));
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+  const state = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+
+  assert.equal(result.rosterId, "main");
+  assert.deepEqual(metricChunks.map((chunk) => chunk.length), [25, 5]);
+  assert.deepEqual(seedChunks.map((chunk) => chunk.length), [25, 5]);
+  assert.equal(state.phase, "completed");
 });
 
 test("roster queue task validates the staged roster shard before writing it", () => {
@@ -2582,6 +2795,7 @@ test("queue finalization preserves state after Cloudflare failure and reuses fre
   const retainedRunAfterFirst = backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET") !== null;
   paths.length = 0;
   const retry = backend.executeAutoRefreshFinalizeTask_(retainedQueue, tasks.find((task) => task.type === "finalize"), Date.now());
+  const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
 
   assert.equal(first.deferred, true);
   assert.equal(first.reason, "cloudflarePublicDataMirror");
@@ -2595,6 +2809,7 @@ test("queue finalization preserves state after Cloudflare failure and reuses fre
   assert.equal(publishOptions[1].force, true);
   assert.equal(activeSnapshotReads, 0);
   assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup") || path.includes("/clanwarleagues/wars/")).length, 0);
+  assert.equal(lastJob.cwlSeasonEventRefresh.reused, true);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);
 });
