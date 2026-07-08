@@ -2001,6 +2001,38 @@ test("queue finalization defers completion until Cloudflare public data verifies
   assert.equal(backend.__triggers.filter((trigger) => trigger.handler === "autoRefreshWorkerTick").length, 1);
 });
 
+test("staged queue finalization cannot complete without verified required final phases", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    currentTaskIndex: 2,
+    processedTasks: 2,
+    processedRosters: 1,
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("staged finalization should not read the full active payload");
+  };
+  backend.runAutoRefreshRequiredFinalPhases_ = () => ({ ok: true, status: "skipped" });
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
+  const queue = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "required-final-phases");
+  assert.match(result.error, /required final phases did not verify/);
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(queue.status, "finalizing");
+  assert.equal(queue.phase, "required-final-phases");
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET") !== null, true);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"), null);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.handler === "autoRefreshWorkerTick").length, 1);
+});
+
 test("queue finalization uses source version guard without reading the active payload", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());

@@ -3073,6 +3073,33 @@ function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRa
 	};
 }
 
+function isAutoRefreshRequiredFinalPhasesVerified_(finalPhasesRaw) {
+	const finalPhases = finalPhasesRaw && typeof finalPhasesRaw === "object" ? finalPhasesRaw : null;
+	if (!finalPhases || finalPhases.deferred === true || finalPhases.ok !== true) return false;
+	if (String(finalPhases.status || "") !== "verified") return false;
+	const publish = finalPhases.cloudflarePublicDataPublish && typeof finalPhases.cloudflarePublicDataPublish === "object"
+		? finalPhases.cloudflarePublicDataPublish
+		: null;
+	const summary = publish && publish.summary && typeof publish.summary === "object" ? publish.summary : null;
+	return !!(publish && publish.ok === true && publish.status === "verified" && summary && summary.ok === true);
+}
+
+function deferAutoRefreshMissingRequiredFinalPhases_(currentRaw, finalPhasesRaw, phaseRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const finalPhases = finalPhasesRaw && typeof finalPhasesRaw === "object" ? finalPhasesRaw : {};
+	const phase = String(phaseRaw || "finalize").trim() || "finalize";
+	const message = "Auto-refresh required final phases did not verify before completion (" + phase + ").";
+	return buildAutoRefreshFinalizationDeferredResult_(
+		current,
+		"required-final-phases",
+		message,
+		{
+			cwlFinalCoordinatorCapture: finalPhases.cwlFinalCoordinatorCapture,
+			cwlSeasonEventRefresh: finalPhases.cwlSeasonEventRefresh,
+		},
+	);
+}
+
 // Execute finalization task: verify shards, guard source fingerprint, write final
 // manifest/playerMetrics shard, then publish the small version pointer.
 function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRaw) {
@@ -3104,6 +3131,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			cloudflareLabel: "auto-refresh-finalize-already-published",
 		});
 		if (finalPhases && finalPhases.deferred) return finalPhases;
+		if (!isAutoRefreshRequiredFinalPhasesVerified_(finalPhases)) return deferAutoRefreshMissingRequiredFinalPhases_(current, finalPhases, "already-published");
 		current.status = "completed";
 		current.phase = "completed";
 		current.completedAt = new Date().toISOString();
@@ -3277,6 +3305,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			cloudflareLabel: "auto-refresh-finalize-staged",
 		});
 		if (finalPhases && finalPhases.deferred) return finalPhases;
+		if (!isAutoRefreshRequiredFinalPhasesVerified_(finalPhases)) return deferAutoRefreshMissingRequiredFinalPhases_(current, finalPhases, "staged");
 		current.cwlFinalCoordinatorCapture = finalPhases && finalPhases.cwlFinalCoordinatorCapture ? finalPhases.cwlFinalCoordinatorCapture : current.cwlFinalCoordinatorCapture;
 		current.cwlSeasonEventRefresh = finalPhases && finalPhases.cwlSeasonEventRefresh ? finalPhases.cwlSeasonEventRefresh : current.cwlSeasonEventRefresh;
 		current.cloudflarePublicDataPublish =
@@ -3393,6 +3422,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		cloudflareLabel: "auto-refresh-finalize",
 	});
 	if (finalPhases && finalPhases.deferred) return finalPhases;
+	if (!isAutoRefreshRequiredFinalPhasesVerified_(finalPhases)) return deferAutoRefreshMissingRequiredFinalPhases_(current, finalPhases, "non-staged");
 	current.cwlFinalCoordinatorCapture = finalPhases && finalPhases.cwlFinalCoordinatorCapture ? finalPhases.cwlFinalCoordinatorCapture : current.cwlFinalCoordinatorCapture;
 	current.cwlSeasonEventRefresh = finalPhases && finalPhases.cwlSeasonEventRefresh ? finalPhases.cwlSeasonEventRefresh : current.cwlSeasonEventRefresh;
 	current.cloudflarePublicDataPublish =
