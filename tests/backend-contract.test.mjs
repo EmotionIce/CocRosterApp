@@ -2964,18 +2964,30 @@ test("CWL participant-filtered aggregate ranked tags use backend display-name ti
     {
       eventId: "cwl-test",
       type: "cwl",
+      cwlTrackingState: "active",
+      cwl: {
+        target: {
+          resolved: true,
+          status: "resolved",
+          rosterId: "main",
+          clanTag: "#CLAN",
+          leagueName: "Champion I",
+          leagueRank: 0,
+          eligibleAccountTags: ["#2LUCULP", "#9PYLQG"],
+        },
+      },
       participantsByDiscordId: {
         "200": {
           discordId: "200",
           discordDisplayName: "Zulu",
           status: "signed_up",
-          accounts: [{ tag: "#BBB", name: "Zulu" }],
+          accounts: [{ tag: "#9PYLQG", name: "Zulu" }],
         },
         "100": {
           discordId: "100",
           discordDisplayName: "Alpha",
           status: "signed_up",
-          accounts: [{ tag: "#AAA", name: "Alpha" }],
+          accounts: [{ tag: "#2LUCULP", name: "Alpha" }],
         },
       },
     },
@@ -2984,30 +2996,377 @@ test("CWL participant-filtered aggregate ranked tags use backend display-name ti
       kind: "live",
       warTags: ["#WAR1"],
       byTag: {
-        "#AAA": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
-        "#BBB": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
+        "#2LUCULP": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
+        "#9PYLQG": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
       },
     },
   );
 
-  assert.equal(JSON.stringify(finalAggregate.rankedTags), JSON.stringify(["#AAA", "#BBB"]));
+  assert.equal(JSON.stringify(finalAggregate.rankedTags), JSON.stringify(["#2LUCULP", "#9PYLQG"]));
+});
+
+test("CWL event target chooses highest league and uses rosterOrder for ties", () => {
+  const backend = loadBackend();
+  const rosterData = {
+    schemaVersion: 1,
+    pageTitle: "Roster",
+    rosterOrder: ["second", "main", "third"],
+    rosters: [
+      {
+        id: "main",
+        title: "Main",
+        connectedClanTag: "#2LUCULP",
+        trackingMode: "cwl",
+        cwlLeagueName: "Champion I",
+        main: [{ tag: "#2LUCULP", name: "Alpha", th: 16 }],
+        subs: [],
+        missing: [],
+      },
+      {
+        id: "third",
+        title: "Third",
+        connectedClanTag: "#PYYQQ",
+        trackingMode: "cwl",
+        cwlLeagueName: "Champion II",
+        main: [{ tag: "#PYYQQ", name: "Charlie", th: 16 }],
+        subs: [],
+        missing: [],
+      },
+      {
+        id: "second",
+        title: "Second",
+        connectedClanTag: "#9PYLQG",
+        trackingMode: "cwl",
+        cwlLeagueName: "Champion I",
+        main: [{ tag: "#9PYLQG", name: "Bravo", th: 16 }],
+        subs: [{ tag: "#8CCVV", name: "Bravo Sub", th: 15 }],
+        missing: [{ tag: "#2LUCULP", name: "Missing", th: 16 }],
+      },
+    ],
+  };
+
+  const result = backend.resolveCwlSeasonEventTargetFromRosterData_(rosterData, {
+    fetchMissing: false,
+    nowIso: "2026-07-01T00:00:00.000Z",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.rosterId, "second");
+  assert.equal(result.target.leagueName, "Champion I");
+  assert.equal(JSON.stringify(result.target.eligibleAccountTags), JSON.stringify(["#9PYLQG", "#8CCVV"]));
+});
+
+test("CWL event target stays frozen and target migration prunes non-target bindings", () => {
+  const backend = loadBackend();
+  const event = {
+    eventId: "cwl-frozen",
+    type: "cwl",
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        rosterTitle: "Main",
+        clanTag: "#2LUCULP",
+        clanName: "Main Clan",
+        leagueName: "Master III",
+        leagueRank: 8,
+        resolvedAt: "2026-07-01T00:00:00.000Z",
+        source: { type: "test" },
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+      groups: {
+        old: {
+          groupId: "old",
+          clanTags: ["#2LUCULP", "#9PYLQG"],
+          warTags: ["#WAR1"],
+          expectedRounds: 1,
+        },
+        wrong: {
+          groupId: "wrong",
+          clanTags: ["#9PYLQG"],
+          warTags: ["#WAR2"],
+          expectedRounds: 1,
+        },
+      },
+      finalizationHash: "unsafe",
+      finalizationFirstSeenAt: "2026-07-02T00:00:00.000Z",
+    },
+  };
+  const rosterData = {
+    rosterOrder: ["second", "main"],
+    rosters: [
+      { id: "second", title: "Second", connectedClanTag: "#9PYLQG", trackingMode: "cwl", cwlLeagueName: "Champion I", main: [] },
+      { id: "main", title: "Main", connectedClanTag: "#2LUCULP", trackingMode: "cwl", cwlLeagueName: "Master III", main: [{ tag: "#2LUCULP", th: 16 }] },
+    ],
+  };
+
+  const result = backend.applyCwlSeasonEventTargetResolution_(event, rosterData, {
+    fetchMissing: false,
+    nowIso: "2026-07-03T00:00:00.000Z",
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.target.rosterId, "main");
+  assert.equal(JSON.stringify(Object.keys(result.event.cwl.groups)), JSON.stringify(["old"]));
+  assert.equal(JSON.stringify(result.event.cwl.groups.old.clanTags), JSON.stringify(["#2LUCULP"]));
+  assert.equal(result.event.cwl.finalizationHash, "unsafe");
+});
+
+test("CWL dormant and mixed signups count and rank only target-eligible accounts", () => {
+  const backend = loadBackend();
+  const event = {
+    eventId: "cwl-dormant",
+    type: "cwl",
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        clanTag: "#2LUCULP",
+        leagueName: "Champion I",
+        leagueRank: 0,
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+    },
+    participantsByDiscordId: {
+      "111": { discordId: "111", discordDisplayName: "Mixed", status: "signed_up", accounts: [{ tag: "#2LUCULP", name: "Alpha" }, { tag: "#9PYLQG", name: "Dormant" }] },
+      "222": { discordId: "222", discordDisplayName: "Dormant", status: "signed_up", accounts: [{ tag: "#9PYLQG", name: "Wrong" }] },
+      "333": { discordId: "333", discordDisplayName: "Cancelled", status: "cancelled", accounts: [{ tag: "#2LUCULP", name: "Alpha" }] },
+    },
+  };
+
+  const counts = backend.summarizeSeasonEventParticipantCounts_(event);
+  const registered = backend.listCwlSeasonEventRegisteredAccounts_(event);
+  const finalAggregate = backend.filterCwlAggregateToRegisteredParticipants_(event, {
+    eventId: "cwl-dormant",
+    kind: "live",
+    warTags: ["#WAR1"],
+    byTag: {
+      "#2LUCULP": { starsTotal: 6, attacksMade: 2 },
+      "#9PYLQG": { starsTotal: 21, attacksMade: 7 },
+    },
+  });
+
+  assert.equal(JSON.stringify(counts), JSON.stringify({ participantCount: 1, activeParticipantCount: 1, accountCount: 1 }));
+  assert.equal(JSON.stringify(registered.map((row) => row.tag)), JSON.stringify(["#2LUCULP"]));
+  assert.equal(JSON.stringify(Object.keys(finalAggregate.byTag)), JSON.stringify(["#2LUCULP"]));
+  assert.equal(JSON.stringify(finalAggregate.rankedTags), JSON.stringify(["#2LUCULP"]));
+});
+
+test("CWL signup validation rejects outside target accounts before and inside the write lock", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const event = {
+    eventId: "cwl-signup",
+    type: "cwl",
+    status: "open",
+    signupsOpen: true,
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        clanTag: "#2LUCULP",
+        leagueName: "Champion I",
+        leagueRank: 0,
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+    },
+    participantsByDiscordId: {},
+    participantsByTag: {},
+  };
+  const activeData = buildSeasonEventRosterData();
+  activeData.playerMetrics.byTag["#9PYLQG"].identity.discordId = "111";
+  activeData.playerMetrics.byTag["#9PYLQG"].identity.discordUsername = "alpha";
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: activeData });
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_("cwl-signup"), "PUT", event);
+
+  const outside = backend.registerSeasonEventSignup({
+    eventId: "cwl-signup",
+    discordUser: { id: "111", username: "alpha" },
+    playerTags: ["#2LUCULP", "#9PYLQG"],
+  }, "secret");
+
+  assert.equal(outside.status, "player-tag-outside-event-roster");
+
+  const originalLock = backend.withSeasonEventParticipantWriteLock_;
+  backend.withSeasonEventParticipantWriteLock_ = (callback) => {
+    backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_("cwl-signup"), "PATCH", {
+      cwl: {
+        target: {
+          resolved: true,
+          status: "resolved",
+          rosterId: "second",
+          clanTag: "#9PYLQG",
+          leagueName: "Champion I",
+          leagueRank: 0,
+          eligibleAccountTags: ["#9PYLQG"],
+        },
+      },
+    });
+    return callback();
+  };
+  const locked = backend.registerSeasonEventSignup({
+    eventId: "cwl-signup",
+    discordUser: { id: "111", username: "alpha" },
+    playerTags: ["#2LUCULP"],
+  }, "secret");
+  backend.withSeasonEventParticipantWriteLock_ = originalLock;
+
+  assert.equal(locked.status, "player-tag-outside-event-roster");
+});
+
+test("CWL unresolved targets wait while legacy completed targetless events remain readable", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const unresolvedEvent = {
+    eventId: "cwl-unresolved",
+    type: "cwl",
+    cwlTrackingState: "active",
+    cwl: { target: { status: "unresolved", reason: "no-current-cwl-league" } },
+    participantsByDiscordId: {
+      "111": { discordId: "111", status: "signed_up", accounts: [{ tag: "#2LUCULP", name: "Alpha" }] },
+    },
+  };
+  const legacyEvent = {
+    eventId: "cwl-legacy",
+    type: "cwl",
+    cwlTrackingState: "completed",
+    cwl: { groups: {} },
+    participantsByDiscordId: {
+      "111": { discordId: "111", status: "signed_up", accounts: [{ tag: "#2LUCULP", name: "Alpha" }] },
+    },
+  };
+  backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_("cwl-legacy", "final"), "PUT", {
+    eventId: "cwl-legacy",
+    kind: "final",
+    warTags: ["#WAR1"],
+    byTag: { "#2LUCULP": { starsTotal: 3, attacksMade: 1 } },
+  });
+
+  const unresolved = backend.buildCwlSeasonEventLeaderboard_(unresolvedEvent, {}, {});
+  const legacy = backend.buildCwlSeasonEventLeaderboard_(legacyEvent, {}, {});
+
+  assert.equal(unresolved.status, "cwl-target-unresolved");
+  assert.equal(JSON.stringify(unresolved.leaderboard), JSON.stringify([]));
+  assert.equal(legacy.leaderboard.length, 1);
+  assert.equal(legacy.leaderboard[0].tag, "#2LUCULP");
+});
+
+test("CWL runtime aggregation is target-only and ignores non-target discovery and audit failures", () => {
+  const backend = loadBackend();
+  const nowIso = "2026-07-05T00:00:00.000Z";
+  const event = {
+    eventId: "cwl-runtime",
+    type: "cwl",
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        clanTag: "#2LUCULP",
+        leagueName: "Champion I",
+        leagueRank: 0,
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+    },
+  };
+  const runtime = {
+    schemaVersion: 1,
+    eventId: "cwl-runtime",
+    discoveryIncomplete: true,
+    bootstrapRequired: false,
+    groups: {
+      group: {
+        groupId: "group",
+        expectedRounds: 1,
+        clanTags: ["#2LUCULP", "#9PYLQG"],
+        candidateClanTags: ["#2LUCULP", "#9PYLQG"],
+        relevantWarTags: ["#WAR1", "#WAR2"],
+      },
+    },
+    roundsByClanTag: {
+      "#2LUCULP": { "0": { groupId: "group", roundIndex: 0, warTag: "#WAR1" } },
+    },
+    warRecords: {
+      "#WAR1|#2LUCULP": {
+        warTag: "#WAR1",
+        clanTag: "#2LUCULP",
+        groupId: "group",
+        roundIndex: 0,
+        status: "settled",
+        state: "warended",
+        auditStatus: "matched",
+        lastFetchedAt: nowIso,
+        lastValidContribution: {
+          warTag: "#WAR1",
+          clanTag: "#2LUCULP",
+          roundIndex: 0,
+          state: "warended",
+          hash: "target-hash",
+          aggregateByTag: { "#2LUCULP": { starsTotal: 3, attacksMade: 1 } },
+        },
+      },
+      "#WAR2|#9PYLQG": {
+        warTag: "#WAR2",
+        clanTag: "#9PYLQG",
+        groupId: "group",
+        roundIndex: 0,
+        status: "settled",
+        state: "warended",
+        auditStatus: "fetch-failed",
+        lastFetchedAt: nowIso,
+        lastValidContribution: {
+          warTag: "#WAR2",
+          clanTag: "#9PYLQG",
+          roundIndex: 0,
+          state: "warended",
+          hash: "non-target-hash",
+          aggregateByTag: { "#9PYLQG": { starsTotal: 21, attacksMade: 7 } },
+        },
+      },
+    },
+    ignoredMarkers: {},
+  };
+
+  const result = backend.buildCwlSeasonEventAggregateFromRuntime_(event, runtime, { eventBoundClanTags: ["#2LUCULP", "#9PYLQG"] }, nowIso);
+
+  assert.equal(result.discoveryIncomplete, false);
+  assert.equal(result.auditIncomplete, false);
+  assert.equal(result.complete, true);
+  assert.equal(JSON.stringify(Object.keys(result.aggregate.byTag)), JSON.stringify(["#2LUCULP"]));
+  assert.equal(JSON.stringify(result.aggregate.warTags), JSON.stringify(["#WAR1"]));
 });
 
 test("CWL backend leaderboard resolves display names from current player metrics before tag fallback", () => {
   const backend = installMemoryFirebase(loadBackend());
-  const rosterData = backend.validateRosterData_(buildValidRosterData());
-  rosterData.playerMetrics.byTag["#PLAYER"].identity.name = "Current Clash";
-  rosterData.playerMetrics.byTag["#PLAYER"].latestSnapshot.name = "Latest Clash";
+  const rosterData = backend.validateRosterData_(buildSeasonEventLeaderboardRosterData());
+  rosterData.playerMetrics.byTag["#2LUCULP"].identity.name = "Current Clash";
+  rosterData.playerMetrics.byTag["#2LUCULP"].latestSnapshot.name = "Latest Clash";
   const event = {
     eventId: "cwl-name",
     type: "cwl",
     status: "open",
     cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        clanTag: "#CLAN",
+        leagueName: "Champion I",
+        leagueRank: 0,
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+    },
     participantsByDiscordId: {
       "100": {
         discordId: "100",
         status: "signed_up",
-        accounts: [{ tag: "#PLAYER" }],
+        accounts: [{ tag: "#2LUCULP" }],
       },
     },
   };
@@ -3018,7 +3377,7 @@ test("CWL backend leaderboard resolves display names from current player metrics
     scoreSchema: "cwl-offense-stars-defense-stars-v2",
     warTags: ["#WAR1"],
     byTag: {
-      "#PLAYER": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
+      "#2LUCULP": { starsTotal: 3, attacksMade: 1, totalDestruction: 100 },
     },
   });
 
@@ -3063,7 +3422,7 @@ test("CWL final aggregate remains compact for a large synthetic leaderboard", ()
   }
 
   const finalAggregate = backend.filterCwlAggregateToRegisteredParticipants_(
-    { eventId: "cwl-test", type: "cwl", participantsByDiscordId },
+    { eventId: "cwl-test", type: "cwl", cwlTrackingState: "completed", participantsByDiscordId },
     { eventId: "cwl-test", kind: "live", warTags: ["#WAR1", "#WAR2"], byTag }
   );
 
@@ -3385,6 +3744,15 @@ test("CWL active event dedupes shared league groups and war tags per snapshot ru
             signupsOpen: true,
             cwlTrackingState: "active",
             cwl: {
+              target: {
+                resolved: true,
+                status: "resolved",
+                rosterId: "a",
+                clanTag: "#AAA",
+                leagueName: "Unranked",
+                leagueRank: 999,
+                eligibleAccountTags: ["#A"],
+              },
               groups: {
                 "grp-test": {
                   groupId: "grp-test",
@@ -3519,6 +3887,15 @@ test("CWL partial refresh marks previous aggregate stale without replacing score
             signupsOpen: true,
             cwlTrackingState: "active",
             cwl: {
+              target: {
+                resolved: true,
+                status: "resolved",
+                rosterId: "a",
+                clanTag: "#AAA",
+                leagueName: "Unranked",
+                leagueRank: 999,
+                eligibleAccountTags: ["#A"],
+              },
               groups: {
                 "grp-test": {
                   groupId: "grp-test",
@@ -3577,6 +3954,15 @@ test("CWL completion freezes only after a second matching complete refresh", () 
             signupsOpen: true,
             cwlTrackingState: "active",
             cwl: {
+              target: {
+                resolved: true,
+                status: "resolved",
+                rosterId: "a",
+                clanTag: "#AAA",
+                leagueName: "Unranked",
+                leagueRank: 999,
+                eligibleAccountTags: ["#A"],
+              },
               groups: {
                 "grp-test": {
                   groupId: "grp-test",

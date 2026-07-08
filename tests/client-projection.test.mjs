@@ -933,6 +933,16 @@ test("season events model includes an active CWL leaderboard card", () => {
           startsAt: "2026-07-04T20:00:00.000Z",
           endsAt: "2026-07-11T20:00:00.000Z",
           cwlTrackingState: "active",
+          cwl: {
+            target: {
+              resolved: true,
+              status: "resolved",
+              rosterId: "main",
+              clanTag: "#CLAN",
+              leagueName: "Champion I",
+              eligibleAccountTags: ["#AAA"],
+            },
+          },
           participantsByDiscordId: {
             "100": {
               status: "signed_up",
@@ -1004,6 +1014,16 @@ test("season events model recomputes CWL registration order when aggregate ranke
           status: "open",
           signupsOpen: true,
           cwlTrackingState: "active",
+          cwl: {
+            target: {
+              resolved: true,
+              status: "resolved",
+              rosterId: "main",
+              clanTag: "#CLAN",
+              leagueName: "Champion I",
+              eligibleAccountTags: ["#AAA", "#BBB"],
+            },
+          },
           participantsByDiscordId: {
             "100": {
               discordDisplayName: "Old Signup",
@@ -1051,6 +1071,72 @@ test("season events model recomputes CWL registration order when aggregate ranke
   assert.equal(cwlCard.rows[0].rank, 1);
   assert.equal(cwlCard.rows[0].displayName, "Current New");
   assert.equal(cwlCard.rows[0].score, 3);
+});
+
+test("season events model excludes dormant wrong-roster CWL accounts", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const data = {
+    seasonEvents: {
+      current: {
+        cwl: { eventId: "cwl-targeted", type: "cwl" },
+      },
+      byId: {
+        "cwl-targeted": {
+          eventId: "cwl-targeted",
+          type: "cwl",
+          title: "CWL Event",
+          status: "open",
+          signupsOpen: true,
+          cwlTrackingState: "active",
+          cwl: {
+            target: {
+              resolved: true,
+              status: "resolved",
+              rosterId: "main",
+              clanTag: "#CLAN",
+              leagueName: "Champion I",
+              eligibleAccountTags: ["#AAA"],
+            },
+          },
+          participantsByDiscordId: {
+            mixed: {
+              discordDisplayName: "Mixed",
+              status: "signed_up",
+              accounts: [{ tag: "#AAA", name: "Target" }, { tag: "#BBB", name: "Dormant" }],
+            },
+            dormant: {
+              discordDisplayName: "Dormant",
+              status: "signed_up",
+              accounts: [{ tag: "#BBB", name: "Wrong Clan" }],
+            },
+          },
+        },
+      },
+      cwlAggregatesByEventId: {
+        "cwl-targeted": {
+          live: {
+            eventId: "cwl-targeted",
+            kind: "live",
+            cwlTrackingState: "active",
+            rankedTags: ["#BBB", "#AAA"],
+            byTag: {
+              "#AAA": { starsTotal: 3, attacksMade: 1, defenseStarsConceded: 2 },
+              "#BBB": { starsTotal: 9, attacksMade: 3, defenseStarsConceded: 1 },
+            },
+          },
+        },
+      },
+    },
+    playerMetrics: { byTag: {} },
+  };
+
+  const model = buildSeasonEventsPublicModel(data);
+  const cwlCard = model.cards.find((card) => card.type === "cwl");
+
+  assert.ok(cwlCard);
+  assert.equal(cwlCard.activeParticipantCount, 1);
+  assert.equal(JSON.stringify(cwlCard.rows.map((row) => row.tag)), JSON.stringify(["#AAA"]));
+  assert.equal(cwlCard.rows[0].displayName, "Target");
 });
 
 test("season events model shows latest completed CWL when the current CWL is waiting", () => {

@@ -5188,6 +5188,52 @@
         return out;
     };
 
+    const getCwlSeasonEventTarget = (eventRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const cwl = event.cwl && typeof event.cwl === "object" ? event.cwl : {};
+        const target = cwl.target && typeof cwl.target === "object" ? cwl.target : {};
+        return target.resolved === true || String(target.status || "").trim().toLowerCase() === "resolved" ? target : null;
+    };
+
+    const isLegacyCompletedTargetlessCwlEvent = (eventRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+        const state = String(event.cwlTrackingState || event.cwlStatus || "").trim().toLowerCase();
+        return normalizeSeasonEventType(event.type) === "cwl" && state === "completed" && !getCwlSeasonEventTarget(event);
+    };
+
+    const buildCwlSeasonEventEligibleTagSet = (eventRaw) => {
+        const target = getCwlSeasonEventTarget(eventRaw);
+        if (!target) return null;
+        const set = Object.create(null);
+        const tags = Array.isArray(target.eligibleAccountTags) ? target.eligibleAccountTags : [];
+        for (let i = 0; i < tags.length; i++) {
+            const tag = normalizeClanTag(tags[i]);
+            if (tag) set[tag] = true;
+        }
+        return set;
+    };
+
+    const filterCwlSeasonEventParticipantAccounts = (eventRaw, accountsRaw) => {
+        const accounts = Array.isArray(accountsRaw) ? accountsRaw : [];
+        const eligibleSet = buildCwlSeasonEventEligibleTagSet(eventRaw);
+        if (!eligibleSet) return isLegacyCompletedTargetlessCwlEvent(eventRaw) ? accounts : [];
+        return accounts.filter((account) => {
+            const tag = normalizeClanTag(account && account.tag);
+            return !!(tag && eligibleSet[tag]);
+        });
+    };
+
+    const listCwlSeasonEventSignedUpParticipants = (eventRaw) => {
+        const participants = listSeasonEventSignedUpParticipants(eventRaw);
+        if (isLegacyCompletedTargetlessCwlEvent(eventRaw)) return participants;
+        const out = [];
+        for (let i = 0; i < participants.length; i++) {
+            const accounts = filterCwlSeasonEventParticipantAccounts(eventRaw, participants[i].accounts);
+            if (accounts.length) out.push(Object.assign({}, participants[i], { accounts: accounts }));
+        }
+        return out;
+    };
+
     // Get event account display name.
     const getSeasonEventAccountNameCandidate = (accountRaw, metricsEntryRaw) => {
         const account = accountRaw && typeof accountRaw === "object" ? accountRaw : {};
@@ -5595,7 +5641,7 @@
     const buildCwlSeasonEventLeaderboardModel = (eventRaw, dataRaw) => {
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
         if (!event) return { event: null, rows: [], activeParticipantCount: 0, aggregate: null };
-        const participants = listSeasonEventSignedUpParticipants(event);
+        const participants = listCwlSeasonEventSignedUpParticipants(event);
         const aggregate = getCwlSeasonEventAggregateForEvent(dataRaw, event);
         const byTag = aggregate && aggregate.byTag && typeof aggregate.byTag === "object" ? aggregate.byTag : {};
         const rankedTags = Array.isArray(aggregate && aggregate.rankedTags)
@@ -5872,6 +5918,9 @@
             " \u00b7 " +
             formatSeasonEventNumber(card.activeParticipantCount) +
             " signed up";
+        if (normalizeSeasonEventType(card.type) === "cwl" && !getCwlSeasonEventTarget(card.event) && !isLegacyCompletedTargetlessCwlEvent(card.event)) {
+            return base + " \u00b7 roster resolving";
+        }
         if (stale) {
             const refreshedAt = toStr(aggregate.lastSuccessfulRefreshAt).trim();
             const refreshedDate = refreshedAt ? new Date(refreshedAt) : null;
