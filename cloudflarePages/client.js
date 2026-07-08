@@ -5551,6 +5551,47 @@
         };
     };
 
+    const hasCwlSeasonEventAggregateParticipation = (statsRaw) => {
+        const stats = sanitizeCwlAggregateStat(statsRaw);
+        return stats.attacksMade > 0
+            || stats.missedAttacks > 0
+            || stats.currentWarAttackPending > 0
+            || stats.defenseAttacksReceived > 0
+            || stats.attackedDefenseDays > 0
+            || stats.unattackedDefenseDays > 0;
+    };
+
+    const compareCwlSeasonEventLeaderboardRows = (leftRaw, rightRaw) => {
+        const left = leftRaw && typeof leftRaw === "object" ? leftRaw : {};
+        const right = rightRaw && typeof rightRaw === "object" ? rightRaw : {};
+        const leftStats = sanitizeCwlAggregateStat(left.cwlStats);
+        const rightStats = sanitizeCwlAggregateStat(right.cwlStats);
+        const leftParticipated = hasCwlSeasonEventAggregateParticipation(leftStats);
+        const rightParticipated = hasCwlSeasonEventAggregateParticipation(rightStats);
+        if (leftParticipated !== rightParticipated) return leftParticipated ? -1 : 1;
+        if (leftStats.starsTotal !== rightStats.starsTotal) return rightStats.starsTotal - leftStats.starsTotal;
+        if (leftStats.defenseStarsConceded !== rightStats.defenseStarsConceded) return leftStats.defenseStarsConceded - rightStats.defenseStarsConceded;
+        const leftName = toStr(left.displayName).trim().toLowerCase();
+        const rightName = toStr(right.displayName).trim().toLowerCase();
+        if (leftName !== rightName) return leftName < rightName ? -1 : 1;
+        return toStr(left.tag).localeCompare(toStr(right.tag));
+    };
+
+    const shouldUseCwlAggregateRankedTagsForRegistrations = (rankedTagsRaw, registrationByTag, registeredOrder) => {
+        const rankedTags = Array.isArray(rankedTagsRaw) ? rankedTagsRaw : [];
+        if (!registeredOrder.length || !rankedTags.length) return false;
+        const seen = Object.create(null);
+        for (let i = 0; i < rankedTags.length; i++) {
+            const tag = normalizeClanTag(rankedTags[i]);
+            if (!tag || !registrationByTag[tag] || seen[tag]) continue;
+            seen[tag] = true;
+        }
+        for (let i = 0; i < registeredOrder.length; i++) {
+            if (!seen[registeredOrder[i]]) return false;
+        }
+        return true;
+    };
+
     const buildCwlSeasonEventLeaderboardModel = (eventRaw, dataRaw) => {
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
         if (!event) return { event: null, rows: [], activeParticipantCount: 0, aggregate: null };
@@ -5573,23 +5614,9 @@
                 registeredOrder.push(tag);
             }
         }
-        const ordered = [];
-        const seen = Object.create(null);
-        for (let i = 0; i < rankedTags.length; i++) {
-            const tag = rankedTags[i];
-            if (!registrationByTag[tag] || seen[tag]) continue;
-            seen[tag] = true;
-            ordered.push(tag);
-        }
+        const rows = [];
         for (let i = 0; i < registeredOrder.length; i++) {
             const tag = registeredOrder[i];
-            if (seen[tag]) continue;
-            seen[tag] = true;
-            ordered.push(tag);
-        }
-        const rows = [];
-        for (let i = 0; i < ordered.length; i++) {
-            const tag = ordered[i];
             const registration = registrationByTag[tag];
             const account = registration.account || {};
             const participant = registration.participant || {};
@@ -5611,6 +5638,17 @@
                 cwlStats: stats,
             });
         }
+        if (shouldUseCwlAggregateRankedTagsForRegistrations(rankedTags, registrationByTag, registeredOrder)) {
+            const rankIndexByTag = Object.create(null);
+            for (let i = 0; i < rankedTags.length; i++) {
+                const tag = rankedTags[i];
+                if (registrationByTag[tag] && rankIndexByTag[tag] == null) rankIndexByTag[tag] = i;
+            }
+            rows.sort((left, right) => toNonNegativeInt(rankIndexByTag[left.tag]) - toNonNegativeInt(rankIndexByTag[right.tag]));
+        } else {
+            rows.sort(compareCwlSeasonEventLeaderboardRows);
+        }
+        for (let i = 0; i < rows.length; i++) rows[i].rank = i + 1;
         return {
             event: event,
             rows: rows,

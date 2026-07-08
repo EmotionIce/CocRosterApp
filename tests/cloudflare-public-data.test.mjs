@@ -60,6 +60,43 @@ test("bot-scoped entries are not mirrored a second time", () => {
   ]);
 });
 
+test("Cloudflare CWL aggregate projection refreshes ranked tags from current registrations", () => {
+  const backend = loadPublisher();
+  backend.Logger = { log() {} };
+  backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
+  backend.sanitizeSeasonEventText_ = (value) => String(value || "").trim();
+  backend.normalizeSeasonEventType_ = (value) => String(value || "").trim().toLowerCase();
+  backend.readCwlSeasonEventAggregate_ = (_eventId, kind) => kind === "live" ? {
+    eventId: "cwl-active",
+    kind: "live",
+    rankedTags: ["#OLD"],
+    byTag: {
+      "#OLD": { starsTotal: 1 },
+      "#NEW": { starsTotal: 3 },
+    },
+  } : null;
+  backend.filterCwlAggregateToRegisteredParticipants_ = (event, aggregate) => {
+    const tags = Object.values(event.participantsByDiscordId)
+      .flatMap((participant) => participant.accounts || [])
+      .map((account) => account.tag)
+      .filter(Boolean)
+      .sort((left, right) => (aggregate.byTag[right]?.starsTotal || 0) - (aggregate.byTag[left]?.starsTotal || 0));
+    return { rankedTags: tags };
+  };
+
+  const projected = backend.addCloudflareCwlAggregatesForEvent_({}, {
+    eventId: "cwl-active",
+    type: "cwl",
+    participantsByDiscordId: {
+      user1: { status: "signed_up", accounts: [{ tag: "#OLD" }] },
+      user2: { status: "signed_up", accounts: [{ tag: "#NEW" }] },
+    },
+  });
+
+  assert.deepEqual(projected["cwl-active"].live.rankedTags, ["#NEW", "#OLD"]);
+  assert.equal(projected["cwl-active"].live.kind, "live");
+});
+
 test("publish skips unchanged objects using stored hashes", () => {
   const backend = loadPublisher();
   backend.CLOUDFLARE_PUBLIC_DATA_ENABLED_PROPERTY = "CLOUDFLARE_PUBLIC_DATA_ENABLED";

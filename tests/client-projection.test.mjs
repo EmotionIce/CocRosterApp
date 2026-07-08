@@ -989,6 +989,70 @@ test("season events model includes an active CWL leaderboard card", () => {
   assert.equal(cwlCard.rows[0].cwlStats.defenseStarsConceded, 2);
 });
 
+test("season events model recomputes CWL registration order when aggregate ranked tags are stale", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const data = {
+    seasonEvents: {
+      current: {
+        cwl: { eventId: "cwl-active", type: "cwl" },
+      },
+      byId: {
+        "cwl-active": {
+          eventId: "cwl-active",
+          type: "cwl",
+          title: "CWL Event",
+          status: "open",
+          signupsOpen: true,
+          cwlTrackingState: "active",
+          participantsByDiscordId: {
+            "100": {
+              discordDisplayName: "Old Signup",
+              status: "signed_up",
+              accounts: [{ tag: "#AAA", name: "Old Account" }],
+            },
+            "200": {
+              discordDisplayName: "New Signup",
+              status: "signed_up",
+              accounts: [{ tag: "#BBB", name: "New Account" }],
+            },
+          },
+        },
+      },
+      cwlAggregatesByEventId: {
+        "cwl-active": {
+          live: {
+            eventId: "cwl-active",
+            kind: "live",
+            cwlTrackingState: "active",
+            rankedTags: ["#AAA"],
+            byTag: {
+              "#AAA": { starsTotal: 1, attacksMade: 1, defenseStarsConceded: 2 },
+              "#BBB": { starsTotal: 3, attacksMade: 1, defenseStarsConceded: 1 },
+            },
+          },
+        },
+      },
+    },
+    playerMetrics: {
+      byTag: {
+        "#BBB": {
+          identity: { tag: "#BBB", name: "Current New" },
+          latestSnapshot: { tag: "#BBB", name: "Latest New" },
+        },
+      },
+    },
+  };
+
+  const model = buildSeasonEventsPublicModel(data);
+  const cwlCard = model.cards.find((card) => card.type === "cwl");
+
+  assert.ok(cwlCard);
+  assert.equal(JSON.stringify(cwlCard.rows.map((row) => row.tag)), JSON.stringify(["#BBB", "#AAA"]));
+  assert.equal(cwlCard.rows[0].rank, 1);
+  assert.equal(cwlCard.rows[0].displayName, "Current New");
+  assert.equal(cwlCard.rows[0].score, 3);
+});
+
 test("season events model shows latest completed CWL when the current CWL is waiting", () => {
   const { buildSeasonEventsPublicModel } = loadClientInternals();
   const data = {

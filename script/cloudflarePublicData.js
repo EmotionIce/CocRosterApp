@@ -561,14 +561,14 @@ function addCloudflareCwlAggregatesForEvent_(outRaw, eventRaw) {
 	const byKind = {};
 	try {
 		const live = readCwlSeasonEventAggregate_(eventId, "live");
-		if (live && typeof live === "object" && !Array.isArray(live) && live.eventId) byKind.live = live;
+		if (live && typeof live === "object" && !Array.isArray(live) && live.eventId) byKind.live = projectCloudflareCwlAggregateForEvent_(event, live, "live");
 	} catch (err) {
 		// Missing live aggregates are allowed for completed or not-yet-started CWL events.
 	}
 	try {
 		const finalAggregate = readCwlSeasonEventAggregate_(eventId, "final");
 		if (finalAggregate && typeof finalAggregate === "object" && !Array.isArray(finalAggregate) && finalAggregate.eventId) {
-			byKind.final = finalAggregate;
+			byKind.final = projectCloudflareCwlAggregateForEvent_(event, finalAggregate, "final");
 		}
 	} catch (err) {
 		// Missing final aggregates are allowed for active CWL events.
@@ -815,6 +815,23 @@ function collectCloudflareSeasonEventIdsFromPointerMap_(pointerMapRaw, setRaw) {
 	return set;
 }
 
+function projectCloudflareCwlAggregateForEvent_(eventRaw, aggregateRaw, kindRaw) {
+	const event = eventRaw && typeof eventRaw === "object" && !Array.isArray(eventRaw) ? eventRaw : null;
+	const aggregate = aggregateRaw && typeof aggregateRaw === "object" && !Array.isArray(aggregateRaw) ? aggregateRaw : null;
+	if (!event || !aggregate || !aggregate.eventId) return aggregate;
+	const projected = Object.assign({}, aggregate);
+	projected.kind = String(kindRaw || projected.kind || "").trim() || projected.kind;
+	try {
+		if (typeof filterCwlAggregateToRegisteredParticipants_ === "function") {
+			const filtered = filterCwlAggregateToRegisteredParticipants_(event, projected);
+			if (filtered && Array.isArray(filtered.rankedTags)) projected.rankedTags = filtered.rankedTags;
+		}
+	} catch (err) {
+		Logger.log("Cloudflare CWL aggregate ranked-tag projection skipped eventId=%s kind=%s error=%s", String(projected.eventId || ""), String(kindRaw || projected.kind || ""), errorMessage_(err));
+	}
+	return projected;
+}
+
 function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 	const label = String(labelRaw || "season-events").trim() || "season-events";
 	try {
@@ -869,12 +886,12 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 					const live = readCwlSeasonEventAggregate_(eventId, "live");
 					const final = readCwlSeasonEventAggregate_(eventId, "final");
 					if (live && live.eventId) {
-						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "live"), live);
+						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "live"), projectCloudflareCwlAggregateForEvent_(event, live, "live"));
 					} else {
 						addCloudflareDeletePath_(deletePaths, buildCwlSeasonEventAggregatePath_(eventId, "live"));
 					}
 					if (final && final.eventId) {
-						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "final"), final);
+						addCloudflarePublishObjectIfPresent_(botObjects, buildCwlSeasonEventAggregatePath_(eventId, "final"), projectCloudflareCwlAggregateForEvent_(event, final, "final"));
 					} else {
 						addCloudflareDeletePath_(deletePaths, buildCwlSeasonEventAggregatePath_(eventId, "final"));
 					}
