@@ -2474,6 +2474,31 @@ test("queue worker runs final CWL capture as a standalone pre-finalize phase", (
   assert.equal(publishCalls, 0);
 });
 
+test("final CWL capture freshness uses persisted write time after slow collection", () => {
+  const backend = loadBackend();
+  const nowMs = Date.parse("2026-05-25T12:04:00.000Z");
+  const summary = {
+    completed: true,
+    finalCapture: true,
+    eventId: "cwl-active",
+    capturedAt: "2026-05-25T12:00:00.000Z",
+    writtenAt: "2026-05-25T12:03:30.000Z",
+  };
+
+  assert.equal(
+    backend.isAutoRefreshFinalCwlCoordinatorSummaryFresh_(summary, { eventId: "cwl-active" }, nowMs),
+    true,
+  );
+  assert.equal(
+    backend.isAutoRefreshFinalCwlCoordinatorSummaryFresh_(
+      Object.assign({}, summary, { writtenAt: "2026-05-25T12:01:30.000Z" }),
+      { eventId: "cwl-active" },
+      nowMs,
+    ),
+    false,
+  );
+});
+
 test("queue finalization defers on failed final CWL refresh and preserves run shards", () => {
   const initial = buildCurrentCwlEventDb();
   initial.events.seasonEvents.byId["cwl-active"].cwl.groups = {

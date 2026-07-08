@@ -3104,7 +3104,7 @@ function isAutoRefreshFinalCwlCoordinatorSummaryFresh_(summaryRaw, needRaw, nowM
 	if (!summary || summary.completed !== true || summary.finalCapture !== true) return false;
 	const eventId = String(need.eventId || "");
 	if (eventId && String(summary.eventId || "") !== eventId) return false;
-	const capturedMs = parseIsoToMs_(summary.capturedAt);
+	const capturedMs = parseIsoToMs_(summary.writtenAt) || parseIsoToMs_(summary.capturedAt);
 	const nowMs = Math.max(0, Number(nowMsRaw) || Date.now());
 	return capturedMs > 0 && nowMs >= capturedMs && nowMs - capturedMs <= AUTO_REFRESH_CWL_FINAL_CAPTURE_MAX_AGE_MS;
 }
