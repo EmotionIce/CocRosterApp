@@ -15,6 +15,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getAutoRefreshDiagnostics(args[0]);
 		case "setAutoRefreshEnabled":
 			return setAutoRefreshEnabled(args[0], args[1]);
+		case "repairAutoRefreshScheduler":
+			return repairAutoRefreshScheduler(args[0], args[1]);
 		case "getDonationRefreshSettings":
 			return getDonationRefreshSettings(args[0]);
 		case "setDonationRefreshEnabled":

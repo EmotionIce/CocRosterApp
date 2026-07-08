@@ -3884,6 +3884,93 @@ function reconcileAutoRefreshTriggerState_() {
 	return { enabled: true, triggerId: triggerId, hasTrigger: !!triggerId };
 }
 
+// Force-recreate auto-refresh triggers from the currently executing deployment.
+function repairAutoRefreshScheduler_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" && !Array.isArray(optionsRaw) ? optionsRaw : {};
+	const props = PropertiesService.getScriptProperties();
+	const enabled = isAutoRefreshEnabled_();
+	const startedAt = new Date().toISOString();
+	const before = buildAutoRefreshTriggerDiagnostics_();
+	const removedAutoRefresh = removeAutoRefreshTriggers_();
+	const removedResume = removeAutoRefreshJobResumeTriggers_();
+	props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
+	let triggerId = "";
+	if (enabled) {
+		const trigger = ScriptApp.newTrigger(AUTO_REFRESH_HANDLER_NAME).timeBased().everyHours(AUTO_REFRESH_INTERVAL_HOURS).create();
+		triggerId = getTriggerUniqueId_(trigger);
+		if (triggerId) props.setProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
+	}
+	let resume = null;
+	let currentStatus = "";
+	let currentRunId = "";
+	try {
+		const current = readAutoRefreshQueueCurrent_();
+		currentStatus = String((current && current.status) || "");
+		currentRunId = String((current && current.runId) || "");
+		if (
+			enabled &&
+			current &&
+			current.kind === "auto-refresh-queue" &&
+			(current.status === "running" || current.status === "finalizing")
+		) {
+			resume = scheduleAutoRefreshJobResume_();
+		} else if (enabled && isAutoRefreshFreshRetryPending_()) {
+			resume = scheduleAutoRefreshJobResume_();
+		}
+	} catch (err) {
+		Logger.log("autoRefresh scheduler repair resume check failed: %s", errorMessage_(err));
+	}
+	const after = buildAutoRefreshTriggerDiagnostics_();
+	const result = {
+		ok: true,
+		status: enabled ? "repaired" : "disabled",
+		enabled: enabled,
+		startedAt: startedAt,
+		finishedAt: new Date().toISOString(),
+		reason: String(options.reason || "").slice(0, 200),
+		removedAutoRefreshTriggers: removedAutoRefresh,
+		removedResumeTriggers: removedResume,
+		triggerId: triggerId,
+		resumeTriggerId: String((resume && resume.triggerId) || ""),
+		currentRunId: currentRunId,
+		currentStatus: currentStatus,
+		before: before,
+		after: after,
+	};
+	Logger.log(
+		"autoRefresh scheduler repaired enabled=%s removedAutoRefresh=%s removedResume=%s triggerId=%s resumeTriggerId=%s currentRunId=%s currentStatus=%s reason=%s",
+		enabled,
+		removedAutoRefresh,
+		removedResume,
+		triggerId,
+		String((resume && resume.triggerId) || ""),
+		currentRunId,
+		currentStatus,
+		String(options.reason || ""),
+	);
+	return result;
+}
+
+function assertAutoRefreshSchedulerRepairAuth_(secretOrPasswordRaw) {
+	try {
+		assertDiscordBotApiSecret_(secretOrPasswordRaw);
+		return "discord-bot";
+	} catch (botErr) {
+		assertAdminPassword_(secretOrPasswordRaw);
+		return "admin";
+	}
+}
+
+function repairAutoRefreshScheduler(payloadRaw, secretOrPasswordRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" && !Array.isArray(payloadRaw) ? payloadRaw : {};
+	const auth = assertAutoRefreshSchedulerRepairAuth_(secretOrPasswordRaw);
+	const result = repairAutoRefreshScheduler_({
+		reason: String(payload.reason || "api-repair").trim() || "api-repair",
+	});
+	result.auth = auth;
+	return result;
+}
+
 // Handle list regular-war finalization triggers.
 function listRegularWarFinalizationTriggers_() {
 	const all = ScriptApp.getProjectTriggers();

@@ -469,6 +469,53 @@ test("scheduleAutoRefreshJobResume keeps exactly one resume trigger", () => {
   assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), resumeTriggers[0].getUniqueId());
 });
 
+test("repairAutoRefreshScheduler recreates stale triggers and preserves a running queue", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  const staleAuto = backend.ScriptApp.newTrigger("autoRefreshActiveRosterTick").timeBased().everyHours(2).create();
+  const staleResume = backend.ScriptApp.newTrigger("autoRefreshWorkerTick").timeBased().after(60000).create();
+  backend.__properties.set("AUTO_REFRESH_TRIGGER_ID", staleAuto.getUniqueId());
+  backend.__properties.set("AUTO_REFRESH_JOB_TRIGGER_ID", staleResume.getUniqueId());
+  const { runId, current } = setupQueueRun(backend, buildRosterData(), {
+    rosterIds: ["main"],
+    currentTaskIndex: 1,
+    processedTasks: 1,
+    processedRosters: 0,
+  });
+  current.status = "running";
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+
+  const result = backend.runAdminApiMethod_("repairAutoRefreshScheduler", [
+    { reason: "test-current-deployment" },
+    "secret",
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "repaired");
+  assert.equal(result.auth, "discord-bot");
+  assert.equal(result.currentRunId, runId);
+  assert.equal(result.currentStatus, "running");
+  assert.equal(result.removedAutoRefreshTriggers, 1);
+  assert.equal(result.removedResumeTriggers, 1);
+  const autoTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshActiveRosterTick");
+  const resumeTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+  assert.equal(autoTriggers.length, 1);
+  assert.equal(resumeTriggers.length, 1);
+  assert.equal(backend.__properties.get("AUTO_REFRESH_TRIGGER_ID"), autoTriggers[0].getUniqueId());
+  assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), resumeTriggers[0].getUniqueId());
+  assert.notEqual(backend.readAutoRefreshQueueCurrent_(), null);
+});
+
+test("repairAutoRefreshScheduler rejects invalid credentials", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("repairAutoRefreshScheduler", [{ reason: "test" }, "wrong"]),
+    /Authentication failed/,
+  );
+});
+
 test("admin diagnostics exposes current auto-refresh queue state without roster payloads", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.__properties.set("ADMIN_PW", "secret");
