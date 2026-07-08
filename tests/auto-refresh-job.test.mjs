@@ -2008,13 +2008,17 @@ test("roster queue task defers before pipeline when pre-process reads consume th
   const backend = installMemoryFirebase(loadBackend());
   const sourceData = buildRosterData();
   sourceData.rosters[0].trackingMode = "regularWar";
-  const { current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
   let processCalls = 0;
-  backend.fetchClanMembersSnapshot_ = () => ({
-    clanTag: "#CLAN",
-    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
-    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
-  });
+  let clanFetchCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => {
+    clanFetchCalls++;
+    return {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    };
+  };
   backend.processRefreshAllRosterPipelineIntoAccumulator_ = () => {
     processCalls++;
     throw new Error("pipeline should not start when the worker budget is already low");
@@ -2029,6 +2033,25 @@ test("roster queue task defers before pipeline when pre-process reads consume th
   assert.equal(result.deferred, true);
   assert.equal(result.reason, "beforeRosterProcess");
   assert.equal(processCalls, 0);
+  assert.equal(clanFetchCalls, 1);
+  assert.equal(backend.readAutoRefreshPreparedRosterInput_(runId, "main").rosterId, "main");
+
+  backend.fetchClanMembersSnapshot_ = () => {
+    throw new Error("prepared roster retry should not fetch clan members again");
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    processCalls++;
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const retry = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+
+  assert.equal(retry.rosterId, "main");
+  assert.equal(processCalls, 1);
 });
 
 test("roster queue task validates the staged roster shard before writing it", () => {

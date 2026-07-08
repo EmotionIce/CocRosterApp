@@ -1803,6 +1803,34 @@ function runAutoRefreshCwlCoordinatorPreflightBeforeRoster_(currentRaw, taskRaw,
 	return { captured: true, reason: "cwlCoordinatorPreflight", result: result };
 }
 
+function readAutoRefreshPreparedRosterInput_(runIdRaw, rosterIdRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) return null;
+	const input = readAutoRefreshRunShard_(runIdRaw, "rosterInputs/" + encodeFirebaseObjectKey_(rosterId));
+	return input && typeof input === "object" ? input : null;
+}
+
+function writeAutoRefreshPreparedRosterInput_(runIdRaw, rosterIdRaw, inputRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const input = inputRaw && typeof inputRaw === "object" ? inputRaw : {};
+	if (!rosterId) return null;
+	const payload = {
+		rosterId: rosterId,
+		sourceMeta: input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : {},
+		sourceRoster: input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : {},
+		sourceOwnership: input.sourceOwnership && typeof input.sourceOwnership === "object" ? input.sourceOwnership : {},
+		clanSnapshot: input.clanSnapshot && typeof input.clanSnapshot === "object" ? input.clanSnapshot : null,
+		sourceMetricByTag: input.sourceMetricByTag && typeof input.sourceMetricByTag === "object" ? input.sourceMetricByTag : {},
+		sourceSeedByTag: input.sourceSeedByTag && typeof input.sourceSeedByTag === "object" ? input.sourceSeedByTag : {},
+		metricTags: Array.isArray(input.metricTags) ? input.metricTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [],
+		cwlCoordinatorClanView: input.cwlCoordinatorClanView && typeof input.cwlCoordinatorClanView === "object" ? input.cwlCoordinatorClanView : null,
+		cwlCoordinatorResult: input.cwlCoordinatorResult && typeof input.cwlCoordinatorResult === "object" ? input.cwlCoordinatorResult : null,
+		writtenAt: new Date().toISOString(),
+	};
+	writeAutoRefreshRunShard_(runIdRaw, "rosterInputs/" + encodeFirebaseObjectKey_(rosterId), payload, "PUT");
+	return payload;
+}
+
 function executeAutoRefreshCwlCoordinatorCaptureTask_(currentRaw, taskRaw, executionStartMsRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const capturePhase = String(options.capturePhase || "early").trim() || "early";
@@ -1931,91 +1959,131 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 	const fetchStartMs = Date.now();
 	const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
 	const sourceVersionId = normalizeActiveVersionId_(current.sourceVersionId);
-	const sourcePaths = [
-		buildAutoRefreshRunPath_(runId, "source/meta"),
-		sourceVersionId
-			? buildActiveVersionPath_(sourceVersionId, "rosters/" + encodedRosterId)
-			: buildAutoRefreshRunPath_(runId, "source/rosters/" + encodedRosterId),
-		buildAutoRefreshRunPath_(runId, "source/ownership"),
-	];
-	const encodedSource = firebaseBatchGetJson_(sourcePaths);
-	const sourceMeta = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[0]]);
-	const sourceRoster = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[1]]);
-	const sourceOwnership = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[2]]) || {};
-	const sourceFetchMs = Math.max(0, Date.now() - fetchStartMs);
-	if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
-	if (!sourceRoster) throw new Error("Auto-refresh source roster shard is missing: " + rosterId + ".");
-	const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
-	const cwlCoordinator = ensureAutoRefreshRosterCwlCoordinatorView_(current, sourceMeta, sourceRoster, clanTag, executionStartMsRaw);
-	if (cwlCoordinator && cwlCoordinator.deferred) {
-		Logger.log(
-			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
-			runId,
-			String(task.taskId || ""),
-			rosterId,
-			String(task.type || "roster"),
-			sourceFetchMs,
-			0,
-			0,
-			toNonNegativeInt_(cwlCoordinator.processMs),
-			0,
-			Math.max(0, Date.now() - taskStartMs),
-			getAutoRefreshJobRemainingMs_(executionStartMsRaw),
-			String(cwlCoordinator.reason || "beforeRosterCwlCoordinator"),
-		);
-		return { deferred: true, reason: cwlCoordinator.reason || "beforeRosterCwlCoordinator", rosterId: rosterId };
-	}
-	const cwlCoordinatorClanView = cwlCoordinator && cwlCoordinator.view ? cwlCoordinator.view : null;
-	const cwlCoordinatorResult = cwlCoordinator && cwlCoordinator.coordinatorResult ? cwlCoordinator.coordinatorResult : null;
+	const preparedInput = readAutoRefreshPreparedRosterInput_(runId, rosterId);
+	const preparedInputUsed = !!preparedInput;
+	let sourceMeta = null;
+	let sourceRoster = null;
+	let sourceOwnership = {};
+	let sourceFetchMs = 0;
+	let clanTag = "";
+	let cwlCoordinatorClanView = null;
+	let cwlCoordinatorResult = null;
 	let clanSnapshot = null;
 	let clanFetchMs = 0;
-	if (clanTag) {
-		const clanFetchStartMs = Date.now();
-		clanSnapshot = fetchClanMembersSnapshot_(clanTag);
-		clanFetchMs = Math.max(0, Date.now() - clanFetchStartMs);
+	let metricTags = [];
+	let sourceMetricByTag = {};
+	let sourceSeedByTag = {};
+	let metricReadMs = 0;
+
+	if (preparedInputUsed) {
+		sourceMeta = preparedInput.sourceMeta && typeof preparedInput.sourceMeta === "object" ? preparedInput.sourceMeta : null;
+		sourceRoster = preparedInput.sourceRoster && typeof preparedInput.sourceRoster === "object" ? preparedInput.sourceRoster : null;
+		sourceOwnership = preparedInput.sourceOwnership && typeof preparedInput.sourceOwnership === "object" ? preparedInput.sourceOwnership : {};
+		clanSnapshot = preparedInput.clanSnapshot && typeof preparedInput.clanSnapshot === "object" ? preparedInput.clanSnapshot : null;
+		sourceMetricByTag = preparedInput.sourceMetricByTag && typeof preparedInput.sourceMetricByTag === "object" ? preparedInput.sourceMetricByTag : {};
+		sourceSeedByTag = preparedInput.sourceSeedByTag && typeof preparedInput.sourceSeedByTag === "object" ? preparedInput.sourceSeedByTag : {};
+		metricTags = Array.isArray(preparedInput.metricTags) ? preparedInput.metricTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
+		cwlCoordinatorClanView = preparedInput.cwlCoordinatorClanView && typeof preparedInput.cwlCoordinatorClanView === "object" ? preparedInput.cwlCoordinatorClanView : null;
+		cwlCoordinatorResult = preparedInput.cwlCoordinatorResult && typeof preparedInput.cwlCoordinatorResult === "object" ? preparedInput.cwlCoordinatorResult : null;
+		sourceFetchMs = Math.max(0, Date.now() - fetchStartMs);
+	} else {
+		const sourcePaths = [
+			buildAutoRefreshRunPath_(runId, "source/meta"),
+			sourceVersionId
+				? buildActiveVersionPath_(sourceVersionId, "rosters/" + encodedRosterId)
+				: buildAutoRefreshRunPath_(runId, "source/rosters/" + encodedRosterId),
+			buildAutoRefreshRunPath_(runId, "source/ownership"),
+		];
+		const encodedSource = firebaseBatchGetJson_(sourcePaths);
+		sourceMeta = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[0]]);
+		sourceRoster = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[1]]);
+		sourceOwnership = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[2]]) || {};
+		sourceFetchMs = Math.max(0, Date.now() - fetchStartMs);
+		if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
+		if (!sourceRoster) throw new Error("Auto-refresh source roster shard is missing: " + rosterId + ".");
+		clanTag = normalizeTag_(sourceRoster.connectedClanTag);
+		const cwlCoordinator = ensureAutoRefreshRosterCwlCoordinatorView_(current, sourceMeta, sourceRoster, clanTag, executionStartMsRaw);
+		if (cwlCoordinator && cwlCoordinator.deferred) {
+			Logger.log(
+				"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
+				runId,
+				String(task.taskId || ""),
+				rosterId,
+				String(task.type || "roster"),
+				sourceFetchMs,
+				0,
+				0,
+				toNonNegativeInt_(cwlCoordinator.processMs),
+				0,
+				Math.max(0, Date.now() - taskStartMs),
+				getAutoRefreshJobRemainingMs_(executionStartMsRaw),
+				String(cwlCoordinator.reason || "beforeRosterCwlCoordinator"),
+			);
+			return { deferred: true, reason: cwlCoordinator.reason || "beforeRosterCwlCoordinator", rosterId: rosterId };
+		}
+		cwlCoordinatorClanView = cwlCoordinator && cwlCoordinator.view ? cwlCoordinator.view : null;
+		cwlCoordinatorResult = cwlCoordinator && cwlCoordinator.coordinatorResult ? cwlCoordinator.coordinatorResult : null;
+		if (clanTag) {
+			const clanFetchStartMs = Date.now();
+			clanSnapshot = fetchClanMembersSnapshot_(clanTag);
+			clanFetchMs = Math.max(0, Date.now() - clanFetchStartMs);
+		}
+		const liveTags = [];
+		const liveMembers = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
+		for (let i = 0; i < liveMembers.length; i++) {
+			const tag = normalizeTag_(liveMembers[i] && liveMembers[i].tag);
+			if (tag) liveTags.push(tag);
+		}
+		const metricsMembers = Array.isArray(clanSnapshot && clanSnapshot.metricsMembers) ? clanSnapshot.metricsMembers : [];
+		for (let i = 0; i < metricsMembers.length; i++) {
+			const tag = normalizeTag_(metricsMembers[i] && metricsMembers[i].tag);
+			if (tag) metricTags.push(tag);
+		}
+		const targetSeedByTag = buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
+		const targetSeedTags = Object.keys(targetSeedByTag);
+		const metricReadTags = metricTags.slice();
+		const metricReadTagSet = {};
+		for (let i = 0; i < metricReadTags.length; i++) {
+			const tag = normalizeTag_(metricReadTags[i]);
+			if (tag) metricReadTagSet[tag] = true;
+		}
+		for (let i = 0; i < targetSeedTags.length; i++) {
+			const tag = normalizeTag_(targetSeedTags[i]);
+			if (!tag || metricReadTagSet[tag]) continue;
+			metricReadTagSet[tag] = true;
+			metricReadTags.push(tag);
+		}
+		const metricReadStartMs = Date.now();
+		sourceMetricByTag = readAutoRefreshSourceMetricEntriesForTags_(runId, metricReadTags, sourceVersionId);
+		const seedReadTags = [];
+		const seedReadSeen = {};
+		for (let i = 0; i < liveTags.length; i++) {
+			const tag = normalizeTag_(liveTags[i]);
+			if (!tag || seedReadSeen[tag] || targetSeedByTag[tag]) continue;
+			seedReadSeen[tag] = true;
+			seedReadTags.push(tag);
+		}
+		sourceSeedByTag = readAutoRefreshSourcePlayerSeedEntriesForTags_(runId, seedReadTags);
+		for (let i = 0; i < targetSeedTags.length; i++) {
+			const tag = normalizeTag_(targetSeedTags[i]);
+			if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];
+		}
+		metricReadMs = Math.max(0, Date.now() - metricReadStartMs);
+		writeAutoRefreshPreparedRosterInput_(runId, rosterId, {
+			sourceMeta: sourceMeta,
+			sourceRoster: sourceRoster,
+			sourceOwnership: sourceOwnership,
+			clanSnapshot: clanSnapshot,
+			sourceMetricByTag: sourceMetricByTag,
+			sourceSeedByTag: sourceSeedByTag,
+			metricTags: metricTags,
+			cwlCoordinatorClanView: cwlCoordinatorClanView,
+			cwlCoordinatorResult: cwlCoordinatorResult,
+		});
 	}
-	const metricTags = [];
-	const liveTags = [];
-	const liveMembers = Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members : [];
-	for (let i = 0; i < liveMembers.length; i++) {
-		const tag = normalizeTag_(liveMembers[i] && liveMembers[i].tag);
-		if (tag) liveTags.push(tag);
-	}
-	const metricsMembers = Array.isArray(clanSnapshot && clanSnapshot.metricsMembers) ? clanSnapshot.metricsMembers : [];
-	for (let i = 0; i < metricsMembers.length; i++) {
-		const tag = normalizeTag_(metricsMembers[i] && metricsMembers[i].tag);
-		if (tag) metricTags.push(tag);
-	}
-	const targetSeedByTag = buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
-	const targetSeedTags = Object.keys(targetSeedByTag);
-	const metricReadTags = metricTags.slice();
-	const metricReadTagSet = {};
-	for (let i = 0; i < metricReadTags.length; i++) {
-		const tag = normalizeTag_(metricReadTags[i]);
-		if (tag) metricReadTagSet[tag] = true;
-	}
-	for (let i = 0; i < targetSeedTags.length; i++) {
-		const tag = normalizeTag_(targetSeedTags[i]);
-		if (!tag || metricReadTagSet[tag]) continue;
-		metricReadTagSet[tag] = true;
-		metricReadTags.push(tag);
-	}
-	const metricReadStartMs = Date.now();
-	const sourceMetricByTag = readAutoRefreshSourceMetricEntriesForTags_(runId, metricReadTags, sourceVersionId);
-	const seedReadTags = [];
-	const seedReadSeen = {};
-	for (let i = 0; i < liveTags.length; i++) {
-		const tag = normalizeTag_(liveTags[i]);
-		if (!tag || seedReadSeen[tag] || targetSeedByTag[tag]) continue;
-		seedReadSeen[tag] = true;
-		seedReadTags.push(tag);
-	}
-	const sourceSeedByTag = readAutoRefreshSourcePlayerSeedEntriesForTags_(runId, seedReadTags);
-	for (let i = 0; i < targetSeedTags.length; i++) {
-		const tag = normalizeTag_(targetSeedTags[i]);
-		if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];
-	}
-	const metricReadMs = Math.max(0, Date.now() - metricReadStartMs);
+	if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
+	if (!sourceRoster) throw new Error("Auto-refresh source roster shard is missing: " + rosterId + ".");
+	clanTag = normalizeTag_(sourceRoster.connectedClanTag);
 	if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
 		Logger.log(
 			"autoRefresh worker task timing runId=%s taskId=%s rosterId=%s phase=%s fetchMs=%s clanFetchMs=%s metricReadMs=%s processMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s reason=%s",
