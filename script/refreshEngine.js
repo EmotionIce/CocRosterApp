@@ -1197,6 +1197,7 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 		initialTrackingMode === "cwl" &&
 		!pipelinePrefetchOptions.autoRefreshSnapshotMode &&
 		!pipelinePrefetchOptions.cwlCoordinatorResult &&
+		!pipelinePrefetchOptions.cwlCoordinatorClanView &&
 		typeof buildCwlCoordinatorResult_ === "function"
 	) {
 		const coordinator = buildCwlCoordinatorResult_(rosterData, {

@@ -1907,9 +1907,108 @@ test("roster queue shards reuse the CWL coordinator view without league or war r
   assert.equal(blockedCwlRequestCount, 0);
 });
 
+test("roster pipeline does not build a full CWL coordinator when a clan view is supplied", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  backend.buildCwlCoordinatorResult_ = () => {
+    throw new Error("pipeline should use the supplied CWL coordinator clan view");
+  };
+  const pass = (rosterData) => ({ rosterData, result: {} });
+  backend.syncClanRosterPoolCore_ = pass;
+  backend.detectAndApplyAutomaticTrackingModeTransition_ = pass;
+  backend.syncClanTodayLineupCore_ = pass;
+  backend.refreshTrackingStatsCore_ = (rosterData) => ({
+    rosterData,
+    result: { cwlUnavailable: false, statsUnchanged: false },
+  });
+  backend.computeBenchSuggestionsCore_ = pass;
+
+  const result = backend.runRosterRefreshPipelineCore_(data, "main", {
+    cwlCoordinatorClanView: {
+      clanTag: "#CLAN",
+      eventId: "cwl-active",
+      groupStates: [{ groupId: "group-1", state: "active" }],
+      rounds: [],
+      currentWar: null,
+      aggregateByTag: {},
+      settledAggregateByTag: {},
+      contributions: [],
+      seasonContext: {},
+      freshness: { discoveryIncomplete: false },
+    },
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test("legacy roster queue task captures missing shared CWL coordinator before processing", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, { rosterIds: ["main"] });
+  const rosterTask = firstRosterTask(tasks);
+  current.taskIds = [rosterTask.taskId];
+  current.taskCount = 1;
+  current.currentTaskIndex = 0;
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  const paths = installCwlFetch(backend, () => buildOneRoundCwlWar({ state: "inWar", stars: 3, destruction: 100 }));
+  const originalBuildCwlCoordinatorResult = backend.buildCwlCoordinatorResult_;
+  let coordinatorCalls = 0;
+  backend.buildCwlCoordinatorResult_ = (...args) => {
+    coordinatorCalls++;
+    return originalBuildCwlCoordinatorResult(...args);
+  };
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  const getPaths = [];
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    if (String(methodRaw || "GET").toUpperCase() === "GET") getPaths.push(String(pathRaw || "").replace(/^\/+|\/+$/g, ""));
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
+  let clanFetchCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => {
+    clanFetchCalls++;
+    return {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    };
+  };
+  let pipelineCalls = 0;
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    pipelineCalls++;
+    assert.equal(rosterId, "main");
+    assert.equal(options.cwlCoordinatorClanView.clanTag, "#CLAN");
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const preflight = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const summary = backend.readAutoRefreshCwlCoordinatorSummary_(runId);
+  const getPathsBeforeRoster = getPaths.slice();
+  const result = backend.executeAutoRefreshRosterTask_(current, rosterTask, Date.now());
+
+  assert.equal(preflight.inProgress, true);
+  assert.equal(preflight.reason, "cwlCoordinatorPreflight");
+  assert.equal(result.rosterId, "main");
+  assert.equal(pipelineCalls, 1);
+  assert.equal(coordinatorCalls, 1);
+  assert.equal(clanFetchCalls, 1);
+  assert.equal(summary.completed, true);
+  assert.equal(summary.capturePhase, "early");
+  assert.equal(summary.viewClanTags.includes("#CLAN"), true);
+  assert.equal(getPathsBeforeRoster.some((path) => path.includes("/source/rosters/")), false);
+  assert.equal(getPathsBeforeRoster.some((path) => path.includes("/activeVersions/") && path.includes("/rosters/")), false);
+  assert.equal(paths.filter((path) => path.includes("/currentwar/leaguegroup")).length, 1);
+  assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
+});
+
 test("roster queue task defers before pipeline when pre-process reads consume the budget", () => {
   const backend = installMemoryFirebase(loadBackend());
-  const { current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  const sourceData = buildRosterData();
+  sourceData.rosters[0].trackingMode = "regularWar";
+  const { current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
   let processCalls = 0;
   backend.fetchClanMembersSnapshot_ = () => ({
     clanTag: "#CLAN",
