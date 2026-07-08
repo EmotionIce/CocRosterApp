@@ -2224,6 +2224,28 @@ test("roster queue processing is snapshot-only and defers forbidden live fetches
   assert.equal(backend.firebaseRequestJson_("activeVersions/" + runId + "/rosters/main", "GET"), null);
 });
 
+test("roster queue defers forbidden live fetches that escape processing directly", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = () => {
+    backend.fetchClanMembersSnapshot_("#CLAN");
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+  const state = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "forbidden-live-fetch");
+  assert.equal(state.phase, "processSnapshot");
+  assert.match(state.error, /forbidden live fetch/i);
+  assert.equal(backend.firebaseRequestJson_("activeVersions/" + runId + "/rosters/main", "GET"), null);
+});
+
 test("roster queue reads metric and seed inputs in cursor chunks", () => {
   const backend = installMemoryFirebase(loadBackend());
   const sourceData = buildRosterData();
@@ -2265,6 +2287,48 @@ test("roster queue reads metric and seed inputs in cursor chunks", () => {
   assert.deepEqual(metricChunks.map((chunk) => chunk.length), [25, 5]);
   assert.deepEqual(seedChunks.map((chunk) => chunk.length), [25, 5]);
   assert.equal(state.phase, "completed");
+});
+
+test("roster queue chunk progress does not consume metric seed retry attempts", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  const metricTags = Array.from({ length: 80 }, (_, index) => "#M" + String(index + 1).padStart(3, "0"));
+  const seedTags = Array.from({ length: 80 }, (_, index) => "#S" + String(index + 1).padStart(3, "0"));
+  sourceData.rosters[0].main[0].tag = metricTags[0];
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const metricChunks = [];
+  const seedChunks = [];
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: seedTags.map((tag) => ({ tag, name: tag, townHallLevel: 16 })),
+    metricsMembers: metricTags.map((tag) => ({ tag, name: tag, trophies: 5000 })),
+  });
+  backend.readAutoRefreshSourceMetricEntriesForTags_ = (_runId, tagsRaw) => {
+    const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
+    metricChunks.push(tags.slice());
+    return Object.fromEntries(tags.map((tag) => [tag, { latestSnapshot: { tag, trophies: 5000 } }]));
+  };
+  backend.readAutoRefreshSourcePlayerSeedEntriesForTags_ = (_runId, tagsRaw) => {
+    const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
+    seedChunks.push(tags.slice());
+    return Object.fromEntries(tags.map((tag) => [tag, { tag, name: tag, th: 16 }]));
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, firstRosterTask(tasks), Date.now());
+  const state = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+
+  assert.equal(result.rosterId, "main");
+  assert.deepEqual(metricChunks.map((chunk) => chunk.length), [25, 25, 25, 5]);
+  assert.deepEqual(seedChunks.map((chunk) => chunk.length), [25, 25, 25, 5]);
+  assert.equal(state.phase, "completed");
+  assert.equal(state.attemptByPhase.metricSeedInputs, 1);
 });
 
 test("roster queue task validates the staged roster shard before writing it", () => {
@@ -3076,6 +3140,49 @@ test("queue worker recovers after partial completion by continuing at the next p
   assert.equal(processedRosterId, "second");
   assert.equal(current.currentTaskIndex, 3);
   assert.equal(current.processedRosters, 2);
+});
+
+test("queue worker retries a stale running roster task instead of waiting", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  sourceData.rosters[0].trackingMode = "regularWar";
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, {
+    rosterIds: ["main"],
+  });
+  const rosterTask = firstRosterTask(tasks);
+  const staleAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+  rosterTask.status = "running";
+  rosterTask.startedAt = staleAt;
+  rosterTask.updatedAt = staleAt;
+  rosterTask.attempts = 1;
+  backend.writeAutoRefreshRunShard_(runId, "tasks/" + backend.encodeFirebaseObjectKey_(rosterTask.taskId), rosterTask, "PUT");
+  current.currentTaskIndex = rosterTask.index;
+  current.processedTasks = rosterTask.index;
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  let pipelineCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => ({
+    clanTag: "#CLAN",
+    members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+    metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+  });
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    pipelineCalls++;
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const updatedTask = backend.readAutoRefreshTask_(runId, rosterTask.taskId);
+  const updatedCurrent = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.inProgress, true);
+  assert.notEqual(result.reason, "taskRunning");
+  assert.equal(pipelineCalls, 1);
+  assert.equal(updatedTask.status, "completed");
+  assert.equal(updatedCurrent.processedRosters, 1);
 });
 
 test("queue worker synthesizes finalization when persisted task list has no finalize task", () => {

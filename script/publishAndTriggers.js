@@ -2207,7 +2207,9 @@ function withAutoRefreshQueueLiveFetchGuard_(fn) {
 	}
 	try {
 		const result = fn(guard);
-		return { result: result, guard: guard };
+		return { result: result, guard: guard, error: null };
+	} catch (err) {
+		return { result: null, guard: guard, error: err };
 	} finally {
 		const originalNames = Object.keys(originals);
 		for (let i = 0; i < originalNames.length; i++) {
@@ -2374,6 +2376,17 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		return preparedInput;
 	};
 
+	const phaseStartedThisInvocation = {};
+	const checkpointPhaseStart = (phaseRaw, optionsRaw) => {
+		const phase = normalizeAutoRefreshRosterPhase_(phaseRaw);
+		const options = Object.assign({}, optionsRaw || {});
+		if (!phaseStartedThisInvocation[phase]) {
+			options.start = true;
+			phaseStartedThisInvocation[phase] = true;
+		}
+		return checkpointAutoRefreshRosterPhase_(current, task, state, phase, options);
+	};
+
 	while (state.phase !== "completed") {
 		if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
 			return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterPhaseBudget", null, executionStartMsRaw);
@@ -2383,7 +2396,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterSourceRead", null, executionStartMsRaw);
 			}
-			checkpointAutoRefreshRosterPhase_(current, task, state, "source", { start: true, cursor: {} });
+			checkpointPhaseStart("source", { cursor: {} });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "source")) {
 				throw new Error("Auto-refresh roster source phase exceeded retry limit for " + rosterId + ".");
 			}
@@ -2431,7 +2444,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				continue;
 			}
 			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
-			checkpointAutoRefreshRosterPhase_(current, task, state, "primarySnapshot", { start: true, cursor: {} });
+			checkpointPhaseStart("primarySnapshot", { cursor: {} });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "primarySnapshot")) {
 				throw new Error("Auto-refresh roster primary snapshot phase exceeded retry limit for " + rosterId + ".");
 			}
@@ -2499,7 +2512,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				continue;
 			}
 			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
-			checkpointAutoRefreshRosterPhase_(current, task, state, "warInputs", { start: true, cursor: {} });
+			checkpointPhaseStart("warInputs", { cursor: {} });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "warInputs")) {
 				throw new Error("Auto-refresh roster war-input phase exceeded retry limit for " + rosterId + ".");
 			}
@@ -2592,10 +2605,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			let sourceSeedByTag = input.sourceSeedByTag && typeof input.sourceSeedByTag === "object" ? input.sourceSeedByTag : {};
 			const targetSeedByTag = input.targetSeedByTag && typeof input.targetSeedByTag === "object" ? input.targetSeedByTag : buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
 			const targetSeedTags = Object.keys(targetSeedByTag);
-			checkpointAutoRefreshRosterPhase_(current, task, state, "metricSeedInputs", {
-				start: true,
-				cursor: { metricOffset: metricOffset, seedOffset: seedOffset },
-			});
+			checkpointPhaseStart("metricSeedInputs", { cursor: { metricOffset: metricOffset, seedOffset: seedOffset } });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "metricSeedInputs")) {
 				throw new Error("Auto-refresh roster metric/seed input phase exceeded retry limit for " + rosterId + ".");
 			}
@@ -2678,7 +2688,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterProcess", null, executionStartMsRaw);
 			}
-			checkpointAutoRefreshRosterPhase_(current, task, state, "processSnapshot", { start: true });
+			checkpointPhaseStart("processSnapshot", {});
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "processSnapshot")) {
 				throw new Error("Auto-refresh roster processing phase exceeded retry limit for " + rosterId + ".");
 			}
@@ -2722,11 +2732,17 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			const guarded = withAutoRefreshQueueLiveFetchGuard_(() =>
 				processRefreshAllRosterPipelineIntoAccumulator_(workingRosterData, rosterId, pipelineOptions, accumulator),
 			);
-			const processed = guarded.result;
 			processMs += Math.max(0, Date.now() - processStartMs);
 			if (guarded.guard && guarded.guard.attempted) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "forbidden-live-fetch", new Error("Roster processing attempted forbidden live fetch: " + guarded.guard.labels.join(",")), executionStartMsRaw);
 			}
+			if (guarded.error) {
+				if (guarded.error.autoRefreshSnapshotMiss) {
+					return markAutoRefreshRosterPhaseDeferred_(current, task, state, "snapshot-miss", guarded.error, executionStartMsRaw);
+				}
+				throw guarded.error;
+			}
+			const processed = guarded.result;
 			const pipelineIssues = Array.isArray(accumulator.issues) ? accumulator.issues : [];
 			if (hasAutoRefreshSnapshotMissIssue_(pipelineIssues)) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "snapshot-miss", new Error(buildAutoRefreshIssueSummary_(pipelineIssues) || "Auto-refresh snapshot missing required input."), executionStartMsRaw);
@@ -2776,7 +2792,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS)) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterCommit", null, executionStartMsRaw);
 			}
-			checkpointAutoRefreshRosterPhase_(current, task, state, "commit", { start: true });
+			checkpointPhaseStart("commit", {});
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "commit")) {
 				throw new Error("Auto-refresh roster commit phase exceeded retry limit for " + rosterId + ".");
 			}
