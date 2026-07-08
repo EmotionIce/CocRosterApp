@@ -672,6 +672,7 @@ const getDataObjectCacheControl = (scopeRaw, logicalPathRaw) => {
   if (path.startsWith("activeVersions/")) return "public, max-age=31536000, immutable";
   if (
     path === "active" ||
+    path === "bootstrap/current" ||
     path.startsWith("activePublished/") ||
     path.startsWith("events/seasonEvents/") ||
     path.startsWith("donationRefresh/")
@@ -681,6 +682,10 @@ const getDataObjectCacheControl = (scopeRaw, logicalPathRaw) => {
   return "public, max-age=30, stale-while-revalidate=120";
 };
 
+// Return whether a value is a plain JSON object.
+const isPlainJsonObject = (valueRaw) =>
+  !!(valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw));
+
 // Return a nested object value only when it exists as a direct own property.
 const readOwnObjectValue = (sourceRaw, keyRaw) => {
   const source = sourceRaw && typeof sourceRaw === "object" && !Array.isArray(sourceRaw) ? sourceRaw : {};
@@ -688,16 +693,22 @@ const readOwnObjectValue = (sourceRaw, keyRaw) => {
   return key && Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined;
 };
 
-// Read and parse the public bootstrap bundle.
-const readPublicBootstrapPayload = async (store) => {
-  const object = await getDataStoreObject(store, PUBLIC_BOOTSTRAP_DATA_KEY);
+// Parse a data-store object as a plain JSON object.
+const parseDataStorePlainJsonObject = async (object) => {
   if (!object) return null;
   try {
     const payload = JSON.parse(await object.text());
-    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+    return isPlainJsonObject(payload) ? payload : null;
   } catch (err) {
     return null;
   }
+};
+
+// Resolve the active version advertised by a bootstrap bundle.
+const readBootstrapActiveVersionId = (payloadRaw) => {
+  const payload = isPlainJsonObject(payloadRaw) ? payloadRaw : {};
+  const active = isPlainJsonObject(payload.active) ? payload.active : {};
+  return String(payload.activeVersionId || active.versionId || "").trim();
 };
 
 // Read a legacy public JSON object by logical path.
@@ -715,6 +726,70 @@ const readLegacyPublicJsonObject = async (store, pathRaw) => {
   } catch (err) {
     return undefined;
   }
+};
+
+// Read the direct public active-version pointer.
+const readDirectPublicActiveVersionId = async (store) => {
+  const value = await readLegacyPublicJsonObject(store, "activePublished/currentVersionId");
+  return String(value || "").trim();
+};
+
+// Read the direct public manifest for a known active version.
+const readDirectPublicActiveManifest = async (store, versionIdRaw) => {
+  const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+  if (!versionId) return null;
+  const currentManifest = await readLegacyPublicJsonObject(store, "activePublished/currentManifest");
+  if (isPlainJsonObject(currentManifest)) {
+    const manifestVersionId = String(currentManifest.versionId || "").trim();
+    if (!manifestVersionId || manifestVersionId === versionId) return currentManifest;
+  }
+  const versionManifest = await readLegacyPublicJsonObject(store, "activeVersions/" + versionId + "/manifest");
+  return isPlainJsonObject(versionManifest) ? versionManifest : isPlainJsonObject(currentManifest) ? currentManifest : null;
+};
+
+// Keep bootstrap active-version pointers aligned with complete immutable shards.
+const sanitizePublicBootstrapActiveVersion = async (store, payloadRaw) => {
+  const payload = isPlainJsonObject(payloadRaw) ? payloadRaw : null;
+  if (!payload) return payload;
+  const advertisedVersionId = readBootstrapActiveVersionId(payload);
+  if (!advertisedVersionId) return payload;
+
+  const advertisedStatus = await readDirectActiveVersionShardStatus(store, advertisedVersionId);
+  if (advertisedStatus.complete) {
+    if (Object.prototype.hasOwnProperty.call(payload, "activeVersionFallback")) delete payload.activeVersionFallback;
+    return payload;
+  }
+
+  const fallbackVersionId = await readDirectPublicActiveVersionId(store);
+  if (!fallbackVersionId || fallbackVersionId === advertisedVersionId) return payload;
+
+  const fallbackStatus = await readDirectActiveVersionShardStatus(store, fallbackVersionId);
+  if (!fallbackStatus.complete) return payload;
+
+  const fallbackManifest = await readDirectPublicActiveManifest(store, fallbackVersionId);
+  const active = isPlainJsonObject(payload.active) ? payload.active : {};
+  payload.activeVersionId = fallbackVersionId;
+  payload.active = Object.assign({}, active, {
+    versionId: fallbackVersionId,
+    manifest: fallbackManifest,
+  });
+  payload.activeVersionFallback = {
+    status: "fallback",
+    reason: "advertised-active-version-shards-missing",
+    advertisedVersionId,
+    servedVersionId: fallbackVersionId,
+    missing: Array.isArray(advertisedStatus.missing) ? advertisedStatus.missing.slice() : [],
+    checkedAt: new Date().toISOString(),
+  };
+  return payload;
+};
+
+// Read, parse, and sanitize the public bootstrap bundle.
+const readPublicBootstrapPayload = async (store) => {
+  const object = await getDataStoreObject(store, PUBLIC_BOOTSTRAP_DATA_KEY);
+  let payload = object ? await parseDataStorePlainJsonObject(object) : null;
+  if (!payload) payload = await synthesizePublicBootstrapFromLegacyObjects(store);
+  return sanitizePublicBootstrapActiveVersion(store, payload);
 };
 
 const collectEventIdsFromPointerMap = (pointersRaw, seenRaw) => {
@@ -958,9 +1033,7 @@ const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathR
 // Read a public object from bootstrap first, falling back to its legacy key.
 const getPublicDataObjectWithBootstrapFallback = async (store, key, objectPath) => {
   if (String(objectPath || "") === PUBLIC_BOOTSTRAP_DATA_PATH) {
-    const direct = await getDataStoreObject(store, key);
-    if (direct) return direct;
-    return buildProjectedDataStoreObject(await synthesizePublicBootstrapFromLegacyObjects(store));
+    return buildProjectedDataStoreObject(await readPublicBootstrapPayload(store));
   }
   if (shouldPreferPublicBootstrapPath(objectPath)) {
     const bootstrap = await readPublicBootstrapPayload(store);

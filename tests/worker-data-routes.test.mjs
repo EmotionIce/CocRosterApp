@@ -179,6 +179,81 @@ test("public health exposes bootstrap-projected pointer without relaxing direct 
   assert.equal(payload.activeVersionShards.complete, true);
 });
 
+test("public bootstrap falls back when advertised active version shards are incomplete", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentVersionId.json": JSON.stringify("version-old"),
+      "public-data/activePublished/currentManifest.json": JSON.stringify({
+        versionId: "version-old",
+        pageTitle: "Old complete",
+      }),
+      "public-data/bootstrap/current.json": JSON.stringify({
+        activeVersionId: "version-new",
+        active: {
+          versionId: "version-new",
+          manifest: { versionId: "version-new", pageTitle: "New partial" },
+        },
+        seasonEvents: {
+          current: {
+            donation: { eventId: "donation-current", seasonId: "season-1" },
+          },
+        },
+        donationRefresh: { bySeason: {} },
+      }),
+      "public-data/activeVersions/version-new/manifest.json": JSON.stringify({ versionId: "version-new" }),
+      "public-data/activeVersions/version-old/manifest.json": JSON.stringify({ versionId: "version-old" }),
+      "public-data/activeVersions/version-old/rosters.json": JSON.stringify({ main: { id: "main" } }),
+      "public-data/activeVersions/version-old/playerMetrics.json": JSON.stringify({ byTag: {} }),
+    }),
+  };
+
+  const bootstrapResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/bootstrap/current.json"),
+    env,
+    {},
+  );
+  const pointerResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activePublished/currentVersionId.json"),
+    env,
+    {},
+  );
+  const missingRosterResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-new/rosters.json"),
+    env,
+    {},
+  );
+  const completeRosterResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-old/rosters.json"),
+    env,
+    {},
+  );
+  const healthResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/health?expectedVersionId=version-new"),
+    env,
+    {},
+  );
+
+  const bootstrap = await bootstrapResponse.json();
+  const health = await healthResponse.json();
+
+  assert.equal(bootstrapResponse.status, 200);
+  assert.equal(bootstrapResponse.headers.get("cache-control"), "no-store");
+  assert.equal(bootstrap.activeVersionId, "version-old");
+  assert.equal(bootstrap.active.versionId, "version-old");
+  assert.equal(bootstrap.active.manifest.pageTitle, "Old complete");
+  assert.equal(bootstrap.seasonEvents.current.donation.eventId, "donation-current");
+  assert.equal(bootstrap.activeVersionFallback.advertisedVersionId, "version-new");
+  assert.deepEqual(bootstrap.activeVersionFallback.missing, ["rosters", "playerMetrics"]);
+  assert.equal(await pointerResponse.json(), "version-old");
+  assert.equal(missingRosterResponse.status, 404);
+  assert.equal(completeRosterResponse.status, 200);
+  assert.equal(health.currentVersionId, "version-old");
+  assert.equal(health.projectedCurrentVersionId, "version-old");
+  assert.equal(health.currentVersionMatchesExpected, false);
+  assert.equal(health.projectedCurrentVersionMatchesExpected, false);
+});
+
 test("missing current active version shards are projected from legacy active data", async () => {
   const worker = loadWorker();
   const env = {
