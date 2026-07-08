@@ -2481,8 +2481,8 @@ test("final CWL capture freshness uses persisted write time after slow collectio
     completed: true,
     finalCapture: true,
     eventId: "cwl-active",
-    capturedAt: "2026-05-25T12:00:00.000Z",
-    writtenAt: "2026-05-25T12:03:30.000Z",
+    capturedAt: "2026-05-25T11:56:00.000Z",
+    writtenAt: "2026-05-25T12:00:30.000Z",
   };
 
   assert.equal(
@@ -2491,7 +2491,7 @@ test("final CWL capture freshness uses persisted write time after slow collectio
   );
   assert.equal(
     backend.isAutoRefreshFinalCwlCoordinatorSummaryFresh_(
-      Object.assign({}, summary, { writtenAt: "2026-05-25T12:01:30.000Z" }),
+      Object.assign({}, summary, { writtenAt: "2026-05-25T11:53:30.000Z" }),
       { eventId: "cwl-active" },
       nowMs,
     ),

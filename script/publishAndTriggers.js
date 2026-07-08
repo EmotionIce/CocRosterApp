@@ -1,6 +1,6 @@
 // Publish flow and auto-refresh trigger orchestration.
 
-const AUTO_REFRESH_CWL_FINAL_CAPTURE_MAX_AGE_MS = 2 * 60 * 1000;
+const AUTO_REFRESH_CWL_FINAL_CAPTURE_MAX_AGE_MS = 10 * 60 * 1000;
 
 // Handle write published roster data.
 function writePublishedRosterData_(rosterDataRaw) {
