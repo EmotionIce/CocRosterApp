@@ -2439,6 +2439,41 @@ test("queue finalization forces final CWL capture for runs without the new task"
   assert.equal(paths.filter((path) => path.includes("/clanwarleagues/wars/")).length, 1);
 });
 
+test("queue worker runs final CWL capture as a standalone pre-finalize phase", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"],
+    sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  const finalizeTask = tasks.find((task) => task.type === "finalize");
+  current.taskIds = [finalizeTask.taskId];
+  current.taskCount = 1;
+  current.currentTaskIndex = 0;
+  current.processedTasks = 0;
+  current.processedRosters = 1;
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  installCwlFetch(backend, () => buildOneRoundCwlWar({ state: "inWar", stars: 2, destruction: 90 }));
+  let publishCalls = 0;
+  backend.publishCloudflarePublicDataSnapshot_ = () => {
+    publishCalls++;
+    return { ok: true };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const summary = backend.readAutoRefreshCwlCoordinatorSummary_(runId);
+  const updatedCurrent = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.inProgress, true);
+  assert.equal(result.reason, "finalCwlCoordinatorPreflight");
+  assert.equal(summary.finalCapture, true);
+  assert.equal(updatedCurrent.phase, "cwl-final-coordinator");
+  assert.equal(updatedCurrent.cwlFinalCoordinatorCapture.status, "captured");
+  assert.equal(publishCalls, 0);
+});
+
 test("queue finalization defers on failed final CWL refresh and preserves run shards", () => {
   const initial = buildCurrentCwlEventDb();
   initial.events.seasonEvents.byId["cwl-active"].cwl.groups = {

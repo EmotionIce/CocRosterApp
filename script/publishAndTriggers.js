@@ -1803,6 +1803,22 @@ function runAutoRefreshCwlCoordinatorPreflightBeforeRoster_(currentRaw, taskRaw,
 	return { captured: true, reason: "cwlCoordinatorPreflight", result: result };
 }
 
+function runAutoRefreshFinalCwlCoordinatorPreflightBeforeFinalize_(currentRaw, taskRaw, executionStartMsRaw) {
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	if (String(task.type || "") !== "finalize") return null;
+	const capture = ensureAutoRefreshFinalCwlCoordinatorCapture_(currentRaw, null, executionStartMsRaw);
+	const status = String(capture && capture.status || "").trim();
+	if (status === "reused" || status === "no-current-cwl-event" || (capture && capture.skipped === true && capture.ok !== false)) return null;
+	if (capture && capture.ok !== false && status === "captured") {
+		return { captured: true, reason: "finalCwlCoordinatorPreflight", result: capture };
+	}
+	return {
+		deferred: true,
+		reason: String((capture && (capture.reason || capture.status)) || "beforeFinalCwlCoordinator"),
+		result: capture,
+	};
+}
+
 function readAutoRefreshPreparedRosterInput_(runIdRaw, rosterIdRaw) {
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	if (!rosterId) return null;
@@ -3805,6 +3821,33 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			setAutoRefreshQueueInProgressResult_(current);
 			scheduleAutoRefreshJobResume_();
 			return { ok: true, status: "inProgress", inProgress: true, reason: cwlPreflight.reason, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
+		}
+		const finalCwlPreflight = runAutoRefreshFinalCwlCoordinatorPreflightBeforeFinalize_(current, task, executionStartMs);
+		if (finalCwlPreflight && finalCwlPreflight.deferred) {
+			current.status = "finalizing";
+			current.phase = "cwl-final-coordinator";
+			current.cwlFinalCoordinatorCapture = summarizeAutoRefreshFinalCwlCoordinatorCapture_(finalCwlPreflight.result);
+			current.updatedAt = new Date().toISOString();
+			writeAutoRefreshQueueCurrent_(current, false);
+			scheduleAutoRefreshJobResume_();
+			return { ok: true, status: "inProgress", inProgress: true, reason: finalCwlPreflight.reason, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
+		}
+		if (finalCwlPreflight && finalCwlPreflight.captured) {
+			current.status = "finalizing";
+			current.phase = "cwl-final-coordinator";
+			current.updatedAt = new Date().toISOString();
+			current.cwlFinalCoordinatorCapture = summarizeAutoRefreshFinalCwlCoordinatorCapture_(finalCwlPreflight.result);
+			current.taskSummary = {
+				taskId: "synthetic-cwlFinalCoordinator-before-" + String(task.taskId || ""),
+				type: "cwlFinalCoordinator",
+				rosterId: "",
+				completedAt: current.updatedAt,
+				summary: "captured-before-finalize",
+			};
+			writeAutoRefreshQueueCurrent_(current, false);
+			setAutoRefreshQueueInProgressResult_(current);
+			scheduleAutoRefreshJobResume_();
+			return { ok: true, status: "inProgress", inProgress: true, reason: finalCwlPreflight.reason, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
 		}
 		task.status = "running";
 		task.startedAt = task.startedAt || nowIso;
