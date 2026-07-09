@@ -266,22 +266,18 @@ function scheduleCloudflarePublishWorker_() {
 	lock.waitLock(10000);
 	try {
 		const triggers = ScriptApp.getProjectTriggers();
-		let keeper = null;
 		let removed = 0;
 		for (let i = 0; i < triggers.length; i++) {
 			const trigger = triggers[i];
 			if (String(trigger.getHandlerFunction ? trigger.getHandlerFunction() : "") !== CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME) continue;
-			if (!keeper) keeper = trigger;
-			else { try { ScriptApp.deleteTrigger(trigger); removed++; } catch (err) {} }
+			try { ScriptApp.deleteTrigger(trigger); removed++; } catch (err) {}
 		}
-		if (!keeper) {
-			const state = readCloudflarePublishQueueState_();
-			const nextAttemptMs = parseIsoToMs_(state.retry.nextAttemptAt);
-			const delay = nextAttemptMs > Date.now()
-				? Math.max(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS, nextAttemptMs - Date.now())
-				: CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS;
-			keeper = ScriptApp.newTrigger(CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME).timeBased().after(delay).create();
-		}
+		const state = readCloudflarePublishQueueState_();
+		const nextAttemptMs = parseIsoToMs_(state.retry.nextAttemptAt);
+		const delay = nextAttemptMs > Date.now()
+			? Math.max(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS, nextAttemptMs - Date.now())
+			: CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS;
+		const keeper = ScriptApp.newTrigger(CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME).timeBased().after(delay).create();
 		const triggerId = getTriggerUniqueId_(keeper);
 		if (triggerId) PropertiesService.getScriptProperties().setProperty(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, triggerId);
 		return { scheduled: true, triggerId: triggerId, removedDuplicates: removed };
