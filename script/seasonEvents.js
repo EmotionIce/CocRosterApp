@@ -346,7 +346,10 @@ function publishCloudflareSeasonEventsAfterMutation_(labelRaw, eventIdRaw, optio
 function buildSeasonEventAuditKey_(timestampRaw) {
 	const date = timestampRaw ? new Date(timestampRaw) : new Date();
 	const safeDate = isFinite(date.getTime()) ? date : new Date();
-	return Utilities.formatDate(safeDate, "Etc/UTC", "yyyyMMdd'T'HHmmss_SSS'Z'") + "_" + Utilities.getUuid().slice(0, 8);
+	const uuid = typeof Utilities !== "undefined" && Utilities && typeof Utilities.getUuid === "function"
+		? String(Utilities.getUuid()).replace(/[^0-9A-Za-z_-]/g, "").slice(0, 32)
+		: String(Date.now());
+	return Utilities.formatDate(safeDate, "Etc/UTC", "yyyyMMdd'T'HHmmss_SSS'Z'") + "_" + uuid;
 }
 
 // Write event audit entry.

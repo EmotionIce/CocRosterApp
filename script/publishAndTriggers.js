@@ -5249,6 +5249,11 @@ function maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_(labelRaw, 
 }
 
 // Handle auto refresh active roster tick.
+function runAutoRefreshActiveRosterTick(payloadRaw, secretOrPasswordRaw) {
+	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
+	return autoRefreshActiveRosterTick();
+}
+
 function autoRefreshActiveRosterTick() {
 	const tickStartMs = Date.now();
 	const startedAt = new Date().toISOString();
