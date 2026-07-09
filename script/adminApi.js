@@ -105,6 +105,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return runCloudflarePublishWorkerTick(args[0], args[1]);
 		case "runAutoRefreshActiveRosterTick":
 			return runAutoRefreshActiveRosterTick(args[0], args[1]);
+		case "runAutoRefreshWorkerTick":
+			return runAutoRefreshWorkerTick(args[0], args[1]);
 		case "repairCloudflarePublishQueue":
 			return repairCloudflarePublishQueue(args[0], args[1]);
 		case "pauseCloudflarePublishQueue":

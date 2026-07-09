@@ -5322,6 +5322,11 @@ function autoRefreshActiveRosterTick() {
 }
 
 // Handle sharded auto-refresh worker one-shot trigger.
+function runAutoRefreshWorkerTick(payloadRaw, secretOrPasswordRaw) {
+	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
+	return autoRefreshWorkerTick();
+}
+
 function autoRefreshWorkerTick() {
 	const tickStartMs = Date.now();
 	const startedAt = new Date().toISOString();
