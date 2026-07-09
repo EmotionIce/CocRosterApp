@@ -1153,6 +1153,11 @@ function retryCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 	return getCloudflarePublishQueueDiagnostics_();
 }
 
+function runCloudflarePublishWorkerTick(payloadRaw, secretOrPasswordRaw) {
+	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
+	return cloudflarePublishWorkerTick();
+}
+
 function pauseCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
 	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};

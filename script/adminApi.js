@@ -101,6 +101,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return inspectCloudflarePublishQueue(args[0], args[1]);
 		case "retryCloudflarePublishQueue":
 			return retryCloudflarePublishQueue(args[0], args[1]);
+		case "runCloudflarePublishWorkerTick":
+			return runCloudflarePublishWorkerTick(args[0], args[1]);
 		case "repairCloudflarePublishQueue":
 			return repairCloudflarePublishQueue(args[0], args[1]);
 		case "pauseCloudflarePublishQueue":
