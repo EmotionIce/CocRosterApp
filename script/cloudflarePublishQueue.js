@@ -413,6 +413,48 @@ function cloudflareQueueJsonBytes_(valueRaw) {
 	}
 }
 
+function cloudflareQueueNormalizedEnvelopeBytes_(requestRaw) {
+	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
+	const publishedAt = String(request.publishedAt || new Date().toISOString());
+	const normalizeItem = function (itemRaw) {
+		const item = itemRaw && typeof itemRaw === "object" ? itemRaw : {};
+		const scope = normalizeCloudflareDataScope_(item.scope || "public");
+		const path = normalizeCloudflareDataObjectPath_(item.path || item.key || item.name);
+		return {
+			scope: scope,
+			path: path,
+			key: (scope === "bot" ? "bot-data/" : "public-data/") + path,
+			payloadText: JSON.stringify(item.payload),
+			cacheControl: String(item.cacheControl || ""),
+			contentType: String(item.contentType || "application/json; charset=utf-8"),
+			publishedAt: publishedAt,
+		};
+	};
+	const normalizeDelete = function (itemRaw) {
+		const item = itemRaw && typeof itemRaw === "object" ? itemRaw : { path: itemRaw };
+		const scope = normalizeCloudflareDataScope_(item.scope || "public");
+		const path = normalizeCloudflareDataObjectPath_(item.path || item.key || item.name);
+		return { scope: scope, path: path, key: (scope === "bot" ? "bot-data/" : "public-data/") + path };
+	};
+	const commits = (Array.isArray(request.commits) ? request.commits : []).map(function (itemRaw) {
+		const item = itemRaw && typeof itemRaw === "object" ? itemRaw : {};
+		if (item.delete === true || String(item.operation || item.action || "").toLowerCase() === "delete") {
+			return Object.assign({ operation: "delete" }, normalizeDelete(item));
+		}
+		return Object.assign({ operation: "put" }, normalizeItem(item));
+	});
+	return cloudflareQueueJsonBytes_( {
+		requestId: String(request.requestId || "request-id-00000000000000000000000000000000"),
+		batchId: String(request.batchId || "batch-id"),
+		publishedAt: publishedAt,
+		objects: (Array.isArray(request.objects) ? request.objects : []).map(normalizeItem),
+		deletes: (Array.isArray(request.deletes) ? request.deletes : []).map(normalizeDelete),
+		commits: commits,
+		commitGuard: request.commitGuard || null,
+		dispatchGuard: request.dispatchGuard || { kind: "queued-v2", generation: 1, batchId: String(request.batchId || "batch-id") },
+	});
+}
+
 function buildCloudflareQueuedBatchList_(objectsRaw) {
 	const objects = Array.isArray(objectsRaw) ? objectsRaw.slice() : [];
 	objects.sort(function (a, b) {
@@ -431,8 +473,8 @@ function buildCloudflareQueuedBatchList_(objectsRaw) {
 			throw new Error("Cloudflare object exceeds hard limit path=" + object.scope + ":" + object.path + " bytes=" + objectBytes + ".");
 		}
 		const candidate = batch.concat([object]);
-		const candidateBytes = cloudflareQueueJsonBytes_({ objects: candidate, deletes: [], commits: [] });
-		const singleRequestBytes = cloudflareQueueJsonBytes_({
+		const candidateBytes = cloudflareQueueNormalizedEnvelopeBytes_({ objects: candidate, deletes: [], commits: [], batchId: "batch-id" });
+		const singleRequestBytes = cloudflareQueueNormalizedEnvelopeBytes_({
 			requestId: "request-id",
 			batchId: "batch-id",
 			publishedAt: new Date(0).toISOString(),
@@ -565,7 +607,7 @@ function buildCloudflareQueuedOrderedBatchList_(objectsRaw) {
 		if (objectBytes > CLOUDFLARE_PUBLISH_QUEUE_HARD_OBJECT_BYTES) {
 			throw new Error("Cloudflare object exceeds hard limit path=" + object.scope + ":" + object.path + " bytes=" + objectBytes + ".");
 		}
-		const singleRequestBytes = cloudflareQueueJsonBytes_({
+		const singleRequestBytes = cloudflareQueueNormalizedEnvelopeBytes_({
 			requestId: "request-id",
 			batchId: "batch-id",
 			publishedAt: new Date(0).toISOString(),
@@ -578,7 +620,7 @@ function buildCloudflareQueuedOrderedBatchList_(objectsRaw) {
 			throw new Error("Cloudflare ordered object cannot fit a request path=" + object.scope + ":" + object.path + " bytes=" + singleRequestBytes + ".");
 		}
 		const candidate = batch.concat([object]);
-		const candidateBytes = cloudflareQueueJsonBytes_({ objects: [], deletes: [], commits: candidate });
+		const candidateBytes = cloudflareQueueNormalizedEnvelopeBytes_({ objects: [], deletes: [], commits: candidate, batchId: "batch-id" });
 		if (batch.length && (candidate.length > CLOUDFLARE_PUBLISH_QUEUE_MAX_OBJECTS_PER_REQUEST || candidateBytes > CLOUDFLARE_PUBLISH_QUEUE_MAX_PAYLOAD_BYTES)) {
 			batches.push(batch);
 			batch = [object];
@@ -738,7 +780,7 @@ function assertCloudflareQueuedRequestBounds_(requestRaw) {
 			throw new Error("Cloudflare object exceeds hard limit path=" + all[i].scope + ":" + all[i].path + " bytes=" + bytes + ".");
 		}
 	}
-	const bytes = cloudflareQueueJsonBytes_(request);
+	const bytes = cloudflareQueueNormalizedEnvelopeBytes_(request);
 	if (bytes > CLOUDFLARE_PUBLISH_QUEUE_MAX_PAYLOAD_BYTES) {
 		throw new Error("Cloudflare queued request exceeds payload limit bytes=" + bytes + ".");
 	}
