@@ -2137,7 +2137,8 @@ test("roster queue task resumes from persisted primary snapshot phase after tran
   assert.equal(first.reason, "clan-members-snapshot");
   assert.equal(stateAfterFailure.phase, "primarySnapshot");
   assert.equal(stateAfterFailure.attemptByPhase.primarySnapshot, 1);
-  assert.equal(preparedAfterFailure.sourceRoster.id, "main");
+  assert.equal(preparedAfterFailure.sourceMeta.connectedClanTagByRosterId.main, "#CLAN");
+  assert.equal(preparedAfterFailure.sourceRoster, null);
   assert.equal(retry.rosterId, "main");
   assert.equal(clanFetchCalls, 2);
   assert.equal(sourceBatchReads, 1);
@@ -2184,10 +2185,58 @@ test("roster queue migrates old prepared inputs back to snapshot collection", ()
   };
 
   const result = backend.executeAutoRefreshRosterTask_(current, rosterTask, Date.now());
+  const prepared = backend.readAutoRefreshPreparedRosterInput_(runId, "main");
 
   assert.equal(result.rosterId, "main");
   assert.equal(clanFetchCalls, 1);
   assert.equal(sawSnapshotPlan, true);
+  assert.equal(prepared.sourceRoster, null);
+});
+
+test("roster queue resumes metric planning from captured primary snapshot without Clash recollect", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const rosterTask = firstRosterTask(tasks);
+  rosterTask.phase = "processSnapshot";
+  backend.writeAutoRefreshTask_(runId, rosterTask);
+  backend.writeAutoRefreshRunShard_(runId, "rosterInputs/main", {
+    rosterId: "main",
+    sourceMeta: backend.readAutoRefreshRunShard_(runId, "source/meta"),
+    sourceRoster: null,
+    sourceOwnership: {},
+    clanSnapshot: {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    },
+    currentRegularWarByClanTag: {},
+    currentRegularWarErrorByClanTag: {},
+    sourceMetricByTag: {},
+    sourceSeedByTag: {},
+  }, "PUT");
+  let clanFetchCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => {
+    clanFetchCalls++;
+    throw new Error("captured primary snapshot should be reused");
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, _options, accumulator) => {
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return {
+      rosterData,
+      pipelineResult: { memberTracking: { capturedPlayers: 1 } },
+    };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, rosterTask, Date.now());
+  const state = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+  const prepared = backend.readAutoRefreshPreparedRosterInput_(runId, "main");
+
+  assert.equal(result.rosterId, "main");
+  assert.equal(clanFetchCalls, 0);
+  assert.equal(state.phase, "completed");
+  assert.equal(prepared.sourceRoster, null);
+  assert.equal(prepared.metricReadTags.join(","), "#PLAYER");
 });
 
 test("roster queue processing is snapshot-only and defers forbidden live fetches", () => {

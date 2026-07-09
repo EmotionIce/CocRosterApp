@@ -1140,6 +1140,56 @@ function buildAutoRefreshRosterWorkingData_(sourceMetaRaw, sourceRosterRaw, sour
 	return payload;
 }
 
+function buildAutoRefreshSourceRosterStubFromMeta_(sourceMetaRaw, rosterIdRaw) {
+	const sourceMeta = sourceMetaRaw && typeof sourceMetaRaw === "object" ? sourceMetaRaw : {};
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	const connectedClanTagByRosterId = sourceMeta.connectedClanTagByRosterId && typeof sourceMeta.connectedClanTagByRosterId === "object"
+		? sourceMeta.connectedClanTagByRosterId
+		: {};
+	const trackingModeByRosterId = sourceMeta.trackingModeByRosterId && typeof sourceMeta.trackingModeByRosterId === "object"
+		? sourceMeta.trackingModeByRosterId
+		: {};
+	return {
+		id: rosterId,
+		title: rosterId,
+		connectedClanTag: normalizeTag_(connectedClanTagByRosterId[rosterId]),
+		trackingMode: trackingModeByRosterId[rosterId] === "regularWar" ? "regularWar" : "cwl",
+		_autoRefreshSourceRosterStub: true,
+		main: [],
+		subs: [],
+		missing: [],
+	};
+}
+
+function isAutoRefreshFullSourceRoster_(sourceRosterRaw, rosterIdRaw) {
+	const sourceRoster = sourceRosterRaw && typeof sourceRosterRaw === "object" ? sourceRosterRaw : null;
+	if (!sourceRoster) return false;
+	if (sourceRoster._autoRefreshSourceRosterStub === true) return false;
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	return !!(String(sourceRoster.id || "").trim() && (!rosterId || String(sourceRoster.id || "").trim() === rosterId));
+}
+
+function readAutoRefreshSourceRosterShardForTask_(runIdRaw, rosterIdRaw, sourceVersionIdRaw) {
+	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
+	if (!rosterId) throw new Error("Auto-refresh source roster id is required.");
+	const sourceVersionId = normalizeActiveVersionId_(sourceVersionIdRaw);
+	const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
+	const path = sourceVersionId
+		? buildActiveVersionPath_(sourceVersionId, "rosters/" + encodedRosterId)
+		: buildAutoRefreshRunPath_(runIdRaw, "source/rosters/" + encodedRosterId);
+	const encoded = firebaseRequestJson_(path, "GET");
+	const sourceRoster = decodeFirebaseObjectKeysRecursive_(encoded);
+	if (!isAutoRefreshFullSourceRoster_(sourceRoster, rosterId)) {
+		throw new Error("Auto-refresh source roster shard is missing for " + rosterId + ".");
+	}
+	return sourceRoster;
+}
+
+function readAutoRefreshSourceOwnershipShardForTask_(runIdRaw) {
+	const sourceOwnership = readAutoRefreshRunShard_(runIdRaw, "source/ownership");
+	return sourceOwnership && typeof sourceOwnership === "object" ? sourceOwnership : {};
+}
+
 // Read source map entries for only the player tags a bounded roster task can touch.
 function readAutoRefreshSourceEntriesForTags_(runIdRaw, basePathRaw, tagsRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -1843,8 +1893,8 @@ function writeAutoRefreshPreparedRosterInput_(runIdRaw, rosterIdRaw, inputRaw) {
 	const payload = {
 		rosterId: rosterId,
 		sourceMeta: input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : {},
-		sourceRoster: input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : {},
-		sourceOwnership: input.sourceOwnership && typeof input.sourceOwnership === "object" ? input.sourceOwnership : {},
+		sourceRoster: null,
+		sourceOwnership: {},
 		clanSnapshot: input.clanSnapshot && typeof input.clanSnapshot === "object" ? input.clanSnapshot : null,
 		sourceMetricByTag: input.sourceMetricByTag && typeof input.sourceMetricByTag === "object" ? input.sourceMetricByTag : {},
 		sourceSeedByTag: input.sourceSeedByTag && typeof input.sourceSeedByTag === "object" ? input.sourceSeedByTag : {},
@@ -1909,6 +1959,16 @@ function hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInputRaw) {
 	);
 }
 
+function hasAutoRefreshPreparedPrimarySnapshot_(preparedInputRaw) {
+	const preparedInput = preparedInputRaw && typeof preparedInputRaw === "object" ? preparedInputRaw : null;
+	if (!preparedInput || !preparedInput.sourceMeta || typeof preparedInput.sourceMeta !== "object") return false;
+	return (
+		Object.prototype.hasOwnProperty.call(preparedInput, "clanSnapshot") &&
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarByClanTag") &&
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarErrorByClanTag")
+	);
+}
+
 function buildInitialAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInputRaw) {
 	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
 	const rosterId = String(task.rosterId || "").trim();
@@ -1917,19 +1977,17 @@ function buildInitialAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInp
 	if (!task.phase) {
 		if (isAutoRefreshTaskResultComplete_(runIdRaw, task)) {
 			phase = "completed";
-		} else if (preparedInput && preparedInput.sourceMeta && preparedInput.sourceRoster && preparedInput.clanSnapshot) {
-			if (!hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInput)) {
-				phase = "primarySnapshot";
-			} else {
-				const metricTags = Array.isArray(preparedInput.metricReadTags) ? preparedInput.metricReadTags : [];
-				const seedTags = Array.isArray(preparedInput.seedReadTags) ? preparedInput.seedReadTags : [];
-				const metricCount = Object.keys(preparedInput.sourceMetricByTag || {}).length;
-				const seedCount = Object.keys(preparedInput.sourceSeedByTag || {}).length;
-				phase = metricCount < metricTags.length || seedCount < seedTags.length
-					? "metricSeedInputs"
-					: "processSnapshot";
-			}
-		} else if (preparedInput && preparedInput.sourceMeta && preparedInput.sourceRoster) {
+		} else if (hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInput)) {
+			const metricTags = Array.isArray(preparedInput.metricReadTags) ? preparedInput.metricReadTags : [];
+			const seedTags = Array.isArray(preparedInput.seedReadTags) ? preparedInput.seedReadTags : [];
+			const metricCount = Object.keys(preparedInput.sourceMetricByTag || {}).length;
+			const seedCount = Object.keys(preparedInput.sourceSeedByTag || {}).length;
+			phase = metricCount < metricTags.length || seedCount < seedTags.length
+				? "metricSeedInputs"
+				: "processSnapshot";
+		} else if (hasAutoRefreshPreparedPrimarySnapshot_(preparedInput)) {
+			phase = "metricSeedInputs";
+		} else if (preparedInput && preparedInput.sourceMeta) {
 			phase = "primarySnapshot";
 		} else {
 			phase = "source";
@@ -1951,6 +2009,7 @@ function buildInitialAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInp
 function getAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInputRaw) {
 	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
 	const rosterId = String(task.rosterId || "").trim();
+	const preparedInput = preparedInputRaw && typeof preparedInputRaw === "object" ? preparedInputRaw : null;
 	const stored = readAutoRefreshRosterPhaseState_(runIdRaw, rosterId);
 	const state = stored && typeof stored === "object" ? stored : buildInitialAutoRefreshRosterPhaseState_(runIdRaw, task, preparedInputRaw);
 	state.runId = normalizeActiveVersionId_(runIdRaw);
@@ -1960,11 +2019,15 @@ function getAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInputRaw) {
 	state.cursor = state.cursor && typeof state.cursor === "object" ? state.cursor : {};
 	state.attemptByPhase = state.attemptByPhase && typeof state.attemptByPhase === "object" ? state.attemptByPhase : {};
 	if (
-		(state.phase === "metricSeedInputs" || state.phase === "processSnapshot" || state.phase === "commit") &&
+		(state.phase === "processSnapshot" || state.phase === "commit") &&
 		!hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInputRaw) &&
 		!isAutoRefreshTaskResultComplete_(runIdRaw, task)
 	) {
-		state.phase = "primarySnapshot";
+		state.phase = hasAutoRefreshPreparedPrimarySnapshot_(preparedInput)
+			? "metricSeedInputs"
+			: preparedInput && preparedInput.sourceMeta
+				? "primarySnapshot"
+				: "source";
 		state.cursor = {};
 		state.error = "migrated-missing-snapshot-plan";
 	}
@@ -2405,10 +2468,6 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			logAutoRefreshRosterPhase_("start", current, task, state, { reason: "source-read" });
 			const sourcePaths = [
 				buildAutoRefreshRunPath_(runId, "source/meta"),
-				sourceVersionId
-					? buildActiveVersionPath_(sourceVersionId, "rosters/" + encodedRosterId)
-					: buildAutoRefreshRunPath_(runId, "source/rosters/" + encodedRosterId),
-				buildAutoRefreshRunPath_(runId, "source/ownership"),
 			];
 			let encodedSource = null;
 			try {
@@ -2418,18 +2477,14 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				throw err;
 			}
 			const sourceMeta = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[0]]);
-			const sourceRoster = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[1]]);
-			const sourceOwnership = decodeFirebaseObjectKeysRecursive_(encodedSource[sourcePaths[2]]) || {};
 			sourceFetchMs += Math.max(0, Date.now() - phaseStartMs);
-			if (!sourceMeta || !sourceRoster) throw new Error("Auto-refresh source shards are missing for run " + runId + ".");
+			if (!sourceMeta || typeof sourceMeta !== "object") throw new Error("Auto-refresh source metadata is missing for run " + runId + ".");
 			persistInput({
 				sourceMeta: sourceMeta,
-				sourceRoster: sourceRoster,
-				sourceOwnership: sourceOwnership,
 				requestCounts: {},
 			});
 			logAutoRefreshRosterPhase_("done", current, task, state, {
-				payloadBytes: approximateAutoRefreshPayloadSize_({ sourceMeta: sourceMeta, sourceRoster: sourceRoster, sourceOwnership: sourceOwnership }),
+				payloadBytes: approximateAutoRefreshPayloadSize_({ sourceMeta: sourceMeta }),
 				elapsedMs: Math.max(0, Date.now() - phaseStartMs),
 			});
 			checkpointAutoRefreshRosterPhase_(current, task, state, "primarySnapshot", { cursor: {} });
@@ -2438,12 +2493,16 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 
 		if (state.phase === "primarySnapshot") {
 			const input = reloadInput();
-			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
-			if (!sourceRoster) {
+			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
+			if (!sourceMeta) {
 				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
 				continue;
 			}
-			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforePrimarySnapshotBudget", null, executionStartMsRaw);
+			}
+			const sourceRosterStub = buildAutoRefreshSourceRosterStubFromMeta_(sourceMeta, rosterId);
+			const clanTag = normalizeTag_(sourceRosterStub.connectedClanTag);
 			checkpointPhaseStart("primarySnapshot", { cursor: {} });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "primarySnapshot")) {
 				throw new Error("Auto-refresh roster primary snapshot phase exceeded retry limit for " + rosterId + ".");
@@ -2475,7 +2534,6 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			if (clanTag && !clanSnapshot) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "missing-clan-members-snapshot", null, executionStartMsRaw);
 			}
-			const plan = collectAutoRefreshRosterInputReadPlan_(sourceRoster, clanSnapshot);
 			const requestCounts = Object.assign({}, input.requestCounts || {}, {
 				members: clanTag ? 1 : 0,
 				currentWar: clanTag ? 1 : 0,
@@ -2484,10 +2542,6 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				clanSnapshot: clanSnapshot,
 				currentRegularWarByClanTag: currentRegularWarByClanTag,
 				currentRegularWarErrorByClanTag: currentRegularWarErrorByClanTag,
-				metricTags: plan.metricTags,
-				metricReadTags: plan.metricReadTags,
-				seedReadTags: plan.seedReadTags,
-				targetSeedByTag: plan.targetSeedByTag,
 				sourceMetricByTag: input.sourceMetricByTag || {},
 				sourceSeedByTag: input.sourceSeedByTag || {},
 				requestCounts: requestCounts,
@@ -2495,7 +2549,9 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			clanFetchMs += Math.max(0, Date.now() - phaseStartMs);
 			logAutoRefreshRosterPhase_("done", current, task, state, {
 				requestCount: toNonNegativeInt_(requestCounts.members) + toNonNegativeInt_(requestCounts.currentWar),
-				tagCount: plan.metricReadTags.length + plan.seedReadTags.length,
+				tagCount:
+					(Array.isArray(clanSnapshot && clanSnapshot.members) ? clanSnapshot.members.length : 0) +
+					(Array.isArray(clanSnapshot && clanSnapshot.metricsMembers) ? clanSnapshot.metricsMembers.length : 0),
 				payloadBytes: approximateAutoRefreshPayloadSize_(clanSnapshot),
 				elapsedMs: Math.max(0, Date.now() - phaseStartMs),
 			});
@@ -2506,11 +2562,16 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		if (state.phase === "warInputs") {
 			const input = reloadInput();
 			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
-			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
-			if (!sourceMeta || !sourceRoster) {
+			if (!sourceMeta) {
 				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
 				continue;
 			}
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
+				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeWarInputsBudget", null, executionStartMsRaw);
+			}
+			let sourceRoster = isAutoRefreshFullSourceRoster_(input.sourceRoster, rosterId)
+				? input.sourceRoster
+				: buildAutoRefreshSourceRosterStubFromMeta_(sourceMeta, rosterId);
 			const clanTag = normalizeTag_(sourceRoster.connectedClanTag);
 			checkpointPhaseStart("warInputs", { cursor: {} });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "warInputs")) {
@@ -2538,6 +2599,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				clanTag &&
 				!Object.prototype.hasOwnProperty.call(regularWarLogByClanTag, clanTag) &&
 				!Object.prototype.hasOwnProperty.call(regularWarLogErrorByClanTag, clanTag) &&
+				(sourceRoster = isAutoRefreshFullSourceRoster_(sourceRoster, rosterId) ? sourceRoster : readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId)) &&
 				shouldPrefetchRegularWarLogForRoster_(
 					sourceRoster,
 					currentRegularWarByClanTag,
@@ -2591,7 +2653,17 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 
 		if (state.phase === "metricSeedInputs") {
 			const input = reloadInput();
-			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
+			let sourceRoster = isAutoRefreshFullSourceRoster_(input.sourceRoster, rosterId)
+				? input.sourceRoster
+				: null;
+			if (!sourceRoster) {
+				try {
+					sourceRoster = readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId);
+				} catch (err) {
+					if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-source-roster-read", err, executionStartMsRaw);
+					throw err;
+				}
+			}
 			if (!sourceRoster) {
 				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
 				continue;
@@ -2599,11 +2671,25 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			const cursor = state.cursor && typeof state.cursor === "object" ? state.cursor : {};
 			let metricOffset = toNonNegativeInt_(cursor.metricOffset);
 			let seedOffset = toNonNegativeInt_(cursor.seedOffset);
-			const metricReadTags = Array.isArray(input.metricReadTags) ? input.metricReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
-			const seedReadTags = Array.isArray(input.seedReadTags) ? input.seedReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
+			let metricReadTags = Array.isArray(input.metricReadTags) ? input.metricReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
+			let seedReadTags = Array.isArray(input.seedReadTags) ? input.seedReadTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
+			let metricTags = Array.isArray(input.metricTags) ? input.metricTags.map((tag) => normalizeTag_(tag)).filter((tag) => tag) : [];
 			let sourceMetricByTag = input.sourceMetricByTag && typeof input.sourceMetricByTag === "object" ? input.sourceMetricByTag : {};
 			let sourceSeedByTag = input.sourceSeedByTag && typeof input.sourceSeedByTag === "object" ? input.sourceSeedByTag : {};
-			const targetSeedByTag = input.targetSeedByTag && typeof input.targetSeedByTag === "object" ? input.targetSeedByTag : buildRosterPlayerSeedByTag_({ rosters: [sourceRoster] });
+			let targetSeedByTag = input.targetSeedByTag && typeof input.targetSeedByTag === "object" ? input.targetSeedByTag : {};
+			if (!Array.isArray(input.metricReadTags) || !Array.isArray(input.seedReadTags) || !Object.keys(targetSeedByTag).length) {
+				const plan = collectAutoRefreshRosterInputReadPlan_(sourceRoster, input.clanSnapshot);
+				metricTags = plan.metricTags;
+				metricReadTags = plan.metricReadTags;
+				seedReadTags = plan.seedReadTags;
+				targetSeedByTag = plan.targetSeedByTag;
+				persistInput({
+					metricTags: metricTags,
+					metricReadTags: metricReadTags,
+					seedReadTags: seedReadTags,
+					targetSeedByTag: targetSeedByTag,
+				});
+			}
 			const targetSeedTags = Object.keys(targetSeedByTag);
 			checkpointPhaseStart("metricSeedInputs", { cursor: { metricOffset: metricOffset, seedOffset: seedOffset } });
 			if (shouldFailAutoRefreshRosterPhaseAfterAttempts_(state, "metricSeedInputs")) {
@@ -2654,6 +2740,9 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];
 			}
 			persistInput({
+				metricTags: metricTags,
+				metricReadTags: metricReadTags,
+				seedReadTags: seedReadTags,
 				sourceMetricByTag: sourceMetricByTag,
 				sourceSeedByTag: sourceSeedByTag,
 				targetSeedByTag: targetSeedByTag,
@@ -2680,10 +2769,20 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		if (state.phase === "processSnapshot") {
 			const input = reloadInput();
 			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
-			const sourceRoster = input.sourceRoster && typeof input.sourceRoster === "object" ? input.sourceRoster : null;
+			let sourceRoster = isAutoRefreshFullSourceRoster_(input.sourceRoster, rosterId)
+				? input.sourceRoster
+				: null;
 			if (!sourceMeta || !sourceRoster) {
-				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
-				continue;
+				if (!sourceMeta) {
+					checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
+					continue;
+				}
+				try {
+					sourceRoster = readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId);
+				} catch (err) {
+					if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-source-roster-read", err, executionStartMsRaw);
+					throw err;
+				}
 			}
 			if (!hasAutoRefreshJobBudgetFor_(executionStartMsRaw, AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS)) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "beforeRosterProcess", null, executionStartMsRaw);
@@ -2708,7 +2807,9 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				rosterId,
 				input.clanSnapshot,
 				input.sourceSeedByTag || {},
-				input.sourceOwnership || {},
+				input.sourceOwnership && typeof input.sourceOwnership === "object" && Object.keys(input.sourceOwnership).length
+					? input.sourceOwnership
+					: readAutoRefreshSourceOwnershipShardForTask_(runId),
 			);
 			const accumulator = createRefreshAllAccumulator_();
 			const pipelineOptions = {
