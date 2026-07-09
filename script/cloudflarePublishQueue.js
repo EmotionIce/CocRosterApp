@@ -140,6 +140,7 @@ function createEmptyCloudflarePublishQueueState_() {
 			nextAttemptAt: "",
 			lastError: "",
 			lastFailureAt: "",
+			permanent: false,
 		},
 		lastSuccessAt: "",
 		lastBatch: null,
@@ -182,6 +183,7 @@ function normalizeCloudflarePublishQueueState_(raw) {
 			nextAttemptAt: String(retryRaw.nextAttemptAt || ""),
 			lastError: String(retryRaw.lastError || "").slice(0, 2000),
 			lastFailureAt: String(retryRaw.lastFailureAt || ""),
+			permanent: retryRaw.permanent === true,
 		},
 		lastSuccessAt: String(source.lastSuccessAt || ""),
 		lastBatch: source.lastBatch && typeof source.lastBatch === "object" ? source.lastBatch : null,
@@ -823,20 +825,23 @@ function clearCloudflareDirtyWorkIfRevisionMatches_(state, workRaw) {
 
 function recordCloudflareQueueFailure_(messageRaw, batchRaw) {
 	const message = String(messageRaw || "Cloudflare publication failed.").slice(0, 2000);
+	const permanent = /cannot fit|hard limit|payload limit|object exceeds/i.test(message);
 	return mutateCloudflarePublishQueueState_(function (state) {
 		const attempt = Math.max(0, toNonNegativeInt_(state.retry.attempt)) + 1;
 		const delay = Math.min(CLOUDFLARE_PUBLISH_QUEUE_MAX_RETRY_MS, CLOUDFLARE_PUBLISH_QUEUE_BASE_RETRY_MS * Math.pow(2, Math.min(10, attempt - 1)));
 		state.retry.attempt = attempt;
-		state.retry.nextAttemptAt = new Date(Date.now() + delay).toISOString();
+		state.retry.nextAttemptAt = permanent ? "" : new Date(Date.now() + delay).toISOString();
 		state.retry.lastError = message;
 		state.retry.lastFailureAt = new Date().toISOString();
+		state.retry.permanent = permanent;
+		if (permanent) state.paused = true;
 		state.lastBatch = batchRaw && typeof batchRaw === "object" ? batchRaw : null;
-		return { attempt: attempt, nextAttemptAt: state.retry.nextAttemptAt };
+		return { attempt: attempt, nextAttemptAt: state.retry.nextAttemptAt, permanent: permanent };
 	});
 }
 
 function resetCloudflareQueueRetry_(state, batchRaw) {
-	state.retry = { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "" };
+	state.retry = { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "", permanent: false };
 	state.lastSuccessAt = new Date().toISOString();
 	state.lastBatch = batchRaw && typeof batchRaw === "object" ? batchRaw : null;
 }
@@ -989,6 +994,10 @@ function cloudflarePublishWorkerTick() {
 	try {
 		let state = readCloudflarePublishQueueState_();
 		if (state.paused) return { ok: true, skipped: true, reason: "paused" };
+		if (state.retry.permanent === true) {
+			removeCloudflarePublishWorkerTriggers_();
+			return { ok: false, skipped: true, reason: "permanent-size-failure", error: state.retry.lastError };
+		}
 		const nextAttemptMs = parseIsoToMs_(state.retry.nextAttemptAt);
 		if (nextAttemptMs > Date.now()) {
 			scheduleCloudflarePublishWorker_();
@@ -1083,6 +1092,7 @@ function getCloudflarePublishQueueDiagnostics_() {
 		retryAttempt: state.retry.attempt,
 		nextRetryAt: state.retry.nextAttemptAt,
 		lastError: state.retry.lastError,
+		permanentFailure: state.retry.permanent === true,
 		lastSuccessAt: state.lastSuccessAt,
 		lastBatch: state.lastBatch,
 		triggerId: triggerId,
@@ -1147,6 +1157,7 @@ function retryCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 	mutateCloudflarePublishQueueState_(function (state) {
 		state.retry.nextAttemptAt = "";
 		state.retry.lastError = "";
+		state.retry.permanent = false;
 		state.paused = false;
 	});
 	scheduleCloudflarePublishWorker_();
