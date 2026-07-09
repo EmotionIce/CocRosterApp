@@ -2669,13 +2669,20 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   const result = backend.executeAutoRefreshFinalizeTask_(current, finalizeTask, Date.now());
   const event = backend.readSeasonEventById_("cwl-waiting");
   const live = backend.readCwlSeasonEventAggregate_("cwl-waiting", "live");
+  const leaderboard = backend.buildSeasonEventLeaderboard_(event, data, { nowIso: "2026-07-05T00:00:00.000Z" });
   const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
 
   assert.equal(result.status, "completed");
   assert.equal(event.cwlTrackingState, "active");
   assert.equal(event.startsAt, "2026-07-04T20:00:00.000Z");
   assert.equal(event.endsAt, "2026-07-05T20:00:00.000Z");
+  assert.equal(JSON.stringify(event.cwl.target.eligibleAccountTags), JSON.stringify(["#PLAYER"]));
+  assert.equal(event.activeParticipantCount || backend.summarizeSeasonEvent_(event).activeParticipantCount, 1);
   assert.equal(live.byTag["#PLAYER"].starsTotal, 3);
+  assert.equal(JSON.stringify(live.rankedTags), JSON.stringify(["#PLAYER"]));
+  assert.equal(leaderboard.event.activeParticipantCount, 1);
+  assert.equal(leaderboard.leaderboard.length, 1);
+  assert.equal(leaderboard.leaderboard[0].tag, "#PLAYER");
   assert.equal(lastJob.cwlSeasonEventRefresh.status, "active");
   assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.leagueGroup, 1);
   assert.equal(lastJob.cwlSeasonEventRefresh.requestCounts.cwlWar, 1);

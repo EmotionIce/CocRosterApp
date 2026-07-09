@@ -3255,6 +3255,92 @@ test("CWL unresolved targets wait while legacy completed targetless events remai
   assert.equal(legacy.leaderboard[0].tag, "#2LUCULP");
 });
 
+test("CWL refresh repairs a resolved empty target eligibility snapshot", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-broken", type: "cwl" },
+        byId: {
+          "cwl-broken": {
+            eventId: "cwl-broken",
+            type: "cwl",
+            status: "open",
+            visibility: "public",
+            signupsOpen: true,
+            startsAt: "",
+            endsAt: "",
+            cwlTrackingState: "active",
+            cwl: {
+              target: {
+                resolved: true,
+                status: "resolved",
+                rosterId: "main",
+                rosterTitle: "Main",
+                clanTag: "#CLAN",
+                clanName: "Main",
+                leagueName: "Champion I",
+                leagueRank: 0,
+                resolvedAt: "2026-07-04T00:00:00.000Z",
+                eligibleAccountTags: [],
+              },
+              groups: {},
+            },
+            participantsByDiscordId: {
+              "100": {
+                discordId: "100",
+                discordUsername: "alpha",
+                discordDisplayName: "Alpha",
+                status: "signed_up",
+                accounts: [{ tag: "#PLAYER", name: "Player" }],
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  const snapshot = {
+    leaguegroupRawByClanTag: {
+      "#CLAN": {
+        state: "inWar",
+        season: "2026-07",
+        clans: [{ tag: "#CLAN" }, { tag: "#OPP" }],
+        rounds: [{ warTags: ["#WAR1"] }],
+      },
+    },
+    cwlWarRawByTag: {
+      "#WAR1": {
+        state: "inWar",
+        startTime: "2026-07-04T20:00:00.000Z",
+        endTime: "2026-07-05T20:00:00.000Z",
+        clan: {
+          tag: "#CLAN",
+          members: [{ tag: "#PLAYER", name: "Player", attacks: [{ defenderTag: "#BASE", stars: 3, destructionPercentage: 100 }] }],
+        },
+        opponent: {
+          tag: "#OPP",
+          members: [{ tag: "#BASE", name: "Base", attacks: [] }],
+        },
+      },
+    },
+    cwlWarErrorByTag: {},
+  };
+
+  const result = backend.refreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, { nowIso: "2026-07-05T00:00:00.000Z" });
+  const event = backend.readSeasonEventById_("cwl-broken");
+  const live = backend.readCwlSeasonEventAggregate_("cwl-broken", "live");
+  const leaderboard = backend.buildSeasonEventLeaderboard_(event, rosterData, { nowIso: "2026-07-05T00:00:00.000Z" });
+
+  assert.equal(result.status, "active");
+  assert.equal(JSON.stringify(event.cwl.target.eligibleAccountTags), JSON.stringify(["#PLAYER"]));
+  assert.equal(backend.summarizeSeasonEvent_(event).activeParticipantCount, 1);
+  assert.equal(JSON.stringify(live.rankedTags), JSON.stringify(["#PLAYER"]));
+  assert.equal(leaderboard.event.activeParticipantCount, 1);
+  assert.equal(leaderboard.leaderboard.length, 1);
+  assert.equal(leaderboard.leaderboard[0].tag, "#PLAYER");
+});
+
 test("CWL runtime aggregation is target-only and ignores non-target discovery and audit failures", () => {
   const backend = loadBackend();
   const nowIso = "2026-07-05T00:00:00.000Z";

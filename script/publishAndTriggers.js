@@ -970,6 +970,14 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		createdAt: new Date().toISOString(),
 	};
 	if (rosterData.publicConfig && typeof rosterData.publicConfig === "object") meta.publicConfig = rosterData.publicConfig;
+	if (typeof buildCwlSeasonEventTargetCandidatesFromRosterData_ === "function") {
+		const cwlTargetCandidates = buildCwlSeasonEventTargetCandidatesFromRosterData_(rosterData, {
+			fetchMissing: false,
+			defaultMissingLeagueToUnranked: false,
+			allowUnresolvedLeague: true,
+		}).filter((candidate) => candidate && Array.isArray(candidate.eligibleAccountTags) && candidate.eligibleAccountTags.length > 0);
+		if (cwlTargetCandidates.length) meta.cwlTargetCandidates = cwlTargetCandidates;
+	}
 	return meta;
 }
 
@@ -1625,7 +1633,16 @@ function buildAutoRefreshCwlCoordinatorRosterDataFromSourceMeta_(sourceMetaRaw, 
 		lastUpdatedAt: String(lastUpdatedAtRaw || sourceMeta.sourceLastUpdatedAt || new Date().toISOString()),
 	};
 	if (sourceMeta.publicConfig && typeof sourceMeta.publicConfig === "object") payload.publicConfig = sourceMeta.publicConfig;
-	return validateRosterData_(payload);
+	const validated = validateRosterData_(payload);
+	if (Array.isArray(sourceMeta.cwlTargetCandidates) && typeof sanitizeCwlSeasonEventTargetCandidate_ === "function") {
+		const cwlTargetCandidates = [];
+		for (let i = 0; i < sourceMeta.cwlTargetCandidates.length; i++) {
+			const candidate = sanitizeCwlSeasonEventTargetCandidate_(sourceMeta.cwlTargetCandidates[i]);
+			if (candidate.rosterId && candidate.clanTag && candidate.eligibleAccountTags.length) cwlTargetCandidates.push(candidate);
+		}
+		if (cwlTargetCandidates.length) validated.cwlTargetCandidates = cwlTargetCandidates;
+	}
+	return validated;
 }
 
 function getAutoRefreshCwlCoordinatorAggregateHash_(coordinatorRaw) {
