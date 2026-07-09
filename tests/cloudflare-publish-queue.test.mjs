@@ -280,6 +280,50 @@ test("active commit request is fenced and writes bootstrap last", () => {
   assert.equal(state.active.committedVersionId, "version-B");
 });
 
+test("large active commit objects are split into resumable ordered batches", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.active = {
+    targetVersionId: "version-B",
+    targetGeneration: 8,
+    phase: "commit",
+    cursor: 0,
+    committedVersionId: "version-A",
+    updatedAt: "",
+  };
+  const batches = [
+    [{ path: "active", scope: "bot", payload: { activeVersionId: "version-B" } }],
+    [{ path: "activePublished/currentManifest", scope: "public", payload: { versionId: "version-B" } }],
+    [{ path: "bootstrap/current", scope: "public", payload: { activeVersionId: "version-B" } }],
+  ];
+  const sent = [];
+  q.buildCloudflareQueuedActivePlan_ = () => ({
+    targetVersionId: "version-B",
+    generation: 8,
+    bootstrapRevision: 0,
+    batches: [],
+    commits: batches.flat(),
+    commitBatches: batches,
+  });
+  q.sendCloudflareQueuedV2Request_ = (request) => {
+    sent.push(clone(request));
+    return { response: { ok: true } };
+  };
+  q.mutateCloudflarePublishQueueState_ = (callback) => callback(state);
+
+  q.processCloudflareActiveQueueRequest_(clone(state));
+  q.processCloudflareActiveQueueRequest_(clone(state));
+  q.processCloudflareActiveQueueRequest_(clone(state));
+
+  assert.deepEqual(sent.map((request) => request.commits.map((item) => item.path)), [
+    ["active"],
+    ["activePublished/currentManifest"],
+    ["bootstrap/current"],
+  ]);
+  assert.equal(state.active.phase, "idle");
+  assert.equal(state.active.committedVersionId, "version-B");
+});
+
 test("worker outage preserves pending state, records backoff, and releases its independent lease", () => {
   const q = loadQueue();
   const state = q.createEmptyCloudflarePublishQueueState_();

@@ -545,6 +545,7 @@ function buildCloudflareQueuedActivePlan_(stateRaw) {
 		bootstrapRevision: state.dirty.bootstrap ? toNonNegativeInt_(state.dirty.bootstrap.revision) : 0,
 		batches: buildCloudflareQueuedBatchList_(ordinary),
 		commits: commits,
+		commitBatches: buildCloudflareQueuedOrderedBatchList_(commits),
 	};
 }
 
@@ -908,18 +909,35 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw, planOverr
 		mutateCloudflarePublishQueueState_(function (latest) {
 			if (latest.active.targetVersionId !== plan.targetVersionId || latest.active.targetGeneration !== plan.generation) return;
 			if (latest.active.cursor === cursor) latest.active.cursor = cursor + 1;
-			if (latest.active.cursor >= plan.batches.length) latest.active.phase = "commit";
+			if (latest.active.cursor >= plan.batches.length) {
+				latest.active.phase = "commit";
+				latest.active.cursor = 0;
+			}
 			latest.active.updatedAt = new Date().toISOString();
 			resetCloudflareQueueRetry_(latest, { category: "active", phase: "ordinary", cursor: cursor, response: sent.response });
 		}, ownerTokenRaw);
 		return { ok: true, category: "active", phase: "ordinary", cursor: cursor };
 	}
+	const commitBatches = Array.isArray(plan.commitBatches)
+		? plan.commitBatches
+		: (Array.isArray(plan.commits) && plan.commits.length ? [plan.commits] : []);
+	if (!commitBatches.length) throw new Error("Cloudflare active publication has no ordered commit batches.");
+	let commitCursor = Math.max(0, toNonNegativeInt_(state.active.cursor));
+	if (commitCursor >= commitBatches.length) {
+		// A pre-split worker may have left the ordinary cursor in the commit
+		// phase. Restart ordered commits from the beginning; each commit is
+		// idempotent and the active guard keeps the old target fenced.
+		commitCursor = 0;
+		mutateCloudflarePublishQueueState_(function (latest) {
+			if (latest.active.targetVersionId === plan.targetVersionId && latest.active.targetGeneration === plan.generation && latest.active.phase === "commit") latest.active.cursor = 0;
+		}, ownerTokenRaw);
+	}
 	const request = {
-		batchId: "active:" + plan.targetVersionId + ":commit",
+		batchId: "active:" + plan.targetVersionId + ":commit:" + commitCursor,
 		revision: plan.generation,
 		objects: [],
 		deletes: [],
-		commits: plan.commits,
+		commits: commitBatches[commitCursor],
 		commitGuard: {
 			kind: "active",
 			generation: plan.generation,
@@ -930,16 +948,21 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw, planOverr
 	const sent = sendCloudflareQueuedV2Request_(request, "active-commit", ownerTokenRaw);
 	mutateCloudflarePublishQueueState_(function (latest) {
 		if (latest.active.targetVersionId !== plan.targetVersionId || latest.active.targetGeneration !== plan.generation) return;
-		latest.active.committedVersionId = plan.targetVersionId;
-		latest.active.phase = "idle";
-		latest.active.cursor = 0;
-		latest.active.updatedAt = new Date().toISOString();
-		if (plan.bootstrapRevision && latest.dirty.bootstrap && toNonNegativeInt_(latest.dirty.bootstrap.revision) === plan.bootstrapRevision) {
-			latest.dirty.bootstrap = null;
+		if (latest.active.phase !== "commit" || latest.active.cursor !== commitCursor) return;
+		if (commitCursor + 1 < commitBatches.length) {
+			latest.active.cursor = commitCursor + 1;
+		} else {
+			latest.active.committedVersionId = plan.targetVersionId;
+			latest.active.phase = "idle";
+			latest.active.cursor = 0;
+			if (plan.bootstrapRevision && latest.dirty.bootstrap && toNonNegativeInt_(latest.dirty.bootstrap.revision) === plan.bootstrapRevision) {
+				latest.dirty.bootstrap = null;
+			}
 		}
+		latest.active.updatedAt = new Date().toISOString();
 		resetCloudflareQueueRetry_(latest, { category: "active", phase: "commit", response: sent.response });
 	}, ownerTokenRaw);
-	return { ok: true, category: "active", phase: "commit", versionId: plan.targetVersionId };
+	return { ok: true, category: "active", phase: "commit", cursor: commitCursor, versionId: plan.targetVersionId };
 }
 
 function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw, planOverrideRaw) {
