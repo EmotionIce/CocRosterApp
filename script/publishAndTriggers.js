@@ -3698,27 +3698,18 @@ function publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(refreshRaw,
 	if (!shouldPublishCloudflareAfterAutoRefreshCwlSeasonEventRefresh_(refreshRaw)) {
 		return { ok: true, skipped: true, reason: "cwl-refresh-not-publishable" };
 	}
+	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : {};
 	const label = String(labelRaw || "auto-refresh-cwl-season-events").trim() || "auto-refresh-cwl-season-events";
-	if (typeof publishCloudflareSeasonEventsAndDonationDataBestEffort_ !== "function") {
-		const unavailable = { ok: false, skipped: true, reason: "unavailable", label: label };
-		Logger.log("Auto-refresh CWL Cloudflare season-event publish unavailable label=%s", label);
-		return unavailable;
+	const eventId = sanitizeSeasonEventText_(refresh.eventId || (refresh.event && refresh.event.eventId), 180);
+	if (eventId && typeof enqueueCloudflareSeasonEventPublication_ === "function") {
+		return enqueueCloudflareSeasonEventPublication_(eventId, label, {
+			cwlLive: refresh.finalized !== true,
+			cwlFinal: refresh.finalized === true,
+			pointers: refresh.finalized === true,
+		});
 	}
-	try {
-		const result = publishCloudflareSeasonEventsAndDonationDataBestEffort_(label);
-		if (!result || result.ok !== true) {
-			Logger.log(
-				"Auto-refresh CWL Cloudflare season-event publish failed label=%s error=%s",
-				label,
-				getCloudflareAutoRefreshResultError_(result),
-			);
-		}
-		return result || { ok: false, status: "empty", label: label };
-	} catch (err) {
-		const failed = { ok: false, status: "error", error: errorMessage_(err), label: label };
-		Logger.log("Auto-refresh CWL Cloudflare season-event publish threw label=%s error=%s", label, failed.error);
-		return failed;
-	}
+	if (typeof enqueueCloudflareRelevantSeasonPublication_ === "function") return enqueueCloudflareRelevantSeasonPublication_(label);
+	return { ok: true, skipped: true, reason: "queue-unavailable", label: label };
 }
 
 // Ensure all metric-copy tasks that precede staged finalization wrote their
@@ -3736,174 +3727,23 @@ function verifyAutoRefreshMetricCopyTasksComplete_(runIdRaw, taskIdsRaw) {
 	}
 }
 
-function getCloudflareAutoRefreshResultError_(resultRaw) {
-	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
-	if (!result) return "Cloudflare publish returned no result.";
-	const parts = [];
-	const pushFailure = function (label, itemRaw) {
-		const item = itemRaw && typeof itemRaw === "object" ? itemRaw : null;
-		if (!item || item.ok === true) return;
-		const reason = String(item.error || item.reason || "not ok").trim();
-		parts.push(label + ": " + reason);
-	};
-	if (result.ok !== true) {
-		const reason = String(result.error || result.reason || "").trim();
-		if (reason) parts.push(reason);
-	}
-	pushFailure("active", result.active);
-	if (result.active && typeof result.active === "object") {
-		pushFailure("active public", result.active.publicResult);
-		pushFailure("active bot", result.active.botResult);
-	}
-	pushFailure("cwlLeagueSignups", result.cwlLeagueSignups);
-	pushFailure("seasonEvents", result.seasonEvents);
-	return (parts.join("; ") || "Cloudflare publish did not return ok.").slice(0, 1000);
-}
-
-function summarizeCloudflareAutoRefreshResult_(publishResultRaw, verifyResultRaw) {
-	const publishResult = publishResultRaw && typeof publishResultRaw === "object" ? publishResultRaw : {};
-	const verifyResult = verifyResultRaw && typeof verifyResultRaw === "object" ? verifyResultRaw : {};
-	const active = publishResult.active && typeof publishResult.active === "object" ? publishResult.active : {};
-	const publicResult = active.publicResult && typeof active.publicResult === "object" ? active.publicResult : {};
-	const botResult = active.botResult && typeof active.botResult === "object" ? active.botResult : {};
-	const signups = publishResult.cwlLeagueSignups && typeof publishResult.cwlLeagueSignups === "object" ? publishResult.cwlLeagueSignups : {};
-	const seasonEvents = publishResult.seasonEvents && typeof publishResult.seasonEvents === "object" ? publishResult.seasonEvents : {};
-	return {
-		ok: publishResult.ok === true && verifyResult.ok === true,
-		versionId: normalizeActiveVersionId_(active.versionId || verifyResult.actualVersionId || verifyResult.expectedVersionId),
-		verifiedAt: new Date().toISOString(),
-		force: publishResult.force === true || publicResult.force === true || botResult.force === true,
-		verifyStatusCode: toNonNegativeInt_(verifyResult.statusCode),
-		activePublicPutCount: toNonNegativeInt_(publicResult.putCount),
-		activeBotPutCount: toNonNegativeInt_(botResult.putCount),
-		cwlLeagueSignupsPutCount: toNonNegativeInt_(signups.putCount),
-		seasonEventsPutCount: toNonNegativeInt_(seasonEvents.putCount),
-		seasonEventsDeleteCount: toNonNegativeInt_(seasonEvents.deleteCount),
-	};
-}
-
-function buildCloudflareAutoRefreshDeferredResult_(currentRaw, errorRaw, labelRaw, optionsRaw) {
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const updateQueue = options.updateQueue !== false;
-	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
-	const message = String(errorRaw || "Cloudflare public data mirror is not verified.").slice(0, 1000);
-	if (current && updateQueue) {
-		current.status = "finalizing";
-		current.phase = "cloudflare-publish";
-		current.error = message;
-		current.cloudflarePublicDataPublish = {
-			ok: false,
-			label: String(labelRaw || "").slice(0, 120),
-			error: message,
-			forceNext: true,
-			updatedAt: new Date().toISOString(),
-		};
-		writeAutoRefreshQueueCurrent_(current, false);
-		setAutoRefreshRunResult_(
-			"inProgress",
-			"Auto-refresh published Firebase; waiting for Cloudflare public data mirror verification.",
-			message,
-			current.issueCount,
-			current.issueSummary,
-			current.startedAt,
-			new Date().toISOString(),
-		);
-	}
-	if (updateQueue) scheduleAutoRefreshJobResume_();
-	Logger.log(
-		"autoRefresh Cloudflare mirror deferred runId=%s label=%s updateQueue=%s error=%s",
-		current ? current.runId : "",
-		String(labelRaw || ""),
-		updateQueue,
-		message,
-	);
-	return {
-		ok: true,
-		status: "inProgress",
-		inProgress: true,
-		deferred: true,
-		reason: "cloudflarePublicDataMirror",
-		error: message,
-		runId: current ? current.runId : "",
-		processedRosters: current ? current.processedRosters : 0,
-		totalRosters: current ? current.rosterIds.length : 0,
-	};
-}
-
-function shouldForceAutoRefreshCloudflarePublish_(currentRaw, optionsRaw) {
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	if (options.force === true) return true;
-	const current = currentRaw && typeof currentRaw === "object" ? currentRaw : {};
-	const previous = current.cloudflarePublicDataPublish && typeof current.cloudflarePublicDataPublish === "object"
-		? current.cloudflarePublicDataPublish
-		: null;
-	if (!previous) return false;
-	if (previous.forceNext === true) return true;
-	if (previous.ok === false) return true;
-	const status = String(previous.status || "").trim().toLowerCase();
-	return status === "verifyfailed" || status === "publishfailed";
-}
-
 function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw, optionsRaw) {
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const updateQueue = options.updateQueue !== false;
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const runId = current && current.runId;
 	const label = String(labelRaw || "auto-refresh-finalize").trim() || "auto-refresh-finalize";
-	if (!runId) throw new Error("Auto-refresh Cloudflare publish is missing run id.");
-	if (typeof publishCloudflarePublicDataSnapshot_ !== "function") {
-		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data publisher is unavailable.", label, options);
+	if (!runId) throw new Error("Auto-refresh Cloudflare enqueue is missing run id.");
+	if (typeof enqueueCloudflareActiveTarget_ !== "function") {
+		return { ok: true, skipped: true, status: "legacy-manual", reason: "cloudflare-queue-unavailable", runId: runId, label: label };
 	}
-	const forcePublish = shouldForceAutoRefreshCloudflarePublish_(current, options);
-	if (updateQueue) {
-		current.status = "finalizing";
-		current.phase = "cloudflare-publish";
-		current.cloudflarePublicDataPublish = {
-			ok: false,
-			label: label.slice(0, 120),
-			status: "publishing",
-			force: forcePublish,
-			updatedAt: new Date().toISOString(),
-		};
-		writeAutoRefreshQueueCurrent_(current, false);
-		scheduleAutoRefreshJobResume_();
-	}
-	const versionWrite = options.rosterData && typeof options.rosterData === "object"
-		? {
-				versionId: runId,
-				manifest: options.manifest && typeof options.manifest === "object" ? options.manifest : null,
-				rosterData: options.rosterData,
-			}
-		: null;
-	const publishOptions = {
-		label: label,
-		force: forcePublish,
-		versionId: runId,
-	};
-	if (versionWrite) publishOptions.versionWrite = versionWrite;
-	const publishResult = publishCloudflarePublicDataSnapshot_(publishOptions);
-	if (!publishResult || publishResult.ok !== true) {
-		return buildCloudflareAutoRefreshDeferredResult_(current, getCloudflareAutoRefreshResultError_(publishResult), label, options);
-	}
-	if (typeof verifyCloudflarePublicActiveVersionId_ !== "function") {
-		return buildCloudflareAutoRefreshDeferredResult_(current, "Cloudflare public data verification is unavailable.", label, options);
-	}
-	const verifyResult = verifyCloudflarePublicActiveVersionId_(runId);
-	if (!verifyResult || verifyResult.ok !== true) {
-		const message = verifyResult && (verifyResult.error || verifyResult.reason)
-			? String(verifyResult.error || verifyResult.reason)
-			: "Cloudflare active version pointer did not verify.";
-		return buildCloudflareAutoRefreshDeferredResult_(current, message, label, options);
-	}
-	current.error = "";
-	current.cloudflarePublicDataPublish = summarizeCloudflareAutoRefreshResult_(publishResult, verifyResult);
+	const queued = enqueueCloudflareActiveTarget_(runId, label);
 	return {
-		ok: true,
-		status: "verified",
+		ok: queued && queued.ok !== false,
+		status: queued && queued.skipped ? String(queued.reason || "skipped") : "queued",
+		queued: true,
 		runId: runId,
-		publishResult: publishResult,
-		verifyResult: verifyResult,
-		summary: current.cloudflarePublicDataPublish,
+		pending: true,
+		queueResult: queued,
+		summary: { ok: true, status: "queued", versionId: runId, label: label, updatedAt: new Date().toISOString() },
 	};
 }
 
@@ -3976,11 +3816,8 @@ function ensureAutoRefreshFinalCwlCoordinatorCapture_(currentRaw, sourceMetaRaw,
 		});
 	}
 	const existingSummary = readAutoRefreshCwlCoordinatorSummary_(runId);
-	const previousCloudflare = current.cloudflarePublicDataPublish && typeof current.cloudflarePublicDataPublish === "object" ? current.cloudflarePublicDataPublish : null;
 	const storedSeasonRefresh = readAutoRefreshRunShard_(runId, "final/cwlSeasonEventRefresh");
-	const cloudflareRetryNeedsStableCwl =
-		!!(previousCloudflare && (previousCloudflare.ok === false || previousCloudflare.forceNext === true || String(previousCloudflare.status || "").trim())) ||
-		!!(storedSeasonRefresh && typeof storedSeasonRefresh === "object" && storedSeasonRefresh.completed === true && storedSeasonRefresh.ok !== false);
+	const cloudflareRetryNeedsStableCwl = !!(storedSeasonRefresh && typeof storedSeasonRefresh === "object" && storedSeasonRefresh.completed === true && storedSeasonRefresh.ok !== false);
 	if (
 		cloudflareRetryNeedsStableCwl &&
 		existingSummary &&
@@ -4208,11 +4045,7 @@ function isAutoRefreshRequiredFinalPhasesVerified_(finalPhasesRaw) {
 	const finalPhases = finalPhasesRaw && typeof finalPhasesRaw === "object" ? finalPhasesRaw : null;
 	if (!finalPhases || finalPhases.deferred === true || finalPhases.ok !== true) return false;
 	if (String(finalPhases.status || "") !== "verified") return false;
-	const publish = finalPhases.cloudflarePublicDataPublish && typeof finalPhases.cloudflarePublicDataPublish === "object"
-		? finalPhases.cloudflarePublicDataPublish
-		: null;
-	const summary = publish && publish.summary && typeof publish.summary === "object" ? publish.summary : null;
-	return !!(publish && publish.ok === true && publish.status === "verified" && summary && summary.ok === true);
+	return true;
 }
 
 function deferAutoRefreshMissingRequiredFinalPhases_(currentRaw, finalPhasesRaw, phaseRaw) {
@@ -5408,26 +5241,11 @@ function readAutoRefreshSettings_() {
 }
 
 function maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_(labelRaw, resultRaw) {
-	const label = String(labelRaw || "auto-refresh-active-mirror").trim() || "auto-refresh-active-mirror";
 	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
-	if (typeof repairCloudflareActiveRosterMirrorIfStale_ !== "function") return null;
 	if (!result || result.ok === false || result.inProgress === true || String(result.status || "") === "error") return null;
-	if (result.skipPostTickMirrorRepair === true) return null;
-	if (String(result.reason || "") === "overlap") return null;
-	try {
-		const repair = repairCloudflareActiveRosterMirrorIfStale_({ label: label });
-		if (repair && repair.ok !== true && repair.skipped !== true) {
-			Logger.log(
-				"autoRefresh active mirror repair failed label=%s error=%s",
-				label,
-				String(repair.error || repair.reason || ""),
-			);
-		}
-		return repair;
-	} catch (err) {
-		Logger.log("autoRefresh active mirror repair threw label=%s error=%s", label, errorMessage_(err));
-		return { ok: false, status: "error", error: errorMessage_(err), label: label };
-	}
+	// Active publication is enqueued during finalization. Avoid broad drift repair
+	// after every successful refresh; diagnostics/periodic repair own that path.
+	return { ok: true, skipped: true, reason: "queue-enqueued-during-finalization" };
 }
 
 // Handle auto refresh active roster tick.

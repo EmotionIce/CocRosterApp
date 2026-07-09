@@ -55,6 +55,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return refreshCurrentCwlSeasonEvent(args[0], args[1]);
 		case "getSeasonEvent":
 			return getSeasonEvent(args[0], args[1]);
+		case "getSeasonEventMutationContext":
+			return getSeasonEventMutationContext(args[0], args[1]);
 		case "getSeasonEventLeaderboard":
 			return getSeasonEventLeaderboard(args[0], args[1]);
 		case "getCurrentSeasonEventLeaderboards":
@@ -65,6 +67,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return setCwlLeaguePreference(args[0], args[1]);
 		case "getCwlLeaguePreferencesForDiscordUser":
 			return getCwlLeaguePreferencesForDiscordUser(args[0], args[1]);
+		case "getCwlLeagueSignupContextForDiscordUser":
+			return getCwlLeagueSignupContextForDiscordUser(args[0], args[1]);
 		case "clearCwlLeaguePreference":
 			return clearCwlLeaguePreference(args[0], args[1]);
 		case "resetCwlLeaguePreferences":
@@ -89,6 +93,18 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return publishCloudflarePublicDataSnapshot(args[0], args[1]);
 		case "repairCloudflareActiveRosterMirror":
 			return repairCloudflareActiveRosterMirror(args[0], args[1]);
+		case "initializeCloudflarePublishQueue":
+			return initializeCloudflarePublishQueue(args[0], args[1]);
+		case "setCloudflarePublicationMode":
+			return setCloudflarePublicationMode(args[0], args[1]);
+		case "inspectCloudflarePublishQueue":
+			return inspectCloudflarePublishQueue(args[0], args[1]);
+		case "retryCloudflarePublishQueue":
+			return retryCloudflarePublishQueue(args[0], args[1]);
+		case "repairCloudflarePublishQueue":
+			return repairCloudflarePublishQueue(args[0], args[1]);
+		case "pauseCloudflarePublishQueue":
+			return pauseCloudflarePublishQueue(args[0], args[1]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}

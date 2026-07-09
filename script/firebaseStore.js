@@ -2179,11 +2179,8 @@ function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 		additionalProtectedVersionIds: [versionWrite.versionId],
 	});
 	const payloadText = JSON.stringify(validated);
-	if (typeof publishCloudflareActiveRosterDataBestEffort_ === "function") {
-		publishCloudflareActiveRosterDataBestEffort_(versionWrite, "active-roster-write");
-	}
-	if (typeof publishCloudflareSeasonEventsAndDonationDataBestEffort_ === "function") {
-		publishCloudflareSeasonEventsAndDonationDataBestEffort_("active-roster-write:season-events");
+	if (typeof enqueueCloudflareActiveTarget_ === "function") {
+		enqueueCloudflareActiveTarget_(versionWrite.versionId, "active-roster-write");
 	}
 	return { rosterData: validated, text: payloadText, storageCleanup: storageCleanup };
 }

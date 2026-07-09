@@ -271,6 +271,11 @@ function popActiveRosterLockContext_(tokenRaw) {
 	}
 }
 
+// Return whether the current execution is inside the active-roster job lock.
+function hasActiveRosterJobLockContext_() {
+	return Array.isArray(activeRosterLockContextStack_) && activeRosterLockContextStack_.length > 0;
+}
+
 // Handle touch active roster lock lease.
 function touchActiveRosterLockLease_(reasonRaw) {
 	if (!Array.isArray(activeRosterLockContextStack_) || !activeRosterLockContextStack_.length) return false;

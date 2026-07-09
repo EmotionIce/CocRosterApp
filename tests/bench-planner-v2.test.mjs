@@ -18,6 +18,7 @@ const appScriptFiles = [
   "script/benchPlanner.js",
   "script/seasonEvents.js",
   "script/cwlLeagueSignups.js",
+  "script/cloudflarePublishQueue.js",
   "script/publishAndTriggers.js",
   "script/authAndLocks.js",
   "script/adminApi.js",

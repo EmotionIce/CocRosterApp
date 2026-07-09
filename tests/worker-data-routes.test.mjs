@@ -9,7 +9,8 @@ const repoRoot = new URL("../", import.meta.url);
 const loadWorker = () => {
   const source = fs
     .readFileSync(new URL("cloudflarePages/worker-core.js", repoRoot), "utf8")
-    .replace(/export\s+default\s+\{/, "globalThis.workerDefault = {");
+    .replace(/export\s+default\s+\{/, "globalThis.workerDefault = {")
+    .replace(/export\s+\{\s*CloudflarePublicationCoordinator\s*\};?/, "");
   const context = {
     URL,
     Request,

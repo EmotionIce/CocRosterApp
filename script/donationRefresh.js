@@ -371,7 +371,7 @@ function setDonationRefreshRunResult_(statusRaw, summaryRaw, errorRaw, startedAt
 function runDonationRefreshCore_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const startedAt = String(options.startedAt || new Date().toISOString());
-	return withDonationRefreshLock_(options.lockOwner || "donation-refresh", Math.max(0, Number(options.lockWaitMs) || 0), function () {
+	const refreshResult = withDonationRefreshLock_(options.lockOwner || "donation-refresh", Math.max(0, Number(options.lockWaitMs) || 0), function () {
 		const source = readDonationRefreshSource_();
 		const clanTags = Array.isArray(source.clanTags) ? source.clanTags : [];
 		if (!clanTags.length) {
@@ -469,10 +469,7 @@ function runDonationRefreshCore_(optionsRaw) {
 		const cleanupWrites = cleanupDonationRefreshSeasonRetentionWrites_();
 		for (let i = 0; i < cleanupWrites.length; i++) writes.push(cleanupWrites[i]);
 		firebaseBatchPutJson_(writes);
-		let cloudflareDonationPublish = { ok: true, skipped: true, reason: "unavailable" };
-		if (typeof publishCloudflareDonationRefreshSeasonBestEffort_ === "function") {
-			cloudflareDonationPublish = publishCloudflareDonationRefreshSeasonBestEffort_(seasonId, "donation-refresh-write");
-		}
+		const cloudflareDonationPublish = { ok: true, skipped: true, reason: "queued-after-lock" };
 		const cloudflareActiveMirrorRepair = { ok: true, skipped: true, reason: "not-run-for-donation-refresh" };
 		return {
 			ok: errorKeys.length < clanTags.length,
@@ -489,6 +486,10 @@ function runDonationRefreshCore_(optionsRaw) {
 			cloudflareActiveMirrorRepair: cloudflareActiveMirrorRepair,
 		};
 	});
+	if (refreshResult && refreshResult.seasonId && typeof enqueueCloudflareDonationSeasonPublication_ === "function") {
+		refreshResult.cloudflareDonationPublish = enqueueCloudflareDonationSeasonPublication_(refreshResult.seasonId, "donation-refresh-write");
+	}
+	return refreshResult;
 }
 
 function isDonationRefreshEnabled_() {

@@ -16,6 +16,7 @@ const appScriptFiles = [
   "script/refreshEngine.js",
   "script/rosterSync.js",
   "script/seasonEvents.js",
+  "script/cloudflarePublishQueue.js",
   "script/publishAndTriggers.js",
   "script/authAndLocks.js",
   "script/assets.js",
@@ -305,12 +306,23 @@ const buildCwlLeagueSignupRosterData = () => ({
     updatedAt: "2026-05-19T00:00:00.000Z",
     byTag: {
       "#2LUCULP": {
-        identity: { tag: "#2LUCULP", name: "Alpha" },
+        identity: { tag: "#2LUCULP", name: "Alpha", discordId: "111", discordUsername: "alpha" },
         latestSnapshot: {
           tag: "#2LUCULP",
           name: "Alpha",
           townHallLevel: 16,
           trophies: 5000,
+          capturedAt: "2026-05-19T00:00:00.000Z",
+        },
+        trophyHistoryDaily: [],
+      },
+      "#9PYLQG": {
+        identity: { tag: "#9PYLQG", name: "Bravo", discordId: "222", discordUsername: "bravo" },
+        latestSnapshot: {
+          tag: "#9PYLQG",
+          name: "Bravo",
+          townHallLevel: 15,
+          trophies: 4500,
           capturedAt: "2026-05-19T00:00:00.000Z",
         },
         trophyHistoryDaily: [],
@@ -347,7 +359,14 @@ const buildSameLeagueCwlSignupRosterData = () => ({
       missing: [],
     },
   ],
-  playerMetrics: { schemaVersion: 1, updatedAt: "2026-05-19T00:00:00.000Z", byTag: {} },
+  playerMetrics: {
+    schemaVersion: 1,
+    updatedAt: "2026-05-19T00:00:00.000Z",
+    byTag: {
+      "#2LUCULP": { identity: { tag: "#2LUCULP", name: "Alpha", discordId: "111", discordUsername: "alpha" } },
+      "#9PYLQG": { identity: { tag: "#9PYLQG", name: "Bravo", discordId: "222", discordUsername: "bravo" } },
+    },
+  },
 });
 
 const buildSeasonEventRosterData = () => ({
@@ -2388,14 +2407,14 @@ test("CWL league preference stores selected clan target metadata", () => {
   assert.equal(signups.preferencesByTag["#2LUCULP"].targetRosterId, "second");
 });
 
-test("CWL league preference saves from the message snapshot without rebuilding options", () => {
+test("CWL league preference saves from the message snapshot while revalidating the canonical link", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
   const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
   let rosterSnapshotReads = 0;
   backend.readActiveRosterSnapshot_ = () => {
     rosterSnapshotReads += 1;
-    throw new Error("roster options should not rebuild for a snapshotted signup");
+    return { rosterData: buildCwlLeagueSignupRosterData(), text: "" };
   };
   backend.cocFetch_ = () => {
     throw new Error("Clash should not be fetched for a snapshotted signup");
@@ -2419,7 +2438,7 @@ test("CWL league preference saves from the message snapshot without rebuilding o
   assert.equal(result.created, true);
   assert.equal(result.preference.leagueName, "Champion I");
   assert.equal(result.preferenceCount, 1);
-  assert.equal(rosterSnapshotReads, 0);
+  assert.equal(rosterSnapshotReads, 1);
 });
 
 test("CWL league preference changes require owner confirmation", () => {
@@ -2455,7 +2474,7 @@ test("CWL league preference changes require owner confirmation", () => {
     discordUsername: "bravo",
     discordDisplayName: "Bravo",
     allowChange: true,
-  }, "secret"), /belongs to another Discord user/i);
+  }, "secret"), /not linked to the requesting Discord user/i);
 
   const result = backend.setCwlLeaguePreference({
     playerTag: "#2LUCULP",

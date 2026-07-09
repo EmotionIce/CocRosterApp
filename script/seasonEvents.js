@@ -331,9 +331,15 @@ function writeSeasonEventFirebasePayload_(pathRaw, methodRaw, payloadRaw) {
 	return firebaseRequestJson_(pathRaw, methodRaw, encodeFirebaseObjectKeysRecursive_(payloadRaw));
 }
 
-function publishCloudflareSeasonEventsAfterMutation_(labelRaw) {
-	if (typeof publishCloudflareSeasonEventsAndDonationDataBestEffort_ !== "function") return null;
-	return publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw);
+function publishCloudflareSeasonEventsAfterMutation_(labelRaw, eventIdRaw, optionsRaw) {
+	if (typeof enqueueCloudflareSeasonEventPublication_ === "function" && eventIdRaw) {
+		return enqueueCloudflareSeasonEventPublication_(eventIdRaw, labelRaw, optionsRaw);
+	}
+	if (typeof enqueueCloudflareRelevantSeasonPublication_ === "function") {
+		return enqueueCloudflareRelevantSeasonPublication_(labelRaw);
+	}
+	// Legacy-manual and disabled modes intentionally do not publish from canonical flows.
+	return { ok: true, skipped: true, reason: "cloudflare-queue-not-active" };
 }
 
 // Build audit key.
@@ -1545,7 +1551,7 @@ function ensureCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
 	const payload = parsed.payload;
 	const result = ensureCurrentCwlSeasonEvent_(payload.source || { type: "api-ensure-cwl-event" });
-	if (result && (result.created === true || result.targetUpdated === true)) publishCloudflareSeasonEventsAfterMutation_("api-ensure-current-cwl");
+	if (result && (result.created === true || result.targetUpdated === true)) publishCloudflareSeasonEventsAfterMutation_("api-ensure-current-cwl", result.event && result.event.eventId, { cwlLive: true, pointers: true });
 	return result;
 }
 
@@ -1590,7 +1596,7 @@ function refreshCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 			}
 			: {};
 	}
-	if (result && result.ok !== false) publishCloudflareSeasonEventsAfterMutation_("api-refresh-current-cwl");
+	if (result && result.ok !== false) publishCloudflareSeasonEventsAfterMutation_("api-refresh-current-cwl", result.eventId || (result.event && result.event.eventId), { cwlLive: true, pointers: true });
 	return result || { ok: false, status: "unknown" };
 }
 
@@ -1618,7 +1624,7 @@ function runCurrentCwlSeasonEventRefreshOnce() {
 			: {};
 	}
 	const cloudflarePublish = result && result.ok !== false
-		? publishCloudflareSeasonEventsAfterMutation_("manual-current-cwl-refresh")
+		? publishCloudflareSeasonEventsAfterMutation_("manual-current-cwl-refresh", result.eventId || (result.event && result.event.eventId), { cwlLive: true, pointers: true })
 		: null;
 	return {
 		ok: !!(result && result.ok !== false),
@@ -1717,6 +1723,47 @@ function getSeasonEvent(payloadRaw, secretOrPassword) {
 	return out;
 }
 
+// Read authoritative mutation context for Discord season-event actions.
+function getSeasonEventMutationContext(payloadRaw, botSecret) {
+	assertDiscordBotApiSecret_(botSecret);
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const eventType = normalizeSeasonEventType_(payload.eventType || payload.type);
+	if (!eventType) throw new Error("A valid season event type is required.");
+	const discordUser = sanitizeSeasonEventDiscordUser_(payload.discordUser || {
+		id: payload.discordId,
+		username: payload.discordUsername,
+		globalName: payload.discordGlobalName,
+		displayName: payload.discordDisplayName,
+	});
+	let event = null;
+	if (eventType === "cwl") event = readCurrentCwlSeasonEvent_();
+	else {
+		const pointer = readSeasonEventPointer_(buildSeasonEventCurrentPointerPath_(eventType));
+		const currentEventId = sanitizeSeasonEventText_(pointer && pointer.eventId, 180);
+		event = currentEventId ? readSeasonEventById_(currentEventId) : null;
+	}
+	if (!event) {
+		const requestedEventId = sanitizeSeasonEventText_(payload.eventId, 180);
+		const requestedEvent = requestedEventId ? readSeasonEventById_(requestedEventId) : null;
+		if (requestedEvent && normalizeSeasonEventType_(requestedEvent.type) === eventType) event = requestedEvent;
+	}
+	if (!event) return { ok: true, status: "event-not-found", event: null, participant: null, linkedAccounts: [], eligibleAccounts: [] };
+	const snapshot = readActiveRosterSnapshot_();
+	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
+	const eligibleAccounts = eventType === "cwl" ? filterCwlSeasonEventAccountsForTarget_(event, linkedAccounts) : linkedAccounts;
+	const participantsByDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
+	const participantRaw = participantsByDiscordId[discordUser.id];
+	return {
+		ok: true,
+		status: "ok",
+		event: summarizeSeasonEvent_(event),
+		participant: participantRaw && typeof participantRaw === "object" ? sanitizeSeasonEventParticipant_(participantRaw) : null,
+		linkedAccounts: linkedAccounts,
+		eligibleAccounts: eligibleAccounts,
+	};
+}
+
 // Public update event callable.
 function updateSeasonEvent(payloadRaw, secretOrPassword) {
 	assertSeasonEventSecretOrAdmin_(secretOrPassword);
@@ -1770,7 +1817,7 @@ function updateSeasonEvent(payloadRaw, secretOrPassword) {
 			changedFields: patchKeys,
 		},
 	});
-	publishCloudflareSeasonEventsAfterMutation_("api-update-season-event");
+	publishCloudflareSeasonEventsAfterMutation_("api-update-season-event", eventId, { cwlLive: event.type === "cwl", pointers: true });
 	return {
 		ok: true,
 		event: summarizeSeasonEvent_(updated),
@@ -2201,7 +2248,7 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
-		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-signup");
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-signup", eventId, { cwlLive: event.type === "cwl" });
 		return buildSeasonEventStatusResponse_("signed-up", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
@@ -2288,7 +2335,7 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
-		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-account-update");
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-account-update", eventId, { cwlLive: event.type === "cwl" });
 		return buildSeasonEventStatusResponse_("updated", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
@@ -2340,7 +2387,7 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
-		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-cancel");
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-cancel", eventId, { cwlLive: event.type === "cwl" });
 		return buildSeasonEventStatusResponse_(existing.status === "cancelled" ? "already-cancelled" : "cancelled", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,

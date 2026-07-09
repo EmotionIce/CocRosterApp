@@ -473,18 +473,48 @@ function writeActiveCwlLeagueSignups_(payloadRaw) {
 	if (!payload.signupId) payload.signupId = buildCwlLeagueSignupId_();
 	firebaseRequestJson_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH, "PUT", encodeFirebaseObjectKeysRecursive_(payload));
 	clearActiveRosterDataCache_();
-	if (typeof publishCloudflareCwlLeagueSignupsBestEffort_ === "function") {
-		publishCloudflareCwlLeagueSignupsBestEffort_(payload, "cwl-league-signups-write");
-	}
 	return payload;
 }
 
-function ensureActiveCwlLeagueSignupId_() {
-	return withCwlLeagueSignupWriteLock_(function () {
-		const signups = readActiveCwlLeagueSignups_();
-		if (signups.signupId) return signups;
-		return writeActiveCwlLeagueSignups_(signups);
+function enqueueActiveCwlLeagueSignupsAfterMutation_(reasonRaw) {
+	if (typeof enqueueCloudflareCwlLeagueSignupsPublication_ !== "function") return null;
+	return enqueueCloudflareCwlLeagueSignupsPublication_(reasonRaw || "cwl-league-signups-write");
+}
+
+function assertCwlPreferencePlayerLinkedToDiscord_(playerTagRaw, discordUserRaw) {
+	const playerTag = normalizeTag_(playerTagRaw);
+	const discordUser = discordUserRaw && typeof discordUserRaw === "object" ? discordUserRaw : { id: discordUserRaw };
+	const discordId = sanitizeDiscordIdValue_(discordUser.id || discordUser.discordId);
+	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
+	const snapshot = readActiveRosterSnapshot_();
+	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+	const linkedAccounts = typeof findLinkedAccountsForDiscordUser_ === "function"
+		? findLinkedAccountsForDiscordUser_(rosterData, {
+			id: discordId,
+			username: sanitizeDiscordUsernameValue_(discordUser.username || discordUser.discordUsername),
+			globalName: sanitizeCwlSignupText_(discordUser.globalName || discordUser.discordGlobalName, 120),
+			displayName: sanitizeCwlSignupText_(discordUser.displayName || discordUser.discordDisplayName, 120),
+		})
+		: [];
+	const linked = Array.isArray(linkedAccounts) && linkedAccounts.some(function (account) {
+		return normalizeTag_(account && account.tag) === playerTag;
 	});
+	if (!linked) {
+		throw createRosterBackendError_("CWL_PLAYER_NOT_LINKED", "This player tag is not linked to the requesting Discord user.");
+	}
+	return linkedAccounts;
+}
+
+function ensureActiveCwlLeagueSignupId_() {
+	let created = false;
+	const signups = withCwlLeagueSignupWriteLock_(function () {
+		const current = readActiveCwlLeagueSignups_();
+		if (current.signupId) return current;
+		created = true;
+		return writeActiveCwlLeagueSignups_(current);
+	});
+	if (created) enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-signup-id-created");
+	return signups;
 }
 
 function buildCwlSignupAuditKey_(timestampRaw) {
@@ -554,6 +584,7 @@ function getCwlLeagueSignupOptions(payloadRaw, secretOrPasswordRaw) {
 		if (!current.updatedAt) current.updatedAt = nowIso;
 		return writeActiveCwlLeagueSignups_(current);
 	});
+	enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-signup-options-refresh");
 	return {
 		ok: true,
 		signupId: signups.signupId,
@@ -570,13 +601,20 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 	const payload = parsed.payload;
 	const playerTag = normalizeTag_(payload.playerTag);
 	if (!playerTag || !isValidPlayerTag_(playerTag)) throw new Error("Invalid player tag.");
-	return withCwlLeagueSignupWriteLock_(function () {
+	const discordId = sanitizeDiscordIdValue_(payload.discordId);
+	const result = withCwlLeagueSignupWriteLock_(function () {
 		const nowIso = new Date().toISOString();
 		const signups = readActiveCwlLeagueSignups_();
 		const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
 		if (!signupId || signupId !== signups.signupId) {
 			throw new Error("This CWL league signup message is no longer active. Please use the latest signup message.");
 		}
+		assertCwlPreferencePlayerLinkedToDiscord_(playerTag, {
+			id: discordId,
+			username: payload.discordUsername,
+			globalName: payload.discordGlobalName,
+			displayName: payload.discordDisplayName,
+		});
 		const existing = signups.preferencesByTag[playerTag] && typeof signups.preferencesByTag[playerTag] === "object"
 			? signups.preferencesByTag[playerTag]
 			: null;
@@ -585,7 +623,6 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			sanitizeCwlSignupText_(existing.targetRosterId, 80) ||
 			normalizeCwlSignupLeagueKey_(existing.leagueKey || existing.leagueName)
 		));
-		const discordId = sanitizeDiscordIdValue_(payload.discordId);
 		const existingDiscordId = sanitizeDiscordIdValue_(existing && existing.discordId);
 		const allowChange = payload.allowChange === true || payload.changeExisting === true;
 		if (existing && existingHasPreference) {
@@ -679,19 +716,13 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			preferenceCount: Object.keys(saved.preferencesByTag).length,
 		};
 	});
+	if (result && (result.created === true || result.changed === true)) enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-preference-write");
+	return result;
 }
 
-function getCwlLeaguePreferencesForDiscordUser(payloadRaw, secretOrPasswordRaw) {
-	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPasswordRaw);
-	assertDiscordBotApiSecret_(parsed.secretOrPassword);
-	const payload = parsed.payload;
-	const discordId = sanitizeDiscordIdValue_(payload.discordId);
-	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
-	const signups = readActiveCwlLeagueSignups_();
-	const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
-	if (signupId && signupId !== signups.signupId) {
-		throw createRosterBackendError_("CWL_SIGNUP_NOT_ACTIVE", "This CWL league signup message is no longer active. Please use the latest signup message.");
-	}
+function buildCwlLeaguePreferencesForDiscordId_(signupsRaw, discordIdRaw) {
+	const signups = sanitizeCwlLeagueSignupsPayload_(signupsRaw);
+	const discordId = sanitizeDiscordIdValue_(discordIdRaw);
 	const preferences = [];
 	const preferencesByTag = signups.preferencesByTag || {};
 	const tags = Object.keys(preferencesByTag).sort();
@@ -718,16 +749,57 @@ function getCwlLeaguePreferencesForDiscordUser(payloadRaw, secretOrPasswordRaw) 
 			updatedAt: sanitizeCwlSignupText_(preference.updatedAt, 40),
 		});
 	}
-	preferences.sort((left, right) => {
-		const leftLeague = String(left && left.leagueName || "");
-		const rightLeague = String(right && right.leagueName || "");
-		const leagueCompare = leftLeague.localeCompare(rightLeague);
-		if (leagueCompare) return leagueCompare;
-		return String(left && (left.playerName || left.playerTag) || "").localeCompare(String(right && (right.playerName || right.playerTag) || ""));
-	});
+	preferences.sort((left, right) => String(left && (left.leagueName || "")).localeCompare(String(right && (right.leagueName || ""))) || String(left && (left.playerName || left.playerTag) || "").localeCompare(String(right && (right.playerName || right.playerTag) || "")));
+	return preferences;
+}
+
+function getCwlLeaguePreferencesForDiscordUser(payloadRaw, secretOrPasswordRaw) {
+	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPasswordRaw);
+	assertDiscordBotApiSecret_(parsed.secretOrPassword);
+	const payload = parsed.payload;
+	const discordId = sanitizeDiscordIdValue_(payload.discordId);
+	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
+	const signups = readActiveCwlLeagueSignups_();
+	const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
+	if (signupId && signupId !== signups.signupId) {
+		throw createRosterBackendError_("CWL_SIGNUP_NOT_ACTIVE", "This CWL league signup message is no longer active. Please use the latest signup message.");
+	}
+	const preferences = buildCwlLeaguePreferencesForDiscordId_(signups, discordId);
 	return {
 		ok: true,
 		signupId: signups.signupId,
+		preferences: preferences,
+		preferenceCount: preferences.length,
+		updatedAt: signups.updatedAt || "",
+	};
+}
+
+function getCwlLeagueSignupContextForDiscordUser(payloadRaw, secretOrPasswordRaw) {
+	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPasswordRaw);
+	assertDiscordBotApiSecret_(parsed.secretOrPassword);
+	const payload = parsed.payload;
+	const discordId = sanitizeDiscordIdValue_(payload.discordId);
+	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
+	const signups = readActiveCwlLeagueSignups_();
+	const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
+	if (signupId && signupId !== signups.signupId) {
+		throw createRosterBackendError_("CWL_SIGNUP_NOT_ACTIVE", "This CWL league signup message is no longer active. Please use the latest signup message.");
+	}
+	const snapshot = readActiveRosterSnapshot_();
+	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+	const optionsResult = buildCwlLeagueSignupOptionsResultFromRosterData_(rosterData, { fetchMissing: false });
+	const discordUser = {
+		id: discordId,
+		username: payload.discordUsername,
+		globalName: payload.discordGlobalName,
+		displayName: payload.discordDisplayName,
+	};
+	const preferences = buildCwlLeaguePreferencesForDiscordId_(signups, discordId);
+	return {
+		ok: true,
+		signupId: signups.signupId,
+		options: optionsResult.options,
+		linkedAccounts: findLinkedAccountsForDiscordUser_(rosterData, discordUser),
 		preferences: preferences,
 		preferenceCount: preferences.length,
 		updatedAt: signups.updatedAt || "",
@@ -742,7 +814,7 @@ function clearCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 	const playerTag = normalizeTag_(payload.playerTag);
 	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
 	if (!playerTag || !isValidPlayerTag_(playerTag)) throw createRosterBackendError_("INVALID_PLAYER_TAG", "Invalid player tag.");
-	return withCwlLeagueSignupWriteLock_(function () {
+	const result = withCwlLeagueSignupWriteLock_(function () {
 		const nowIso = new Date().toISOString();
 		const signups = readActiveCwlLeagueSignups_();
 		const signupId = sanitizeCwlSignupText_(payload.signupId, 40);
@@ -796,10 +868,12 @@ function clearCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			preferenceCount: Object.keys(saved.preferencesByTag || {}).length,
 		};
 	});
+	if (result && result.cleared === true) enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-preference-clear");
+	return result;
 }
 
 function archiveAndResetCwlLeagueSignups_(reasonRaw, sourceRaw) {
-	return withCwlLeagueSignupWriteLock_(function () {
+	const result = withCwlLeagueSignupWriteLock_(function () {
 		const signups = readActiveCwlLeagueSignups_();
 		const count = Object.keys(signups.preferencesByTag || {}).length;
 		const hasArchiveData = !!(count || Object.keys(signups.audit || {}).length);
@@ -833,6 +907,8 @@ function archiveAndResetCwlLeagueSignups_(reasonRaw, sourceRaw) {
 		});
 		return { archived: hasArchiveData, count: count, archiveKey: archiveKey, signupId: saved.signupId };
 	});
+	enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-signups-reset");
+	return result;
 }
 
 function resetCwlLeaguePreferences(payloadRaw, secretOrPasswordRaw) {
