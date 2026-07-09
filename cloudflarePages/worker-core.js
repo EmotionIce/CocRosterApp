@@ -6,10 +6,18 @@ const FALLBACK_APPS_SCRIPT_EXEC_URL =
 const PUBLIC_DATA_ROUTE_PREFIX = "/api/public-data";
 const BOT_DATA_ROUTE_PREFIX = "/api/bot-data";
 const DATA_PUBLISH_ROUTE = "/api/internal/public-data/publish";
+const DATA_PUBLISH_V2_ROUTE = "/api/internal/public-data/publish-v2";
+const DATA_PUBLISH_V2_CONCURRENCY = 4;
+const DATA_PUBLISH_V2_MAX_BODY_BYTES = 5 * 1024 * 1024;
+const DATA_PUBLISH_V2_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const DATA_PUBLISH_V2_MAX_OBJECT_BYTES = 8 * 1024 * 1024;
 const PUBLIC_DATA_STORE_PREFIX = "public-data";
 const BOT_DATA_STORE_PREFIX = "bot-data";
 const PUBLIC_BOOTSTRAP_DATA_PATH = "bootstrap/current.json";
 const PUBLIC_BOOTSTRAP_DATA_KEY = PUBLIC_DATA_STORE_PREFIX + "/" + PUBLIC_BOOTSTRAP_DATA_PATH;
+const ACTIVE_COMMIT_GUARD_KEY = "internal/cloudflare-publish/active-commit-guard.json";
+const PUBLICATION_COORDINATOR_BINDING = "CLOUDFLARE_PUBLICATION_COORDINATOR";
+const PUBLICATION_COORDINATOR_NAME = "queued-v2-global";
 
 // Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
@@ -1232,12 +1240,17 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
 
 // Parse publish request body.
 const readPublishBody = async (request) => {
-  let body = null;
+  const contentLength = Number(request.headers.get("content-length") || 0);
+  if (contentLength > DATA_PUBLISH_V2_MAX_BODY_BYTES) throw new Error("Publish payload exceeds body size limit.");
+  let text = "";
   try {
-    body = await request.json();
+    text = await request.text();
   } catch (err) {
     throw new Error("Invalid JSON payload.");
   }
+  if (new TextEncoder().encode(text).byteLength > DATA_PUBLISH_V2_MAX_BODY_BYTES) throw new Error("Publish payload exceeds body size limit.");
+  let body = null;
+  try { body = JSON.parse(text); } catch (err) { throw new Error("Invalid JSON payload."); }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error("Publish payload must be an object.");
   }
@@ -1360,6 +1373,482 @@ const handleDataPublish = async (request, env) => {
   }
 };
 
+
+// Run async operations with a fixed concurrency limit while retaining exact failure details.
+const runBoundedDataOperations = async (itemsRaw, concurrencyRaw, operation, phaseRaw) => {
+  const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+  const concurrency = Math.max(1, Math.min(16, Number(concurrencyRaw) || 1));
+  const phase = String(phaseRaw || "write");
+  let cursor = 0;
+  let completed = 0;
+  let firstFailure = null;
+
+  const worker = async () => {
+    while (true) {
+      if (firstFailure) return;
+      const index = cursor++;
+      if (index >= items.length) return;
+      const item = items[index];
+      try {
+        await operation(item, index);
+        completed += 1;
+      } catch (err) {
+        if (!firstFailure) {
+          firstFailure = {
+            phase,
+            index,
+            scope: String(item && item.scope || ""),
+            path: String(item && item.path || "").replace(/\.json$/i, ""),
+            error: err && err.message ? err.message : String(err || "Data operation failed."),
+          };
+        }
+        return;
+      }
+    }
+  };
+
+  const workers = [];
+  const count = Math.min(concurrency, items.length);
+  for (let i = 0; i < count; i++) workers.push(worker());
+  await Promise.all(workers);
+  return { ok: !firstFailure, completed, failure: firstFailure };
+};
+
+// Prepare one ordered commit operation. Commit deletes are processed in the
+// supplied order alongside commit writes.
+const normalizeCommitOperation = (entryRaw, defaultScopeRaw, publishedAt) => {
+  const entry = entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw) ? entryRaw : null;
+  if (!entry) throw new Error("Each commit must be an object.");
+  if (entry.delete === true || String(entry.operation || entry.action || "").toLowerCase() === "delete") {
+    return Object.assign({ operation: "delete" }, normalizeDeleteObject(entry, defaultScopeRaw));
+  }
+  return Object.assign({ operation: "put" }, normalizePublishObject(entry, defaultScopeRaw, publishedAt));
+};
+
+const normalizeActiveCommitGuard = (guardRaw) => {
+  const guard = guardRaw && typeof guardRaw === "object" && !Array.isArray(guardRaw) ? guardRaw : null;
+  if (!guard) return null;
+  const generation = Math.max(0, Math.floor(Number(guard.generation) || 0));
+  const targetVersionId = String(guard.targetVersionId || "").trim();
+  if (!generation || !targetVersionId) throw new Error("Active commit guard requires generation and targetVersionId.");
+  return { kind: "active", generation, targetVersionId };
+};
+
+const readActiveCommitGuard = async (store) => {
+  const object = await getDataStoreObject(store, ACTIVE_COMMIT_GUARD_KEY);
+  if (!object) return null;
+  return parseDataStorePlainJsonObject(object);
+};
+
+const activeCommitGuardMatches = (currentRaw, expected) => {
+  const current = currentRaw && typeof currentRaw === "object" ? currentRaw : {};
+  return Number(current.generation) === expected.generation &&
+    String(current.targetVersionId || "") === expected.targetVersionId;
+};
+
+const claimActiveCommitGuard = async (store, guard, publishedAt) => {
+  const current = await readActiveCommitGuard(store);
+  const currentGeneration = Math.max(0, Math.floor(Number(current && current.generation) || 0));
+  if (currentGeneration > guard.generation) {
+    return { ok: false, current };
+  }
+  if (currentGeneration === guard.generation && current && String(current.targetVersionId || "") !== guard.targetVersionId) {
+    return { ok: false, current };
+  }
+  await putDataStoreObject(store, ACTIVE_COMMIT_GUARD_KEY, JSON.stringify({
+    schemaVersion: 1,
+    generation: guard.generation,
+    targetVersionId: guard.targetVersionId,
+    claimedAt: publishedAt,
+  }), {
+    contentType: "application/json; charset=utf-8",
+    cacheControl: "no-store",
+    customMetadata: { publishedAt, schema: "roster-public-data-v2-active-guard" },
+  });
+  const verified = await readActiveCommitGuard(store);
+  return { ok: activeCommitGuardMatches(verified, guard), current: verified };
+};
+
+const normalizePublicationDispatchGuard = (guardRaw, batchIdRaw) => {
+  const guard = guardRaw && typeof guardRaw === "object" && !Array.isArray(guardRaw) ? guardRaw : null;
+  if (!guard) return null;
+  const generation = Math.max(0, Math.floor(Number(guard.generation) || 0));
+  const batchId = String(guard.batchId || batchIdRaw || "").trim();
+  if (!generation || !batchId) throw new Error("Publication dispatch guard requires generation and batchId.");
+  return { kind: "queued-v2", generation, batchId };
+};
+
+const publicationGuardMatches = (currentRaw, expected) => {
+  const current = currentRaw && typeof currentRaw === "object" ? currentRaw : {};
+  return Number(current.generation) === expected.generation && String(current.batchId || "") === expected.batchId;
+};
+
+const publicationGuardIsStale = (currentRaw, expected) => {
+  const current = currentRaw && typeof currentRaw === "object" ? currentRaw : {};
+  const currentGeneration = Math.max(0, Math.floor(Number(current.generation) || 0));
+  if (currentGeneration > expected.generation) return true;
+  return currentGeneration === expected.generation && !publicationGuardMatches(current, expected);
+};
+
+// Execute a fully normalized v2 publication batch. The Durable Object path
+// supplies strongly serialized generation claims; the direct path is retained
+// for manual repair/backward-compatible callers that do not send dispatchGuard.
+const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) => {
+  const batch = batchRaw && typeof batchRaw === "object" ? batchRaw : {};
+  const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+  const store = resolveRosterDataStore(env);
+  const requestId = String(batch.requestId || "");
+  const batchId = String(batch.batchId || "");
+  const publishedAt = String(batch.publishedAt || new Date().toISOString());
+  const payloadBytes = Math.max(0, Number(batch.payloadBytes) || 0);
+  const objects = Array.isArray(batch.objects) ? batch.objects : [];
+  const deletes = Array.isArray(batch.deletes) ? batch.deletes : [];
+  const commits = Array.isArray(batch.commits) ? batch.commits : [];
+  const commitGuard = batch.commitGuard || null;
+  const baseCounts = {
+    objectCount: objects.length,
+    deleteCount: deletes.length,
+    commitCount: commits.length,
+  };
+
+  if (!store) {
+    return {
+      status: 503,
+      payload: Object.assign({ ok: false, requestId, batchId, error: "Roster data store is not configured." }, baseCounts),
+    };
+  }
+
+  const writeStartedAt = Date.now();
+  const putResult = await runBoundedDataOperations(objects, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
+    await putDataStoreObject(store, item.key, item.payloadText, {
+      contentType: item.contentType,
+      cacheControl: item.cacheControl,
+      customMetadata: { publishedAt: item.publishedAt, scope: item.scope, schema: "roster-public-data-v2" },
+    });
+  }, "object");
+  if (!putResult.ok) {
+    return {
+      status: 502,
+      payload: Object.assign({
+        ok: false, requestId, batchId, publishedAt, payloadBytes,
+        completedObjectCount: putResult.completed, completedDeleteCount: 0, completedCommitCount: 0,
+        writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0, failed: putResult.failure,
+        error: "Ordinary object publication failed; commit objects were not written.",
+      }, baseCounts),
+    };
+  }
+
+  const deleteResult = await runBoundedDataOperations(deletes, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
+    await deleteDataStoreObject(store, item.key);
+  }, "delete");
+  if (!deleteResult.ok) {
+    return {
+      status: 502,
+      payload: Object.assign({
+        ok: false, requestId, batchId, publishedAt, payloadBytes,
+        completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount: 0,
+        writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0, failed: deleteResult.failure,
+        error: "Delete publication failed; commit objects were not written.",
+      }, baseCounts),
+    };
+  }
+
+  const writeDurationMs = Date.now() - writeStartedAt;
+  const commitStartedAt = Date.now();
+  if (commitGuard) {
+    const claimed = typeof options.claimActiveCommitGuard === "function"
+      ? await options.claimActiveCommitGuard(commitGuard, publishedAt)
+      : await claimActiveCommitGuard(store, commitGuard, publishedAt);
+    if (!claimed.ok) {
+      return {
+        status: 409,
+        payload: Object.assign({
+          ok: false, requestId, batchId, publishedAt, payloadBytes,
+          completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount: 0,
+          writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
+          failed: { phase: "commit-guard", scope: "internal", path: ACTIVE_COMMIT_GUARD_KEY, error: "Active commit was superseded by a newer generation." },
+          error: "Active commit generation is stale.",
+        }, baseCounts),
+      };
+    }
+  }
+
+  let completedCommitCount = 0;
+  for (let i = 0; i < commits.length; i++) {
+    if (commitGuard && options.recheckActiveCommitGuard !== false) {
+      const currentGuard = await readActiveCommitGuard(store);
+      if (!activeCommitGuardMatches(currentGuard, commitGuard)) {
+        return {
+          status: 409,
+          payload: Object.assign({
+            ok: false, requestId, batchId, publishedAt, payloadBytes,
+            completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
+            writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
+            failed: { phase: "commit-guard", index: i, scope: "internal", path: ACTIVE_COMMIT_GUARD_KEY, error: "Active commit was superseded while committing." },
+            error: "Active commit generation was superseded.",
+          }, baseCounts),
+        };
+      }
+    }
+    const item = commits[i];
+    try {
+      if (item.operation === "delete") {
+        await deleteDataStoreObject(store, item.key);
+      } else {
+        await putDataStoreObject(store, item.key, item.payloadText, {
+          contentType: item.contentType,
+          cacheControl: item.cacheControl,
+          customMetadata: { publishedAt: item.publishedAt, scope: item.scope, schema: "roster-public-data-v2-commit" },
+        });
+      }
+      completedCommitCount += 1;
+    } catch (err) {
+      return {
+        status: 502,
+        payload: Object.assign({
+          ok: false, requestId, batchId, publishedAt, payloadBytes,
+          completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
+          writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
+          failed: { phase: "commit", index: i, scope: item.scope, path: item.path.replace(/\.json$/i, ""), error: err && err.message ? err.message : String(err) },
+          error: "Commit object publication failed.",
+        }, baseCounts),
+      };
+    }
+  }
+
+  return {
+    status: 200,
+    payload: Object.assign({
+      ok: true, requestId, batchId, publishedAt, payloadBytes,
+      completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
+      commitGuard: commitGuard || null,
+      writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
+      scopes: Array.from(new Set(objects.concat(deletes, commits).map((item) => item.scope))).sort(),
+    }, baseCounts),
+  };
+};
+
+// Strongly serialize queued-v2 batches and reject any delayed request whose
+// durable dispatch generation is older than a batch already accepted here.
+class CloudflarePublicationCoordinator {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.tail = Promise.resolve();
+  }
+
+  async fetch(request) {
+    let body = null;
+    try {
+      body = await request.json();
+    } catch (err) {
+      return jsonResponse(400, { ok: false, error: "Invalid coordinator payload." });
+    }
+    const run = this.tail.then(() => this.processBatch(body));
+    this.tail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  async processBatch(bodyRaw) {
+    const body = bodyRaw && typeof bodyRaw === "object" ? bodyRaw : {};
+    let dispatchGuard = null;
+    try {
+      dispatchGuard = normalizePublicationDispatchGuard(body.dispatchGuard, body.batchId);
+    } catch (err) {
+      return jsonResponse(400, { ok: false, requestId: String(body.requestId || ""), batchId: String(body.batchId || ""), error: err.message });
+    }
+    if (!dispatchGuard) {
+      return jsonResponse(400, { ok: false, requestId: String(body.requestId || ""), batchId: String(body.batchId || ""), error: "Queued publication requires dispatchGuard." });
+    }
+
+    const currentDispatch = await this.state.storage.get("dispatchGuard");
+    if (publicationGuardIsStale(currentDispatch, dispatchGuard)) {
+      return jsonResponse(409, {
+        ok: false,
+        requestId: String(body.requestId || ""),
+        batchId: String(body.batchId || ""),
+        objectCount: Array.isArray(body.objects) ? body.objects.length : 0,
+        deleteCount: Array.isArray(body.deletes) ? body.deletes.length : 0,
+        commitCount: Array.isArray(body.commits) ? body.commits.length : 0,
+        completedObjectCount: 0,
+        completedDeleteCount: 0,
+        completedCommitCount: 0,
+        failed: { phase: "dispatch-guard", scope: "internal", path: "coordinator/dispatch", error: "Publication batch was superseded by a newer dispatch generation." },
+        error: "Publication dispatch generation is stale.",
+      });
+    }
+
+    await this.state.storage.put("dispatchGuard", {
+      schemaVersion: 1,
+      generation: dispatchGuard.generation,
+      batchId: dispatchGuard.batchId,
+      claimedAt: String(body.publishedAt || new Date().toISOString()),
+    });
+
+    const claimActiveCommitGuardDurably = async (guard, publishedAt) => {
+      const current = await this.state.storage.get("activeCommitGuard");
+      const currentGeneration = Math.max(0, Math.floor(Number(current && current.generation) || 0));
+      if (currentGeneration > guard.generation) return { ok: false, current };
+      if (currentGeneration === guard.generation && current && String(current.targetVersionId || "") !== guard.targetVersionId) {
+        return { ok: false, current };
+      }
+      const claimed = {
+        schemaVersion: 1,
+        generation: guard.generation,
+        targetVersionId: guard.targetVersionId,
+        claimedAt: publishedAt,
+      };
+      await this.state.storage.put("activeCommitGuard", claimed);
+      return { ok: true, current: claimed };
+    };
+
+    const result = await executeNormalizedDataPublishV2Batch(body, this.env, {
+      claimActiveCommitGuard: claimActiveCommitGuardDurably,
+      recheckActiveCommitGuard: false,
+    });
+    return jsonResponse(result.status, result.payload);
+  }
+}
+
+const getPublicationCoordinatorStub = (envRaw) => {
+  const env = envRaw && typeof envRaw === "object" ? envRaw : {};
+  const namespace = env[PUBLICATION_COORDINATOR_BINDING];
+  if (!namespace || typeof namespace.idFromName !== "function" || typeof namespace.get !== "function") return null;
+  return namespace.get(namespace.idFromName(PUBLICATION_COORDINATOR_NAME));
+};
+
+// Handle the queued v2 publisher. Ordinary writes and deletes complete before
+// ordered commit objects, so a partial batch can never advertise incomplete data.
+const handleDataPublishV2 = async (request, env) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") return new Response(null, { status: 204, headers: publishCorsHeaders() });
+  if (method !== "POST") {
+    return jsonResponse(405, { ok: false, error: "Method not allowed. Use POST." }, publishCorsHeaders());
+  }
+
+  const auth = await verifyRequestSecret(request, resolvePublishSecret(env), "Roster data publish secret");
+  if (!auth.ok) return auth.response;
+  const store = resolveRosterDataStore(env);
+  if (!store) return jsonResponse(503, { ok: false, error: "Roster data store is not configured." });
+
+  let body = null;
+  try {
+    body = await readPublishBody(request);
+  } catch (err) {
+    return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid publish payload." });
+  }
+
+  const requestId = String(body.requestId || crypto.randomUUID && crypto.randomUUID() || Date.now());
+  const batchId = String(body.batchId || body.revision || "");
+  const defaultScope = normalizeDataScope(body.scope || "public");
+  const publishedAt = String(body.publishedAt || new Date().toISOString());
+  const dryRun = body.dryRun === true;
+  const objectsRaw = Array.isArray(body.objects) ? body.objects : [];
+  const deletesRaw = Array.isArray(body.deletePaths) ? body.deletePaths : Array.isArray(body.deletes) ? body.deletes : [];
+  const commitsRaw = Array.isArray(body.commits) ? body.commits : Array.isArray(body.commitObjects) ? body.commitObjects : [];
+  let commitGuard = null;
+  let dispatchGuard = null;
+  try {
+    commitGuard = normalizeActiveCommitGuard(body.commitGuard);
+    dispatchGuard = normalizePublicationDispatchGuard(body.dispatchGuard, batchId);
+  } catch (err) {
+    return jsonResponse(400, { ok: false, requestId, batchId, error: err && err.message ? err.message : "Invalid publication guard." });
+  }
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(body)).byteLength;
+
+  if (!objectsRaw.length && !deletesRaw.length && !commitsRaw.length) {
+    return jsonResponse(400, { ok: false, requestId, batchId, error: "At least one object, delete path, or commit is required." });
+  }
+  if (objectsRaw.length > 500 || deletesRaw.length > 500 || commitsRaw.length > 50) {
+    return jsonResponse(413, { ok: false, requestId, batchId, error: "Publish batch is too large." });
+  }
+
+  let objects = [];
+  let deletes = [];
+  let commits = [];
+  try {
+    objects = objectsRaw.map((entry) => normalizePublishObject(entry, defaultScope, publishedAt));
+    deletes = deletesRaw.map((entry) => normalizeDeleteObject(entry, defaultScope));
+    commits = commitsRaw.map((entry) => normalizeCommitOperation(entry, defaultScope, publishedAt));
+  } catch (err) {
+    return jsonResponse(400, { ok: false, requestId, batchId, error: err && err.message ? err.message : "Invalid publish object." });
+  }
+
+  const normalizedItems = objects.concat(commits);
+  for (const item of normalizedItems) {
+    const itemBytes = new TextEncoder().encode(item.payloadText || "").byteLength;
+    if (itemBytes > DATA_PUBLISH_V2_MAX_OBJECT_BYTES) {
+      return jsonResponse(413, {
+        ok: false,
+        requestId,
+        batchId,
+        error: `Cloudflare object exceeds hard limit path=${item.scope}:${item.path.replace(/\.json$/i, "")} bytes=${itemBytes}.`,
+        failed: { phase: "bounds", scope: item.scope, path: item.path.replace(/\.json$/i, ""), error: "Object size limit exceeded." },
+      }, publishCorsHeaders());
+    }
+  }
+  const normalizedEnvelopeBytes = new TextEncoder().encode(JSON.stringify({ requestId, batchId, publishedAt, objects, deletes, commits, commitGuard, dispatchGuard })).byteLength;
+  if (normalizedEnvelopeBytes > DATA_PUBLISH_V2_MAX_PAYLOAD_BYTES) {
+    return jsonResponse(413, { ok: false, requestId, batchId, error: `Cloudflare request exceeds payload limit bytes=${normalizedEnvelopeBytes}.` }, publishCorsHeaders());
+  }
+
+  if (dryRun) {
+    return jsonResponse(200, {
+      ok: true, dryRun: true, requestId, batchId, publishedAt, payloadBytes,
+      objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length,
+      commitGuard: commitGuard || null, dispatchGuard: dispatchGuard || null,
+      writeDurationMs: 0, commitDurationMs: 0,
+    });
+  }
+
+  const normalizedBatch = {
+    requestId,
+    batchId,
+    publishedAt,
+    payloadBytes,
+    objects,
+    deletes,
+    commits,
+    commitGuard,
+    dispatchGuard,
+  };
+
+  if (dispatchGuard) {
+    const coordinator = getPublicationCoordinatorStub(env);
+    if (!coordinator || typeof coordinator.fetch !== "function") {
+      return jsonResponse(503, {
+        ok: false, requestId, batchId,
+        objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length,
+        completedObjectCount: 0, completedDeleteCount: 0, completedCommitCount: 0,
+        failed: { phase: "coordinator", scope: "internal", path: "coordinator/binding", error: "Durable publication coordinator is not configured." },
+        error: "Queued-v2 publication coordinator is unavailable.",
+      }, publishCorsHeaders());
+    }
+    try {
+      const coordinated = await coordinator.fetch(new Request("https://cloudflare-publication-coordinator.internal/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(normalizedBatch),
+      }));
+      const headers = new Headers(publishCorsHeaders());
+      headers.set("content-type", coordinated.headers.get("content-type") || "application/json; charset=utf-8");
+      headers.set("cache-control", "no-store");
+      return new Response(await coordinated.text(), { status: coordinated.status, headers });
+    } catch (err) {
+      return jsonResponse(502, {
+        ok: false, requestId, batchId,
+        objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length,
+        completedObjectCount: 0, completedDeleteCount: 0, completedCommitCount: 0,
+        failed: { phase: "coordinator", scope: "internal", path: "coordinator/request", error: err && err.message ? err.message : String(err) },
+        error: "Queued-v2 publication coordinator request failed.",
+      }, publishCorsHeaders());
+    }
+  }
+
+  const result = await executeNormalizedDataPublishV2Batch(normalizedBatch, env, {});
+  return jsonResponse(result.status, result.payload, publishCorsHeaders());
+};
+
 // Create an asset request.
 const createAssetRequest = (request, pathnameRaw) => {
   const pathname = String(pathnameRaw == null ? "" : pathnameRaw).trim();
@@ -1377,9 +1866,14 @@ const serveStaticAsset = (request, env) => {
   return env.ASSETS.fetch(request);
 };
 
+export { CloudflarePublicationCoordinator };
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.pathname === DATA_PUBLISH_V2_ROUTE || url.pathname === DATA_PUBLISH_V2_ROUTE + "/") {
+      return handleDataPublishV2(request, env);
+    }
     if (url.pathname === DATA_PUBLISH_ROUTE || url.pathname === DATA_PUBLISH_ROUTE + "/") {
       return handleDataPublish(request, env);
     }

@@ -1,1 +1,1 @@
-export { default } from "./worker-core.js";
+export { default, CloudflarePublicationCoordinator } from "./worker-core.js";
