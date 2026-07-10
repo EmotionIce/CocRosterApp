@@ -389,6 +389,64 @@ const setupSyntheticQueueRun = (backend, specs, options = {}) => {
   return setupQueueRun(backend, buildRosterData(), options);
 };
 
+const setupMetricCopyRun = (backend, metricKeys, options = {}) => {
+  const runId = options.runId || "run-1";
+  const sourceVersionId = options.sourceVersionId || "source-1";
+  const rosterIds = options.rosterIds || ["main"];
+  const tasks = backend.buildAutoRefreshQueueTasks_(runId, rosterIds, {
+    metricCopyKeys: metricKeys,
+    metricCopyTaskTagLimit: options.chunkLimit || 100,
+  });
+  const taskIds = backend.writeAutoRefreshQueueTasks_(runId, tasks);
+  const current = backend.writeAutoRefreshQueueCurrent_({
+    runId,
+    kind: "auto-refresh-queue",
+    status: options.status || "running",
+    phase: "processing",
+    sourceVersionId,
+    rosterIds,
+    taskIds,
+    taskCount: taskIds.length,
+    currentTaskIndex: options.currentTaskIndex || 0,
+    processedTasks: options.processedTasks || 0,
+    processedRosters: 0,
+    issueCount: 0,
+    issueSummary: "",
+    taskSummary: null,
+  });
+  return { runId, sourceVersionId, tasks, taskIds, current };
+};
+
+const installMetricRangeResponse = (backend, sourceByKey) => {
+  const parentPath = "activeVersions/source-1/playerMetrics/byTag";
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  const rangeRequests = [];
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    const method = String(methodRaw || "GET").toUpperCase();
+    const query = queryParamsRaw && typeof queryParamsRaw === "object" ? queryParamsRaw : {};
+    if (method === "GET" && String(pathRaw || "").replace(/^\/+|\/+$/g, "") === parentPath && query.orderBy) {
+      rangeRequests.push({ path: String(pathRaw || ""), method, query: Object.assign({}, query) });
+      return clone(sourceByKey);
+    }
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
+  return { originalFirebaseRequestJson, rangeRequests };
+};
+
+const buildMetricSourceMap = (backend, encodedKeys) => {
+  const sourceByKey = {};
+  const keys = Array.isArray(encodedKeys) ? encodedKeys : [];
+  for (let i = 0; i < keys.length; i++) {
+    sourceByKey[keys[i]] = backend.encodeFirebaseObjectKeysRecursive_({
+      identity: { tag: "#METRIC" + String(i), name: "Metric " + String(i) },
+      latestSnapshot: { tag: "#METRIC" + String(i), trophies: 1000 + i },
+      trophyHistoryDaily: [],
+      donationCycles: [],
+    });
+  }
+  return sourceByKey;
+};
+
 const buildOneRoundCwlLeagueGroup = (options = {}) => ({
   state: options.state || "inWar",
   season: options.season || "2026-07",
@@ -1465,6 +1523,248 @@ test("metric copy queue task stages source metric entries in the target active v
   assert.equal(result.missingCount, 0);
   assert.equal(copiedEntry.latestSnapshot.trophies, 5000);
   assert.equal(marker.copiedCount, 1);
+});
+
+test("metric copy reads one bounded Firebase key range per task and preserves values", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = ["#B", "#A", "#Ü/[]", "plain.key", "normal"]
+    .map((key) => backend.encodeFirebaseObjectKey_(key));
+  const sourceByKey = buildMetricSourceMap(backend, encodedKeys);
+  const sourcePath = "activeVersions/source-1/playerMetrics/byTag";
+  backend.firebaseRequestJson_(sourcePath, "PUT", sourceByKey);
+  const { tasks, current } = setupMetricCopyRun(backend, encodedKeys);
+  const { rangeRequests } = installMetricRangeResponse(backend, sourceByKey);
+
+  const result = backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now());
+  const destination = backend.firebaseRequestJson_("activeVersions/run-1/playerMetrics/byTag", "GET");
+  const marker = backend.readAutoRefreshRunShard_("run-1", "metricCopies/" + tasks[0].taskId);
+
+  assert.equal(rangeRequests.length, 1);
+  assert.equal(rangeRequests[0].path, sourcePath);
+  assert.equal(rangeRequests[0].query.orderBy, JSON.stringify("$key"));
+  assert.equal(rangeRequests[0].query.startAt, JSON.stringify(tasks[0].metricKeys[0]));
+  assert.equal(rangeRequests[0].query.endAt, JSON.stringify(tasks[0].metricKeys.at(-1)));
+  assert.equal(result.copiedCount, encodedKeys.length);
+  assert.equal(result.missingCount, 0);
+  assert.deepEqual(clone(destination), clone(sourceByKey));
+  assert.equal(marker.copiedCount, encodedKeys.length);
+});
+
+test("metric range query quotes and URL-encodes Firebase query parameters", () => {
+  const backend = loadBackend();
+  const requests = [];
+  const first = backend.encodeFirebaseObjectKey_("#Ü/[]");
+  backend.getFirebaseConfig_ = () => ({ dbUrl: "https://firebase.test/db" });
+  backend.getFirebaseAccessToken_ = () => "token";
+  backend.UrlFetchApp = {
+    fetch(url) {
+      requests.push(url);
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => "{}",
+      };
+    },
+  };
+
+  backend.firebaseRequestJson_("activeVersions/source-1/playerMetrics/byTag", "GET", undefined, {
+    orderBy: JSON.stringify("$key"),
+    startAt: JSON.stringify(first),
+    endAt: JSON.stringify(first),
+  });
+
+  assert.equal(
+    requests[0],
+    "https://firebase.test/db/activeVersions/source-1/playerMetrics/byTag.json?orderBy=%22%24key%22&startAt=" +
+      encodeURIComponent(JSON.stringify(first)) +
+      "&endAt=" +
+      encodeURIComponent(JSON.stringify(first)),
+  );
+});
+
+test("metric keys sort deterministically before bounded chunking", () => {
+  const backend = loadBackend();
+  const rawKeys = Array.from({ length: 205 }, (_value, index) => "#METRIC" + String(index).padStart(3, "0")).reverse();
+  const encodedKeys = rawKeys.map((key) => backend.encodeFirebaseObjectKey_(key));
+  const tasks = backend.buildAutoRefreshQueueTasks_("run-1", ["main"], {
+    metricCopyKeys: encodedKeys,
+    metricCopyTaskTagLimit: 100,
+  }).filter((task) => task.type === "metricCopy");
+  const expectedKeys = encodedKeys.slice().sort();
+
+  assert.deepEqual(Array.from(tasks.map((task) => task.metricKeys.length)), [100, 100, 5]);
+  assert.deepEqual(Array.from(tasks.flatMap((task) => task.metricKeys)), expectedKeys);
+  assert.equal(new Set(Array.from(tasks.flatMap((task) => task.metricKeys))).size, expectedKeys.length);
+});
+
+test("metric copy rejects a missing expected range key before writing a marker", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = ["#A", "#B", "#C"].map((key) => backend.encodeFirebaseObjectKey_(key));
+  const sourceByKey = buildMetricSourceMap(backend, encodedKeys);
+  const { tasks, current, runId } = setupMetricCopyRun(backend, encodedKeys);
+  const incomplete = Object.assign({}, sourceByKey);
+  delete incomplete[encodedKeys[1]];
+  installMetricRangeResponse(backend, incomplete);
+
+  assert.throws(
+    () => backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now()),
+    /missing source metric key/,
+  );
+  assert.equal(backend.readAutoRefreshRunShard_(runId, "metricCopies/" + tasks[0].taskId), null);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
+});
+
+test("metric copy rejects an unexpected key returned inside the range", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = ["#A", "#B"].map((key) => backend.encodeFirebaseObjectKey_(key));
+  const sourceByKey = buildMetricSourceMap(backend, encodedKeys);
+  const { tasks, current, runId } = setupMetricCopyRun(backend, encodedKeys);
+  const unexpectedKey = backend.encodeFirebaseObjectKey_("#UNEXPECTED");
+  const response = Object.assign({}, sourceByKey, buildMetricSourceMap(backend, [unexpectedKey]));
+  installMetricRangeResponse(backend, response);
+
+  assert.throws(
+    () => backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now()),
+    /unexpected key/,
+  );
+  assert.equal(backend.readAutoRefreshRunShard_(runId, "metricCopies/" + tasks[0].taskId), null);
+});
+
+test("empty metric-copy chunks complete without a Firebase range read", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { tasks, current, runId } = setupMetricCopyRun(backend, []);
+  const { rangeRequests } = installMetricRangeResponse(backend, {});
+
+  const result = backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now());
+  const marker = backend.readAutoRefreshRunShard_(runId, "metricCopies/" + tasks[0].taskId);
+
+  assert.equal(rangeRequests.length, 0);
+  assert.equal(result.copiedCount, 0);
+  assert.equal(result.missingCount, 0);
+  assert.equal(marker.requestedCount, 0);
+  assert.equal(marker.copiedCount, 0);
+});
+
+test("failed metric range reads leave the task resumable without completion", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = ["#A", "#B"].map((key) => backend.encodeFirebaseObjectKey_(key));
+  const { tasks, current, runId } = setupMetricCopyRun(backend, encodedKeys);
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    if (String(methodRaw).toUpperCase() === "GET" && queryParamsRaw && queryParamsRaw.orderBy) throw new Error("range read failed");
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
+
+  assert.throws(
+    () => backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now()),
+    /range read failed/,
+  );
+  assert.equal(backend.readAutoRefreshRunShard_(runId, "metricCopies/" + tasks[0].taskId), null);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
+});
+
+test("metric copy remains idempotent after its completion marker exists", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = ["#A", "#B"].map((key) => backend.encodeFirebaseObjectKey_(key));
+  const sourceByKey = buildMetricSourceMap(backend, encodedKeys);
+  const { tasks, current } = setupMetricCopyRun(backend, encodedKeys);
+  const range = installMetricRangeResponse(backend, sourceByKey);
+
+  const first = backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now());
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    if (queryParamsRaw && queryParamsRaw.orderBy) throw new Error("idempotent retry must not read range");
+    return range.originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
+  const second = backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now());
+
+  assert.equal(first.copiedCount, encodedKeys.length);
+  assert.equal(second.skipped, true);
+  assert.equal(second.reason, "resultExists");
+  assert.equal(range.rangeRequests.length, 1);
+});
+
+test("interruption after metric read does not create a completion marker", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = ["#A", "#B"].map((key) => backend.encodeFirebaseObjectKey_(key));
+  const sourceByKey = buildMetricSourceMap(backend, encodedKeys);
+  const { tasks, current, runId } = setupMetricCopyRun(backend, encodedKeys);
+  installMetricRangeResponse(backend, sourceByKey);
+  backend.firebaseBatchPutJson_ = () => {
+    throw new Error("write interrupted");
+  };
+
+  assert.throws(
+    () => backend.executeAutoRefreshMetricCopyTask_(current, tasks[0], Date.now()),
+    /write interrupted/,
+  );
+  assert.equal(backend.readAutoRefreshRunShard_(runId, "metricCopies/" + tasks[0].taskId), null);
+});
+
+test("one thousand metric entries use ten bounded reads and preserve the old result", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const encodedKeys = Array.from({ length: 1000 }, (_value, index) => backend.encodeFirebaseObjectKey_("#METRIC" + String(index).padStart(4, "0")));
+  const sourceByKey = buildMetricSourceMap(backend, encodedKeys);
+  const sourcePath = "activeVersions/source-1/playerMetrics/byTag";
+  backend.firebaseRequestJson_(sourcePath, "PUT", sourceByKey);
+  const { tasks, current } = setupMetricCopyRun(backend, encodedKeys, { chunkLimit: 100 });
+  const originalFirebaseRequestJson = backend.firebaseRequestJson_;
+  let rangeReadCount = 0;
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw, queryParamsRaw) => {
+    const method = String(methodRaw || "GET").toUpperCase();
+    if (method === "GET" && String(pathRaw || "").replace(/^\/+|\/+$/g, "") === sourcePath && queryParamsRaw && queryParamsRaw.orderBy) {
+      rangeReadCount++;
+      const startAt = JSON.parse(queryParamsRaw.startAt);
+      const endAt = JSON.parse(queryParamsRaw.endAt);
+      const response = {};
+      const keys = Object.keys(sourceByKey).filter((key) => key >= startAt && key <= endAt);
+      for (let i = 0; i < keys.length; i++) response[keys[i]] = sourceByKey[keys[i]];
+      return response;
+    }
+    return originalFirebaseRequestJson(pathRaw, methodRaw, payloadRaw, queryParamsRaw);
+  };
+
+  const metricTasks = tasks.filter((task) => task.type === "metricCopy");
+  for (let i = 0; i < metricTasks.length; i++) backend.executeAutoRefreshMetricCopyTask_(current, metricTasks[i], Date.now());
+  const destination = originalFirebaseRequestJson(sourcePath.replace("source-1", "run-1"), "GET");
+
+  assert.equal(metricTasks.length, 10);
+  assert.equal(rangeReadCount, 10);
+  assert.equal(Object.keys(destination).length, 1000);
+  assert.deepEqual(clone(destination), clone(sourceByKey));
+  for (let i = 0; i < metricTasks.length; i++) {
+    assert.equal(backend.readAutoRefreshRunShard_("run-1", "metricCopies/" + metricTasks[i].taskId).copiedCount, 100);
+  }
+});
+
+test("daily UrlFetch quota errors pause the worker without rapid retries", () => {
+  const backend = loadBackend();
+  backend.getFirebaseConfig_ = () => ({ dbUrl: "https://firebase.test/db" });
+  backend.getFirebaseAccessToken_ = () => "token";
+  backend.UrlFetchApp = {
+    fetch() {
+      throw new Error("Service invoked too many times for one day: urlfetch");
+    },
+  };
+  assert.throws(
+    () => backend.firebaseRequestJson_("activeVersions/source-1/playerMetrics/byTag", "GET"),
+    (err) => err && err.firebaseDailyUrlFetchQuota === true && err.autoRefreshDefer === true && err.reason === "firebaseUrlFetchQuota",
+  );
+
+  const worker = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupMetricCopyRun(worker, [worker.encodeFirebaseObjectKey_("#A")]);
+  worker.executeAutoRefreshMetricCopyTask_ = () => {
+    const err = new Error("Service invoked too many times for one day: urlfetch");
+    err.firebaseDailyUrlFetchQuota = true;
+    err.autoRefreshDefer = true;
+    err.reason = "firebaseUrlFetchQuota";
+    throw err;
+  };
+  const result = worker.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.equal(result.reason, "firebaseUrlFetchQuota");
+  assert.equal(result.quotaPaused, true);
+  assert.equal(worker.__triggers.length, 0);
+  assert.equal(worker.readAutoRefreshQueueCurrent_().runId, runId);
+  assert.equal(worker.readAutoRefreshTask_(runId, tasks[0].taskId).status, "running");
 });
 
 test("roster ownership snapshot preserves live cross-roster owners for isolated workers", () => {

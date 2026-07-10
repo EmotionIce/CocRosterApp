@@ -803,6 +803,12 @@ function maybeClearStaleAutoRefreshLockAfterBusy_(labelRaw) {
 
 // Build the queue tasks for one run. Optional metric-copy chunks stage source
 // metrics before roster tasks patch their refreshed entries.
+function normalizeAutoRefreshMetricCopyKey_(keyRaw) {
+	const key = String(keyRaw == null ? "" : keyRaw).trim();
+	if (!key) return "";
+	return key.indexOf(FIREBASE_KEY_ENCODING_PREFIX) === 0 ? key : encodeFirebaseObjectKey_(key);
+}
+
 function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const runId = normalizeActiveVersionId_(runIdRaw);
@@ -812,11 +818,12 @@ function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
 	const metricCopyKeys = [];
 	const metricCopySeen = {};
 	for (let i = 0; i < metricCopyKeysRaw.length; i++) {
-		const key = String(metricCopyKeysRaw[i] == null ? "" : metricCopyKeysRaw[i]).trim();
+		const key = normalizeAutoRefreshMetricCopyKey_(metricCopyKeysRaw[i]);
 		if (!key || metricCopySeen[key]) continue;
 		metricCopySeen[key] = true;
 		metricCopyKeys.push(key);
 	}
+	metricCopyKeys.sort();
 	const copyLimit = Math.max(1, toNonNegativeInt_(options.metricCopyTaskTagLimit || AUTO_REFRESH_METRIC_COPY_TASK_TAG_LIMIT));
 	for (let i = 0; i < metricCopyKeys.length; i += copyLimit) {
 		const chunkIndex = Math.floor(i / copyLimit) + 1;
@@ -1277,22 +1284,45 @@ function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMs
 	const metricKeys = [];
 	const seen = {};
 	for (let i = 0; i < metricKeysRaw.length; i++) {
-		const key = String(metricKeysRaw[i] == null ? "" : metricKeysRaw[i]).trim();
+		const key = normalizeAutoRefreshMetricCopyKey_(metricKeysRaw[i]);
 		if (!key || seen[key]) continue;
 		seen[key] = true;
 		metricKeys.push(key);
 	}
+	metricKeys.sort();
 	const fetchStartMs = Date.now();
-	let encodedByPath = {};
-	const sourcePathByKey = {};
-	const sourcePaths = [];
+	let encodedByKey = {};
 	if (sourceVersionId && metricKeys.length) {
-		for (let i = 0; i < metricKeys.length; i++) {
-			const path = buildActiveVersionPath_(sourceVersionId, "playerMetrics/byTag/" + metricKeys[i]);
-			sourcePathByKey[metricKeys[i]] = path;
-			sourcePaths.push(path);
+		const sourcePath = buildActiveVersionPath_(sourceVersionId, "playerMetrics/byTag");
+		const firstKey = metricKeys[0];
+		const lastKey = metricKeys[metricKeys.length - 1];
+		const encodedResponse = firebaseRequestJson_(sourcePath, "GET", undefined, {
+			orderBy: JSON.stringify("$key"),
+			startAt: JSON.stringify(firstKey),
+			endAt: JSON.stringify(lastKey),
+		});
+		if (!encodedResponse || typeof encodedResponse !== "object" || Array.isArray(encodedResponse)) {
+			throw new Error("Auto-refresh metric copy range response is not an object for task " + taskId + ".");
 		}
-		encodedByPath = firebaseBatchGetJson_(sourcePaths, { disableFallback: true });
+		const expectedKeys = {};
+		for (let i = 0; i < metricKeys.length; i++) expectedKeys[metricKeys[i]] = true;
+		const returnedKeys = Object.keys(encodedResponse);
+		for (let i = 0; i < returnedKeys.length; i++) {
+			if (!expectedKeys[returnedKeys[i]]) {
+				throw new Error("Auto-refresh metric copy range returned unexpected key " + returnedKeys[i] + " for task " + taskId + ".");
+			}
+		}
+		for (let i = 0; i < metricKeys.length; i++) {
+			const key = metricKeys[i];
+			if (!Object.prototype.hasOwnProperty.call(encodedResponse, key)) {
+				throw new Error("Auto-refresh metric copy range is missing source metric key " + key + " for task " + taskId + ".");
+			}
+			const payload = encodedResponse[key];
+			if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+				throw new Error("Auto-refresh metric copy source metric key " + key + " is not an object for task " + taskId + ".");
+			}
+			encodedByKey[key] = payload;
+		}
 	}
 	const fetchMs = Math.max(0, Date.now() - fetchStartMs);
 	const writeStartMs = Date.now();
@@ -1301,7 +1331,7 @@ function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMs
 	let missingCount = 0;
 	for (let i = 0; i < metricKeys.length; i++) {
 		const key = metricKeys[i];
-		const payload = encodedByPath[sourcePathByKey[key]];
+		const payload = encodedByKey[key];
 		if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
 			missingCount++;
 			continue;
@@ -2191,8 +2221,31 @@ function markAutoRefreshRosterPhaseDeferred_(currentRaw, taskRaw, stateRaw, reas
 		reason: reason,
 		elapsedMs: getAutoRefreshJobElapsedMs_(executionStartMsRaw),
 	});
-	scheduleAutoRefreshJobResume_();
+	if (isFirebaseDailyUrlFetchQuotaError_(errRaw)) {
+		removeAutoRefreshJobResumeTriggers_();
+		Logger.log("Auto-refresh roster phase paused without short retry because Firebase UrlFetch daily quota is exhausted.");
+	} else {
+		scheduleAutoRefreshJobResume_();
+	}
 	return { deferred: true, reason: reason, rosterId: String((taskRaw && taskRaw.rosterId) || ""), error: message };
+}
+
+// Leave a queue task recoverable without scheduling short retries while the
+// Apps Script daily UrlFetch quota is exhausted. The persisted running task
+// remains protected by the existing stale-run recovery path.
+function buildAutoRefreshUrlFetchQuotaPauseResult_(currentRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	removeAutoRefreshJobResumeTriggers_();
+	Logger.log("Auto-refresh worker paused without short retry because Firebase UrlFetch daily quota is exhausted.");
+	return {
+		ok: true,
+		status: "inProgress",
+		inProgress: true,
+		reason: "firebaseUrlFetchQuota",
+		quotaPaused: true,
+		processedRosters: current ? current.processedRosters : 0,
+		totalRosters: current ? current.rosterIds.length : 0,
+	};
 }
 
 function collectAutoRefreshRosterInputReadPlan_(sourceRosterRaw, clanSnapshotRaw) {
@@ -4584,7 +4637,12 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 		task.updatedAt = nowIso;
 		task.attempts = toNonNegativeInt_(task.attempts) + 1;
 		task.error = "";
-		writeAutoRefreshTask_(current.runId, task);
+		try {
+			writeAutoRefreshTask_(current.runId, task);
+		} catch (err) {
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) return buildAutoRefreshUrlFetchQuotaPauseResult_(current);
+			throw err;
+		}
 		current.phase = task.type === "finalize" ? "finalizing" : task.type === "cwlFinalCoordinator" ? "cwl-final-coordinator" : task.type === "cwlCoordinator" ? "cwl-coordinator" : "processing";
 		current.status = task.type === "finalize" ? "finalizing" : "running";
 		current.taskSummary = {
@@ -4594,7 +4652,12 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			startedAt: nowIso,
 			attempts: task.attempts,
 		};
-		writeAutoRefreshQueueCurrent_(current, false);
+		try {
+			writeAutoRefreshQueueCurrent_(current, false);
+		} catch (err) {
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) return buildAutoRefreshUrlFetchQuotaPauseResult_(current);
+			throw err;
+		}
 		let result = null;
 		try {
 			result = task.type === "finalize"
@@ -4607,6 +4670,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 							? executeAutoRefreshFinalCwlCoordinatorTask_(current, task, executionStartMs)
 							: executeAutoRefreshRosterTask_(current, task, executionStartMs);
 			if (result && result.deferred) {
+				if (isFirebaseDailyUrlFetchQuotaError_(result.error)) return buildAutoRefreshUrlFetchQuotaPauseResult_(current);
 				task.status = "pending";
 				task.summary = String(result.reason || "deferred");
 				writeAutoRefreshTask_(current.runId, task);
@@ -4642,6 +4706,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			workerStats.tasksCompleted++;
 			continue;
 		} catch (err) {
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) return buildAutoRefreshUrlFetchQuotaPauseResult_(current);
 			if (err && err.autoRefreshDefer) {
 				const message = errorMessage_(err);
 				task.status = "pending";

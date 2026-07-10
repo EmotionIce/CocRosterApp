@@ -388,6 +388,34 @@ function parseFirebaseJsonResponse_(responseRaw, contextRaw) {
 	}
 }
 
+// Identify the Apps Script daily UrlFetch quota failure without treating
+// ordinary transient Firebase HTTP failures as quota exhaustion.
+function isFirebaseDailyUrlFetchQuotaError_(errRaw) {
+	const text = String(
+		errRaw && typeof errRaw === "object"
+			? [errRaw.message, errRaw.error, errRaw.stack].filter((value) => value != null).join(" ")
+			: (errRaw == null ? "" : errRaw),
+	).toLowerCase();
+	return text.indexOf("urlfetch") >= 0 && (
+		text.indexOf("too many times for one day") >= 0 ||
+		text.indexOf("service invoked too many times") >= 0 ||
+		text.indexOf("waiting for quota") >= 0 ||
+		text.indexOf("an einem tag") >= 0 ||
+		text.indexOf("zu häufig") >= 0
+	);
+}
+
+// Preserve a resumable queue pause marker on a daily UrlFetch quota error.
+function markFirebaseDailyUrlFetchQuotaError_(errRaw) {
+	if (!isFirebaseDailyUrlFetchQuotaError_(errRaw)) return errRaw;
+	if (errRaw && typeof errRaw === "object") {
+		errRaw.firebaseDailyUrlFetchQuota = true;
+		errRaw.autoRefreshDefer = true;
+		errRaw.reason = "firebaseUrlFetchQuota";
+	}
+	return errRaw;
+}
+
 // Handle Firebase request JSON.
 function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 	const path = normalizeFirebasePath_(pathRaw);
@@ -418,15 +446,25 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 		return UrlFetchApp.fetch(url, options);
 	};
 
-	let response = doRequest(false);
-	let code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
-	if (code === 401 || code === 403) {
-		clearFirebaseAccessTokenCache_();
-		response = doRequest(true);
+	let response = null;
+	let code = 0;
+	try {
+		response = doRequest(false);
 		code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+		if (code === 401 || code === 403) {
+			clearFirebaseAccessTokenCache_();
+			response = doRequest(true);
+			code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+		}
+	} catch (err) {
+		throw markFirebaseDailyUrlFetchQuotaError_(err);
 	}
 
-	return parseFirebaseJsonResponse_(response, { method: method, path: path });
+	try {
+		return parseFirebaseJsonResponse_(response, { method: method, path: path });
+	} catch (err) {
+		throw markFirebaseDailyUrlFetchQuotaError_(err);
+	}
 }
 
 // Build an error for queue phases that must retry instead of expanding failed
@@ -438,7 +476,7 @@ function buildFirebaseBatchFallbackDisabledError_(operationRaw, detailRaw) {
 	err.name = "FirebaseBatchFallbackDisabledError";
 	err.autoRefreshDefer = true;
 	err.reason = "firebaseBatch";
-	return err;
+	return markFirebaseDailyUrlFetchQuotaError_(err);
 }
 
 // Batch Firebase GET requests with per-entry fallback to the single-request path.
@@ -489,6 +527,7 @@ function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 	try {
 		responses = UrlFetchApp.fetchAll(buildRequests(false));
 	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 		if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch GET", errorMessage_(err));
 		Logger.log("Firebase batch GET fetchAll failed; falling back to single GETs: %s", errorMessage_(err));
 		return fallbackAll();
@@ -507,6 +546,7 @@ function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 		try {
 			responses = UrlFetchApp.fetchAll(buildRequests(true));
 		} catch (err) {
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 			if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch GET auth retry", errorMessage_(err));
 			Logger.log("Firebase batch GET auth retry failed; falling back to single GETs: %s", errorMessage_(err));
 			return fallbackAll();
@@ -587,6 +627,7 @@ function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 	try {
 		responses = UrlFetchApp.fetchAll(buildRequests(false));
 	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 		if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch write", errorMessage_(err));
 		Logger.log("Firebase batch write fetchAll failed; falling back to single writes: %s", errorMessage_(err));
 		return fallbackAll();
@@ -605,6 +646,7 @@ function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 		try {
 			responses = UrlFetchApp.fetchAll(buildRequests(true));
 		} catch (err) {
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 			if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase batch write auth retry", errorMessage_(err));
 			Logger.log("Firebase batch write auth retry failed; falling back to single writes: %s", errorMessage_(err));
 			return fallbackAll();
@@ -663,6 +705,7 @@ function firebaseBatchPutJson_(entriesRaw, optionsRaw) {
 	try {
 		return firebaseRequestJson_("", "PATCH", patch);
 	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 		if (disableFallback) throw buildFirebaseBatchFallbackDisabledError_("Firebase multi-location PUT", errorMessage_(err));
 		Logger.log("Firebase multi-location PUT failed; falling back to single writes: %s", errorMessage_(err));
 		return fallbackAll();
