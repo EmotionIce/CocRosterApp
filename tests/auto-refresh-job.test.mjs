@@ -1765,6 +1765,18 @@ test("daily UrlFetch quota errors pause the worker without rapid retries", () =>
   assert.equal(worker.__triggers.length, 0);
   assert.equal(worker.readAutoRefreshQueueCurrent_().runId, runId);
   assert.equal(worker.readAutoRefreshTask_(runId, tasks[0].taskId).status, "running");
+
+  const entryWorker = installMemoryFirebase(loadBackend());
+  entryWorker.isAutoRefreshEnabled_ = () => true;
+  entryWorker.readAutoRefreshQueueCurrent_ = () => {
+    const err = new Error("Service invoked too many times for one day: urlfetch");
+    err.firebaseDailyUrlFetchQuota = true;
+    throw err;
+  };
+  const entryResult = entryWorker.autoRefreshWorkerTick();
+  assert.equal(entryResult.reason, "firebaseUrlFetchQuota");
+  assert.equal(entryResult.quotaPaused, true);
+  assert.equal(entryWorker.__triggers.length, 0);
 });
 
 test("roster ownership snapshot preserves live cross-roster owners for isolated workers", () => {

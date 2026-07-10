@@ -5424,6 +5424,12 @@ function autoRefreshActiveRosterTick() {
 		Logger.log("autoRefreshActiveRosterTick ok: %s", String(result && result.summary ? result.summary : ""));
 		return result;
 	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) {
+			removeAutoRefreshJobResumeTriggers_();
+			Logger.log("Auto-refresh coordinator paused without short retry because Firebase UrlFetch daily quota is exhausted.");
+			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseUrlFetchQuota", quotaPaused: true };
+			return resultForLog;
+		}
 		if (isActiveRosterJobLockBusyError_(err)) {
 			const lockRecovery = maybeClearStaleAutoRefreshLockAfterBusy_("autoRefreshActiveRosterTick lock busy recovery");
 			if (lockRecovery && lockRecovery.cleared) {
@@ -5500,6 +5506,12 @@ function autoRefreshWorkerTick() {
 		}
 		return result;
 	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) {
+			removeAutoRefreshJobResumeTriggers_();
+			Logger.log("Auto-refresh worker paused without short retry because Firebase UrlFetch daily quota is exhausted.");
+			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseUrlFetchQuota", quotaPaused: true };
+			return resultForLog;
+		}
 		if (isActiveRosterJobLockBusyError_(err)) {
 			const lockRecovery = maybeClearStaleAutoRefreshLockAfterBusy_("autoRefreshWorkerTick lock busy recovery");
 			if (lockRecovery && lockRecovery.cleared) {
@@ -5522,7 +5534,9 @@ function autoRefreshWorkerTick() {
 		resultForLog = { ok: false, status: "error", error: message };
 		return resultForLog;
 	} finally {
-		maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_("auto-refresh-worker-tick-mirror", resultForLog);
+		if (!resultForLog || !resultForLog.quotaPaused) {
+			maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_("auto-refresh-worker-tick-mirror", resultForLog);
+		}
 		Logger.log(
 			"autoRefreshWorkerTick end status=%s reason=%s elapsedMs=%s",
 			String((resultForLog && resultForLog.status) || ""),
