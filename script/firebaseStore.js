@@ -323,6 +323,7 @@ function requestFirebaseAccessToken_() {
 	const response = UrlFetchApp.fetch(config.tokenUri, {
 		method: "post",
 		muteHttpExceptions: true,
+		timeoutSeconds: getExternalRequestTimeoutSeconds_("FIREBASE_OAUTH_REQUEST_TIMEOUT_SECONDS", FIREBASE_OAUTH_REQUEST_TIMEOUT_SECONDS, 5, 25),
 		payload: {
 			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
 			assertion: assertion,
@@ -430,16 +431,19 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 
 	// Handle do request.
 	const doRequest = (forceTokenRefresh) => {
+		if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase request");
 		const accessToken = getFirebaseAccessToken_(forceTokenRefresh);
 		const options = {
 			method: method,
 			muteHttpExceptions: true,
+			timeoutSeconds: getExternalRequestTimeoutSeconds_("FIREBASE_REQUEST_TIMEOUT_SECONDS", FIREBASE_REQUEST_TIMEOUT_SECONDS, 5, 25),
 			headers: {
 				Authorization: "Bearer " + accessToken,
 				Accept: "application/json",
 			},
 		};
 		if (payloadRaw !== undefined) {
+			if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase request serialization");
 			options.contentType = "application/json";
 			options.payload = JSON.stringify(payloadRaw);
 		}
@@ -465,6 +469,88 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 	} catch (err) {
 		throw markFirebaseDailyUrlFetchQuotaError_(err);
 	}
+}
+
+// Read one Firebase response header case-insensitively. Apps Script returns
+// either a plain object or a one-element array for repeated headers.
+function getFirebaseResponseHeader_(responseRaw, nameRaw) {
+	const response = responseRaw && typeof responseRaw === "object" ? responseRaw : null;
+	const wanted = String(nameRaw || "").trim().toLowerCase();
+	if (!response || !wanted || typeof response.getAllHeaders !== "function") return "";
+	const headers = response.getAllHeaders() || {};
+	const keys = Object.keys(headers);
+	for (let i = 0; i < keys.length; i++) {
+		if (String(keys[i]).toLowerCase() !== wanted) continue;
+		const value = headers[keys[i]];
+		return Array.isArray(value) ? String(value[0] || "") : String(value == null ? "" : value);
+	}
+	return "";
+}
+
+// Execute a Firebase request while retaining its ETag. Queue state mutations
+// use this primitive for compare-and-swap rather than a network-held lock.
+function firebaseRequestJsonWithEtag_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
+	const path = normalizeFirebasePath_(pathRaw);
+	const method = String(methodRaw == null ? "GET" : methodRaw).trim().toUpperCase();
+	if (!method) throw new Error("Firebase request method is required.");
+	const queryParams = queryParamsRaw && typeof queryParamsRaw === "object" ? Object.assign({}, queryParamsRaw) : {};
+	delete queryParams.ifMatch;
+	let url = appendFirebaseJsonUrlQueryParams_(buildFirebaseJsonUrl_(getFirebaseConfig_().dbUrl, path), queryParams);
+	if (method !== "GET") url = appendFirebaseJsonUrlQueryParam_(url, "print", "silent");
+	const config = getFirebaseConfig_();
+	const doRequest = (forceTokenRefresh) => {
+		if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase ETag request");
+		const accessToken = getFirebaseAccessToken_(forceTokenRefresh);
+		const headers = {
+			Authorization: "Bearer " + accessToken,
+			Accept: "application/json",
+		};
+		if (method === "GET") headers["X-Firebase-ETag"] = "true";
+		if (queryParamsRaw && queryParamsRaw.ifMatch) headers["If-Match"] = String(queryParamsRaw.ifMatch);
+		const options = {
+			method: method,
+			muteHttpExceptions: true,
+			timeoutSeconds: getExternalRequestTimeoutSeconds_("FIREBASE_REQUEST_TIMEOUT_SECONDS", FIREBASE_REQUEST_TIMEOUT_SECONDS, 5, 25),
+			headers: headers,
+		};
+		if (payloadRaw !== undefined) {
+			if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase ETag serialization");
+			options.contentType = "application/json";
+			options.payload = JSON.stringify(payloadRaw);
+		}
+		return UrlFetchApp.fetch(url, options);
+	};
+
+	let response = null;
+	try {
+		response = doRequest(false);
+		const code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+		if (code === 401 || code === 403) {
+			clearFirebaseAccessTokenCache_();
+			response = doRequest(true);
+		}
+	} catch (err) {
+		throw markFirebaseDailyUrlFetchQuotaError_(err);
+	}
+	const code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
+	if (code === 412) {
+		const conflict = new Error("Firebase ETag compare-and-swap conflict" + formatFirebaseRequestContext_({ method, path }) + ".");
+		conflict.code = "FIREBASE_ETAG_CONFLICT";
+		throw conflict;
+	}
+	let value;
+	try {
+		value = parseFirebaseJsonResponse_(response, { method, path });
+	} catch (err) {
+		throw markFirebaseDailyUrlFetchQuotaError_(err);
+	}
+	const etag = getFirebaseResponseHeader_(response, "ETag") || getFirebaseResponseHeader_(response, "Etag");
+	if (method === "GET" && !etag) {
+		const missing = new Error("Firebase response did not include an ETag" + formatFirebaseRequestContext_({ method, path }) + ".");
+		missing.code = "FIREBASE_ETAG_MISSING";
+		throw missing;
+	}
+	return { value: value, etag: etag, responseCode: code };
 }
 
 // Build an error for queue phases that must retry instead of expanding failed
@@ -504,6 +590,7 @@ function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 				url: buildFirebaseJsonUrl_(config.dbUrl, paths[i]),
 				method: "get",
 				muteHttpExceptions: true,
+				timeoutSeconds: getExternalRequestTimeoutSeconds_("FIREBASE_BATCH_REQUEST_TIMEOUT_SECONDS", FIREBASE_BATCH_REQUEST_TIMEOUT_SECONDS, 5, 25),
 				headers: {
 					Authorization: "Bearer " + accessToken,
 					Accept: "application/json",
@@ -525,6 +612,7 @@ function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 
 	let responses = null;
 	try {
+		if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase batch GET");
 		responses = UrlFetchApp.fetchAll(buildRequests(false));
 	} catch (err) {
 		if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
@@ -544,6 +632,7 @@ function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 	if (hasAuthFailure) {
 		clearFirebaseAccessTokenCache_();
 		try {
+			if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase batch GET auth retry");
 			responses = UrlFetchApp.fetchAll(buildRequests(true));
 		} catch (err) {
 			if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
@@ -609,6 +698,7 @@ function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 				url: appendFirebaseJsonUrlQueryParam_(buildFirebaseJsonUrl_(config.dbUrl, entry.path), "print", "silent"),
 				method: entry.method.toLowerCase(),
 				muteHttpExceptions: true,
+				timeoutSeconds: getExternalRequestTimeoutSeconds_("FIREBASE_BATCH_REQUEST_TIMEOUT_SECONDS", FIREBASE_BATCH_REQUEST_TIMEOUT_SECONDS, 5, 25),
 				headers: {
 					Authorization: "Bearer " + accessToken,
 					Accept: "application/json",
@@ -625,6 +715,7 @@ function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 
 	let responses = null;
 	try {
+		if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase batch write");
 		responses = UrlFetchApp.fetchAll(buildRequests(false));
 	} catch (err) {
 		if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
@@ -644,6 +735,7 @@ function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 	if (hasAuthFailure) {
 		clearFirebaseAccessTokenCache_();
 		try {
+			if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase batch write auth retry");
 			responses = UrlFetchApp.fetchAll(buildRequests(true));
 		} catch (err) {
 			if (isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);

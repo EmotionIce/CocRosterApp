@@ -118,6 +118,9 @@ function buildCocFetchRequestConfig_(pathRaw, tokenRaw) {
 			Authorization: "Bearer " + token,
 			Accept: "application/json",
 		},
+		timeoutSeconds: typeof getExternalRequestTimeoutSeconds_ === "function"
+			? getExternalRequestTimeoutSeconds_("COC_API_REQUEST_TIMEOUT_SECONDS", COC_API_REQUEST_TIMEOUT_SECONDS, 5, 25)
+			: 15,
 	};
 	return {
 		url: url,

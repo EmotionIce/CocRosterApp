@@ -35,9 +35,12 @@ function getCloudflarePublicDataBaseUrl_() {
 
 
 function getCloudflareLegacyRequestTimeoutSeconds_() {
-	return typeof CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS !== "undefined"
+	const fallback = typeof CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS !== "undefined"
 		? Math.max(1, Math.min(30, toNonNegativeInt_(CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS) || 20))
 		: 20;
+	return typeof getExternalRequestTimeoutSeconds_ === "function"
+		? getExternalRequestTimeoutSeconds_("CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS", fallback, 5, 25)
+		: fallback;
 }
 
 function getCloudflarePublicDataPublishEndpoint_() {
@@ -754,6 +757,17 @@ function buildCloudflarePublicBootstrapPayload_(optionsRaw) {
 	const manifest = manifestOverride || (versionWrite.manifest && typeof versionWrite.manifest === "object" && !Array.isArray(versionWrite.manifest)
 		? versionWrite.manifest
 		: readCloudflarePublishedActiveManifest_(activeVersionId));
+	if (options.compact === true) {
+		return {
+			schemaVersion: 2,
+			generatedAt: String(options.generatedAt || new Date().toISOString()),
+			activeVersionId: activeVersionId,
+			active: {
+				versionId: activeVersionId,
+				manifest: manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : null,
+			},
+		};
+	}
 	const seasonEvents = attachCloudflarePreviousSeasonBundle_(buildCloudflareCurrentSeasonEventsBundle_());
 	const donationRefresh = buildCloudflareDonationRefreshBundleForSeasonEvents_(seasonEvents);
 	const generatedAt = String(options.generatedAt || new Date().toISOString());

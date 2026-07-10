@@ -2029,6 +2029,64 @@ test("season event participant account updates and cancellation maintain tag ind
   assert.equal(backend.firebaseRequestJson_(backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#8CCVV"), "GET"), null);
 });
 
+test("OAuth, Firebase single, Firebase fetchAll, and ETag CAS requests have explicit timeouts", () => {
+  const backend = loadBackend();
+  const requests = [];
+  backend.getFirebaseConfig_ = () => ({
+    dbUrl: "https://firebase.test/db",
+    clientEmail: "client@example.test",
+    privateKey: "key",
+    tokenUri: "https://oauth.test/token",
+  });
+  backend.getFirebaseAccessToken_ = () => "token";
+  backend.Utilities.computeRsaSha256Signature = () => [1, 2, 3];
+  backend.UrlFetchApp = {
+    fetch(url, options) {
+      requests.push({ kind: "fetch", url, options });
+      if (url.includes("oauth")) return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ access_token: "fresh", expires_in: 3600 }) };
+      return { getResponseCode: () => 200, getContentText: () => "{}", getAllHeaders: () => ({ ETag: '"etag-1"' }) };
+    },
+    fetchAll(descriptors) {
+      requests.push({ kind: "fetchAll", descriptors });
+      return descriptors.map(() => ({ getResponseCode: () => 200, getContentText: () => "{}" }));
+    },
+  };
+
+  backend.requestFirebaseAccessToken_();
+  backend.firebaseRequestJson_("active", "GET");
+  backend.firebaseBatchGetJson_(["active", "activePublished"]);
+  const etagRead = backend.firebaseRequestJsonWithEtag_("queue", "GET");
+  backend.firebaseRequestJsonWithEtag_("queue", "PUT", { ok: true }, { ifMatch: etagRead.etag });
+
+  const oauth = requests.find((request) => request.url.includes("oauth"));
+  const single = requests.find((request) => request.kind === "fetch" && request.url.includes("/active.json"));
+  const batch = requests.find((request) => request.kind === "fetchAll");
+  const etagGet = requests.find((request) => request.kind === "fetch" && request.url.includes("/queue.json") && request.options.method === "GET");
+  const etagPut = requests.find((request) => request.kind === "fetch" && request.url.includes("/queue.json") && request.options.method === "PUT");
+  assert.equal(oauth.options.timeoutSeconds, 15);
+  assert.equal(single.options.timeoutSeconds, 15);
+  assert.ok(batch.descriptors.every((descriptor) => descriptor.timeoutSeconds === 15));
+  assert.equal(etagGet.options.headers["X-Firebase-ETag"], "true");
+  assert.equal(etagPut.options.headers["If-Match"], '"etag-1"');
+  assert.equal(etagPut.options.timeoutSeconds, 15);
+});
+
+test("CoC single and fetchAll descriptors use the bounded transport policy", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("COC_API_TOKEN", "token");
+  const requestLog = [];
+  backend.UrlFetchApp = {
+    fetch(url, options) { requestLog.push({ url, options }); return { getResponseCode: () => 200, getContentText: () => "{}" }; },
+    fetchAll(descriptors) { requestLog.push({ descriptors }); return descriptors.map(() => ({ getResponseCode: () => 200, getContentText: () => "{}" })); },
+  };
+  backend.cocFetch_("/clans/%23CLAN");
+  backend.cocFetchAllByPathEntries_([{ key: "one", path: "/clans/%23CLAN" }]);
+  const single = requestLog.find((entry) => entry.url);
+  const batch = requestLog.find((entry) => entry.descriptors);
+  assert.equal(single.options.timeoutSeconds, 15);
+  assert.equal(batch.descriptors[0].timeoutSeconds, 15);
+});
+
 test("season-event publication enqueueing happens only after the participant lock is released", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");

@@ -66,21 +66,53 @@ const CLOUDFLARE_PUBLICATION_MODE_QUEUED_V2 = "queued-v2";
 const CLOUDFLARE_PUBLICATION_MODE_DISABLED = "disabled";
 const CLOUDFLARE_PUBLICATION_MODE_LEGACY_MANUAL = "legacy-manual";
 const CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME = "cloudflarePublishWorkerTick";
+const CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_HANDLER_NAME = "cloudflarePublishWorkerRecoveryTick";
 const CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY = "CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID";
 const CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY = "CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT";
+const CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY = "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID";
+const CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY = "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT";
 const CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY = "CLOUDFLARE_PUBLISH_QUEUE_LOCK";
 const CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS = 100;
 const CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS = 60 * 1000;
 const CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS = 240 * 1000;
-const CLOUDFLARE_PUBLISH_QUEUE_LEASE_SAFETY_MS = 60 * 1000;
+// Apps Script executions can remain alive for roughly six minutes after a
+// transport stalls. Keep ownership longer than that hard runtime so a
+// successor cannot overlap a hard-killed owner.
+const CLOUDFLARE_PUBLISH_QUEUE_LEASE_SAFETY_MS = 8 * 60 * 1000;
 const CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS = CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS + CLOUDFLARE_PUBLISH_QUEUE_LEASE_SAFETY_MS;
 const CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS = 20;
-const CLOUDFLARE_PUBLISH_QUEUE_MAX_REQUESTS_PER_TICK = 2;
 const CLOUDFLARE_PUBLISH_QUEUE_MAX_OBJECTS_PER_REQUEST = 24;
 const CLOUDFLARE_PUBLISH_QUEUE_MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
 const CLOUDFLARE_PUBLISH_QUEUE_HARD_OBJECT_BYTES = 8 * 1024 * 1024;
 const CLOUDFLARE_PUBLISH_QUEUE_BASE_RETRY_MS = 60 * 1000;
 const CLOUDFLARE_PUBLISH_QUEUE_MAX_RETRY_MS = 6 * 60 * 60 * 1000;
+const CLOUDFLARE_PUBLISH_QUEUE_CAS_MAX_ATTEMPTS = 3;
+const CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_ROSTERS_PER_PHASE = 24;
+const CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY = 3;
+const CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS = CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS + 60 * 1000;
+const FIREBASE_OAUTH_REQUEST_TIMEOUT_SECONDS = 15;
+const FIREBASE_REQUEST_TIMEOUT_SECONDS = 15;
+const FIREBASE_BATCH_REQUEST_TIMEOUT_SECONDS = 15;
+const COC_API_REQUEST_TIMEOUT_SECONDS = 15;
+
+// Read one bounded external transport timeout. Operators can tune a policy
+// without changing code, but values are always clamped so a request cannot
+// silently become an execution-length operation.
+function getExternalRequestTimeoutSeconds_(propertyNameRaw, fallbackRaw, minimumRaw, maximumRaw) {
+	const propertyName = String(propertyNameRaw || "").trim();
+	const fallback = Math.max(1, Number(fallbackRaw) || 15);
+	const minimum = Math.max(1, Number(minimumRaw) || 5);
+	const maximum = Math.max(minimum, Number(maximumRaw) || 30);
+	let configured = 0;
+	try {
+		configured = propertyName && typeof PropertiesService !== "undefined" && PropertiesService
+			? Number(PropertiesService.getScriptProperties().getProperty(propertyName) || 0)
+			: 0;
+	} catch (err) {
+		configured = 0;
+	}
+	return Math.max(minimum, Math.min(maximum, Math.floor(configured > 0 ? configured : fallback)));
+}
 const FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_PATH = "internal/cloudflarePublish";
 const FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_STATE_PATH = "internal/cloudflarePublish/state";
 const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";

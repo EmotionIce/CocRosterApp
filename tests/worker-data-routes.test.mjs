@@ -88,6 +88,67 @@ test("bot data route does not fall back to public shards", async () => {
   assert.equal((await response.json()).error, "Data object not found.");
 });
 
+test("bot active routes resolve immutable versioned objects with the existing schemas", async () => {
+  const worker = loadWorker();
+  const activePayload = { activeVersionId: "version-7", schemaVersion: 1, rosters: [{ id: "main" }], playerMetrics: { byTag: {} } };
+  const byTag = { "#PLAYER": { identity: { tag: "#PLAYER", name: "Player" } } };
+  const linked = { "discord-1": [{ tag: "#PLAYER", playerTag: "#PLAYER" }] };
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "bot-data/active/currentVersionId.json": JSON.stringify("version-7"),
+      "bot-data/activeVersions/version-7/active.json": JSON.stringify(activePayload),
+      "bot-data/activeVersions/version-7/playerMetrics/byTag.json": JSON.stringify(byTag),
+      "bot-data/activeVersions/version-7/indexes/linkedAccountsByDiscordId.json": JSON.stringify(linked),
+    }),
+  };
+  const headers = { authorization: "Bearer secret" };
+  const active = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", { headers }), env, {});
+  const metrics = await worker.fetch(new Request("https://worker.test/api/bot-data/active/playerMetrics/byTag.json", { headers }), env, {});
+  const index = await worker.fetch(new Request("https://worker.test/api/bot-data/indexes/linkedAccountsByDiscordId.json", { headers }), env, {});
+  assert.equal(active.status, 200);
+  assert.deepEqual(await active.json(), activePayload);
+  assert.deepEqual(await metrics.json(), byTag);
+  assert.deepEqual(await index.json(), linked);
+});
+
+test("versioned bot reads fall back only to the existing bot object, never public scope", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "bot-data/active/currentVersionId.json": JSON.stringify("version-8"),
+      "bot-data/active.json": JSON.stringify({ activeVersionId: "legacy" }),
+      "public-data/activeVersions/version-8/active.json": JSON.stringify({ activeVersionId: "public-leak" }),
+    }),
+  };
+  const response = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", {
+    headers: { authorization: "Bearer secret" },
+  }), env, {});
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { activeVersionId: "legacy" });
+});
+
+test("verify-v2 refuses pointer readiness when a required object is missing", async () => {
+  const worker = loadWorker();
+  const env = {
+    ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "publish-secret",
+    ROSTER_DATA_KV: createKv({
+      "public-data/activeVersions/version-1/manifest.json": JSON.stringify({ versionId: "version-1" }),
+    }),
+  };
+  const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/verify-v2", {
+    method: "POST",
+    headers: { authorization: "Bearer publish-secret", "content-type": "application/json" },
+    body: JSON.stringify({ versionId: "version-1", objects: [
+      { scope: "public", path: "activeVersions/version-1/manifest" },
+      { scope: "bot", path: "activeVersions/version-1/active" },
+    ] }),
+  }), env, {});
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).ok, false);
+});
+
 test("mutable public pointers are no-store while version shards stay immutable", async () => {
   const worker = loadWorker();
   const env = {

@@ -7,6 +7,7 @@ const PUBLIC_DATA_ROUTE_PREFIX = "/api/public-data";
 const BOT_DATA_ROUTE_PREFIX = "/api/bot-data";
 const DATA_PUBLISH_ROUTE = "/api/internal/public-data/publish";
 const DATA_PUBLISH_V2_ROUTE = "/api/internal/public-data/publish-v2";
+const DATA_VERIFY_V2_ROUTE = "/api/internal/public-data/verify-v2";
 const DATA_PUBLISH_V2_CONCURRENCY = 4;
 const DATA_PUBLISH_V2_MAX_BODY_BYTES = 12 * 1024 * 1024;
 const DATA_PUBLISH_V2_MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
@@ -1215,7 +1216,7 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
 
   const object = scope === "public"
     ? await getPublicDataObjectWithBootstrapFallback(store, key, objectPath)
-    : await getDataStoreObject(store, key);
+    : await readBotDataObjectWithVersionFallback(store, objectPath, key);
   if (!object) {
     return jsonResponse(404, {
       ok: false,
@@ -1371,6 +1372,83 @@ const handleDataPublish = async (request, env) => {
       error: err && err.message ? err.message : "Roster data publish failed.",
     });
   }
+};
+
+// Verify immutable target objects before an Apps Script queue worker commits
+// any mutable pointer. This endpoint is intentionally bot/public-scope aware
+// and never returns object contents.
+const handleDataVerifyV2 = async (request, env) => {
+  const method = String(request.method || "").toUpperCase();
+  if (method === "OPTIONS") return new Response(null, { status: 204, headers: publishCorsHeaders() });
+  if (method !== "POST") return jsonResponse(405, { ok: false, error: "Method not allowed. Use POST." }, publishCorsHeaders());
+  const auth = await verifyRequestSecret(request, resolvePublishSecret(env), "Roster data publish secret");
+  if (!auth.ok) return auth.response;
+  const store = resolveRosterDataStore(env);
+  if (!store) return jsonResponse(503, { ok: false, error: "Roster data store is not configured." }, publishCorsHeaders());
+  let body;
+  try { body = await request.json(); } catch (err) { return jsonResponse(400, { ok: false, error: "Invalid JSON payload." }, publishCorsHeaders()); }
+  const objects = Array.isArray(body && body.objects) ? body.objects : [];
+  if (!objects.length || objects.length > 32) return jsonResponse(400, { ok: false, error: "Verification object list is required and bounded." }, publishCorsHeaders());
+  const missing = [];
+  for (let i = 0; i < objects.length; i++) {
+    const entry = objects[i] && typeof objects[i] === "object" ? objects[i] : {};
+    let scope;
+    let path;
+    try {
+      scope = normalizeDataScope(entry.scope || "public");
+      path = normalizeDataObjectPath(entry.path || entry.key || entry.name);
+    } catch (err) {
+      return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid verification object." }, publishCorsHeaders());
+    }
+    const object = await getDataStoreObject(store, buildDataObjectKey(scope, path));
+    if (!object) missing.push({ scope, path: path.replace(/\.json$/i, "") });
+  }
+  if (missing.length) return jsonResponse(409, { ok: false, error: "Required Cloudflare objects are missing.", missing }, publishCorsHeaders());
+  return jsonResponse(200, { ok: true, versionId: String(body && body.versionId || ""), verified: objects.length }, publishCorsHeaders());
+};
+
+// Resolve the committed bot pointer without ever serving a public object from
+// an authenticated bot route. The public pointer is read only as a migration
+// fallback while older deployments acquire the bot-local pointer.
+const readCommittedBotVersionId = async (store) => {
+  const botPointer = await readLegacyBotJsonObject(store, "active/currentVersionId");
+  const botVersionId = String(botPointer || "").trim();
+  if (botVersionId) return botVersionId;
+  return readDirectPublicActiveVersionId(store);
+};
+
+const readLegacyBotJsonObject = async (store, pathRaw) => {
+  let key = "";
+  try { key = buildDataObjectKey("bot", pathRaw); } catch (err) { return undefined; }
+  const object = await getDataStoreObject(store, key);
+  if (!object) return undefined;
+  try { return JSON.parse(await object.text()); } catch (err) { return undefined; }
+};
+
+const buildVersionedBotObjectPath = (versionIdRaw, objectPathRaw) => {
+  const versionId = String(versionIdRaw || "").trim();
+  const objectPath = String(objectPathRaw || "").replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
+  if (!versionId || !objectPath) return "";
+  if (objectPath === "active") return "activeVersions/" + encodeURIComponent(versionId) + "/active";
+  if (objectPath === "active/playerMetrics/byTag" || objectPath.startsWith("active/playerMetrics/byTag/")) {
+    return "activeVersions/" + encodeURIComponent(versionId) + "/playerMetrics/byTag" + objectPath.slice("active/playerMetrics/byTag".length);
+  }
+  if (objectPath === "indexes/linkedAccountsByDiscordId" || objectPath === "indexes/linkedAccountsByDiscordUsername") {
+    return "activeVersions/" + encodeURIComponent(versionId) + "/" + objectPath;
+  }
+  return "";
+};
+
+const readBotDataObjectWithVersionFallback = async (store, objectPathRaw, legacyKey) => {
+  const versionId = await readCommittedBotVersionId(store);
+  const versionedPath = buildVersionedBotObjectPath(versionId, objectPathRaw);
+  if (versionedPath) {
+    const versioned = await getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
+    if (versioned) return versioned;
+  }
+  // Rollout compatibility: only the existing bot-scope key is eligible for
+  // fallback. Public-scope reads are never used here.
+  return getDataStoreObject(store, legacyKey);
 };
 
 
@@ -1873,6 +1951,9 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === DATA_PUBLISH_V2_ROUTE || url.pathname === DATA_PUBLISH_V2_ROUTE + "/") {
       return handleDataPublishV2(request, env);
+    }
+    if (url.pathname === DATA_VERIFY_V2_ROUTE || url.pathname === DATA_VERIFY_V2_ROUTE + "/") {
+      return handleDataVerifyV2(request, env);
     }
     if (url.pathname === DATA_PUBLISH_ROUTE || url.pathname === DATA_PUBLISH_ROUTE + "/") {
       return handleDataPublish(request, env);

@@ -41,7 +41,7 @@ test("queued publisher does not enumerate history or use force-all retry state",
   const source = read("script/cloudflarePublishQueue.js");
   assert.equal(source.includes("listFirebaseChildKeys_("), false);
   assert.equal(source.includes("forceNext"), false);
-  assert.match(source, /timeoutSeconds:\s*CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS/);
+  assert.match(source, /timeoutSeconds:\s*getCloudflareQueueRequestTimeoutSeconds_\(\)/);
   assert.match(source, /commitGuard:\s*\{/);
 });
 
@@ -77,4 +77,3 @@ test("queued v2 batches are globally generation-fenced by the Durable Object coo
   assert.match(config, /"CLOUDFLARE_PUBLICATION_COORDINATOR"/);
   assert.match(config, /"new_sqlite_classes"/);
 });
-

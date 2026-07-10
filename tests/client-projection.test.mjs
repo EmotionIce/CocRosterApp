@@ -500,6 +500,36 @@ test("uses bootstrap for current public state without granular event reads", asy
   assert.equal(requested.includes("https://public-data.test/api/public-data/donationRefresh/bySeason/season-1.json"), false);
 });
 
+test("compact bootstrap hydrates targeted event and donation objects while active shards remain cached separately", async () => {
+  const seasonId = "season-compact";
+  const eventId = "donation-compact";
+  const responses = new Map([
+    ["https://public-data.test/api/public-data/bootstrap/current.json", { schemaVersion: 2, activeVersionId: "version-compact", active: { versionId: "version-compact" } }],
+    ["https://public-data.test/api/public-data/activeVersions/version-compact/manifest.json", { versionId: "version-compact", schemaVersion: 1, pageTitle: "Compact", rosterIds: ["main"], rosterOrder: ["main"] }],
+    ["https://public-data.test/api/public-data/activeVersions/version-compact/rosters.json", { main: { id: "main", main: [], subs: [], missing: [] } }],
+    ["https://public-data.test/api/public-data/activeVersions/version-compact/playerMetrics.json", { schemaVersion: 1, byTag: {} }],
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", { donation: { eventId, seasonId } }],
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", { seasonId }],
+    ["https://public-data.test/api/public-data/events/seasonEvents/byId/" + eventId + ".json", { eventId, type: "donation", seasonId, participantsByDiscordId: {} }],
+    ["https://public-data.test/api/public-data/donationRefresh/bySeason/" + seasonId + ".json", { seasonId, byTag: {} }],
+  ]);
+  const requested = [];
+  const { loadRosterDataViaCloudflarePublic } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: { fetch: async (url) => {
+      requested.push(url);
+      return { ok: responses.has(url), status: responses.has(url) ? 200 : 404, text: async () => JSON.stringify(responses.get(url)) };
+    } },
+  });
+  const loaded = await loadRosterDataViaCloudflarePublic();
+  assert.equal(loaded.activeVersionId, "version-compact");
+  assert.equal(loaded.data.seasonEvents.byId[eventId].eventId, eventId);
+  assert.equal(loaded.data.donationRefresh.bySeason[seasonId].seasonId, seasonId);
+  assert.ok(requested.includes("https://public-data.test/api/public-data/events/seasonEvents/current.json"));
+  assert.ok(requested.includes("https://public-data.test/api/public-data/events/seasonEvents/byId/" + eventId + ".json"));
+  assert.ok(requested.includes("https://public-data.test/api/public-data/donationRefresh/bySeason/" + seasonId + ".json"));
+});
+
 test("does not fall back to legacy active when the published version shard is missing", async () => {
   const responses = new Map([
     ["https://public-data.test/api/public-data/activePublished/currentVersionId.json", "version-missing"],
