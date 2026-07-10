@@ -376,11 +376,13 @@ function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, 
 	const toleranceMs = typeof CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS !== "undefined"
 		? Math.max(0, Number(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS) || 0)
 		: 30000;
+	const earliestReusableAtMs = Date.now() - toleranceMs;
 	// The stored timestamp is the only schedule timestamp Apps Script exposes.
 	// Reuse only when the known trigger is no later than the requested time,
-	// allowing a small clock/scheduler tolerance. A later or metadata-invalid
-	// trigger is replaced and all duplicates are removed.
-	if (configuredTrigger && configuredAtMs > 0 && configuredAtMs <= desiredAtMs + toleranceMs) {
+	// allowing a small clock/scheduler tolerance, and has not already gone
+	// stale in the past. A later, stale, or metadata-invalid trigger is replaced
+	// and all duplicates are removed.
+	if (configuredTrigger && configuredAtMs >= earliestReusableAtMs && configuredAtMs <= desiredAtMs + toleranceMs) {
 		for (let i = 0; i < candidates.length; i++) if (candidates[i] !== configuredTrigger) { try { ScriptApp.deleteTrigger(candidates[i]); } catch (err) {} }
 		const triggerId = getTriggerUniqueId_(configuredTrigger);
 		if (triggerId) properties.setProperty(idPropertyRaw, triggerId);
@@ -980,6 +982,7 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		};
 	const commits = [];
 	const objects = [];
+	const deletes = [];
 	if (discovered.step === "events" && discovered.eventIndex >= discovered.eventIds.length) discovered.step = "season-maps";
 	if (discovered.step === "season-maps" && discovered.seasonIndex >= discovered.seasonIds.length) discovered.step = "donations";
 	if (discovered.step === "donations" && discovered.donationIndex >= discovered.donationSeasonIds.length) discovered.step = "pointers";
@@ -1021,8 +1024,21 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		const seasonId = discovered.donationSeasonIds[discovered.donationIndex];
 		const overlayPath = buildFirebaseChildPath_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason"), encodeFirebaseObjectKey_(seasonId));
 		const overlay = readDecodedCloudflareQueueObject_(overlayPath);
-		if (!overlay) { const error = new Error("Referenced donation overlay is missing: " + seasonId); error.resumable = true; throw error; }
-		addCloudflareMirroredQueueObject_(objects, overlayPath, overlay);
+		if (overlay) {
+			addCloudflareMirroredQueueObject_(objects, overlayPath, overlay);
+		} else {
+			const currentDonation = readDecodedCloudflareQueueObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"));
+			const currentDonationSeasonId = String(currentDonation && currentDonation.seasonId || "").trim();
+			if (currentDonationSeasonId === seasonId) {
+				const error = new Error("Current donation pointer references a missing overlay: " + seasonId);
+				error.resumable = true;
+				throw error;
+			}
+			// An archived event may legitimately outlive its detached overlay. Remove
+			// any stale mirror object and continue; only donationRefresh/current is
+			// forbidden from advertising a missing overlay.
+			addCloudflareMirroredQueueDelete_(deletes, overlayPath);
+		}
 		repairAdvance = Object.assign({}, discovered, {
 			donationIndex: discovered.donationIndex + 1,
 			step: discovered.donationIndex + 1 >= discovered.donationSeasonIds.length ? "pointers" : "donations",
@@ -1041,7 +1057,7 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		} else addCloudflareMirroredQueueCommitDelete_(commits, currentDonationPath);
 		repairAdvance = Object.assign({}, discovered, { step: "done" });
 	}
-	return { objects: objects, deletes: [], commits: commits, repairAdvance: repairAdvance };
+	return { objects: objects, deletes: deletes, commits: commits, repairAdvance: repairAdvance };
 }
 
 function buildCloudflareDirtyRequest_(stateRaw, workRaw) {
@@ -1153,7 +1169,11 @@ function allocateCloudflarePhaseClaim_(stateRaw, workRaw, ownerTokenRaw) {
 		}
 		if (!work) return { stale: true };
 		const marker = latest.dirty[work.category === "repair" ? "repair" : work.category === "event" ? "events" : work.category === "cwlAggregate" ? "cwlAggregates" : work.category === "donationSeason" ? "donationSeasons" : work.category === "cwlLeagueSignups" ? "cwlLeagueSignups" : work.category === "seasonPointers" ? "seasonPointers" : "bootstrap"];
-		const currentMarker = work.category === "event" ? marker && marker[work.key] : work.category === "cwlAggregate" ? marker && marker[work.key] && marker[work.key][work.kind] : marker;
+		const currentMarker = work.category === "event" || work.category === "donationSeason"
+			? marker && marker[work.key]
+			: work.category === "cwlAggregate"
+				? marker && marker[work.key] && marker[work.key][work.kind]
+				: marker;
 		if (!currentMarker || toNonNegativeInt_(currentMarker.revision) !== toNonNegativeInt_(work.revision)) return { stale: true };
 		const dispatchKey = work.category === "repair" ? cloudflareRepairDispatchKey_(work) : String(work.cursor || 0);
 		if (currentMarker.dispatch && currentMarker.dispatch.revision === work.revision && currentMarker.dispatch.key === dispatchKey) return Object.assign({}, work, { dispatchGuard: currentMarker.dispatch.guard });

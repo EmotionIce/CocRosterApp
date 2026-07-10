@@ -2069,6 +2069,7 @@ test("OAuth, Firebase single, Firebase fetchAll, and ETag CAS requests have expl
   assert.equal(etagGet.options.headers["X-Firebase-ETag"], "true");
   assert.equal(etagPut.options.headers["If-Match"], '"etag-1"');
   assert.equal(etagPut.options.timeoutSeconds, 15);
+  assert.equal(etagPut.url.includes("print=silent"), false);
 });
 
 test("CoC single and fetchAll descriptors use the bounded transport policy", () => {

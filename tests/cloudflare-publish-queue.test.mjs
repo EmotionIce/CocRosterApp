@@ -280,6 +280,20 @@ test("CAS exhaustion is resumable and does not discard the original queue state"
   assert.deepEqual(q.__getState().dirty.donationSeasons, { season1: { revision: 4 } });
 });
 
+test("donation-season claim uses the selected season marker revision", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.donationSeasons["season-1"] = { revision: 7, category: "donationSeason" };
+  q.__setState(state);
+  const work = q.firstCloudflareDirtyWork_(state);
+  const claim = q.allocateCloudflarePhaseClaim_(state, work);
+  assert.equal(claim.stale, undefined);
+  assert.equal(claim.category, "donationSeason");
+  assert.equal(claim.key, "season-1");
+  assert.equal(claim.revision, 7);
+  assert.ok(claim.dispatchGuard);
+});
+
 test("no Firebase transport runs while ScriptLock is held", () => {
   const q = loadQueue();
   let held = false;
@@ -346,6 +360,14 @@ test("trigger reconciliation reuses earlier work and replaces later or invalid m
   const replaced = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", desired);
   assert.equal(replaced.reused, false);
   assert.equal(q.__triggerCalls.schedules, 1);
+  assert.equal(q.__triggers.filter((item) => item.handler === "cloudflarePublishWorkerTick").length, 1);
+
+  const stale = q.__triggers[0];
+  q.__properties.set("TRIGGER", stale.id);
+  q.__properties.set("TRIGGER_AT", String(Date.now() - 60000));
+  const staleReplaced = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", desired);
+  assert.equal(staleReplaced.reused, false);
+  assert.equal(q.__triggerCalls.schedules, 2);
   assert.equal(q.__triggers.filter((item) => item.handler === "cloudflarePublishWorkerTick").length, 1);
 });
 
@@ -748,4 +770,25 @@ test("bounded repair resumes through every event, CWL aggregate, season map, and
   assert.ok(repairPhases.indexOf("pointers") > repairPhases.lastIndexOf("season-map"));
   for (const scopes of pointerScopes.values()) assert.deepEqual(scopes.sort(), ["bot", "public"]);
   assert.equal(state.dirty.repair, null);
+});
+
+test("repair skips a missing archived donation overlay but blocks a missing current overlay", () => {
+  const q = loadQueue();
+  q.makeCloudflareQueueObject_ = (path, payload, scope) => ({ path, payload, scope });
+  q.readDecodedCloudflareQueueObject_ = (path) => {
+    if (path.endsWith("donationRefresh/current")) return { seasonId: "season-current" };
+    if (path.includes("bySeason/season-current")) return null;
+    if (path.includes("bySeason/season-archived")) return null;
+    return null;
+  };
+  const archived = q.buildCloudflareTargetedRepairRequest_({
+    category: "repair", revision: 1, step: "donations", seasonIds: [], eventIds: [],
+    donationSeasonIds: ["season-archived"], seasonIndex: 0, eventIndex: 0, donationIndex: 0,
+  });
+  assert.equal(archived.deletes.length, 2);
+  assert.equal(archived.repairAdvance.step, "pointers");
+  assert.throws(() => q.buildCloudflareTargetedRepairRequest_({
+    category: "repair", revision: 2, step: "donations", seasonIds: [], eventIds: [],
+    donationSeasonIds: ["season-current"], seasonIndex: 0, eventIndex: 0, donationIndex: 0,
+  }), /Current donation pointer references a missing overlay/);
 });

@@ -496,7 +496,11 @@ function firebaseRequestJsonWithEtag_(pathRaw, methodRaw, payloadRaw, queryParam
 	const queryParams = queryParamsRaw && typeof queryParamsRaw === "object" ? Object.assign({}, queryParamsRaw) : {};
 	delete queryParams.ifMatch;
 	let url = appendFirebaseJsonUrlQueryParams_(buildFirebaseJsonUrl_(getFirebaseConfig_().dbUrl, path), queryParams);
-	if (method !== "GET") url = appendFirebaseJsonUrlQueryParam_(url, "print", "silent");
+	// Firebase rejects conditional ETag writes when If-Match is combined with
+	// print=silent. Queue CAS writes are small, so retain their response body;
+	// non-conditional writes may still suppress the echoed payload.
+	const hasIfMatch = !!(queryParamsRaw && queryParamsRaw.ifMatch);
+	if (method !== "GET" && !hasIfMatch) url = appendFirebaseJsonUrlQueryParam_(url, "print", "silent");
 	const config = getFirebaseConfig_();
 	const doRequest = (forceTokenRefresh) => {
 		if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase ETag request");
@@ -506,7 +510,7 @@ function firebaseRequestJsonWithEtag_(pathRaw, methodRaw, payloadRaw, queryParam
 			Accept: "application/json",
 		};
 		if (method === "GET") headers["X-Firebase-ETag"] = "true";
-		if (queryParamsRaw && queryParamsRaw.ifMatch) headers["If-Match"] = String(queryParamsRaw.ifMatch);
+		if (hasIfMatch) headers["If-Match"] = String(queryParamsRaw.ifMatch);
 		const options = {
 			method: method,
 			muteHttpExceptions: true,
