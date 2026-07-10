@@ -4432,12 +4432,16 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	return { ok: true, status: "completed", summary: summary, changed: changed, processedRosters: current.processedRosters, issueCount: current.issueCount, skipPostTickMirrorRepair: true };
 }
 
-// Continue one queue worker execution. The worker intentionally executes at most
-// one task per trigger to stay well below the Apps Script execution limit.
+// Continue one queue worker execution. Consecutive tasks are safe to process
+// here because each task is checkpointed as completed before the next task is
+// started; the existing phase reserves still decide whether another task may begin.
 function continueAutoRefreshQueueWorker_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const executionStartMs = Math.max(0, Number(options.executionStartMs) || Date.now());
-	return withActiveRosterJobLock_("auto-refresh-worker", 0, function () {
+	const workerStats = { tasksCompleted: 0, exitReason: "" };
+	let result = null;
+	try {
+		result = withActiveRosterJobLock_("auto-refresh-worker", 0, function () {
 		let current = readAutoRefreshQueueCurrent_();
 		if (!current || current.kind !== "auto-refresh-queue") {
 			removeAutoRefreshJobResumeTriggers_();
@@ -4452,12 +4456,14 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			removeAutoRefreshJobResumeTriggers_();
 			return { ok: true, status: current.status || "skipped", skipped: true, reason: "notRunnable" };
 		}
-		if (!hasAutoRefreshJobBudgetFor_(executionStartMs, AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS)) {
-			scheduleAutoRefreshJobResume_();
-			setAutoRefreshQueueInProgressResult_(current);
-			return { ok: true, status: "inProgress", inProgress: true, reason: "beforeTaskBudget", processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
-		}
-		let next = findNextAutoRefreshQueueTask_(current);
+		let watchdogEnsured = false;
+		for (;;) {
+			if (!hasAutoRefreshJobBudgetFor_(executionStartMs, AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS)) {
+				scheduleAutoRefreshJobResume_();
+				setAutoRefreshQueueInProgressResult_(current);
+				return { ok: true, status: "inProgress", inProgress: true, reason: "beforeTaskBudget", processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
+			}
+			let next = findNextAutoRefreshQueueTask_(current);
 		current = next && next.current ? next.current : current;
 		if (next && next.index !== current.currentTaskIndex) {
 			current.currentTaskIndex = next.index;
@@ -4474,6 +4480,10 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				}
 			}
 			if (!hasFinalizeTask || current.status === "finalizing" || readPublishedActiveVersionId_() === current.runId) {
+				if (!watchdogEnsured) {
+					scheduleAutoRefreshJobResume_();
+					watchdogEnsured = true;
+				}
 				const syntheticTask = {
 					taskId: buildAutoRefreshTaskId_(current.taskIds.length, "finalize", ""),
 					runId: current.runId,
@@ -4493,6 +4503,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 					scheduleAutoRefreshJobResume_();
 					return { ok: true, status: "inProgress", inProgress: true, reason: finalResult.reason, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
 				}
+				if (finalResult && (finalResult.status === "completed" || finalResult.status === "stale")) workerStats.tasksCompleted++;
 				return finalResult;
 			}
 			const summary = "Auto-refresh completed; no pending queue tasks remain.";
@@ -4504,6 +4515,15 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			setAutoRefreshRunResult_("ok", summary, "", current.issueCount, current.issueSummary, current.startedAt, new Date().toISOString());
 			archiveAndClearAutoRefreshQueueStateBestEffort_(current, "completed", summary, "", "autoRefresh queue no-task cleanup");
 			return { ok: true, status: "completed", summary: summary, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
+		}
+		if (!watchdogEnsured) {
+			scheduleAutoRefreshJobResume_();
+			watchdogEnsured = true;
+		}
+		if (workerStats.tasksCompleted > 0 && (String(task.type || "") === "cwlCoordinator" || String(task.type || "") === "cwlFinalCoordinator")) {
+			setAutoRefreshQueueInProgressResult_(current);
+			scheduleAutoRefreshJobResume_();
+			return { ok: true, status: "inProgress", inProgress: true, reason: "cwlBoundary", processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
 		}
 		const nowIso = new Date().toISOString();
 		const status = String(task.status || "pending");
@@ -4593,7 +4613,10 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				scheduleAutoRefreshJobResume_();
 				return { ok: true, status: "inProgress", inProgress: true, reason: result.reason, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
 			}
-			if (result && (result.status === "completed" || result.status === "stale")) return result;
+			if (result && (result.status === "completed" || result.status === "stale")) {
+				workerStats.tasksCompleted++;
+				return result;
+			}
 			task.status = "completed";
 			task.completedAt = new Date().toISOString();
 			task.summary = JSON.stringify(result || {}).slice(0, 500);
@@ -4616,8 +4639,8 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			};
 			writeAutoRefreshQueueCurrent_(current, false);
 			setAutoRefreshQueueInProgressResult_(current);
-			scheduleAutoRefreshJobResume_();
-			return { ok: true, status: "inProgress", inProgress: true, runId: current.runId, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length, lastTaskId: task.taskId };
+			workerStats.tasksCompleted++;
+			continue;
 		} catch (err) {
 			if (err && err.autoRefreshDefer) {
 				const message = errorMessage_(err);
@@ -4651,7 +4674,27 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			archiveAndClearAutoRefreshQueueStateBestEffort_(current, "failed", "Auto-refresh run failed.", message, "autoRefresh queue failed cleanup");
 			throw err;
 		}
+		}
+		});
+	} catch (err) {
+		workerStats.exitReason = "failed";
+		throw err;
+	}
+	const elapsedMs = getAutoRefreshJobElapsedMs_(executionStartMs);
+	const enriched = Object.assign({}, result || {}, {
+		tasksCompleted: workerStats.tasksCompleted,
+		elapsedMs: elapsedMs,
+		remainingMs: getAutoRefreshJobRemainingMs_(executionStartMs),
+		exitReason: workerStats.exitReason || String((result && (result.reason || result.status)) || ""),
 	});
+	Logger.log(
+		"autoRefresh queue worker progress tasksCompleted=%s elapsedMs=%s remainingMs=%s exitReason=%s",
+		enriched.tasksCompleted,
+		enriched.elapsedMs,
+		enriched.remainingMs,
+		String(enriched.exitReason || ""),
+	);
+	return enriched;
 }
 
 // Clone JSON-safe queue/result fragments before writing them to Firebase.
@@ -5364,6 +5407,13 @@ function autoRefreshWorkerTick() {
 		}
 		const result = continueAutoRefreshQueueWorker_({ executionStartMs: Date.now(), startedAt: startedAt });
 		resultForLog = result;
+		Logger.log(
+			"autoRefreshWorkerTick progress tasksCompleted=%s elapsedMs=%s remainingMs=%s exitReason=%s",
+			toNonNegativeInt_(result && result.tasksCompleted),
+			toNonNegativeInt_(result && result.elapsedMs),
+			toNonNegativeInt_(result && result.remainingMs),
+			String((result && result.exitReason) || (result && result.reason) || ""),
+		);
 		if (result && result.inProgress) {
 			Logger.log("autoRefreshWorkerTick in progress processedRosters=%s totalRosters=%s", toNonNegativeInt_(result.processedRosters), toNonNegativeInt_(result.totalRosters));
 		} else if (result && result.stale) {

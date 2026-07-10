@@ -352,6 +352,35 @@ const setupQueueRun = (backend, sourceDataRaw, options = {}) => {
 const firstRosterTask = (tasks) => tasks.find((task) => task.type === "roster");
 const rosterTaskById = (tasks, rosterId) => tasks.find((task) => task.type === "roster" && task.rosterId === rosterId);
 
+const disableQueueCwlPreflights = (backend) => {
+  backend.runAutoRefreshCwlCoordinatorPreflightBeforeRoster_ = () => null;
+  backend.runAutoRefreshFinalCwlCoordinatorPreflightBeforeFinalize_ = () => null;
+};
+
+const setupSyntheticQueueRun = (backend, specs, options = {}) => {
+  backend.buildAutoRefreshQueueTasks_ = (runIdRaw) => {
+    const runId = String(runIdRaw || "run-1");
+    return specs.map((specRaw, index) => {
+      const spec = specRaw && typeof specRaw === "object" ? specRaw : {};
+      return Object.assign({
+        taskId: `synthetic-${index}-${String(spec.type || "task")}`,
+        runId,
+        type: String(spec.type || "metricCopy"),
+        status: "pending",
+        rosterId: String(spec.rosterId || ""),
+        index,
+        attempts: 0,
+        startedAt: "",
+        updatedAt: "",
+        completedAt: "",
+        error: "",
+        summary: "",
+      }, spec, { runId, index });
+    });
+  };
+  return setupQueueRun(backend, buildRosterData(), options);
+};
+
 const buildOneRoundCwlLeagueGroup = (options = {}) => ({
   state: options.state || "inWar",
   season: options.season || "2026-07",
@@ -446,6 +475,250 @@ const installCwlFetch = (backend, getWarRaw, options = {}) => {
   };
   return paths;
 };
+
+test("queue worker drains several lightweight tasks in one invocation with diagnostics", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "metricCopy" },
+    { type: "metricCopy" },
+    { type: "cwlFinalCoordinator" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const completed = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    completed.push(task.taskId);
+    return { copiedCount: 1 };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.deepEqual(completed, tasks.slice(0, 3).map((task) => task.taskId));
+  assert.equal(result.inProgress, true);
+  assert.equal(result.reason, "cwlBoundary");
+  assert.equal(result.tasksCompleted, 3);
+  assert.equal(result.elapsedMs >= 0, true);
+  assert.equal(result.remainingMs > 0, true);
+  assert.equal(result.exitReason, "cwlBoundary");
+  assert.equal(current.currentTaskIndex, 3);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "completed");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[2].taskId).status, "completed");
+  assert.equal(backend.__triggers.length, 1);
+});
+
+test("queue worker continues from a coordinator task into a roster task when budget permits", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { tasks } = setupSyntheticQueueRun(backend, [
+    { type: "cwlCoordinator" },
+    { type: "roster", rosterId: "main" },
+    { type: "cwlFinalCoordinator" },
+  ], { rosterIds: ["main"] });
+  disableQueueCwlPreflights(backend);
+  const completed = [];
+  backend.executeAutoRefreshCwlCoordinatorTask_ = (_current, task) => {
+    completed.push(task.taskId);
+    return { captured: true };
+  };
+  backend.executeAutoRefreshRosterTask_ = (_current, task) => {
+    completed.push(task.taskId);
+    return { issueCount: 0 };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.deepEqual(completed, [tasks[0].taskId, tasks[1].taskId]);
+  assert.equal(result.reason, "cwlBoundary");
+  assert.equal(result.tasksCompleted, 2);
+  assert.equal(result.processedRosters, 1);
+});
+
+test("queue worker drains multiple fast roster tasks before the CWL boundary", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { tasks } = setupSyntheticQueueRun(backend, [
+    { type: "roster", rosterId: "main" },
+    { type: "roster", rosterId: "second" },
+    { type: "roster", rosterId: "third" },
+    { type: "cwlFinalCoordinator" },
+  ], { rosterIds: ["main", "second", "third"] });
+  disableQueueCwlPreflights(backend);
+  const completed = [];
+  backend.executeAutoRefreshRosterTask_ = (_current, task) => {
+    completed.push(task.rosterId);
+    return { issueCount: 0 };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.deepEqual(completed, ["main", "second", "third"]);
+  assert.equal(result.reason, "cwlBoundary");
+  assert.equal(result.tasksCompleted, 3);
+  assert.equal(result.processedRosters, 3);
+});
+
+test("queue worker refuses the next task when its start reserve is unavailable", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  setupSyntheticQueueRun(backend, [{ type: "metricCopy" }]);
+  disableQueueCwlPreflights(backend);
+  let calls = 0;
+  backend.executeAutoRefreshMetricCopyTask_ = () => {
+    calls++;
+    return {};
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() - 269000 });
+
+  assert.equal(calls, 0);
+  assert.equal(result.reason, "beforeTaskBudget");
+  assert.equal(result.tasksCompleted, 0);
+  assert.equal(result.exitReason, "beforeTaskBudget");
+  assert.equal(backend.__triggers.length, 1);
+});
+
+test("queue worker retains a roster task when its next phase reserve is unavailable", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "roster", rosterId: "main" },
+    { type: "metricCopy" },
+  ], { rosterIds: ["main"] });
+  disableQueueCwlPreflights(backend);
+  backend.executeAutoRefreshMetricCopyTask_ = () => ({});
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() - 170000 });
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.inProgress, true);
+  assert.equal(result.tasksCompleted, 1);
+  assert.equal(result.reason, "beforePrimarySnapshotBudget");
+  assert.equal(current.currentTaskIndex, 1);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[2].taskId).status, "pending");
+  assert.equal(backend.__triggers.length, 1);
+});
+
+test("queue worker preserves continuation after a deferred task", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "metricCopy" },
+    { type: "metricCopy" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    return calls.length === 2 ? { deferred: true, reason: "after-input-chunk" } : {};
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.deepEqual(calls, [tasks[0].taskId, tasks[1].taskId]);
+  assert.equal(result.reason, "after-input-chunk");
+  assert.equal(result.tasksCompleted, 1);
+  assert.equal(current.currentTaskIndex, 1);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[2].taskId).status, "pending");
+  assert.equal(backend.__triggers.length, 1);
+});
+
+test("queue worker stops at a newly reached CWL boundary", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "cwlCoordinator" },
+    { type: "roster", rosterId: "main" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    return {};
+  };
+  backend.executeAutoRefreshCwlCoordinatorTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    return {};
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.deepEqual(calls, [tasks[0].taskId]);
+  assert.equal(result.reason, "cwlBoundary");
+  assert.equal(current.currentTaskIndex, 1);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
+});
+
+test("queue worker skips completed idempotent tasks and continues safely", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy", status: "completed", completedAt: "2026-05-25T00:00:00.000Z" },
+    { type: "metricCopy" },
+    { type: "cwlFinalCoordinator" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  backend.isAutoRefreshTaskResultComplete_ = (_runId, task) => task.taskId === tasks[0].taskId;
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    return {};
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.deepEqual(calls, [tasks[1].taskId]);
+  assert.equal(result.reason, "cwlBoundary");
+  assert.equal(result.tasksCompleted, 1);
+  assert.equal(backend.readAutoRefreshQueueCurrent_().currentTaskIndex, 2);
+});
+
+test("retryable queue failures do not start later tasks", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "metricCopy" },
+    { type: "cwlFinalCoordinator" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    if (calls.length === 1) return { deferred: true, reason: "retryable-external" };
+    return {};
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.deepEqual(calls, [tasks[0].taskId]);
+  assert.equal(result.reason, "retryable-external");
+  assert.equal(result.tasksCompleted, 0);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
+});
+
+test("fatal queue failures stop before later tasks and clean up the queue", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "metricCopy" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    throw new Error("fatal-external");
+  };
+
+  assert.throws(
+    () => backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() }),
+    /fatal-external/,
+  );
+
+  assert.deepEqual(calls, [tasks[0].taskId]);
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId), null);
+  assert.equal(backend.__triggers.length, 0);
+});
 
 const stageCompletedRosterOutputs = (backend, runId, dataRaw, rosterIdsRaw = ["main"]) => {
   const data = backend.validateRosterData_(dataRaw || buildRosterData());
