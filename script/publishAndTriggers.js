@@ -4481,7 +4481,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			}
 			if (!hasFinalizeTask || current.status === "finalizing" || readPublishedActiveVersionId_() === current.runId) {
 				if (!watchdogEnsured) {
-					scheduleAutoRefreshJobResume_();
+					scheduleAutoRefreshJobWatchdog_();
 					watchdogEnsured = true;
 				}
 				const syntheticTask = {
@@ -4517,7 +4517,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			return { ok: true, status: "completed", summary: summary, processedRosters: current.processedRosters, totalRosters: current.rosterIds.length };
 		}
 		if (!watchdogEnsured) {
-			scheduleAutoRefreshJobResume_();
+			scheduleAutoRefreshJobWatchdog_();
 			watchdogEnsured = true;
 		}
 		if (workerStats.tasksCompleted > 0 && (String(task.type || "") === "cwlCoordinator" || String(task.type || "") === "cwlFinalCoordinator")) {
@@ -4907,18 +4907,30 @@ function removeAutoRefreshJobResumeTriggers_() {
 	return removed;
 }
 
-// Schedule exactly one one-shot resumable auto-refresh trigger.
-function scheduleAutoRefreshJobResume_() {
+// Schedule exactly one one-shot auto-refresh worker trigger.
+function scheduleAutoRefreshJobTrigger_(delayMsRaw, kindRaw) {
+	const delayMs = Math.max(1, Number(delayMsRaw) || AUTO_REFRESH_JOB_RESUME_DELAY_MS);
+	const kind = String(kindRaw || "resume");
 	removeAutoRefreshJobResumeTriggers_();
 	const trigger = ScriptApp.newTrigger(AUTO_REFRESH_JOB_HANDLER_NAME)
 		.timeBased()
-		.after(AUTO_REFRESH_JOB_RESUME_DELAY_MS)
+		.after(delayMs)
 		.create();
 	const triggerId = getTriggerUniqueId_(trigger);
 	if (triggerId) PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY, triggerId);
 	else PropertiesService.getScriptProperties().deleteProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY);
-	Logger.log("autoRefresh worker scheduled triggerId=%s delayMs=%s", triggerId, AUTO_REFRESH_JOB_RESUME_DELAY_MS);
-	return { triggerId: triggerId, delayMs: AUTO_REFRESH_JOB_RESUME_DELAY_MS };
+	Logger.log("autoRefresh worker scheduled triggerId=%s delayMs=%s kind=%s", triggerId, delayMs, kind);
+	return { triggerId: triggerId, delayMs: delayMs, kind: kind };
+}
+
+// Schedule the normal one-shot continuation after an intentional in-progress exit.
+function scheduleAutoRefreshJobResume_() {
+	return scheduleAutoRefreshJobTrigger_(AUTO_REFRESH_JOB_RESUME_DELAY_MS, "resume");
+}
+
+// Schedule the later emergency watchdog for a worker that has started draining tasks.
+function scheduleAutoRefreshJobWatchdog_() {
+	return scheduleAutoRefreshJobTrigger_(AUTO_REFRESH_JOB_WATCHDOG_DELAY_MS, "watchdog");
 }
 
 // Ensure single auto refresh trigger.

@@ -129,6 +129,10 @@ const AUTO_REFRESH_PREFETCH_BATCH_SIZE = 8;
 const AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS = 1000;
 const AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS = 270 * 1000;
 const AUTO_REFRESH_JOB_RESUME_DELAY_MS = 60 * 1000;
+// A worker may consume the full 270-second budget. Keep its emergency watchdog
+// beyond that budget by half a normal retry interval (30 seconds), so it does
+// not normally race the worker's active-roster lock while preserving recovery.
+const AUTO_REFRESH_JOB_WATCHDOG_DELAY_MS = AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS + (AUTO_REFRESH_JOB_RESUME_DELAY_MS / 2);
 const AUTO_REFRESH_QUEUE_TASK_STALE_MS = 8 * 60 * 1000;
 const AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS = 90 * 1000;
 const AUTO_REFRESH_QUEUE_FINALIZE_RESERVE_MS = 120 * 1000;

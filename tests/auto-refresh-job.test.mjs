@@ -35,10 +35,12 @@ const loadBackend = () => {
     .join("\n");
   const properties = new Map([["DISCORD_BOT_API_SECRET", "secret"]]);
   const triggers = [];
+  const triggerRequests = [];
   let uuidCounter = 0;
-  const makeTrigger = (handler) => ({
+  const makeTrigger = (handler, requestedDelayMs = null) => ({
     id: "trigger-" + (triggers.length + 1),
     handler,
+    requestedDelayMs,
     getUniqueId() { return this.id; },
     getHandlerFunction() { return this.handler; },
   });
@@ -73,13 +75,18 @@ const loadBackend = () => {
       newTrigger(handler) {
         return {
           timeBased() {
+            let requestedDelayMs = null;
             const create = () => {
-              const trigger = makeTrigger(handler);
+              const trigger = makeTrigger(handler, requestedDelayMs);
+              triggerRequests.push({ handler, delayMs: requestedDelayMs });
               triggers.push(trigger);
               return trigger;
             };
             return {
-              after: () => ({ create }),
+              after: (delayMsRaw) => {
+                requestedDelayMs = Number(delayMsRaw);
+                return { create };
+              },
               at: () => ({ create }),
               everyMinutes: () => ({ create }),
               everyHours: () => ({ create }),
@@ -133,6 +140,7 @@ const loadBackend = () => {
   };
   context.__properties = properties;
   context.__triggers = triggers;
+  context.__triggerRequests = triggerRequests;
   vm.createContext(context);
   vm.runInContext(code, context);
   return context;
@@ -718,6 +726,132 @@ test("fatal queue failures stop before later tasks and clean up the queue", () =
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId), null);
   assert.equal(backend.__triggers.length, 0);
+});
+
+test("queue worker startup uses a later watchdog than normal continuation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "cwlFinalCoordinator" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  backend.executeAutoRefreshMetricCopyTask_ = () => {
+    throw new Error("startup-watchdog-test");
+  };
+
+  assert.throws(
+    () => backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() }),
+    /startup-watchdog-test/,
+  );
+
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000]);
+  assert.equal(backend.__triggers.length, 0);
+});
+
+test("deferred queue work replaces the watchdog with normal continuation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [{ type: "metricCopy" }]);
+  disableQueueCwlPreflights(backend);
+  backend.executeAutoRefreshMetricCopyTask_ = () => ({ deferred: true, reason: "test-defer" });
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+
+  assert.equal(result.reason, "test-defer");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
+  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000, 60000]);
+  assert.equal(workerTriggers.length, 1);
+  assert.equal(workerTriggers[0].requestedDelayMs, 60000);
+});
+
+test("terminal completion removes the delayed watchdog", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" },
+    { type: "finalize" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.type);
+    return {};
+  };
+  backend.executeAutoRefreshFinalizeTask_ = (current, task) => {
+    calls.push(task.type);
+    backend.archiveAndClearAutoRefreshQueueStateBestEffort_(current, "completed", "test complete", "", "test terminal cleanup");
+    return { ok: true, status: "completed" };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(calls, ["metricCopy", "finalize"]);
+  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000]);
+  assert.equal(backend.__triggers.length, 0);
+});
+
+test("watchdog and continuation replacement keep one effective worker trigger", () => {
+  const backend = loadBackend();
+
+  backend.scheduleAutoRefreshJobWatchdog_();
+  backend.scheduleAutoRefreshJobResume_();
+  backend.scheduleAutoRefreshJobWatchdog_();
+
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+
+  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000, 60000, 300000]);
+  assert.equal(workerTriggers.length, 1);
+  assert.equal(workerTriggers[0].requestedDelayMs, 300000);
+});
+
+test("final CWL coordinator and finalization can complete in one invocation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  setupSyntheticQueueRun(backend, [
+    { type: "cwlFinalCoordinator" },
+    { type: "finalize" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshFinalCwlCoordinatorTask_ = (_current, task) => {
+    calls.push(task.type);
+    return { captured: true };
+  };
+  backend.executeAutoRefreshFinalizeTask_ = (current, task) => {
+    calls.push(task.type);
+    backend.archiveAndClearAutoRefreshQueueStateBestEffort_(current, "completed", "test CWL complete", "", "test CWL cleanup");
+    return { ok: true, status: "completed" };
+  };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(calls, ["cwlFinalCoordinator", "finalize"]);
+  assert.equal(result.tasksCompleted, 2);
+  assert.equal(backend.__triggers.length, 0);
+});
+
+test("deferred finalization leaves the task pending with one normal continuation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "cwlFinalCoordinator", status: "completed", completedAt: "2026-05-25T00:00:00.000Z" },
+    { type: "finalize" },
+  ], { currentTaskIndex: 1, processedTasks: 1, status: "finalizing" });
+  disableQueueCwlPreflights(backend);
+  backend.executeAutoRefreshFinalizeTask_ = () => ({ deferred: true, reason: "beforeFinalize" });
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+
+  assert.equal(result.reason, "beforeFinalize");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
+  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000, 60000]);
+  assert.equal(workerTriggers.length, 1);
+  assert.equal(workerTriggers[0].requestedDelayMs, 60000);
 });
 
 const stageCompletedRosterOutputs = (backend, runId, dataRaw, rosterIdsRaw = ["main"]) => {
