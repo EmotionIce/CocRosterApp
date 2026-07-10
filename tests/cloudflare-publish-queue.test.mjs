@@ -29,7 +29,7 @@ const loadQueue = () => {
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY: "TRIGGER",
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY: "TRIGGER_AT",
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY: "LOCK",
-    CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS: 120000,
+    CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS: 300000,
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS: 1,
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS: 60000,
     CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS: 240000,
@@ -418,6 +418,75 @@ test("worker outage preserves pending state, records backoff, and releases its i
   assert.ok(scheduled >= 1);
 });
 
+test("a plan that outlives an expired lease leaves a watchdog and completes on the successor", () => {
+  const q = loadQueueTriggerHarness();
+  q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS = 120000;
+  let now = 0;
+  let firstPlan = true;
+  const BaseDate = Date;
+  class AdversarialDate extends BaseDate {
+    constructor(...args) {
+      super(args.length ? args[0] : now);
+    }
+
+    static now() {
+      return now;
+    }
+  }
+  q.Date = AdversarialDate;
+  q.__state.active = {
+    targetVersionId: "version-B",
+    targetGeneration: 2,
+    phase: "ordinary",
+    cursor: 0,
+    committedVersionId: "version-A",
+    updatedAt: "",
+  };
+  q.readCloudflarePublishQueueState_ = () => q.__state;
+  q.mutateCloudflarePublishQueueState_ = callback => callback(q.__state);
+  q.buildCloudflareQueuedActivePlan_ = () => {
+    if (firstPlan) {
+      firstPlan = false;
+      now = 180000;
+    }
+    return {
+      targetVersionId: "version-B",
+      generation: 2,
+      batches: [[{ path: "activeVersions/version-B/manifest", scope: "public", payload: {} }]],
+      commits: [{ path: "bootstrap/current", scope: "public", payload: {} }],
+    };
+  };
+  q.sendCloudflareQueuedV2Request_ = () => ({ response: { ok: true } });
+
+  const first = q.cloudflarePublishWorkerTick();
+
+  assert.equal(first.ok, false);
+  assert.equal(first.reason, "lease-lost");
+  assert.equal(q.hasPendingCloudflarePublishWork_(q.__state), true);
+  assert.equal(q.__triggers.length, 1);
+  assert.ok(Number(q.__properties.get("TRIGGER_AT")) > now);
+
+  const successor = q.cloudflarePublishWorkerTick();
+
+  assert.equal(successor.ok, true);
+  assert.equal(successor.pending, false);
+  assert.equal(q.hasPendingCloudflarePublishWork_(q.__state), false);
+  assert.equal(q.__triggers.length, 0);
+});
+
+test("a busy lease still schedules a future watchdog for pending work", () => {
+  const q = loadQueueTriggerHarness();
+  q.__state.dirty.bootstrap = { revision: 1, updatedAt: new Date().toISOString() };
+  q.tryAcquireCloudflarePublishQueueLease_ = () => null;
+
+  const result = q.cloudflarePublishWorkerTick();
+
+  assert.equal(result.reason, "lease-busy");
+  assert.equal(result.watchdog.scheduled, true);
+  assert.equal(q.__triggers.length, 1);
+  assert.ok(Number(q.__properties.get("TRIGGER_AT")) > Date.now());
+});
+
 test("new active targets use a wall-clock generation that survives queue-state recreation", () => {
   const q = loadQueue();
   const state = q.createEmptyCloudflarePublishQueueState_();
@@ -509,6 +578,36 @@ test("relevant reconstruction batches referenced objects before pointers and boo
   assert.equal(q.buildCloudflareDirtyRequest_(state, { category: "bootstrap", revision: 1 }).commits.map(item => item.path).join(","), "bootstrap/current");
 });
 
+test("relevant snapshot deletes are sent once before ordered commits", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.relevantSnapshot = { revision: 3, phase: "ordinary", cursor: 0 };
+  const sent = [];
+  q.mutateCloudflarePublishQueueState_ = callback => callback(state);
+  q.sendCloudflareQueuedV2Request_ = request => {
+    sent.push(clone(request));
+    return { response: { ok: true } };
+  };
+
+  q.processCloudflareDirtyQueueRequest_(state, "", {
+    revision: 3,
+    ordinaryBatches: [[{ path: "events/seasonEvents/byId/live", scope: "public", payload: {} }]],
+    commitBatches: [[{ path: "events/seasonEvents/current", scope: "public", payload: {} }]],
+    deletes: [{ path: "events/seasonEvents/byId/old", scope: "public" }],
+  });
+  q.processCloudflareDirtyQueueRequest_(state, "", {
+    revision: 3,
+    ordinaryBatches: [[{ path: "events/seasonEvents/byId/live", scope: "public", payload: {} }]],
+    commitBatches: [[{ path: "events/seasonEvents/current", scope: "public", payload: {} }]],
+    deletes: [{ path: "events/seasonEvents/byId/old", scope: "public" }],
+  });
+
+  assert.deepEqual(sent.map(request => ({ deletes: request.deletes, commits: request.commits.map(item => item.path) })), [
+    { deletes: [{ path: "events/seasonEvents/byId/old", scope: "public" }], commits: [] },
+    { deletes: [], commits: ["events/seasonEvents/current"] },
+  ]);
+});
+
 test("queue initialization marks reconstruction, pointers, signups, and bootstrap in one state mutation", () => {
   const q = loadQueue();
   const state = q.createEmptyCloudflarePublishQueueState_();
@@ -529,6 +628,19 @@ test("queue initialization marks reconstruction, pointers, signups, and bootstra
   assert.ok(state.dirty.relevantSnapshot);
   assert.ok(state.dirty.cwlLeagueSignups);
   assert.ok(state.dirty.bootstrap);
+});
+
+test("queue diagnostics includes relevant snapshot age when it is the oldest pending work", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.relevantSnapshot = { revision: 9, updatedAt: "2026-07-01T00:00:00.000Z" };
+  q.readCloudflarePublishQueueState_ = () => state;
+  q.readPublishedActiveVersionId_ = () => "version-A";
+
+  const diagnostics = q.getCloudflarePublishQueueDiagnostics_();
+
+  assert.equal(diagnostics.oldestPendingAt, "2026-07-01T00:00:00.000Z");
+  assert.equal(diagnostics.pendingDirtyCounts.relevantSnapshot, 1);
 });
 
 test("a stale lease owner cannot record success, failure, backoff, or pause state", () => {
@@ -597,6 +709,7 @@ test("worker A cannot update success or failure after worker B acquires the leas
 
 test("concurrent enqueue scheduling keeps one effective trigger and honors long backoff", () => {
   const q = loadQueueTriggerHarness();
+  q.__state.dirty.bootstrap = { revision: 1, updatedAt: new Date().toISOString() };
   q.__state.retry.nextAttemptAt = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
   const earlyTrigger = {
     id: "early-trigger",
