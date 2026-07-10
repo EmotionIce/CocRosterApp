@@ -598,6 +598,13 @@ test("worker A cannot update success or failure after worker B acquires the leas
 test("concurrent enqueue scheduling keeps one effective trigger and honors long backoff", () => {
   const q = loadQueueTriggerHarness();
   q.__state.retry.nextAttemptAt = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+  const earlyTrigger = {
+    id: "early-trigger",
+    getHandlerFunction: () => "cloudflarePublishWorkerTick",
+  };
+  q.__triggers.push(earlyTrigger);
+  q.__properties.set("TRIGGER", earlyTrigger.id);
+  q.__properties.set("TRIGGER_AT", String(Date.now() + 60 * 1000));
 
   q.scheduleCloudflarePublishWorker_();
   q.scheduleCloudflarePublishWorker_();
