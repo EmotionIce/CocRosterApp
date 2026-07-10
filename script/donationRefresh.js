@@ -487,7 +487,19 @@ function runDonationRefreshCore_(optionsRaw) {
 		};
 	});
 	if (refreshResult && refreshResult.seasonId && typeof enqueueCloudflareDonationSeasonPublication_ === "function") {
-		refreshResult.cloudflareDonationPublish = enqueueCloudflareDonationSeasonPublication_(refreshResult.seasonId, "donation-refresh-write");
+		try {
+			refreshResult.cloudflareDonationPublish = enqueueCloudflareDonationSeasonPublication_(refreshResult.seasonId, "donation-refresh-write");
+		} catch (err) {
+			Logger.log("Donation refresh Cloudflare enqueue failed after canonical write: %s", errorMessage_(err));
+			refreshResult.cloudflareDonationPublish = { ok: false, error: errorMessage_(err), queued: false };
+		}
+	} else if (refreshResult && refreshResult.skipped && typeof enqueueCloudflareRelevantSeasonPublication_ === "function") {
+		try {
+			refreshResult.cloudflareDonationPublish = enqueueCloudflareRelevantSeasonPublication_("donation-refresh-current-repair");
+		} catch (err) {
+			Logger.log("Donation refresh current-pointer repair enqueue failed: %s", errorMessage_(err));
+			refreshResult.cloudflareDonationPublish = { ok: false, error: errorMessage_(err), queued: false };
+		}
 	}
 	return refreshResult;
 }

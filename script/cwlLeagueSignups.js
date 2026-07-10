@@ -478,7 +478,45 @@ function writeActiveCwlLeagueSignups_(payloadRaw) {
 
 function enqueueActiveCwlLeagueSignupsAfterMutation_(reasonRaw) {
 	if (typeof enqueueCloudflareCwlLeagueSignupsPublication_ !== "function") return null;
-	return enqueueCloudflareCwlLeagueSignupsPublication_(reasonRaw || "cwl-league-signups-write");
+	try {
+		return enqueueCloudflareCwlLeagueSignupsPublication_(reasonRaw || "cwl-league-signups-write");
+	} catch (err) {
+		Logger.log("CWL signup enqueue failed after canonical mutation: %s", errorMessage_(err));
+		return { ok: false, error: errorMessage_(err), queued: false };
+	}
+}
+
+function enqueueCurrentCwlAggregateAfterPreferenceMutation_(reasonRaw) {
+	if (typeof publishCloudflareSeasonEventsAfterMutation_ !== "function") return null;
+	let event = null;
+	try {
+		event = typeof readCurrentCwlSeasonEvent_ === "function" ? readCurrentCwlSeasonEvent_() : null;
+	} catch (err) {
+		Logger.log("Unable to read current CWL event for preference mirror enqueue: %s", errorMessage_(err));
+	}
+	const eventId = sanitizeCwlSignupText_(event && event.eventId, 180);
+	return publishCloudflareSeasonEventsAfterMutation_(reasonRaw || "cwl-preference-write", eventId, { cwlLive: !!eventId });
+}
+
+function enqueueCwlPreferenceMirrorsAfterMutation_(reasonRaw) {
+	let cwlLeagueSignups = null;
+	let cwlAggregate = null;
+	try {
+		cwlLeagueSignups = enqueueActiveCwlLeagueSignupsAfterMutation_(reasonRaw);
+	} catch (err) {
+		Logger.log("CWL signup mirror enqueue failed after canonical mutation: %s", errorMessage_(err));
+		cwlLeagueSignups = { ok: false, error: errorMessage_(err), queued: false };
+	}
+	try {
+		cwlAggregate = enqueueCurrentCwlAggregateAfterPreferenceMutation_(reasonRaw);
+	} catch (err) {
+		Logger.log("CWL aggregate mirror enqueue failed after canonical mutation: %s", errorMessage_(err));
+		cwlAggregate = { ok: false, error: errorMessage_(err), queued: false };
+	}
+	return {
+		cwlLeagueSignups: cwlLeagueSignups,
+		cwlAggregate: cwlAggregate,
+	};
 }
 
 function assertCwlPreferencePlayerLinkedToDiscord_(playerTagRaw, discordUserRaw) {
@@ -719,7 +757,7 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			preferenceCount: Object.keys(saved.preferencesByTag).length,
 		};
 	});
-	if (result && (result.created === true || result.changed === true)) enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-preference-write");
+	if (result && (result.created === true || result.changed === true)) enqueueCwlPreferenceMirrorsAfterMutation_("cwl-preference-write");
 	return result;
 }
 
@@ -871,7 +909,7 @@ function clearCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 			preferenceCount: Object.keys(saved.preferencesByTag || {}).length,
 		};
 	});
-	if (result && result.cleared === true) enqueueActiveCwlLeagueSignupsAfterMutation_("cwl-preference-clear");
+	if (result && result.cleared === true) enqueueCwlPreferenceMirrorsAfterMutation_("cwl-preference-clear");
 	return result;
 }
 

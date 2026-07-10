@@ -1154,10 +1154,13 @@ function repairCloudflareActiveRosterMirrorIfStale_(optionsRaw) {
 			? String(getCloudflarePublicationMode_() || "").trim().toLowerCase()
 			: "legacy-manual";
 		if (publicationMode === "queued-v2") {
-			const active = enqueueCloudflareActiveTarget_(expectedVersionId, label);
-			const relevant = enqueueCloudflareRelevantSeasonPublication_(label);
-			const signups = enqueueCloudflareCwlLeagueSignupsPublication_(label);
-			const ok = active && active.ok !== false && relevant && relevant.ok !== false && signups && signups.ok !== false;
+			const repair = typeof repairCloudflarePublishQueueDrift_ === "function"
+				? repairCloudflarePublishQueueDrift_(undefined, expectedVersionId)
+				: { ok: false, error: "Cloudflare queue repair is unavailable." };
+			const active = repair.active || null;
+			const relevant = repair.relevant || null;
+			const signups = repair.signups || null;
+			const ok = repair.ok === true;
 			return {
 				ok: !!ok,
 				status: ok ? "queued" : "queueFailed",

@@ -2180,7 +2180,16 @@ function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 	});
 	const payloadText = JSON.stringify(validated);
 	if (typeof enqueueCloudflareActiveTarget_ === "function") {
-		enqueueCloudflareActiveTarget_(versionWrite.versionId, "active-roster-write");
+		const enqueue = function () {
+			try {
+				return enqueueCloudflareActiveTarget_(versionWrite.versionId, "active-roster-write");
+			} catch (err) {
+				Logger.log("Active roster Cloudflare enqueue failed after canonical write: %s", errorMessage_(err));
+				return { ok: false, error: errorMessage_(err), queued: false };
+			}
+		};
+		if (typeof deferActiveRosterLockAction_ === "function" && deferActiveRosterLockAction_(enqueue)) return { rosterData: validated, text: payloadText, storageCleanup: storageCleanup };
+		enqueue();
 	}
 	return { rosterData: validated, text: payloadText, storageCleanup: storageCleanup };
 }

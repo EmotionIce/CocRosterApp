@@ -332,14 +332,28 @@ function writeSeasonEventFirebasePayload_(pathRaw, methodRaw, payloadRaw) {
 }
 
 function publishCloudflareSeasonEventsAfterMutation_(labelRaw, eventIdRaw, optionsRaw) {
-	if (typeof enqueueCloudflareSeasonEventPublication_ === "function" && eventIdRaw) {
-		return enqueueCloudflareSeasonEventPublication_(eventIdRaw, labelRaw, optionsRaw);
+	const enqueue = function () {
+		try {
+			if (typeof enqueueCloudflareSeasonEventPublication_ === "function" && eventIdRaw) {
+				return enqueueCloudflareSeasonEventPublication_(eventIdRaw, labelRaw, optionsRaw);
+			}
+			if (typeof enqueueCloudflareRelevantSeasonPublication_ === "function") {
+				return enqueueCloudflareRelevantSeasonPublication_(labelRaw);
+			}
+			// Legacy-manual and disabled modes intentionally do not publish from canonical flows.
+			return { ok: true, skipped: true, reason: "cloudflare-queue-not-active" };
+		} catch (err) {
+			Logger.log("Cloudflare queue enqueue failed after canonical mutation: %s", errorMessage_(err));
+			return { ok: false, error: errorMessage_(err), queued: false };
+		}
+	};
+	if (typeof deferActiveRosterLockAction_ === "function") {
+		const deferredResult = { ok: true, queued: true, deferred: true, reason: "canonical-lock" };
+		if (deferActiveRosterLockAction_(function () {
+			Object.assign(deferredResult, enqueue());
+		})) return deferredResult;
 	}
-	if (typeof enqueueCloudflareRelevantSeasonPublication_ === "function") {
-		return enqueueCloudflareRelevantSeasonPublication_(labelRaw);
-	}
-	// Legacy-manual and disabled modes intentionally do not publish from canonical flows.
-	return { ok: true, skipped: true, reason: "cloudflare-queue-not-active" };
+	return enqueue();
 }
 
 // Build audit key.
@@ -2190,7 +2204,7 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 		});
 	}
 
-	return withSeasonEventParticipantWriteLock_(function () {
+	const response = withSeasonEventParticipantWriteLock_(function () {
 		const event = readSeasonEventById_(eventId);
 		const lockedAvailability = checkSeasonEventSignupAvailability_(event, nowIso);
 		if (lockedAvailability) return buildSeasonEventStatusResponse_(lockedAvailability, { event: event ? summarizeSeasonEvent_(event) : null });
@@ -2251,12 +2265,15 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
-		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-signup", eventId, { cwlLive: event.type === "cwl" });
 		return buildSeasonEventStatusResponse_("signed-up", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
 		});
 	});
+	if (response && response.status === "signed-up") {
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-signup", eventId, { cwlLive: response.event && response.event.type === "cwl" });
+	}
+	return response;
 }
 
 // Public participant account update callable.
@@ -2283,7 +2300,7 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 		});
 	}
 
-	return withSeasonEventParticipantWriteLock_(function () {
+	const response = withSeasonEventParticipantWriteLock_(function () {
 		const event = readSeasonEventById_(eventId);
 		if (!event) return buildSeasonEventStatusResponse_("event-not-found", { event: null });
 		const participantsByDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
@@ -2338,12 +2355,15 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
-		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-account-update", eventId, { cwlLive: event.type === "cwl" });
 		return buildSeasonEventStatusResponse_("updated", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
 		});
 	});
+	if (response && response.status === "updated") {
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-account-update", eventId, { cwlLive: response.event && response.event.type === "cwl" });
+	}
+	return response;
 }
 
 // Public cancellation callable.
@@ -2355,7 +2375,7 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 	const discordUser = sanitizeSeasonEventDiscordUser_(payload.discordUser);
 	const nowIso = new Date().toISOString();
 
-	return withSeasonEventParticipantWriteLock_(function () {
+	const response = withSeasonEventParticipantWriteLock_(function () {
 		const event = readSeasonEventById_(eventId);
 		if (!event) return buildSeasonEventStatusResponse_("event-not-found", { event: null });
 		const participantsByDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
@@ -2390,12 +2410,15 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 			updatedAt: nowIso,
 			participantsByDiscordId: updatedParticipantsByDiscordId,
 		});
-		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-cancel", eventId, { cwlLive: event.type === "cwl" });
 		return buildSeasonEventStatusResponse_(existing.status === "cancelled" ? "already-cancelled" : "cancelled", {
 			event: summarizeSeasonEvent_(updatedEvent),
 			participant: participant,
 		});
 	});
+	if (response && (response.status === "cancelled" || response.status === "already-cancelled")) {
+		publishCloudflareSeasonEventsAfterMutation_("discord-season-event-cancel", eventId, { cwlLive: response.event && response.event.type === "cwl" });
+	}
+	return response;
 }
 
 // Normalize leaderboard limit.

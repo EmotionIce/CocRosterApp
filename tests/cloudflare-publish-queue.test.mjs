@@ -27,6 +27,7 @@ const loadQueue = () => {
     CLOUDFLARE_PUBLICATION_MODE_LEGACY_MANUAL: "legacy-manual",
     CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME: "cloudflarePublishWorkerTick",
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY: "TRIGGER",
+    CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY: "TRIGGER_AT",
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY: "LOCK",
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS: 120000,
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS: 1,
@@ -48,12 +49,14 @@ const loadQueue = () => {
     SEASON_EVENTS_BY_SEASON_PATH: "events/seasonEvents/bySeason",
     SEASON_EVENTS_BY_ID_PATH: "events/seasonEvents/byId",
     FIREBASE_DONATION_REFRESH_PATH: "donationRefresh",
+    CWL_LEAGUE_SIGNUPS_ACTIVE_PATH: "active/cwlLeagueSignups",
     normalizeActiveVersionId_: (value) => String(value ?? "").trim(),
     toNonNegativeInt_: (value) => Math.max(0, Math.floor(Number(value) || 0)),
     parseIsoToMs_: (value) => Date.parse(value) || 0,
     getOptionalScriptProperty_: () => "queued-v2",
     isCloudflarePublicDataEnabled_: () => true,
     sanitizeSeasonEventText_: (value) => String(value ?? "").trim(),
+    normalizeSeasonEventType_: (value) => String(value ?? "").trim(),
     sanitizeDonationCycleKey_: (value) => String(value ?? "").trim(),
     normalizeCloudflareDataScope_: (value) => String(value || "public"),
     normalizeCloudflareDataObjectPath_: (value) => String(value || "").replace(/^\/+|\/+$/g, ""),
@@ -68,6 +71,51 @@ const loadQueue = () => {
   vm.createContext(context);
   vm.runInContext(source, context);
   return context;
+};
+
+const loadQueueTriggerHarness = () => {
+  const queue = loadQueue();
+  const properties = new Map([['MODE', 'queued-v2']]);
+  let triggerSequence = 0;
+  let createDelays = [];
+  const triggers = [];
+  const makeTrigger = (id) => ({
+    id,
+    getHandlerFunction: () => 'cloudflarePublishWorkerTick',
+  });
+  queue.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: key => properties.has(key) ? properties.get(key) : null,
+      setProperty: (key, value) => properties.set(key, String(value)),
+      deleteProperty: key => properties.delete(key),
+    }),
+  };
+  queue.getTriggerUniqueId_ = trigger => trigger && trigger.id;
+  queue.ScriptApp = {
+    getProjectTriggers: () => triggers.slice(),
+    deleteTrigger: trigger => {
+      const index = triggers.indexOf(trigger);
+      if (index >= 0) triggers.splice(index, 1);
+    },
+    newTrigger: () => ({
+      timeBased: () => ({
+        after: delay => ({
+          create: () => {
+            createDelays.push(delay);
+            const trigger = makeTrigger(`trigger-${++triggerSequence}`);
+            triggers.push(trigger);
+            return trigger;
+          },
+        }),
+      }),
+    }),
+  };
+  queue.readCloudflarePublishQueueState_ = () => queue.__state;
+  queue.__state = queue.createEmptyCloudflarePublishQueueState_();
+  queue.__triggers = triggers;
+  queue.__properties = properties;
+  queue.__createDelays = createDelays;
+  return queue;
 };
 
 test("dirty revision completion cannot clear a newer mutation", () => {
@@ -382,4 +430,200 @@ test("new active targets use a wall-clock generation that survives queue-state r
   assert.equal(result.ok, true);
   assert.ok(result.generation >= before);
   assert.equal(state.active.targetGeneration, result.generation);
+});
+
+test("event, aggregate, donation, pointer, and bootstrap work produce one final bootstrap commit", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.events.event1 = { revision: 1 };
+  state.dirty.cwlAggregates.event1 = { live: { revision: 2 } };
+  state.dirty.donationSeasons.season1 = { revision: 3 };
+  state.dirty.seasonPointers = { revision: 4 };
+  state.dirty.bootstrap = { revision: 5 };
+  const sent = [];
+  q.mutateCloudflarePublishQueueState_ = callback => callback(state);
+  q.buildCloudflareDirtyRequest_ = (_state, work) => work.category === "bootstrap"
+    ? { objects: [], deletes: [], commits: [{ path: "bootstrap/current", payload: {} }] }
+    : { objects: [{ path: `${work.category}/${work.key || work.kind || "current"}`, payload: {} }], deletes: [], commits: [] };
+  q.sendCloudflareQueuedV2Request_ = request => {
+    sent.push(clone(request));
+    return { response: { ok: true } };
+  };
+
+  for (let i = 0; i < 5; i++) q.processCloudflareDirtyQueueRequest_(state);
+
+  assert.deepEqual(sent.map(request => request.objects.map(item => item.path).concat(request.commits.map(item => item.path))), [
+    ["event/event1"],
+    ["cwlAggregate/event1"],
+    ["donationSeason/season1"],
+    ["seasonPointers/current"],
+    ["bootstrap/current"],
+  ]);
+  assert.equal(sent.filter(request => request.commits.some(item => item.path === "bootstrap/current")).length, 1);
+});
+
+test("a newer bootstrap revision survives an older in-flight request", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.bootstrap = { revision: 10 };
+  const oldWork = { category: "bootstrap", revision: 10 };
+  state.dirty.bootstrap = { revision: 11 };
+
+  q.clearCloudflareDirtyWorkIfRevisionMatches_(state, oldWork);
+
+  assert.equal(state.dirty.bootstrap.revision, 11);
+});
+
+test("relevant reconstruction batches referenced objects before pointers and bootstrap", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  q.buildCloudflareRelevantSeasonPointerCommits_ = () => ({
+    commits: [{ path: "events/seasonEvents/current", payload: { push: { eventId: "event-current" } } }],
+    deletes: [],
+  });
+  q.buildCloudflareCurrentSeasonEventsBundle_ = () => ({
+    current: { push: { eventId: "event-current" }, donation: { eventId: "donation-current" } },
+    seasonState: { seasonId: "season-current" },
+    byId: {
+      "event-current": { eventId: "event-current", type: "push" },
+      "donation-current": { eventId: "donation-current", type: "donation", seasonId: "season-current" },
+    },
+    cwlAggregatesByEventId: {},
+  });
+  q.attachCloudflarePreviousSeasonBundle_ = bundle => bundle;
+  q.collectCloudflareDonationRefreshSeasonIdsFromBundle_ = () => ["season-current"];
+  q.readDecodedCloudflareFirebaseObject_ = path => path === "donationRefresh/bySeason/season-current"
+    ? { seasonId: "season-current", byTag: {} }
+    : path === "donationRefresh/current" ? { seasonId: "season-current" } : null;
+  q.buildCloudflareQueuedBootstrapCommit_ = () => ({ path: "bootstrap/current", payload: { activeVersionId: "version-A" } });
+
+  const plan = q.buildCloudflareRelevantSnapshotPlan_(state);
+  const ordinaryPaths = plan.ordinaryBatches.flat().map(item => item.path);
+  const commitPaths = plan.commitBatches.flat().map(item => item.path);
+
+  assert.ok(ordinaryPaths.some(path => path.includes("events/seasonEvents/byId/event-current")));
+  assert.ok(ordinaryPaths.some(path => path.includes("donationRefresh/bySeason/season-current")));
+  assert.ok(commitPaths.includes("events/seasonEvents/current"));
+  assert.ok(commitPaths.includes("donationRefresh/current"));
+  assert.equal(commitPaths.includes("bootstrap/current"), false);
+  assert.equal(q.buildCloudflareDirtyRequest_(state, { category: "bootstrap", revision: 1 }).commits.map(item => item.path).join(","), "bootstrap/current");
+});
+
+test("queue initialization marks reconstruction, pointers, signups, and bootstrap in one state mutation", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  let mutationCalls = 0;
+  q.readPublishedActiveVersionId_ = () => "version-A";
+  q.verifyCloudflarePublicActiveVersionId_ = () => ({ ok: true, actualVersionId: "version-A" });
+  q.mutateCloudflarePublishQueueState_ = callback => {
+    mutationCalls++;
+    return callback(state);
+  };
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  q.getCloudflarePublishQueueDiagnostics_ = () => ({ pending: true });
+
+  const result = q.initializeCloudflarePublishQueue_({});
+
+  assert.equal(result.ok, true);
+  assert.equal(mutationCalls, 1);
+  assert.ok(state.dirty.relevantSnapshot);
+  assert.ok(state.dirty.cwlLeagueSignups);
+  assert.ok(state.dirty.bootstrap);
+});
+
+test("a stale lease owner cannot record success, failure, backoff, or pause state", () => {
+  const q = loadQueue();
+  let lockState = JSON.stringify({ token: "worker-B", owner: "B", expiresAt: Date.now() + 60_000 });
+  let callbackCalls = 0;
+  q.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: key => key === "LOCK" ? lockState : null,
+      setProperty: () => {},
+      deleteProperty: () => {},
+    }),
+  };
+  q.mutateCloudflarePublishQueueState_ = (callback, ownerToken) => {
+    q.assertCloudflarePublishQueueLeaseOwned_(ownerToken);
+    callbackCalls++;
+    return callback(q.createEmptyCloudflarePublishQueueState_());
+  };
+
+  assert.throws(() => q.recordCloudflareQueueFailure_("failure", {}, "worker-A"), /lease ownership was lost/);
+  assert.throws(() => q.mutateCloudflarePublishQueueState_(state => { state.retry.attempt = 9; }, "worker-A"), /lease ownership was lost/);
+  assert.throws(() => q.mutateCloudflarePublishQueueState_(state => { state.retry.nextAttemptAt = new Date().toISOString(); }, "worker-A"), /lease ownership was lost/);
+  assert.throws(() => q.mutateCloudflarePublishQueueState_(state => { state.paused = true; }, "worker-A"), /lease ownership was lost/);
+  assert.equal(callbackCalls, 0);
+});
+
+test("worker A cannot update success or failure after worker B acquires the lease", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.active = {
+    targetVersionId: "version-B",
+    targetGeneration: 2,
+    phase: "ordinary",
+    cursor: 0,
+    committedVersionId: "version-A",
+    updatedAt: "",
+  };
+  let currentToken = "worker-A";
+  q.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: key => key === "LOCK" ? JSON.stringify({ token: currentToken, expiresAt: Date.now() + 60_000 }) : null,
+      setProperty: () => {},
+      deleteProperty: () => {},
+    }),
+  };
+  q.buildCloudflareQueuedActivePlan_ = () => ({
+    targetVersionId: "version-B",
+    generation: 2,
+    batches: [[{ path: "activeVersions/version-B/manifest", payload: {} }]],
+    commits: [],
+  });
+  q.sendCloudflareQueuedV2Request_ = () => {
+    currentToken = "worker-B";
+    return { response: { ok: true } };
+  };
+  q.mutateCloudflarePublishQueueState_ = (callback, ownerToken) => {
+    q.assertCloudflarePublishQueueLeaseOwned_(ownerToken);
+    return callback(state);
+  };
+
+  assert.throws(() => q.processCloudflareActiveQueueRequest_(state, "worker-A"), /lease ownership was lost/);
+  assert.equal(state.active.cursor, 0);
+  assert.throws(() => q.recordCloudflareQueueFailure_("late failure", {}, "worker-A"), /lease ownership was lost/);
+  assert.equal(state.retry.attempt, 0);
+});
+
+test("concurrent enqueue scheduling keeps one effective trigger and honors long backoff", () => {
+  const q = loadQueueTriggerHarness();
+  q.__state.retry.nextAttemptAt = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+
+  q.scheduleCloudflarePublishWorker_();
+  q.scheduleCloudflarePublishWorker_();
+
+  assert.equal(q.__triggers.length, 1);
+  assert.equal(q.__createDelays.length, 1);
+  assert.ok(q.__createDelays[0] > 2 * 60 * 60 * 1000);
+  assert.equal(q.__properties.get("TRIGGER"), q.__triggers[0].id);
+});
+
+test("donation-current creation and deletion are mirrored by queued donation work", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  q.readDecodedCloudflareFirebaseObject_ = path => {
+    if (path === "donationRefresh/bySeason/season-1") return { seasonId: "season-1", byTag: {} };
+    if (path === "donationRefresh/current") return q.__currentDonation;
+    return null;
+  };
+  const work = { category: "donationSeason", key: "season-1", revision: 1 };
+  q.__currentDonation = { seasonId: "season-1", updatedAt: "2026-07-10T00:00:00.000Z" };
+  const created = q.buildCloudflareDirtyRequest_(state, work);
+  assert.equal(created.commits.map(item => item.path).join(","), "donationRefresh/current,donationRefresh/current");
+  assert.equal(created.commits.every(item => item.delete !== true), true);
+
+  q.__currentDonation = null;
+  const deleted = q.buildCloudflareDirtyRequest_(state, work);
+  assert.equal(deleted.commits.length, 2);
+  assert.equal(deleted.commits.every(item => item.delete === true), true);
 });

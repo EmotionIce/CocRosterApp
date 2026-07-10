@@ -3701,13 +3701,14 @@ function publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(refreshRaw,
 	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : {};
 	const label = String(labelRaw || "auto-refresh-cwl-season-events").trim() || "auto-refresh-cwl-season-events";
 	const eventId = sanitizeSeasonEventText_(refresh.eventId || (refresh.event && refresh.event.eventId), 180);
-	if (eventId && typeof enqueueCloudflareSeasonEventPublication_ === "function") {
-		return enqueueCloudflareSeasonEventPublication_(eventId, label, {
+	if (eventId && typeof publishCloudflareSeasonEventsAfterMutation_ === "function") {
+		return publishCloudflareSeasonEventsAfterMutation_(label, eventId, {
 			cwlLive: refresh.finalized !== true,
 			cwlFinal: refresh.finalized === true,
 			pointers: refresh.finalized === true,
 		});
 	}
+	if (typeof publishCloudflareSeasonEventsAfterMutation_ === "function") return publishCloudflareSeasonEventsAfterMutation_(label);
 	if (typeof enqueueCloudflareRelevantSeasonPublication_ === "function") return enqueueCloudflareRelevantSeasonPublication_(label);
 	return { ok: true, skipped: true, reason: "queue-unavailable", label: label };
 }
@@ -3735,7 +3736,23 @@ function ensureAutoRefreshCloudflarePublicDataPublished_(currentRaw, labelRaw, o
 	if (typeof enqueueCloudflareActiveTarget_ !== "function") {
 		return { ok: true, skipped: true, status: "legacy-manual", reason: "cloudflare-queue-unavailable", runId: runId, label: label };
 	}
-	const queued = enqueueCloudflareActiveTarget_(runId, label);
+	const enqueue = function () {
+		try {
+			return enqueueCloudflareActiveTarget_(runId, label);
+		} catch (err) {
+			Logger.log("Auto-refresh Cloudflare enqueue failed after canonical completion: %s", errorMessage_(err));
+			return { ok: false, error: errorMessage_(err), queued: false };
+		}
+	};
+	let queued;
+	if (typeof deferActiveRosterLockAction_ === "function") {
+		const deferredResult = { ok: true, queued: true, deferred: true, reason: "canonical-lock" };
+		queued = deferActiveRosterLockAction_(function () {
+			Object.assign(deferredResult, enqueue());
+		}) ? deferredResult : enqueue();
+	} else {
+		queued = enqueue();
+	}
 	return {
 		ok: queued && queued.ok !== false,
 		status: queued && queued.skipped ? String(queued.reason || "skipped") : "queued",

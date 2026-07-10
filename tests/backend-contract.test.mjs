@@ -2029,6 +2029,125 @@ test("season event participant account updates and cancellation maintain tag ind
   assert.equal(backend.firebaseRequestJson_(backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#8CCVV"), "GET"), null);
 });
 
+test("season-event publication enqueueing happens only after the participant lock is released", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+  const originalLock = backend.withSeasonEventParticipantWriteLock_;
+  let lockHeld = false;
+  const enqueueCalls = [];
+  backend.withSeasonEventParticipantWriteLock_ = callback => {
+    lockHeld = true;
+    try {
+      return callback();
+    } finally {
+      lockHeld = false;
+    }
+  };
+  backend.enqueueCloudflareSeasonEventPublication_ = (eventId, reason, options) => {
+    assert.equal(lockHeld, false);
+    enqueueCalls.push({ eventId, reason, options });
+    return { ok: true, queued: true };
+  };
+
+  const signup = backend.registerSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#9PYLQG"],
+  }, "secret");
+  assert.equal(signup.status, "signed-up");
+  const update = backend.updateSeasonEventParticipantAccounts({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#8CCVV"],
+  }, "secret");
+  assert.equal(update.status, "updated");
+  const cancel = backend.cancelSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+  }, "secret");
+
+  backend.withSeasonEventParticipantWriteLock_ = originalLock;
+  assert.deepEqual(enqueueCalls.map(call => call.reason), [
+    "discord-season-event-signup",
+    "discord-season-event-account-update",
+    "discord-season-event-cancel",
+  ]);
+});
+
+test("CWL participant mutations enqueue the participant-projected aggregate immediately", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = buildSeasonEventRosterData();
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData, text: "" });
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_("cwl-live"), "PUT", {
+    eventId: "cwl-live",
+    type: "cwl",
+    seasonId: "2026-05",
+    status: "open",
+    visibility: "public",
+    signupsOpen: true,
+    maxAccounts: 1,
+    startsAt: "2020-01-01T00:00:00.000Z",
+    endsAt: "2100-01-01T00:00:00.000Z",
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        clanTag: "#CLAN",
+        leagueName: "Champion I",
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+    },
+    participantsByDiscordId: {},
+  });
+  const calls = [];
+  backend.enqueueCloudflareSeasonEventPublication_ = (eventId, reason, options) => {
+    calls.push({ eventId, reason, options });
+    return { ok: true, queued: true };
+  };
+
+  const signup = backend.registerSeasonEventSignup({
+    eventId: "cwl-live",
+    discordUser: { id: "111", username: "alpha", globalName: "Alpha", displayName: "Alpha" },
+    playerTags: ["#2LUCULP"],
+  }, "secret");
+  assert.equal(signup.status, "signed-up");
+  const update = backend.updateSeasonEventParticipantAccounts({
+    eventId: "cwl-live",
+    discordUser: { id: "111", username: "alpha", globalName: "Alpha", displayName: "Alpha" },
+    playerTags: ["#2LUCULP"],
+  }, "secret");
+  assert.equal(update.status, "updated");
+  const cancel = backend.cancelSeasonEventSignup({
+    eventId: "cwl-live",
+    discordUser: { id: "111", username: "alpha", globalName: "Alpha", displayName: "Alpha" },
+  }, "secret");
+
+  assert.equal(cancel.status, "cancelled");
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map(call => call.options.cwlLive), [true, true, true]);
+});
+
+test("Cloudflare enqueue failure cannot block a canonical Discord mutation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+  backend.enqueueCloudflareSeasonEventPublication_ = () => {
+    throw new Error("Cloudflare queue unavailable");
+  };
+
+  const result = backend.registerSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#9PYLQG"],
+  }, "secret");
+
+  assert.equal(result.status, "signed-up");
+  assert.equal(backend.readSeasonEventById_("donation-2026-05").participantsByDiscordId["222"].status, "signed_up");
+});
+
 test("season event signup rejects assigned tags and closed signup windows", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");

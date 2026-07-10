@@ -187,17 +187,33 @@ function withActiveRosterJobLock_(ownerRaw, waitMsRaw, callback) {
 		owner: owner,
 		rosterId: "active-job:" + owner,
 		lastTouchedAtMs: 0,
+		afterRelease: [],
 		touch: function () {
 			return renewActiveRosterJobLockLeaseForToken_(props, acquired.token, acquired.owner);
 		},
 	};
 	pushActiveRosterLockContext_(lockContext);
+	let result;
+	let callbackError = null;
 	try {
-		return callback();
-	} finally {
-		popActiveRosterLockContext_(contextToken);
-		releaseActiveRosterJobLock_(acquired.token);
+		result = callback();
+	} catch (err) {
+		callbackError = err;
 	}
+	const afterRelease = Array.isArray(lockContext.afterRelease) ? lockContext.afterRelease.slice() : [];
+	popActiveRosterLockContext_(contextToken);
+	releaseActiveRosterJobLock_(acquired.token);
+	if (!callbackError) {
+		for (let i = 0; i < afterRelease.length; i++) {
+			try {
+				afterRelease[i]();
+			} catch (err) {
+				Logger.log("withActiveRosterJobLock: deferred post-lock work failed for owner '%s': %s", owner, errorMessage_(err));
+			}
+		}
+	}
+	if (callbackError) throw callbackError;
+	return result;
 }
 
 // Return whether active roster job lock busy error.
@@ -274,6 +290,17 @@ function popActiveRosterLockContext_(tokenRaw) {
 // Return whether the current execution is inside the active-roster job lock.
 function hasActiveRosterJobLockContext_() {
 	return Array.isArray(activeRosterLockContextStack_) && activeRosterLockContextStack_.length > 0;
+}
+
+// Queue publication is deliberately deferred until the canonical lock has
+// been released. The callback must contain only independent queue work.
+function deferActiveRosterLockAction_(callback) {
+	if (typeof callback !== "function") throw new Error("Deferred active-roster lock callback is required.");
+	if (!Array.isArray(activeRosterLockContextStack_) || !activeRosterLockContextStack_.length) return false;
+	const context = activeRosterLockContextStack_[activeRosterLockContextStack_.length - 1];
+	if (!context || !Array.isArray(context.afterRelease)) return false;
+	context.afterRelease.push(callback);
+	return true;
 }
 
 // Handle touch active roster lock lease.
