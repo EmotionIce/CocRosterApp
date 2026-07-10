@@ -112,6 +112,82 @@ test("bot active routes resolve immutable versioned objects with the existing sc
   assert.deepEqual(await index.json(), linked);
 });
 
+test("one shared selector drives public and bot reads for the same version", async () => {
+  const worker = loadWorker();
+  const selector = { schemaVersion: 1, currentVersionId: "version-current", previousVersionId: "version-previous", generation: 4, committedAt: "now" };
+  const publicObjects = {
+    "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+    "public-data/activeVersions/version-current/manifest.json": JSON.stringify({ versionId: "version-current" }),
+    "public-data/activeVersions/version-current/rosters.json": JSON.stringify({ main: { id: "main" } }),
+    "public-data/activeVersions/version-current/playerMetrics.json": JSON.stringify({ byTag: {} }),
+  };
+  const botPayload = { activeVersionId: "version-current", rosters: [{ id: "main" }], playerMetrics: { byTag: {} } };
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv(Object.assign(publicObjects, {
+      "bot-data/activeVersions/version-current/active.json": JSON.stringify(botPayload),
+      "bot-data/activeVersions/version-current/playerMetrics/byTag.json": JSON.stringify({}),
+      "bot-data/activeVersions/version-current/indexes/linkedAccountsByDiscordId.json": JSON.stringify({}),
+    })),
+  };
+  const auth = { authorization: "Bearer secret" };
+  const publicPointer = await worker.fetch(new Request("https://worker.test/api/public-data/activePublished/currentVersionId.json", { headers: auth }), env, {});
+  const botPointer = await worker.fetch(new Request("https://worker.test/api/bot-data/active/currentVersionId.json", { headers: auth }), env, {});
+  const botActive = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", { headers: auth }), env, {});
+  assert.equal(await publicPointer.json(), "version-current");
+  assert.equal(await botPointer.json(), "version-current");
+  assert.deepEqual(await botActive.json(), botPayload);
+});
+
+test("shared selector falls back to the previous complete version during KV propagation", async () => {
+  const worker = loadWorker();
+  const selector = { schemaVersion: 1, currentVersionId: "version-current", previousVersionId: "version-previous", generation: 5, committedAt: "now" };
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+      "public-data/activeVersions/version-current/manifest.json": JSON.stringify({ versionId: "version-current" }),
+      "public-data/activeVersions/version-previous/manifest.json": JSON.stringify({ versionId: "version-previous" }),
+      "public-data/activeVersions/version-previous/rosters.json": JSON.stringify({ main: { id: "main" } }),
+      "public-data/activeVersions/version-previous/playerMetrics.json": JSON.stringify({ byTag: {} }),
+      "bot-data/activeVersions/version-previous/active.json": JSON.stringify({ activeVersionId: "version-previous", rosters: [], playerMetrics: { byTag: {} } }),
+      "bot-data/activeVersions/version-previous/playerMetrics/byTag.json": JSON.stringify({}),
+      "bot-data/activeVersions/version-previous/indexes/linkedAccountsByDiscordId.json": JSON.stringify({}),
+      "bot-data/activeVersions/version-previous/indexes/linkedAccountsByDiscordUsername.json": JSON.stringify({}),
+    }),
+  };
+  const auth = { authorization: "Bearer secret" };
+  const publicPointer = await worker.fetch(new Request("https://worker.test/api/public-data/activePublished/currentVersionId.json", { headers: auth }), env, {});
+  const botPointer = await worker.fetch(new Request("https://worker.test/api/bot-data/active/currentVersionId.json", { headers: auth }), env, {});
+  const botActive = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", { headers: auth }), env, {});
+  assert.equal(await publicPointer.json(), "version-previous");
+  assert.equal(await botPointer.json(), "version-previous");
+  assert.equal((await botActive.json()).activeVersionId, "version-previous");
+});
+
+test("a valid shared selector never falls back to a legacy bot object from another generation", async () => {
+  const worker = loadWorker();
+  const selector = { schemaVersion: 1, currentVersionId: "version-current", previousVersionId: "version-previous", generation: 6, committedAt: "now" };
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+      "public-data/activeVersions/version-current/manifest.json": JSON.stringify({ versionId: "version-current" }),
+      "public-data/activeVersions/version-current/rosters.json": JSON.stringify({}),
+      "public-data/activeVersions/version-current/playerMetrics.json": JSON.stringify({}),
+      "public-data/activeVersions/version-previous/manifest.json": JSON.stringify({ versionId: "version-previous" }),
+      "public-data/activeVersions/version-previous/rosters.json": JSON.stringify({}),
+      "public-data/activeVersions/version-previous/playerMetrics.json": JSON.stringify({}),
+      "bot-data/active.json": JSON.stringify({ activeVersionId: "legacy" }),
+      "bot-data/activeVersions/version-previous/active.json": JSON.stringify({ activeVersionId: "version-previous" }),
+    }),
+  };
+  const response = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", {
+    headers: { authorization: "Bearer secret" },
+  }), env, {});
+  assert.equal(response.status, 404);
+});
+
 test("versioned bot reads fall back only to the existing bot object, never public scope", async () => {
   const worker = loadWorker();
   const env = {

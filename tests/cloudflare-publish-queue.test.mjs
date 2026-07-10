@@ -2,9 +2,47 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 
 const repoRoot = new URL("../", import.meta.url);
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+const loadRealFirebaseCodec = () => {
+  const source = fs.readFileSync(new URL("script/firebaseStore.js", repoRoot), "utf8");
+  const blob = (value) => {
+    const bytes = Array.isArray(value) || value instanceof Uint8Array ? Buffer.from(value) : Buffer.from(String(value ?? ""), "utf8");
+    return {
+      getBytes: () => Array.from(bytes),
+      getDataAsString: () => bytes.toString("utf8"),
+    };
+  };
+  const context = {
+    FIREBASE_KEY_ENCODING_PREFIX: "__FB64__",
+    Utilities: {
+      newBlob: blob,
+      base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url"),
+      base64DecodeWebSafe: (value) => Array.from(Buffer.from(String(value), "base64url")),
+    },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => null }) },
+    Logger: { log() {} },
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  return {
+    encode: context.encodeFirebaseObjectKeysRecursive_,
+    decode: context.decodeFirebaseObjectKeysRecursive_,
+  };
+};
+
+const loadWorkerForBoundary = () => {
+  const source = fs.readFileSync(new URL("cloudflarePages/worker-core.js", repoRoot), "utf8")
+    .replace(/export\s+default\s+\{/, "globalThis.workerDefault = {")
+    .replace(/export\s+\{\s*CloudflarePublicationCoordinator\s*\};?/, "");
+  const context = { URL, Request, Response, Headers, TextEncoder, Uint8Array, crypto: webcrypto, console };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  return context.workerDefault;
+};
 
 const loadQueue = () => {
   const source = fs.readFileSync(new URL("script/cloudflarePublishQueue.js", repoRoot), "utf8");
@@ -63,6 +101,7 @@ const loadQueue = () => {
     CLOUDFLARE_PUBLISH_QUEUE_BASE_RETRY_MS: 60000,
     CLOUDFLARE_PUBLISH_QUEUE_MAX_RETRY_MS: 21600000,
     FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_STATE_PATH: "internal/cloudflarePublish/state",
+    FIREBASE_ACTIVE_PUBLISHED_CURRENT_SELECTOR_PATH: "activePublished/currentSelector",
     CLOUDFLARE_PUBLIC_DATA_BOOTSTRAP_PATH: "bootstrap/current",
     SEASON_EVENTS_CURRENT_PATH: "events/seasonEvents/current",
     SEASON_EVENTS_CURRENT_CWL_PATH: "events/seasonEvents/currentCwl",
@@ -287,6 +326,29 @@ test("transport descriptors carry explicit bounded timeouts", () => {
   assert.equal(requestOptions.timeoutSeconds, 20);
 });
 
+test("trigger reconciliation reuses earlier work and replaces later or invalid metadata", () => {
+  const q = loadQueue();
+  const desired = Date.now() + 120000;
+  const earlier = { id: "earlier", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  const duplicate = { id: "duplicate", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(earlier, duplicate);
+  q.__properties.set("TRIGGER", "earlier");
+  q.__properties.set("TRIGGER_AT", String(desired - 1000));
+  const reused = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", desired);
+  assert.equal(reused.reused, true);
+  assert.equal(q.__triggerCalls.schedules, 0);
+  assert.deepEqual(q.__triggers.map((item) => item.id), ["earlier"]);
+
+  const later = { id: "later", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(later);
+  q.__properties.set("TRIGGER", "later");
+  q.__properties.set("TRIGGER_AT", String(desired + 60000));
+  const replaced = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", desired);
+  assert.equal(replaced.reused, false);
+  assert.equal(q.__triggerCalls.schedules, 1);
+  assert.equal(q.__triggers.filter((item) => item.handler === "cloudflarePublishWorkerTick").length, 1);
+});
+
 test("active public manifest/roster phase reads no metrics", () => {
   const q = loadQueue();
   const state = activeState(q, "public-manifest-rosters");
@@ -320,7 +382,7 @@ test("commit phase verifies immutable objects and never rebuilds the complete sn
   q.verifyCloudflareActiveVersionObjects_ = (_version, required) => { verified = required; return { ok: true }; };
   q.buildCloudflarePublicBootstrapObject_ = (options) => ({ path: "bootstrap/current", payload: { schemaVersion: 2, activeVersionId: options.activeVersionIdOverride } });
   const built = q.buildCloudflareActivePhaseRequest_(activeState(q, "commit"), { phase: "commit", cursor: 0 });
-  assert.equal(built.request.commits.at(-1).path, "active/currentVersionId");
+  assert.equal(built.request.commits[0].path, "activePublished/currentSelector");
   assert.equal(verified.length, 7);
   assert.equal(built.request.commits.some((item) => item.path.includes("rosters")), false);
   assert.equal(built.request.commits.some((item) => item.path.includes("playerMetrics")), false);
@@ -374,7 +436,7 @@ test("two consecutive active publications and an unchanged enqueue are idempoten
   const q = loadQueue();
   let state = activeState(q);
   const store = installCloudflareTransport(q);
-  q.readCloudflarePublishQueueState_ = () => clone(state);
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
   q.mutateCloudflarePublishQueueState_ = (callback) => { const result = callback(state); return result; };
   q.buildCloudflareActivePhaseRequest_ = (current, claim) => {
     if (claim.phase === "commit") {
@@ -406,6 +468,7 @@ test("canonical active enqueue traces all five phases to public and bot pointer 
   q.__setState(state);
   q.isCloudflareQueuedPublicationEnabled_ = () => true;
   q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
   const manifest = { versionId: "version-B", schemaVersion: 1, rosterIds: ["main"], rosterOrder: ["main"], pageTitle: "Roster" };
   const roster = { id: "main", main: [], subs: [], missing: [] };
   const metrics = { schemaVersion: 1, byTag: { "#P": { identity: { tag: "#P", discordId: "discord-1" }, latestSnapshot: { trophies: 5000 } } } };
@@ -464,10 +527,225 @@ test("active fixture payload stays within repository and Worker limits", () => {
   assert.ok(q.cloudflareQueueNormalizedEnvelopeBytes_({ batchId: "fixture", objects: [{ scope: "public", path: "activeVersions/v/active", payload: fixture }] }) < 10 * 1024 * 1024);
 });
 
+test("near-maximum active schema fixture has a comfortable normalized margin", () => {
+  const q = loadQueue();
+  const codec = loadRealFirebaseCodec();
+  q.encodeFirebaseObjectKeysRecursive_ = codec.encode;
+  const tags = Array.from({ length: 608 }, (_, index) => `#P${String(index).padStart(4, "0")}`);
+  const metricFor = (tag, index) => ({
+    identity: { tag, name: `Player ${index}`, discordId: `discord-${index}`, discordUsername: `player_${index}` },
+    trophyHistoryDaily: Array.from({ length: 30 }, (_, day) => ({ dayKey: `2026-06-${String((day % 28) + 1).padStart(2, "0")}`, trophies: 5000 + index + day, clanTag: "#8L28LJCC" })),
+    regularWar: { current: { inWar: index % 2 === 0, attacksAllowed: 2, attacksUsed: 1, starsTotal: 2, totalDestruction: 80 }, aggregate: { warsInLineup: 15, attacksMade: 20, attacksMissed: 2, starsTotal: 38, totalDestruction: 1320 } },
+    cwlStats: { season: "2026-07-03", starsTotal: 18, daysInLineup: 7, attacksMade: 7, missedAttacks: 0, threeStarCount: 5, totalDestruction: 680, defenseStarsConceded: 18 },
+    donationCycles: { "ranked-legend-i-2026-06-15": { seasonId: "ranked-legend-i-2026-06-15", cycleTotalDonations: 250, cycleTotalDonationsReceived: 180, lastSeenAt: "2026-07-09T20:00:00.000Z" } },
+    latestSnapshot: { tag, name: `Player ${index}`, trophies: 5200 + index, donations: 250, donationsReceived: 180, clanTag: "#8L28LJCC", capturedAt: "2026-07-09T20:00:00.000Z" },
+  });
+  const fixture = {
+    schemaVersion: 1,
+    pageTitle: "TURTLE Clan Family Overview",
+    rosterOrder: ["turtle-main", "purpleTurtle", "turtle-cwl-crystal-2-30v30"],
+    rosters: ["turtle-main", "purpleTurtle", "turtle-cwl-crystal-2-30v30"].map((id) => ({
+      id, title: id, main: tags.slice(0, 30).map((tag, index) => ({ slot: index + 1, tag, name: `Player ${index}`, th: 18 })),
+      subs: tags.slice(30, 50).map((tag, index) => ({ slot: null, tag, name: `Sub ${index}`, th: 18 })),
+      missing: tags.slice(50, 60).map((tag) => ({ slot: null, tag, name: "Missing", th: 18 })),
+    })),
+    playerMetrics: { schemaVersion: 1, byTag: Object.fromEntries(tags.map((tag, index) => [tag, metricFor(tag, index)])) },
+    cwlLeagueSignups: { schemaVersion: 1, entries: tags.slice(0, 90).map((tag) => ({ tag, league: "crystal-2", selected: true })) },
+  };
+  const object = q.makeCloudflareQueueObject_("activeVersions/near-max/active", fixture, "bot");
+  const normalized = q.normalizeCloudflareQueuePublishObjectForSize_(object, "public", "2026-07-10T00:00:00.000Z");
+  const objectBytes = q.cloudflareQueueTextBytes_(normalized.payloadText);
+  const envelopeBytes = q.cloudflareQueueNormalizedEnvelopeBytes_({ requestId: "near-max", batchId: "near-max", publishedAt: "2026-07-10T00:00:00.000Z", objects: [object] });
+  assert.ok(objectBytes < 6 * 1024 * 1024, `near-maximum object bytes=${objectBytes}`);
+  assert.ok(envelopeBytes < 7 * 1024 * 1024, `near-maximum envelope bytes=${envelopeBytes}`);
+  assert.ok(q.assertCloudflareQueuedRequestBounds_({ requestId: "near-max", batchId: "near-max", publishedAt: "2026-07-10T00:00:00.000Z", objects: [object] }) === envelopeBytes);
+  if (process.env.REPORT_SIZES === "1") process.stdout.write(`near-max object bytes=${objectBytes} envelope bytes=${envelopeBytes}\n`);
+});
+
+test("Apps Script size checks match Worker normalization at realistic boundaries", async () => {
+  const q = loadQueue();
+  const codec = loadRealFirebaseCodec();
+  q.encodeFirebaseObjectKeysRecursive_ = codec.encode;
+  const fixture = {
+    schemaVersion: 1,
+    rosters: { main: [{ tag: "#PLAYER", name: "Quote\\\\Player", notes: "\\\"quoted\\\"" }] },
+    playerMetrics: { byTag: {
+      "#PLAYER": { identity: { tag: "#PLAYER", linked: "a/b" }, history: Array.from({ length: 20 }, (_, index) => ({ season: index, text: "metric" })) },
+      "__FB64__original": { identity: { tag: "__FB64__original" } },
+    } },
+  };
+  const object = q.makeCloudflareQueueObject_("activeVersions/version-1/playerMetrics", fixture, "public");
+  const request = { requestId: "size-test", batchId: "size-test", publishedAt: "2026-07-10T00:00:00.000Z", objects: [object], commits: [] };
+  const appsBytes = q.cloudflareQueueNormalizedEnvelopeBytes_(request);
+  assert.equal(q.assertCloudflareQueuedRequestBounds_(request), appsBytes);
+
+  const worker = loadWorkerForBoundary();
+  const env = { ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret", ROSTER_DATA_KV: { async get() { return null; }, async put() {} } };
+  const accepted = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+    method: "POST", headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify(Object.assign({}, request, { dryRun: true })),
+  }), env, {});
+  assert.equal(accepted.status, 200);
+
+  const tooLargeObject = { requestId: "large-object", batchId: "large-object", publishedAt: request.publishedAt, objects: [{ path: "activeVersions/v/metrics", scope: "public", payload: { text: "x".repeat(8 * 1024 * 1024) } }] };
+  assert.throws(() => q.assertCloudflareQueuedRequestBounds_(tooLargeObject), /object exceeds hard limit/i);
+  const rejectedObject = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+    method: "POST", headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify(Object.assign({}, tooLargeObject, { dryRun: true })),
+  }), env, {});
+  assert.equal(rejectedObject.status, 413);
+
+  const envelopeTooLarge = {
+    requestId: "large-envelope", batchId: "large-envelope", publishedAt: request.publishedAt,
+    objects: [
+      { path: "activeVersions/v/a", scope: "public", payload: { text: "a".repeat(5.2 * 1024 * 1024) } },
+      { path: "activeVersions/v/b", scope: "public", payload: { text: "b".repeat(5.2 * 1024 * 1024) } },
+    ],
+  };
+  assert.throws(() => q.assertCloudflareQueuedRequestBounds_(envelopeTooLarge), /payload limit/i);
+  const rejectedEnvelope = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+    method: "POST", headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify(Object.assign({}, envelopeTooLarge, { dryRun: true })),
+  }), env, {});
+  assert.equal(rejectedEnvelope.status, 413);
+});
+
 test("queued v2 source has no whole-plan or history enumeration path", () => {
   const source = fs.readFileSync(new URL("script/cloudflarePublishQueue.js", repoRoot), "utf8");
   assert.equal(source.includes("buildCloudflareQueuedActivePlan_"), false);
   assert.equal(source.includes("buildCloudflareRelevantSnapshotPlan_"), false);
   assert.equal(source.includes("readActiveRosterSnapshotFromVersion_(target)"), false);
   assert.equal(source.includes("forceNext"), false);
+});
+
+test("Cloudflare queue objects encode player tags exactly once with the production codec", () => {
+  const q = loadQueue();
+  const codec = loadRealFirebaseCodec();
+  q.encodeFirebaseObjectKeysRecursive_ = codec.encode;
+  q.decodeFirebaseObjectKeysRecursive_ = codec.decode;
+  const original = {
+    "#PLAYER": { "a.b": 1, "x/y": 2, "[x]": 3 },
+    "plain": { "__FB64__original": { "#SECOND": true } },
+  };
+  const queued = q.makeCloudflareQueueObject_("activeVersions/v/active", original, "bot");
+  assert.deepEqual(JSON.parse(JSON.stringify(codec.decode(queued.payload))), original);
+  assert.equal(Object.keys(queued.payload).includes("#PLAYER"), false);
+  assert.equal(Object.keys(queued.payload).some((key) => key.startsWith("__FB64__")), true);
+
+  const accidentallyPreEncoded = codec.encode(original);
+  const doubleQueued = q.makeCloudflareQueueObject_("activeVersions/v/active", accidentallyPreEncoded, "bot");
+  assert.notDeepEqual(codec.decode(doubleQueued.payload), original);
+});
+
+test("superseded active generation cannot publish or commit its selector", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = activeState(q, "commit");
+  state.active.targetVersionId = "generation-A";
+  state.active.targetGeneration = 11;
+  state.active.committedVersionId = "version-old";
+  q.__setState(state);
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  q.buildCloudflareActivePhaseRequest_ = (_state, claim) => ({
+    label: "commit",
+    request: { batchId: `active:${claim.targetVersionId}:commit`, commits: [{ path: "activePublished/currentSelector", scope: "public", payload: { currentVersionId: claim.targetVersionId } }] },
+  });
+  let sends = 0;
+  q.sendCloudflareQueuedV2Request_ = () => { sends += 1; return { ok: true, response: { ok: true } }; };
+  let supersede = true;
+  q.readCloudflarePublishQueueState_ = () => {
+    if (supersede) {
+      supersede = false;
+      q.enqueueCloudflareActiveTarget_("generation-B", "newer-target");
+    }
+    return clone(q.__getState());
+  };
+  const first = q.processCloudflareActiveQueueRequest_(q.__getState());
+  assert.equal(first.reason, "superseded");
+  assert.equal(sends, 0);
+  assert.equal(q.__getState().active.committedVersionId, "version-old");
+  assert.equal(q.__getState().active.targetVersionId, "generation-B");
+});
+
+test("bot-object repair migration is idempotent and preserves the committed version and dirty work", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.active.committedVersionId = "known-good";
+  state.dirty.events["event-1"] = { revision: 12 };
+  q.__setState(state);
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.scheduleCloudflareAfterMutation_ = () => ({ scheduled: true });
+  const first = q.repairCloudflareBotVersionObjects_({ versionId: "known-good" });
+  assert.equal(first.ok, true);
+  assert.equal(first.idempotent, false);
+  assert.equal(q.__getState().active.committedVersionId, "known-good");
+  assert.equal(q.__getState().active.targetVersionId, "known-good");
+  assert.equal(q.__getState().active.phase, "bot-active");
+  assert.equal(q.__getState().active.republish, true);
+  assert.ok(q.__getState().dirty.events["event-1"]);
+  const second = q.repairCloudflareBotVersionObjects_({ versionId: "known-good" });
+  assert.equal(second.idempotent, true);
+  assert.equal(q.__getState().active.committedVersionId, "known-good");
+});
+
+test("bounded repair resumes through every event, CWL aggregate, season map, and donation overlay", () => {
+  const q = loadQueue();
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  const eventIds = Array.from({ length: 8 }, (_, index) => `push-${index + 1}`);
+  eventIds.push("cwl-current", "cwl-completed");
+  state.dirty.repair = {
+    revision: 9, category: "repair", step: "discover", seasonIndex: 0, eventIndex: 0, donationIndex: 0,
+    seasonIds: [], eventIds: [], donationSeasonIds: [], updatedAt: "",
+  };
+  q.resolveLegendIRankedSeasonCycle_ = () => ({ seasonId: "season-previous" });
+  q.collectCloudflareSeasonEventIdsFromPointerMap_ = (pointers, output) => {
+    for (const value of Object.values(pointers || {})) if (value && value.eventId) output[value.eventId] = true;
+    return output;
+  };
+  q.readDecodedCloudflareQueueObject_ = (path) => {
+    if (path.endsWith("seasonState/current")) return { seasonId: "season-current", startsAt: "2026-07-01T00:00:00.000Z" };
+    if (path.endsWith("currentCwl")) return { eventId: "cwl-current", seasonId: "season-current" };
+    if (path.endsWith("latestCompletedCwl")) return { eventId: "cwl-completed", seasonId: "season-previous" };
+    if (path.includes("donationRefresh/bySeason/")) return { seasonId: path.includes("season-previous") ? "season-previous" : "season-current", totals: {} };
+    if (path.endsWith("donationRefresh/current")) return { seasonId: "season-current" };
+    if (path.includes("bySeason/season-current")) return Object.fromEntries(eventIds.slice(0, 5).map((id) => [id, { eventId: id, seasonId: "season-current" }]));
+    if (path.includes("bySeason/season-previous")) return Object.fromEntries(eventIds.slice(5, 8).map((id) => [id, { eventId: id, seasonId: "season-previous" }]));
+    return { pointer: true };
+  };
+  q.readSeasonEventById_ = (eventId) => ({ eventId, type: eventId.startsWith("cwl-") ? "cwl" : "push", seasonId: eventId === "cwl-completed" ? "season-previous" : "season-current" });
+  q.readCwlSeasonEventAggregate_ = (eventId, kind) => ({ eventId, kind, rankedTags: [] });
+  q.projectCloudflareCwlAggregateForEvent_ = (_event, aggregate, kind) => Object.assign({}, aggregate, { kind });
+  q.buildCwlSeasonEventAggregatePath_ = (eventId, kind) => `events/seasonEvents/cwlAggregates/byEvent/${eventId}/${kind}`;
+  q.makeCloudflareQueueObject_ = (path, payload, scope) => ({ path, payload, scope });
+
+  const repairedEvents = [];
+  const repairedAggregates = [];
+  const repairPhases = [];
+  const pointerScopes = new Map();
+  while (state.dirty.repair) {
+    const work = q.firstCloudflareDirtyWork_(state);
+    const built = q.buildCloudflareTargetedRepairRequest_(work);
+    const advance = built.repairAdvance;
+    for (const item of built.objects) {
+      if (item.path.includes("/byId/")) repairedEvents.push(item.path);
+      if (item.path.includes("cwlAggregates")) repairedAggregates.push(item.path);
+      if (item.path.includes("/bySeason/")) repairPhases.push("season-map");
+    }
+    for (const item of built.commits) {
+      if (item.path.includes("seasonEvents/current") || item.path.includes("seasonEvents/currentCwl") || item.path.includes("seasonEvents/latestCompletedCwl") || item.path.includes("seasonEvents/seasonState/current")) {
+        const scopes = pointerScopes.get(item.path) || [];
+        scopes.push(item.scope);
+        pointerScopes.set(item.path, scopes);
+      }
+    }
+    if (built.commits.length) repairPhases.push("pointers");
+    const claim = Object.assign({}, work, { repairAdvance: advance });
+    q.clearCloudflareDirtyWorkIfRevisionMatches_(state, claim);
+  }
+  assert.equal(repairedEvents.length, eventIds.length * 2);
+  assert.equal(repairedAggregates.length, 8);
+  assert.ok(repairPhases.indexOf("season-map") > -1);
+  assert.ok(repairPhases.indexOf("pointers") > repairPhases.lastIndexOf("season-map"));
+  for (const scopes of pointerScopes.values()) assert.deepEqual(scopes.sort(), ["bot", "public"]);
+  assert.equal(state.dirty.repair, null);
 });

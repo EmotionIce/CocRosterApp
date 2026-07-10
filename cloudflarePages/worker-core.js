@@ -16,6 +16,7 @@ const PUBLIC_DATA_STORE_PREFIX = "public-data";
 const BOT_DATA_STORE_PREFIX = "bot-data";
 const PUBLIC_BOOTSTRAP_DATA_PATH = "bootstrap/current.json";
 const PUBLIC_BOOTSTRAP_DATA_KEY = PUBLIC_DATA_STORE_PREFIX + "/" + PUBLIC_BOOTSTRAP_DATA_PATH;
+const PUBLIC_ACTIVE_SELECTOR_PATH = "activePublished/currentSelector";
 const ACTIVE_COMMIT_GUARD_KEY = "internal/cloudflare-publish/active-commit-guard.json";
 const PUBLICATION_COORDINATOR_BINDING = "CLOUDFLARE_PUBLICATION_COORDINATOR";
 const PUBLICATION_COORDINATOR_NAME = "queued-v2-global";
@@ -743,6 +744,43 @@ const readDirectPublicActiveVersionId = async (store) => {
   return String(value || "").trim();
 };
 
+// The shared selector is metadata only. It is safe for the bot route to read
+// this public-scope selector because bot payloads are always fetched from the
+// bot scope below; public objects are never used as bot fallbacks.
+const readSharedCommittedSelector = async (store) => {
+  const selector = await readLegacyPublicJsonObject(store, PUBLIC_ACTIVE_SELECTOR_PATH);
+  if (!isPlainJsonObject(selector)) return null;
+  const currentVersionId = String(selector.currentVersionId || "").trim();
+  if (!currentVersionId) return null;
+  return {
+    schemaVersion: Math.max(1, Math.floor(Number(selector.schemaVersion) || 1)),
+    currentVersionId,
+    previousVersionId: String(selector.previousVersionId || "").trim(),
+    generation: Math.max(0, Math.floor(Number(selector.generation) || 0)),
+    committedAt: String(selector.committedAt || ""),
+  };
+};
+
+// Resolve one shared selector, falling back to the previous immutable version
+// only when the current public shards are temporarily absent from KV.
+const resolveSharedActiveVersion = async (store) => {
+  const selector = await readSharedCommittedSelector(store);
+  if (selector) {
+    const currentStatus = await readDirectActiveVersionShardStatus(store, selector.currentVersionId);
+    const currentBotStatus = await readDirectActiveBotVersionStatus(store, selector.currentVersionId);
+    if (currentStatus.complete && currentBotStatus.complete) return { selector, versionId: selector.currentVersionId, fallback: false, status: currentStatus, botStatus: currentBotStatus };
+    if (selector.previousVersionId) {
+      const previousStatus = await readDirectActiveVersionShardStatus(store, selector.previousVersionId);
+      const previousBotStatus = await readDirectActiveBotVersionStatus(store, selector.previousVersionId);
+      if (previousStatus.complete && previousBotStatus.complete) return { selector, versionId: selector.previousVersionId, fallback: true, status: previousStatus, botStatus: previousBotStatus, missingCurrent: currentStatus.missing.concat(currentBotStatus.missing) };
+    }
+    return { selector, versionId: selector.currentVersionId, fallback: false, status: currentStatus, botStatus: currentBotStatus, missingCurrent: currentStatus.missing.concat(currentBotStatus.missing) };
+  }
+  const legacyVersionId = await readDirectPublicActiveVersionId(store);
+  const status = await readDirectActiveVersionShardStatus(store, legacyVersionId);
+  return { selector: null, versionId: legacyVersionId, fallback: false, status };
+};
+
 // Read the direct public manifest for a known active version.
 const readDirectPublicActiveManifest = async (store, versionIdRaw) => {
   const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
@@ -753,7 +791,7 @@ const readDirectPublicActiveManifest = async (store, versionIdRaw) => {
     if (!manifestVersionId || manifestVersionId === versionId) return currentManifest;
   }
   const versionManifest = await readLegacyPublicJsonObject(store, "activeVersions/" + versionId + "/manifest");
-  return isPlainJsonObject(versionManifest) ? versionManifest : isPlainJsonObject(currentManifest) ? currentManifest : null;
+  return isPlainJsonObject(versionManifest) ? versionManifest : null;
 };
 
 // Keep bootstrap active-version pointers aligned with complete immutable shards.
@@ -763,16 +801,18 @@ const sanitizePublicBootstrapActiveVersion = async (store, payloadRaw) => {
   const advertisedVersionId = readBootstrapActiveVersionId(payload);
   if (!advertisedVersionId) return payload;
 
+  const shared = await resolveSharedActiveVersion(store);
   const advertisedStatus = await readDirectActiveVersionShardStatus(store, advertisedVersionId);
-  if (advertisedStatus.complete) {
+  const servedVersionId = shared.versionId || advertisedVersionId;
+  if (advertisedStatus.complete && servedVersionId === advertisedVersionId && !shared.fallback) {
     if (Object.prototype.hasOwnProperty.call(payload, "activeVersionFallback")) delete payload.activeVersionFallback;
     return payload;
   }
 
-  const fallbackVersionId = await readDirectPublicActiveVersionId(store);
+  const fallbackVersionId = servedVersionId || await readDirectPublicActiveVersionId(store);
   if (!fallbackVersionId || fallbackVersionId === advertisedVersionId) return payload;
 
-  const fallbackStatus = await readDirectActiveVersionShardStatus(store, fallbackVersionId);
+  const fallbackStatus = shared.selector ? shared.status : await readDirectActiveVersionShardStatus(store, fallbackVersionId);
   if (!fallbackStatus.complete) return payload;
 
   const fallbackManifest = await readDirectPublicActiveManifest(store, fallbackVersionId);
@@ -784,7 +824,7 @@ const sanitizePublicBootstrapActiveVersion = async (store, payloadRaw) => {
   });
   payload.activeVersionFallback = {
     status: "fallback",
-    reason: "advertised-active-version-shards-missing",
+    reason: shared.fallback ? "shared-selector-current-version-shards-missing" : "advertised-active-version-shards-missing",
     advertisedVersionId,
     servedVersionId: fallbackVersionId,
     missing: Array.isArray(advertisedStatus.missing) ? advertisedStatus.missing.slice() : [],
@@ -1039,10 +1079,42 @@ const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathR
   return rosterMap;
 };
 
+const readVersionedBotObject = async (store, versionIdRaw, objectPathRaw) => {
+  const versionedPath = buildVersionedBotObjectPath(versionIdRaw, objectPathRaw);
+  if (!versionedPath) return null;
+  return getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
+};
+
+const resolveSharedBotVersion = async (store, selectorRaw, objectPathRaw) => {
+  const selector = selectorRaw && typeof selectorRaw === "object" ? selectorRaw : null;
+  if (!selector) return { selector: null, versionId: "", fallback: false, object: null };
+  // Public shard completeness chooses the shared generation for both scopes.
+  // Bot propagation may not independently fall back, or the two readers could
+  // observe different generations during KV convergence.
+  const shared = await resolveSharedActiveVersion(store);
+  const object = await readVersionedBotObject(store, shared.versionId, objectPathRaw);
+  return Object.assign({}, shared, { object });
+};
+
 // Read a public object from bootstrap first, falling back to its legacy key.
 const getPublicDataObjectWithBootstrapFallback = async (store, key, objectPath) => {
   if (String(objectPath || "") === PUBLIC_BOOTSTRAP_DATA_PATH) {
     return buildProjectedDataStoreObject(await readPublicBootstrapPayload(store));
+  }
+  const shared = await readSharedCommittedSelector(store);
+  if (shared) {
+    const resolution = await resolveSharedActiveVersion(store);
+    const path = String(objectPath || "").replace(/\.json$/i, "");
+    if (path === PUBLIC_ACTIVE_SELECTOR_PATH) return buildProjectedDataStoreObject(shared);
+    if (path === "activePublished/currentVersionId") return buildProjectedDataStoreObject(resolution.versionId);
+    if (path === "activePublished/currentManifest") {
+      return buildProjectedDataStoreObject(await readDirectPublicActiveManifest(store, resolution.versionId));
+    }
+    const match = /^activeVersions\/([^/]+)\/(manifest|rosters|playerMetrics)$/.exec(path);
+    if (match && decodeURIComponent(match[1] || "") === shared.currentVersionId && resolution.versionId !== shared.currentVersionId) {
+      const fallbackPath = "activeVersions/" + encodeURIComponent(resolution.versionId) + "/" + match[2];
+      return getDataStoreObject(store, buildDataObjectKey("public", fallbackPath));
+    }
   }
   if (shouldPreferPublicBootstrapPath(objectPath)) {
     const bootstrap = await readPublicBootstrapPayload(store);
@@ -1105,8 +1177,25 @@ const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
   return status;
 };
 
+const readDirectActiveBotVersionStatus = async (store, versionIdRaw) => {
+  const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+  const names = ["active", "playerMetrics/byTag", "indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
+  const status = { versionId, complete: false, missing: [] };
+  if (!versionId) {
+    status.missing = names.slice();
+    return status;
+  }
+  for (let i = 0; i < names.length; i++) {
+    const object = await getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/" + names[i]));
+    if (!object) status.missing.push(names[i]);
+  }
+  status.complete = status.missing.length === 0;
+  return status;
+};
+
 // Handle public/bot data health.
 const handleDataHealth = async (request, env, scopeRaw) => {
+  const scope = normalizeDataScope(scopeRaw);
   const method = String(request.method || "").toUpperCase();
   if (method === "OPTIONS") {
     return new Response(null, {
@@ -1118,7 +1207,7 @@ const handleDataHealth = async (request, env, scopeRaw) => {
     return jsonResponse(405, { ok: false, error: "Method not allowed. Use GET." });
   }
 
-  if (normalizeDataScope(scopeRaw) === "bot") {
+  if (scope === "bot") {
     const auth = await verifyRequestSecret(request, resolveBotDataSecret(env), "Bot data secret");
     if (!auth.ok) return auth.response;
   }
@@ -1128,18 +1217,24 @@ const handleDataHealth = async (request, env, scopeRaw) => {
     return jsonResponse(503, { ok: false, error: "Roster data store is not configured." });
   }
 
+  const sharedSelector = await readSharedCommittedSelector(store);
+  const sharedResolution = sharedSelector ? await resolveSharedActiveVersion(store) : null;
   const pointerKey = buildDataObjectKey("public", "activePublished/currentVersionId");
-  const pointer = await getDataStoreObject(store, pointerKey);
+  const pointer = scope === "public" ? await getDataStoreObject(store, pointerKey) : null;
   let directCurrentVersionId = "";
-  if (pointer) {
+  if (sharedSelector) {
+    directCurrentVersionId = sharedSelector.currentVersionId;
+  } else if (scope === "bot") {
+    directCurrentVersionId = String(await readLegacyBotJsonObject(store, "active/currentVersionId") || "").trim();
+  } else if (pointer) {
     try {
       directCurrentVersionId = String(JSON.parse(await pointer.text()) || "").trim();
     } catch (err) {
       directCurrentVersionId = "";
     }
   }
-  let projectedCurrentVersionId = directCurrentVersionId;
-  if (normalizeDataScope(scopeRaw) === "public") {
+  let projectedCurrentVersionId = sharedResolution ? sharedResolution.versionId : directCurrentVersionId;
+  if (scope === "public" && !sharedSelector) {
     try {
       const projectedPointer = await getPublicDataObjectWithBootstrapFallback(
         store,
@@ -1153,13 +1248,13 @@ const handleDataHealth = async (request, env, scopeRaw) => {
   }
   const url = new URL(request.url);
   const expectedVersionId = String(url.searchParams.get("expectedVersionId") || "").trim();
-  const checkedVersionId = expectedVersionId || directCurrentVersionId;
-  const activeVersionShards = normalizeDataScope(scopeRaw) === "public"
+  const checkedVersionId = expectedVersionId || projectedCurrentVersionId;
+  const activeVersionShards = scope === "public"
     ? await readDirectActiveVersionShardStatus(store, checkedVersionId)
     : null;
   const response = jsonResponse(200, {
     ok: true,
-    scope: normalizeDataScope(scopeRaw),
+    scope,
     storeConfigured: true,
     storeKind: store.kind,
     currentVersionId: directCurrentVersionId,
@@ -1170,7 +1265,9 @@ const handleDataHealth = async (request, env, scopeRaw) => {
     projectedCurrentVersionMatchesExpected: expectedVersionId ? projectedCurrentVersionId === expectedVersionId : undefined,
     hasCurrentVersion: !!directCurrentVersionId,
     activeVersionShards,
-  }, scopeRaw === "public" ? publicDataCorsHeaders() : {});
+    sharedSelector: sharedSelector || null,
+    sharedVersionFallback: sharedResolution ? sharedResolution.fallback : false,
+  }, scope === "public" ? publicDataCorsHeaders() : {});
   if (method === "HEAD") return new Response(null, { status: response.status, headers: response.headers });
   return response;
 };
@@ -1408,13 +1505,17 @@ const handleDataVerifyV2 = async (request, env) => {
 };
 
 // Resolve the committed bot pointer without ever serving a public object from
-// an authenticated bot route. The public pointer is read only as a migration
-// fallback while older deployments acquire the bot-local pointer.
+// an authenticated bot route. A shared selector is authoritative; the legacy
+// bot-local pointer is used only while no shared selector exists.
 const readCommittedBotVersionId = async (store) => {
+  const selector = await readSharedCommittedSelector(store);
+  if (selector) {
+    const resolution = await resolveSharedActiveVersion(store);
+    return resolution.versionId;
+  }
   const botPointer = await readLegacyBotJsonObject(store, "active/currentVersionId");
   const botVersionId = String(botPointer || "").trim();
-  if (botVersionId) return botVersionId;
-  return readDirectPublicActiveVersionId(store);
+  return botVersionId;
 };
 
 const readLegacyBotJsonObject = async (store, pathRaw) => {
@@ -1440,12 +1541,19 @@ const buildVersionedBotObjectPath = (versionIdRaw, objectPathRaw) => {
 };
 
 const readBotDataObjectWithVersionFallback = async (store, objectPathRaw, legacyKey) => {
-  const versionId = await readCommittedBotVersionId(store);
-  const versionedPath = buildVersionedBotObjectPath(versionId, objectPathRaw);
-  if (versionedPath) {
-    const versioned = await getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
-    if (versioned) return versioned;
+  const selector = await readSharedCommittedSelector(store);
+  if (selector) {
+    const resolution = await resolveSharedBotVersion(store, selector, objectPathRaw);
+    const normalizedPath = String(objectPathRaw || "").replace(/\.json$/i, "");
+    if (normalizedPath === "active/currentVersionId") return buildProjectedDataStoreObject(resolution.versionId);
+    if (resolution.object) return resolution.object;
+    // A valid shared selector must never expose an older direct bot object;
+    // returning 404 is safer than mixing generations or scopes.
+    return null;
   }
+  const versionId = await readCommittedBotVersionId(store);
+  const versioned = await readVersionedBotObject(store, versionId, objectPathRaw);
+  if (versioned) return versioned;
   // Rollout compatibility: only the existing bot-scope key is eligible for
   // fallback. Public-scope reads are never used here.
   return getDataStoreObject(store, legacyKey);

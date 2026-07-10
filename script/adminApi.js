@@ -109,6 +109,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return runAutoRefreshWorkerTick(args[0], args[1]);
 		case "repairCloudflarePublishQueue":
 			return repairCloudflarePublishQueue(args[0], args[1]);
+		case "repairCloudflareBotVersionObjects":
+			return repairCloudflareBotVersionObjects(args[0], args[1]);
 		case "pauseCloudflarePublishQueue":
 			return pauseCloudflarePublishQueue(args[0], args[1]);
 		default:
