@@ -233,6 +233,42 @@ test("lease-busy performs zero external, enumeration, or scheduling work", () =>
   assert.equal(q.__triggerCalls.schedules, 0);
 });
 
+test("failed active enqueue persists a durable local repair target", () => {
+  const q = loadQueue();
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.mutateCloudflarePublishQueueState_ = () => { throw new Error("Firebase unavailable"); };
+
+  const result = q.enqueueCloudflareActiveTarget_("version-B", "auto-refresh-finalize");
+  const marker = JSON.parse(q.__properties.get("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.repairPending, true);
+  assert.equal(marker.activeVersionId, "version-B");
+  assert.equal(marker.activeReason, "auto-refresh-finalize");
+});
+
+test("permanent watchdog merges a failed active enqueue idempotently and never restores a superseded target", () => {
+  const q = installCasFirebase(loadQueue());
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  q.readPublishedActiveVersionId_ = () => "version-B";
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-B", activeReason: "auto-refresh" }));
+
+  const repaired = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+  const generation = q.__getState().active.targetGeneration;
+  const repeated = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+
+  assert.equal(repaired.ok, true);
+  assert.equal(q.__getState().active.targetVersionId, "version-B");
+  assert.equal(q.__getState().active.targetGeneration, generation);
+  assert.equal(repeated.ok, true);
+
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-A", activeReason: "stale-auto-refresh" }));
+  q.readPublishedActiveVersionId_ = () => "version-B";
+  q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+  assert.equal(q.__getState().active.targetVersionId, "version-B");
+});
+
 test("lease lifetime exceeds the maximum live Apps Script execution and recovery is later", () => {
   const q = loadQueue();
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS > 360000);

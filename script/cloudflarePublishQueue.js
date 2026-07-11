@@ -597,14 +597,20 @@ function consumeCloudflareFiredTriggerIdentity_(eventRaw, idPropertyRaw, atPrope
 	return true;
 }
 
-function markCloudflarePublishSchedulerRepair_(reasonRaw, nextAttemptAtRaw) {
-	const payload = {
+function markCloudflarePublishSchedulerRepair_(reasonRaw, nextAttemptAtRaw, detailsRaw) {
+	const properties = PropertiesService.getScriptProperties();
+	let existing = {};
+	try {
+		const raw = String(properties.getProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_) || "").trim();
+		existing = raw ? JSON.parse(raw) : {};
+	} catch (err) {}
+	const payload = Object.assign({}, existing && typeof existing === "object" ? existing : {}, {
 		pending: true,
 		reason: String(reasonRaw || "dynamic-scheduling-failed").slice(0, 500),
 		updatedAt: new Date().toISOString(),
 		nextAttemptAt: String(nextAttemptAtRaw || ""),
-	};
-	PropertiesService.getScriptProperties().setProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_, JSON.stringify(payload));
+	}, detailsRaw && typeof detailsRaw === "object" ? detailsRaw : {});
+	properties.setProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_, JSON.stringify(payload));
 	return payload;
 }
 
@@ -690,7 +696,11 @@ function enqueueCloudflareActiveTarget_(versionIdRaw, reasonRaw) {
 		migration = migrateUnsafeCloudflareActiveVersion_(requestedVersionId, reasonRaw);
 		versionId = migration.versionId;
 	}
-	if (!versionId || !isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: !versionId ? "missing-version" : "disabled" };
+	if (!versionId) return { ok: false, skipped: true, reason: "missing-version" };
+	if (!isCloudflareQueuedPublicationEnabled_()) {
+		markCloudflarePublishSchedulerRepair_("active-target-queue-disabled", "", { activeVersionId: versionId, activeReason: String(reasonRaw || "") });
+		return { ok: false, skipped: true, reason: "disabled", versionId: versionId, repairPending: true };
+	}
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
 			if (state.active.targetVersionId !== versionId || isCloudflareQueueFailureDead_(state.active.failure)) {
@@ -710,7 +720,8 @@ function enqueueCloudflareActiveTarget_(versionIdRaw, reasonRaw) {
 		return Object.assign(finalizeCloudflareEnqueueResult_(result), { migration: migration });
 	} catch (err) {
 		Logger.log("Cloudflare active target enqueue failed versionId=%s error=%s", versionId, errorMessage_(err));
-		return { ok: false, error: errorMessage_(err), versionId: versionId };
+		markCloudflarePublishSchedulerRepair_("active-target-enqueue-failed:" + errorMessage_(err), "", { activeVersionId: versionId, activeReason: String(reasonRaw || "") });
+		return { ok: false, error: errorMessage_(err), versionId: versionId, repairPending: true };
 	}
 }
 
@@ -1982,16 +1993,34 @@ function repairCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 function repairCloudflarePublishSchedulingFromPermanentWatchdog_() {
 	const properties = PropertiesService.getScriptProperties();
 	const markerRaw = String(properties.getProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_) || "").trim();
-	const state = readCloudflarePublishQueueState_();
+	let marker = {};
+	try { marker = markerRaw ? JSON.parse(markerRaw) : {}; } catch (err) {}
+	let repairVersionId = normalizeActiveVersionId_(marker && marker.activeVersionId);
+	const canonicalVersionId = typeof readPublishedActiveVersionId_ === "function" ? normalizeActiveVersionId_(readPublishedActiveVersionId_()) : "";
+	if (repairVersionId && canonicalVersionId && canonicalVersionId !== repairVersionId) {
+		// A newer canonical publication supersedes this local repair marker. Never
+		// replace that target with an older auto-refresh version.
+		repairVersionId = "";
+		clearCloudflarePublishSchedulerRepair_();
+	}
+	let activeRepair = null;
+	let state = readCloudflarePublishQueueState_();
+	if (repairVersionId && String((state.active && state.active.targetVersionId) || "") !== repairVersionId) {
+		activeRepair = enqueueCloudflareActiveTarget_(repairVersionId, marker.activeReason || "permanent-watchdog-active-repair");
+		state = readCloudflarePublishQueueState_();
+	}
 	const pending = hasPendingCloudflarePublishWork_(state);
-	if (!pending) { clearCloudflarePublishSchedulerRepair_(); return { ok: true, pending: false, repaired: !!markerRaw }; }
+	if (!pending) {
+		if (!repairVersionId || (activeRepair && activeRepair.ok !== false)) clearCloudflarePublishSchedulerRepair_();
+		return { ok: !repairVersionId || !!(activeRepair && activeRepair.ok !== false), pending: false, repaired: !!(activeRepair && activeRepair.ok !== false), activeRepair: activeRepair };
+	}
 	const nextAttemptAt = cloudflareQueueNextAttemptIso_(state);
 	const continuation = scheduleCloudflarePublishWorker_(undefined, true, nextAttemptAt);
 	const lease = parseCloudflarePublishQueueLockState_(properties.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
 	const recovery = lease ? scheduleCloudflarePublishWorkerRecovery_(true, lease) : { scheduled: false, reason: "no-live-owner" };
 	if (continuation && continuation.scheduled) clearCloudflarePublishSchedulerRepair_();
 	else markCloudflarePublishSchedulerRepair_(continuation && (continuation.error || continuation.reason), nextAttemptAt);
-	return { ok: !!(continuation && continuation.scheduled), pending: true, repaired: !!(continuation && continuation.scheduled), continuation: continuation, recovery: recovery };
+	return { ok: !!(continuation && continuation.scheduled), pending: true, repaired: !!(continuation && continuation.scheduled), activeRepair: activeRepair, continuation: continuation, recovery: recovery };
 }
 function repairCloudflareBotVersionObjects(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return repairCloudflareBotVersionObjects_(payloadRaw); }
 function inspectCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return getCloudflarePublishQueueDiagnostics_(); }
