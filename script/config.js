@@ -85,7 +85,7 @@ const CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS = 240 * 1000;
 // Apps Script executions can remain alive for roughly six minutes after a
 // transport stalls. Keep ownership longer than that hard runtime so a
 // successor cannot overlap a hard-killed owner.
-const CLOUDFLARE_PUBLISH_QUEUE_LEASE_SAFETY_MS = 8 * 60 * 1000;
+const CLOUDFLARE_PUBLISH_QUEUE_LEASE_SAFETY_MS = 3 * 60 * 1000;
 const CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS = CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS + CLOUDFLARE_PUBLISH_QUEUE_LEASE_SAFETY_MS;
 const CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS = 20;
 const CLOUDFLARE_PUBLISH_QUEUE_MAX_OBJECTS_PER_REQUEST = 24;

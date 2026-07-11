@@ -91,7 +91,7 @@ const loadQueue = () => {
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY: "TRIGGER",
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY: "TRIGGER_AT",
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY: "LOCK",
-    CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS: 12 * 60 * 1000,
+    CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS: 7 * 60 * 1000,
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS: 1,
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS: 1000,
     CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS: 240000,
@@ -115,7 +115,7 @@ const loadQueue = () => {
     CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_HANDLER_NAME: "cloudflarePublishWorkerRecoveryTick",
     CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY: "RECOVERY_TRIGGER",
     CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY: "RECOVERY_TRIGGER_AT",
-    CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS: 13 * 60 * 1000,
+    CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS: 8 * 60 * 1000,
     CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_ROSTERS_PER_PHASE: 24,
     CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY: 3,
     CLOUDFLARE_PUBLISH_QUEUE_CAS_MAX_ATTEMPTS: 3,
@@ -315,10 +315,12 @@ test("lifecycle descriptors dirty canonical event, exact aggregates, and pointer
   assert.equal(JSON.stringify(state).includes("forged"), false);
 });
 
-test("lease lifetime exceeds the maximum live Apps Script execution and recovery is later", () => {
+test("lease prevents six-minute overlap and claimed-work recovery follows promptly", () => {
   const q = loadQueue();
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS > 360000);
+  assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS <= 8 * 60 * 1000);
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS > q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS);
+  assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS <= 9 * 60 * 1000);
 });
 
 test("schema-v2 ordinary and commit states migrate to the first idempotent phase without changing the committed pointer", () => {
@@ -408,7 +410,7 @@ test("no Firebase transport runs while ScriptLock is held", () => {
   q.mutateCloudflarePublishQueueState_((current) => { current.dirty.events.e = { revision: 1 }; });
 });
 
-test("Firebase timeout leaves phase and cursor unchanged, applies backoff, and leaves one continuation plus recovery", () => {
+test("pre-claim Firebase timeout leaves phase unchanged and schedules no recovery trigger", () => {
   const q = installCasFirebase(loadQueue(), activeState(loadQueue()));
   q.__setState(activeState(q));
   q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
@@ -421,8 +423,67 @@ test("Firebase timeout leaves phase and cursor unchanged, applies backoff, and l
   assert.equal(after.active.cursor, 0);
   assert.equal(after.infrastructure.attempt, 1);
   assert.ok(after.infrastructure.nextAttemptAt);
-  assert.equal(q.__triggers.length, 2);
+  assert.equal(q.__triggers.length, 1);
+  assert.deepEqual(q.__triggers.map((trigger) => trigger.handler), ["cloudflarePublishWorkerTick"]);
+});
+
+test("empty publication worker reads queue once and performs no drift or trigger work", () => {
+  const q = installCasFirebase(loadQueue());
+  let reads = 0;
+  q.readCloudflarePublishQueueState_ = () => { reads += 1; return clone(q.__getState()); };
+  q.repairCloudflarePublishQueueDrift_ = () => { throw new Error("empty worker must not discover drift"); };
+
+  const result = q.cloudflarePublishWorkerTick();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.pending, false);
+  assert.equal(reads, 1);
+  assert.equal(q.__triggerCalls.enumerations, 0);
+  assert.equal(q.__triggerCalls.schedules, 0);
+  assert.equal(q.__triggerCalls.deletes, 0);
+});
+
+test("publication recovery is created only after a durable dispatch claim", () => {
+  const q = installCasFirebase(loadQueue());
+  q.__setState(activeState(q));
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  let observedClaim = false;
+  q.buildCloudflareActivePhaseRequest_ = (_state, claim) => {
+    observedClaim = !!(q.__getState().active.dispatch && claim.dispatchGuard);
+    assert.equal(q.__triggers.some((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick"), true);
+    return { label: "claimed", request: { objects: [] } };
+  };
+  q.sendCloudflareQueuedV2Request_ = () => ({ ok: true, response: { ok: true } });
+
+  const result = q.cloudflarePublishWorkerTick();
+
+  assert.equal(result.ok, true);
+  assert.equal(observedClaim, true);
   assert.deepEqual(q.__triggers.map((trigger) => trigger.handler).sort(), ["cloudflarePublishWorkerRecoveryTick", "cloudflarePublishWorkerTick"]);
+});
+
+test("recovery trigger creation failure checkpoints the claim without starting remote work", () => {
+  const q = installCasFirebase(loadQueue());
+  q.__setState(activeState(q));
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  const originalNewTrigger = q.ScriptApp.newTrigger;
+  q.ScriptApp.newTrigger = (handler) => {
+    if (handler !== "cloudflarePublishWorkerRecoveryTick") return originalNewTrigger(handler);
+    return { timeBased: () => ({ after: () => ({ create: () => { throw new Error("trigger quota"); } }) }) };
+  };
+  let builds = 0;
+  q.buildCloudflareActivePhaseRequest_ = () => { builds += 1; throw new Error("must not build without recovery"); };
+  q.sendCloudflareQueuedV2Request_ = () => { throw new Error("must not send without recovery"); };
+
+  const result = q.cloudflarePublishWorkerTick();
+  const state = q.__getState();
+
+  assert.equal(result.ok, false);
+  assert.equal(builds, 0);
+  assert.ok(state.active.dispatch && state.active.dispatch.guard);
+  assert.equal(state.active.failure, null);
+  assert.equal(state.infrastructure.attempt, 1);
+  assert.deepEqual(q.__triggers.map((trigger) => trigger.handler), ["cloudflarePublishWorkerTick"]);
 });
 
 test("transport descriptors carry explicit bounded timeouts", () => {

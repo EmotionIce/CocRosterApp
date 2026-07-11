@@ -1713,6 +1713,44 @@ function cloudflareActiveClaimMatchesState_(stateRaw, claimRaw) {
 		dispatch.guard && dispatch.guard.batchId === claim.dispatchGuard.batchId;
 }
 
+// Install hard-kill recovery only after the queue CAS has persisted a dispatch
+// claim. Empty, paused, disabled, and backoff-only workers never create it.
+function ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claimRaw) {
+	const ownerToken = String(ownerTokenRaw || "").trim();
+	if (!ownerToken) return { scheduled: false, skipped: true, reason: "ownerless-direct-call" };
+	const lease = parseCloudflarePublishQueueLockState_(PropertiesService.getScriptProperties().getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+	if (!lease || lease.token !== ownerToken || lease.expiresAt <= Date.now()) {
+		const error = new Error("Cloudflare queue lease ownership was lost before recovery scheduling.");
+		error.code = "CLOUDFLARE_QUEUE_LEASE_LOST";
+		throw error;
+	}
+	let scheduled = null;
+	try {
+		scheduled = scheduleCloudflarePublishWorkerRecovery_(true, lease);
+	} catch (err) {
+		markCloudflarePublishSchedulerRepair_(errorMessage_(err), "", {
+			claim: cloudflareQueueClaimItemKey_(claimRaw),
+			recovery: true,
+		});
+		const failure = new Error("Cloudflare claimed-work recovery scheduling failed: " + errorMessage_(err));
+		failure.code = "CLOUDFLARE_QUEUE_RECOVERY_UNAVAILABLE";
+		failure.resumable = true;
+		throw failure;
+	}
+	if (!scheduled || scheduled.scheduled !== true) {
+		const reason = String(scheduled && (scheduled.error || scheduled.reason) || "recovery-trigger-unavailable");
+		markCloudflarePublishSchedulerRepair_(reason, "", {
+			claim: cloudflareQueueClaimItemKey_(claimRaw),
+			recovery: true,
+		});
+		const failure = new Error("Cloudflare claimed-work recovery trigger is unavailable: " + reason);
+		failure.code = "CLOUDFLARE_QUEUE_RECOVERY_UNAVAILABLE";
+		failure.resumable = true;
+		throw failure;
+	}
+	return scheduled;
+}
+
 // The final active request is allowed to publish only after a fresh
 // owner-checked canonical read. Enqueueing a newer target clears the dispatch
 // claim, so a superseded request becomes resumable before it reaches Worker.
@@ -1731,6 +1769,7 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw) {
 	if (claim.deferred) return { ok: true, skipped: true, reason: "backoff", nextAttemptAt: claim.nextAttemptAt };
 	cloudflarePublishQueueCurrentClaim_ = claim;
 	try {
+		ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claim);
 		const built = buildCloudflareActivePhaseRequest_(state, claim);
 		const request = Object.assign({}, built.request, { dispatchGuard: claim.dispatchGuard, revision: claim.generation });
 		request.batchId = claim.dispatchGuard.batchId;
@@ -1742,7 +1781,7 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw) {
 		const sent = sendCloudflareQueuedV2Request_(request, built.label, ownerTokenRaw);
 		return completeCloudflareActivePhase_(claim, sent, ownerTokenRaw);
 	} catch (err) {
-		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE")) throw err;
+		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE" || err.code === "CLOUDFLARE_QUEUE_RECOVERY_UNAVAILABLE")) throw err;
 		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: "active", phase: claim.phase, targetVersionId: claim.targetVersionId, failed: err && err.publishFailure || null }, ownerTokenRaw, claim);
 		return { ok: false, error: errorMessage_(err), failure: failure, claim: claim };
 	} finally {
@@ -1759,6 +1798,7 @@ function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw) {
 	if (claim.deferred) return { ok: true, skipped: true, reason: "backoff", nextAttemptAt: claim.nextAttemptAt };
 	cloudflarePublishQueueCurrentClaim_ = claim;
 	try {
+		ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claim);
 		const built = buildCloudflareDirtyRequest_(state, claim);
 		const request = Object.assign({}, built, { dispatchGuard: claim.dispatchGuard, revision: claim.revision, batchId: claim.dispatchGuard.batchId });
 		if (claim.category === "repair") {
@@ -1769,7 +1809,7 @@ function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw) {
 		const sent = sendCloudflareQueuedV2Request_(request, built.label || claim.category, ownerTokenRaw);
 		return completeCloudflareDirtyPhase_(claim, sent, ownerTokenRaw);
 	} catch (err) {
-		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE")) throw err;
+		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE" || err.code === "CLOUDFLARE_QUEUE_RECOVERY_UNAVAILABLE")) throw err;
 		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: claim.category, revision: claim.revision, failed: err && err.publishFailure || null }, ownerTokenRaw, claim);
 		return { ok: false, error: errorMessage_(err), failure: failure, claim: claim };
 	} finally {
@@ -1819,9 +1859,6 @@ function cloudflarePublishWorkerTick(eventRaw, triggerKindRaw) {
 		const triggerKind = String(triggerKindRaw || "continuation");
 		if (triggerKind === "recovery") consumeCloudflareFiredTriggerIdentity_(eventRaw, cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"), cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"));
 		else consumeCloudflareFiredTriggerIdentity_(eventRaw, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY);
-		// Recovery is installed from local trigger state before the first remote
-		// read. It protects a hard-killed owner without reading queue state.
-		scheduleCloudflarePublishWorkerRecovery_(true, lease);
 		let state = readCloudflarePublishQueueState_();
 		if (state.paused) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, skipped: true, reason: "paused" }; }
 		if (parseIsoToMs_(state.infrastructure.nextAttemptAt) > Date.now()) {
@@ -1830,14 +1867,7 @@ function cloudflarePublishWorkerTick(eventRaw, triggerKindRaw) {
 			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), state.infrastructure.nextAttemptAt);
 			return { ok: true, skipped: true, reason: "infrastructure-backoff", nextAttemptAt: state.infrastructure.nextAttemptAt };
 		}
-		if (!hasPendingCloudflarePublishWork_(state)) {
-			const driftAge = Date.now() - parseIsoToMs_(state.lastDriftRepairAt);
-			if (!state.lastDriftRepairAt || driftAge > 6 * 60 * 60 * 1000) {
-				const repair = repairCloudflarePublishQueueDrift_(lease.token);
-				if (repair && repair.ok) state = readCloudflarePublishQueueState_();
-			}
-		}
-		if (!hasPendingCloudflarePublishWork_(state)) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, pending: false, results: [] }; }
+		if (!hasPendingCloudflarePublishWork_(state)) { finalPendingKnown = false; return { ok: true, pending: false, results: [] }; }
 		const activePending = state.active.targetVersionId && (state.active.targetVersionId !== state.active.committedVersionId || state.active.republish || state.active.phase !== "idle") && !isCloudflareQueueFailureDead_(state.active.failure);
 		const activeEligible = activePending && isCloudflareQueueMarkerEligible_(state.active, Date.now());
 		const dirty = firstCloudflareDirtyWork_(state);
