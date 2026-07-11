@@ -45,6 +45,32 @@ const createKv = (entriesRaw) => {
   };
 };
 
+const createObservedKv = (entriesRaw, optionsRaw = {}) => {
+  const entries = new Map(Object.entries(entriesRaw || {}));
+  const reads = [];
+  const delayMs = Math.max(0, Number(optionsRaw.delayMs) || 0);
+  return {
+    reads,
+    async get(key) {
+      reads.push(key);
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return entries.has(key) ? entries.get(key) : null;
+    },
+    async getWithMetadata(key) {
+      reads.push(key);
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (!entries.has(key)) return { value: null, metadata: null };
+      return {
+        value: entries.get(key),
+        metadata: {
+          etag: `"etag-${key}"`,
+          contentType: "application/json; charset=utf-8",
+        },
+      };
+    },
+  };
+};
+
 test("bot data route reads bot-scoped event data", async () => {
   const worker = loadWorker();
   const env = {
@@ -144,11 +170,12 @@ test("sharded bot-active publication reconstructs the unchanged active route con
   });
 });
 
-test("one shared selector drives public and bot reads for the same version", async () => {
+test("committed public pointer and shared selector expose the same version", async () => {
   const worker = loadWorker();
   const selector = { schemaVersion: 1, currentVersionId: "version-current", previousVersionId: "version-previous", generation: 4, committedAt: "now" };
   const publicObjects = {
     "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+    "public-data/activePublished/currentVersionId.json": JSON.stringify("version-current"),
     "public-data/activeVersions/version-current/manifest.json": JSON.stringify({ versionId: "version-current" }),
     "public-data/activeVersions/version-current/rosters.json": JSON.stringify({ main: { id: "main" } }),
     "public-data/activeVersions/version-current/playerMetrics.json": JSON.stringify({ byTag: {} }),
@@ -178,6 +205,7 @@ test("shared selector falls back to the previous complete version during KV prop
     ROSTER_BOT_SECRET: "secret",
     ROSTER_DATA_KV: createKv({
       "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+      "public-data/activePublished/currentVersionId.json": JSON.stringify("version-current"),
       "public-data/activeVersions/version-current/manifest.json": JSON.stringify({ versionId: "version-current" }),
       "public-data/activeVersions/version-previous/manifest.json": JSON.stringify({ versionId: "version-previous" }),
       "public-data/activeVersions/version-previous/rosters.json": JSON.stringify({ main: { id: "main" } }),
@@ -192,7 +220,7 @@ test("shared selector falls back to the previous complete version during KV prop
   const publicPointer = await worker.fetch(new Request("https://worker.test/api/public-data/activePublished/currentVersionId.json", { headers: auth }), env, {});
   const botPointer = await worker.fetch(new Request("https://worker.test/api/bot-data/active/currentVersionId.json", { headers: auth }), env, {});
   const botActive = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", { headers: auth }), env, {});
-  assert.equal(await publicPointer.json(), "version-previous");
+  assert.equal(await publicPointer.json(), "version-current");
   assert.equal(await botPointer.json(), "version-previous");
   assert.equal((await botActive.json()).activeVersionId, "version-previous");
 });
@@ -257,7 +285,7 @@ test("verify-v2 refuses pointer readiness when a required object is missing", as
   assert.equal((await response.json()).ok, false);
 });
 
-test("mutable public pointers are no-store while version shards stay immutable", async () => {
+test("mutable public pointers use short edge caching while version shards stay immutable", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_DATA_KV: createKv({
@@ -278,10 +306,60 @@ test("mutable public pointers are no-store while version shards stay immutable",
   );
 
   assert.equal(pointerResponse.status, 200);
-  assert.equal(pointerResponse.headers.get("cache-control"), "no-store");
+  assert.equal(pointerResponse.headers.get("cache-control"), "public, max-age=5, s-maxage=15, stale-while-revalidate=30");
   assert.equal(await pointerResponse.json(), "version-2");
   assert.equal(manifestResponse.status, 200);
   assert.equal(manifestResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
+});
+
+test("immutable public reads touch one exact KV key and never substitute the previous version", async () => {
+  const worker = loadWorker();
+  const kv = createObservedKv({
+    "public-data/activePublished/currentSelector.json": JSON.stringify({
+      currentVersionId: "version-new",
+      previousVersionId: "version-old",
+    }),
+    "public-data/activeVersions/version-old/rosters.json": JSON.stringify({ old: true }),
+  }, { delayMs: 35 });
+  const startedAt = Date.now();
+  const response = await worker.fetch(
+    new Request("https://worker.test/api/public-data/activeVersions/version-new/rosters.json"),
+    { ROSTER_DATA_KV: kv },
+    {},
+  );
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(kv.reads, ["public-data/activeVersions/version-new/rosters.json"]);
+  assert.ok(elapsedMs >= 30, `expected simulated KV latency, received ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 120, `exact immutable read should not serialize hidden KV reads, received ${elapsedMs}ms`);
+});
+
+test("mutable public reads touch one exact key and retain direct-object ETags", async () => {
+  const worker = loadWorker();
+  const key = "public-data/events/seasonEvents/current.json";
+  const kv = createObservedKv({
+    "public-data/bootstrap/current.json": JSON.stringify({ seasonEvents: { current: { source: "bootstrap" } } }),
+    [key]: JSON.stringify({ source: "direct" }),
+  });
+  const first = await worker.fetch(
+    new Request("https://worker.test/api/public-data/events/seasonEvents/current.json"),
+    { ROSTER_DATA_KV: kv },
+    {},
+  );
+  const etag = first.headers.get("etag");
+  const second = await worker.fetch(
+    new Request("https://worker.test/api/public-data/events/seasonEvents/current.json", {
+      headers: { "if-none-match": etag },
+    }),
+    { ROSTER_DATA_KV: kv },
+    {},
+  );
+
+  assert.deepEqual(await first.json(), { source: "direct" });
+  assert.equal(second.status, 304);
+  assert.equal(kv.reads.every((readKey) => readKey === key), true);
+  assert.equal(kv.reads.length, 2);
 });
 
 test("public health reports direct active version shard presence", async () => {
@@ -349,7 +427,7 @@ test("public health exposes bootstrap-projected pointer without relaxing direct 
   assert.equal(payload.activeVersionShards.complete, true);
 });
 
-test("public bootstrap falls back when advertised active version shards are incomplete", async () => {
+test("public bootstrap and immutable version URLs preserve exact route identity", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_DATA_KV: createKv({
@@ -408,15 +486,15 @@ test("public bootstrap falls back when advertised active version shards are inco
   const health = await healthResponse.json();
 
   assert.equal(bootstrapResponse.status, 200);
-  assert.equal(bootstrapResponse.headers.get("cache-control"), "no-store");
-  assert.equal(bootstrap.activeVersionId, "version-old");
-  assert.equal(bootstrap.active.versionId, "version-old");
-  assert.equal(bootstrap.active.manifest.pageTitle, "Old complete");
+  assert.equal(bootstrapResponse.headers.get("cache-control"), "public, max-age=5, s-maxage=15, stale-while-revalidate=30");
+  assert.equal(bootstrap.activeVersionId, "version-new");
+  assert.equal(bootstrap.active.versionId, "version-new");
+  assert.equal(bootstrap.active.manifest.pageTitle, "New partial");
   assert.equal(bootstrap.seasonEvents.current.donation.eventId, "donation-current");
-  assert.equal(bootstrap.activeVersionFallback.advertisedVersionId, "version-new");
-  assert.deepEqual(bootstrap.activeVersionFallback.missing, ["rosters", "playerMetrics"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(bootstrap, "activeVersionFallback"), false);
   assert.equal(await pointerResponse.json(), "version-old");
-  assert.equal(missingRosterResponse.status, 404);
+  assert.equal(missingRosterResponse.status, 503);
+  assert.equal(missingRosterResponse.headers.get("retry-after"), "1");
   assert.equal(completeRosterResponse.status, 200);
   assert.equal(health.currentVersionId, "version-old");
   assert.equal(health.projectedCurrentVersionId, "version-old");
@@ -424,7 +502,7 @@ test("public bootstrap falls back when advertised active version shards are inco
   assert.equal(health.projectedCurrentVersionMatchesExpected, false);
 });
 
-test("missing current active version shards are projected from legacy active data", async () => {
+test("missing current active version shards are never projected from legacy active data", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_DATA_KV: createKv({
@@ -471,13 +549,10 @@ test("missing current active version shards are projected from legacy active dat
     {},
   );
 
-  assert.equal(manifestResponse.status, 200);
-  assert.equal((await manifestResponse.json()).pageTitle, "Projected");
-  assert.equal(rostersResponse.status, 200);
-  assert.deepEqual(await rostersResponse.json(), { main: { id: "main", title: "Main" } });
-  assert.equal(metricsResponse.status, 200);
-  assert.equal((await metricsResponse.json()).byTag.__FB64__I1BMQVlFUg.identity.tag, "#PLAYER");
-  assert.equal(staleResponse.status, 404);
+  assert.equal(manifestResponse.status, 503);
+  assert.equal(rostersResponse.status, 503);
+  assert.equal(metricsResponse.status, 503);
+  assert.equal(staleResponse.status, 503);
 });
 
 test("missing active version shards are not projected from stale legacy active data", async () => {
@@ -522,13 +597,12 @@ test("missing active version shards are not projected from stale legacy active d
     {},
   );
 
-  assert.equal(manifestResponse.status, 200);
-  assert.equal((await manifestResponse.json()).versionId, "version-5");
-  assert.equal(rostersResponse.status, 404);
-  assert.equal(metricsResponse.status, 404);
+  assert.equal(manifestResponse.status, 503);
+  assert.equal(rostersResponse.status, 503);
+  assert.equal(metricsResponse.status, 503);
 });
 
-test("mutable public data paths are projected from bootstrap before legacy keys", async () => {
+test("mutable public data paths read only their direct keys", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_DATA_KV: createKv({
@@ -580,12 +654,12 @@ test("mutable public data paths are projected from bootstrap before legacy keys"
   );
 
   assert.equal(pointerResponse.status, 200);
-  assert.equal(await pointerResponse.json(), "version-bootstrap");
-  assert.equal((await currentResponse.json()).donation.eventId, "donation-current");
-  assert.deepEqual(await donationResponse.json(), { seasonId: "season-1", byTag: {} });
+  assert.equal(await pointerResponse.json(), "stale-version");
+  assert.equal((await currentResponse.json()).donation.eventId, "stale-donation");
+  assert.equal(donationResponse.status, 404);
 });
 
-test("bootstrap route can synthesize from legacy public objects during rollout", async () => {
+test("bootstrap route does not synthesize from unrelated public objects", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_DATA_KV: createKv({
@@ -613,11 +687,5 @@ test("bootstrap route can synthesize from legacy public objects during rollout",
     env,
     {},
   );
-  const payload = await response.json();
-
-  assert.equal(response.status, 200);
-  assert.equal(payload.activeVersionId, "version-legacy");
-  assert.equal(payload.seasonEvents.current.donation.eventId, "donation-current");
-  assert.equal(payload.seasonEvents.byId["donation-current"].type, "donation");
-  assert.equal(payload.donationRefresh.bySeason["season-1"].seasonId, "season-1");
+  assert.equal(response.status, 404);
 });

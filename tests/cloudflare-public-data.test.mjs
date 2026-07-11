@@ -23,6 +23,37 @@ test("generated Cloudflare publish version ids are unique active-version keys", 
   assert.notEqual(versionId, "legacy-active");
 });
 
+test("public bootstrap stays compact and carries explicit current and previous coordination", () => {
+  const backend = loadPublisher();
+  backend.normalizeActiveVersionId_ = (value) => String(value || "").trim();
+  const payload = backend.buildCloudflarePublicBootstrapPayload_({
+    activeVersionIdOverride: "version-new",
+    previousVersionIdOverride: "version-old",
+    generationOverride: 12,
+    generatedAt: "2026-07-12T12:00:00.000Z",
+    manifestOverride: {
+      versionId: "version-new",
+      pageTitle: "Roster",
+      lastUpdatedAt: "2026-07-12T11:59:00.000Z",
+      rosterIds: ["main", "second"],
+      largeUnneededField: { players: Array.from({ length: 100 }, (_, index) => index) },
+    },
+  });
+
+  assert.equal(payload.currentVersionId, "version-new");
+  assert.equal(payload.previousVersionId, "version-old");
+  assert.equal(payload.generation, 12);
+  assert.deepEqual(plain(payload.active), {
+    versionId: "version-new",
+    pageTitle: "Roster",
+    lastUpdatedAt: "2026-07-12T11:59:00.000Z",
+    rosterCount: 2,
+  });
+  assert.equal(Object.hasOwn(payload, "seasonEvents"), false);
+  assert.equal(Object.hasOwn(payload, "donationRefresh"), false);
+  assert.equal(JSON.stringify(payload).includes("largeUnneededField"), false);
+});
+
 test("public event publish batches are mirrored into bot scope", () => {
   const backend = loadPublisher();
   const batch = backend.buildCloudflareBotScopeMirroredPublishBatch_([

@@ -8833,14 +8833,44 @@
     const loadActivePublishedVersionIdViaCloudflarePublic = async () =>
         toStr(await fetchCloudflarePublicJson(ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
 
-    // Load roster data from the published active version shards, if available.
-    const loadPublishedActiveVersionViaCloudflarePublic = async (versionIdRaw) => {
+    // Load all immutable shards for one exact version in parallel.
+    const fetchPublishedActiveVersionShardsViaCloudflarePublic = async (versionIdRaw) => {
+        const versionId = toStr(versionIdRaw).trim();
+        if (!versionId) throw new Error("Missing active published version pointer.");
+        const paths = ["manifest", "rosters", "playerMetrics"];
+        const payloads = await Promise.all(paths.map((childPath) =>
+            fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, childPath))
+        ));
+        return {
+            manifestPayload: payloads[0],
+            rostersPayload: payloads[1],
+            playerMetricsPayload: payloads[2],
+        };
+    };
+
+    // Load roster data from one published active version. A failed immutable
+    // generation is retried as a whole so no response can mix shard versions.
+    const loadPublishedActiveVersionViaCloudflarePublic = async (versionIdRaw, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const versionId = toStr(versionIdRaw).trim() || await loadActivePublishedVersionIdViaCloudflarePublic();
         if (!versionId) throw new Error("Missing active published version pointer.");
         const versionLabel = "Cloudflare public data /activeVersions/" + versionId;
-        const manifestPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "manifest"));
-        const rostersPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "rosters"));
-        const playerMetricsPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "playerMetrics"));
+        const retryCount = Math.max(0, Math.min(2, Number(options.retryCount) || 0));
+        let shards = null;
+        let lastError = null;
+        for (let attempt = 0; attempt <= retryCount; attempt++) {
+            try {
+                shards = await fetchPublishedActiveVersionShardsViaCloudflarePublic(versionId);
+                break;
+            } catch (err) {
+                lastError = err;
+                if (attempt < retryCount) await Promise.resolve();
+            }
+        }
+        if (!shards) throw lastError || new Error("Immutable version shards are unavailable at " + versionLabel + ".");
+        const manifestPayload = shards.manifestPayload;
+        const rostersPayload = shards.rostersPayload;
+        const playerMetricsPayload = shards.playerMetricsPayload;
         const manifest = decodePublicDataObjectKeysRecursive(manifestPayload);
         const rosterMap = decodePublicDataObjectKeysRecursive(rostersPayload);
         const playerMetrics = decodePublicDataObjectKeysRecursive(playerMetricsPayload || {});
@@ -8884,12 +8914,15 @@
         const source = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
         if (!source) throw new Error("Cloudflare public bootstrap returned an invalid payload.");
         const active = source.active && typeof source.active === "object" && !Array.isArray(source.active) ? source.active : {};
-        const activeVersionId = toStr(source.activeVersionId || active.versionId).trim();
+        const activeVersionId = toStr(source.currentVersionId || source.activeVersionId || active.versionId).trim();
         if (!activeVersionId) throw new Error("Cloudflare public bootstrap is missing activeVersionId.");
         return {
             schemaVersion: Number.isFinite(Number(source.schemaVersion)) ? Number(source.schemaVersion) : 1,
             generatedAt: toStr(source.generatedAt).trim(),
             activeVersionId: activeVersionId,
+            currentVersionId: activeVersionId,
+            previousVersionId: toStr(source.previousVersionId).trim(),
+            generation: Math.max(0, Number(source.generation) || 0),
             active: active,
             seasonEvents: source.seasonEvents && typeof source.seasonEvents === "object" && !Array.isArray(source.seasonEvents)
                 ? source.seasonEvents
@@ -9194,10 +9227,12 @@
     // Load current season event data from public data.
     const loadCurrentSeasonEventsViaCloudflarePublic = async () => {
         const loadErrors = [];
-        const current = await fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_PATH, loadErrors);
-        const currentCwl = await fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_CWL_PATH);
-        const latestCompletedCwl = await fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
-        const seasonState = await fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors);
+        const [current, currentCwl, latestCompletedCwl, seasonState] = await Promise.all([
+            fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_PATH, loadErrors),
+            fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_CWL_PATH),
+            fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH),
+            fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors),
+        ]);
         const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
         if (currentCwl && typeof currentCwl === "object" && !Array.isArray(currentCwl)) currentObj.cwl = currentCwl;
         const latestCompletedCwlObj = latestCompletedCwl && typeof latestCompletedCwl === "object" && !Array.isArray(latestCompletedCwl) ? latestCompletedCwl : null;
@@ -9274,17 +9309,38 @@
             if (cachedLoaded) return cachedLoaded;
         }
 
-        const versionedLoaded = await loadPublishedActiveVersionViaCloudflarePublic(activeVersionId);
+        const previousVersionId = toStr(bootstrap && bootstrap.previousVersionId).trim();
+        const activeLoadPromise = (async () => {
+            try {
+                return await loadPublishedActiveVersionViaCloudflarePublic(activeVersionId, { retryCount: 1 });
+            } catch (currentError) {
+                if (!previousVersionId || previousVersionId === activeVersionId) throw currentError;
+                if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+                    console.warn("[RosterBoot] Current immutable version is temporarily unavailable; loading the complete previous version.", currentError);
+                }
+                return loadPublishedActiveVersionViaCloudflarePublic(previousVersionId, { retryCount: 0 });
+            }
+        })();
+        const eventLoadPromise = hasCloudflareBootstrapPublicModel(bootstrap)
+            ? Promise.resolve({ bundle: null, error: null })
+            : loadCurrentSeasonEventsViaCloudflarePublic().then(
+                (bundle) => ({ bundle: bundle, error: null }),
+                (error) => ({ bundle: null, error: error }),
+            );
+        const loadedParts = await Promise.all([activeLoadPromise, eventLoadPromise]);
+        const versionedLoaded = loadedParts[0];
+        const eventLoad = loadedParts[1];
         const data = versionedLoaded.data;
         activeVersionId = toStr(versionedLoaded.activeVersionId).trim();
         if (!applyCloudflareBootstrapPublicModel(data, bootstrap)) {
-            try {
-                data.seasonEvents = await loadCurrentSeasonEventsViaCloudflarePublic();
+            if (eventLoad && eventLoad.bundle) {
+                data.seasonEvents = eventLoad.bundle;
                 await hydrateDonationRefreshForLoadedSeasonEvents(data);
-            } catch (err) {
+            } else {
+                const err = eventLoad && eventLoad.error;
                 data.seasonEvents = buildEmptySeasonEventsBundle([{
                     path: "/" + SEASON_EVENTS_BASE_PATH,
-                    message: err && err.message ? err.message : toStr(err),
+                    message: err && err.message ? err.message : (toStr(err) || "Current event metadata unavailable."),
                 }]);
                 if (typeof console !== "undefined" && console && typeof console.warn === "function") {
                     console.warn("[SeasonEvents] Public data event hydration failed; continuing without event data.", err);

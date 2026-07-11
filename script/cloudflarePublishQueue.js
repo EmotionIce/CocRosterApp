@@ -1048,10 +1048,25 @@ function buildCloudflareQueuedBootstrapCommit_(stateRaw, activeVersionOverrideRa
 	if (typeof buildCloudflarePublicBootstrapPayload_ === "function") {
 		return {
 			path: CLOUDFLARE_PUBLIC_DATA_BOOTSTRAP_PATH,
-			payload: buildCloudflarePublicBootstrapPayload_({ compact: true, activeVersionIdOverride: versionId, manifestOverride: manifestOverrideRaw }),
+			payload: buildCloudflarePublicBootstrapPayload_({
+				compact: true,
+				activeVersionIdOverride: versionId,
+				previousVersionIdOverride: state.active.committedVersionId,
+				generationOverride: state.active.targetGeneration,
+				manifestOverride: manifestOverrideRaw,
+			}),
 		};
 	}
-	return { path: CLOUDFLARE_PUBLIC_DATA_BOOTSTRAP_PATH, payload: { schemaVersion: 2, generatedAt: new Date().toISOString(), activeVersionId: versionId, active: { versionId: versionId, manifest: manifestOverrideRaw || null } } };
+	const previousVersionId = normalizeActiveVersionId_(state.active.committedVersionId);
+	return { path: CLOUDFLARE_PUBLIC_DATA_BOOTSTRAP_PATH, payload: {
+		schemaVersion: 2,
+		generatedAt: new Date().toISOString(),
+		currentVersionId: versionId,
+		activeVersionId: versionId,
+		previousVersionId: previousVersionId && previousVersionId !== versionId ? previousVersionId : "",
+		generation: Math.max(0, toNonNegativeInt_(state.active.targetGeneration)),
+		active: { versionId: versionId },
+	} };
 }
 
 function getCloudflareCommittedActiveVersionId_(stateRaw) {

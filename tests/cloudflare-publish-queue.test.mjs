@@ -682,9 +682,20 @@ test("compact bootstrap contains coordination data only", () => {
   const q = loadQueue();
   const state = q.createEmptyCloudflarePublishQueueState_();
   state.active.committedVersionId = "version-A";
-  q.buildCloudflarePublicBootstrapObject_ = (options) => ({ path: "bootstrap/current", payload: { schemaVersion: 2, generatedAt: "now", activeVersionId: options.activeVersionIdOverride, active: { versionId: options.activeVersionIdOverride, manifest: options.manifestOverride || null } } });
-  const result = q.buildCloudflareQueuedBootstrapCommit_(state);
-  assert.equal(result.payload.activeVersionId, "version-A");
+  state.active.targetGeneration = 7;
+  q.buildCloudflarePublicBootstrapPayload_ = (options) => ({
+    schemaVersion: 2,
+    generatedAt: "now",
+    currentVersionId: options.activeVersionIdOverride,
+    activeVersionId: options.activeVersionIdOverride,
+    previousVersionId: options.previousVersionIdOverride,
+    generation: options.generationOverride,
+    active: { versionId: options.activeVersionIdOverride },
+  });
+  const result = q.buildCloudflareQueuedBootstrapCommit_(state, "version-B");
+  assert.equal(result.payload.activeVersionId, "version-B");
+  assert.equal(result.payload.previousVersionId, "version-A");
+  assert.equal(result.payload.generation, 7);
   assert.equal(Object.hasOwn(result.payload, "seasonEvents"), false);
   assert.equal(Object.hasOwn(result.payload, "donationRefresh"), false);
 });

@@ -19,6 +19,7 @@ const loadClientInternals = (overrides = {}) => {
       "        buildSeasonEventsPublicModel,",
       "        loadRosterDataWithFallback,",
       "        loadRosterDataViaCloudflarePublic,",
+      "        loadPublishedActiveVersionViaCloudflarePublic,",
       "        loadCurrentSeasonEventsViaCloudflarePublic,",
       "        loadPreviousSeasonEventsViaCloudflarePublic,",
       "        readCachedRosterSnapshot,",
@@ -528,6 +529,94 @@ test("compact bootstrap hydrates targeted event and donation objects while activ
   assert.ok(requested.includes("https://public-data.test/api/public-data/events/seasonEvents/current.json"));
   assert.ok(requested.includes("https://public-data.test/api/public-data/events/seasonEvents/byId/" + eventId + ".json"));
   assert.ok(requested.includes("https://public-data.test/api/public-data/donationRefresh/bySeason/" + seasonId + ".json"));
+});
+
+test("current shard propagation failure retries one whole version then loads every previous-version shard", async () => {
+  const previousVersionId = "version-previous";
+  const currentVersionId = "version-current";
+  const responses = new Map([
+    ["https://public-data.test/api/public-data/bootstrap/current.json", {
+      schemaVersion: 2,
+      currentVersionId,
+      activeVersionId: currentVersionId,
+      previousVersionId,
+      active: { versionId: currentVersionId },
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/" + currentVersionId + "/manifest.json", {
+      versionId: currentVersionId,
+      pageTitle: "Partial current",
+      rosterIds: ["current"],
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/" + previousVersionId + "/manifest.json", {
+      versionId: previousVersionId,
+      schemaVersion: 1,
+      pageTitle: "Complete previous",
+      rosterIds: ["previous"],
+      rosterOrder: ["previous"],
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/" + previousVersionId + "/rosters.json", {
+      previous: { id: "previous", main: [], subs: [], missing: [] },
+    }],
+    ["https://public-data.test/api/public-data/activeVersions/" + previousVersionId + "/playerMetrics.json", {
+      schemaVersion: 1,
+      byTag: {},
+    }],
+    ["https://public-data.test/api/public-data/events/seasonEvents/current.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/currentCwl.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/latestCompletedCwl.json", null],
+    ["https://public-data.test/api/public-data/events/seasonEvents/seasonState/current.json", null],
+  ]);
+  const counts = new Map();
+  const { loadRosterDataViaCloudflarePublic } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: { fetch: async (url) => {
+      counts.set(url, (counts.get(url) || 0) + 1);
+      return { ok: responses.has(url), status: responses.has(url) ? 200 : 503, text: async () => JSON.stringify(responses.get(url)) };
+    } },
+  });
+
+  const loaded = await loadRosterDataViaCloudflarePublic();
+
+  assert.equal(loaded.activeVersionId, previousVersionId);
+  assert.equal(loaded.data.pageTitle, "Complete previous");
+  assert.deepEqual(Array.from(loaded.data.rosters, (roster) => roster.id), ["previous"]);
+  for (const child of ["manifest", "rosters", "playerMetrics"]) {
+    assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + currentVersionId + "/" + child + ".json"), 2);
+    assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + previousVersionId + "/" + child + ".json"), 1);
+  }
+});
+
+test("roster shards and independent event metadata load concurrently under simulated latency", async () => {
+  const base = "https://public-data.test/api/public-data/";
+  const responses = new Map([
+    [base + "bootstrap/current.json", { schemaVersion: 2, currentVersionId: "version-fast", activeVersionId: "version-fast" }],
+    [base + "activeVersions/version-fast/manifest.json", { versionId: "version-fast", schemaVersion: 1, pageTitle: "Fast", rosterIds: ["main"], rosterOrder: ["main"] }],
+    [base + "activeVersions/version-fast/rosters.json", { main: { id: "main", main: [], subs: [], missing: [] } }],
+    [base + "activeVersions/version-fast/playerMetrics.json", { schemaVersion: 1, byTag: {} }],
+    [base + "events/seasonEvents/current.json", null],
+    [base + "events/seasonEvents/currentCwl.json", null],
+    [base + "events/seasonEvents/latestCompletedCwl.json", null],
+    [base + "events/seasonEvents/seasonState/current.json", null],
+  ]);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { loadRosterDataViaCloudflarePublic } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: { fetch: async (url) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      inFlight -= 1;
+      return { ok: responses.has(url), status: responses.has(url) ? 200 : 404, text: async () => JSON.stringify(responses.get(url)) };
+    } },
+  });
+  const startedAt = Date.now();
+  const loaded = await loadRosterDataViaCloudflarePublic();
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(loaded.activeVersionId, "version-fast");
+  assert.ok(maxInFlight >= 7, `expected three shards and four metadata reads in flight, observed ${maxInFlight}`);
+  assert.ok(elapsedMs < 150, `parallel hydration should avoid serialized simulated latency, received ${elapsedMs}ms`);
 });
 
 test("does not fall back to legacy active when the published version shard is missing", async () => {

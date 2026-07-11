@@ -687,7 +687,7 @@ const getDataObjectCacheControl = (scopeRaw, logicalPathRaw) => {
     path.startsWith("events/seasonEvents/") ||
     path.startsWith("donationRefresh/")
   ) {
-    return "no-store";
+    return "public, max-age=5, s-maxage=15, stale-while-revalidate=30";
   }
   return "public, max-age=30, stale-while-revalidate=120";
 };
@@ -1346,14 +1346,26 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
     return jsonResponse(503, { ok: false, error: "Roster data store is not configured." }, cors);
   }
 
+  // Every public object URL is an identity boundary. Public reads must touch
+  // only their exact key: immutable routes may not consult selectors or serve
+  // a sibling version, and mutable routes may not project bootstrap contents.
   const object = scope === "public"
-    ? await getPublicDataObjectWithBootstrapFallback(store, key, objectPath)
+    ? await getDataStoreObject(store, key)
     : await readBotDataObjectWithVersionFallback(store, objectPath, key);
   if (!object) {
+    const logicalPath = objectPath.replace(/\.json$/i, "");
+    if (scope === "public" && /^activeVersions\/[^/]+\/(manifest|rosters|playerMetrics)$/.test(logicalPath)) {
+      return jsonResponse(503, {
+        ok: false,
+        temporary: true,
+        error: "Immutable version object is temporarily unavailable.",
+        path: logicalPath,
+      }, Object.assign({}, cors, { "cache-control": "no-store", "retry-after": "1" }));
+    }
     return jsonResponse(404, {
       ok: false,
       error: "Data object not found.",
-      path: objectPath.replace(/\.json$/i, ""),
+      path: logicalPath,
     }, Object.assign({}, cors, { "cache-control": "no-store" }));
   }
 

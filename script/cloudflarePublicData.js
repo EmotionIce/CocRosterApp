@@ -757,30 +757,21 @@ function buildCloudflarePublicBootstrapPayload_(optionsRaw) {
 	const manifest = manifestOverride || (versionWrite.manifest && typeof versionWrite.manifest === "object" && !Array.isArray(versionWrite.manifest)
 		? versionWrite.manifest
 		: readCloudflarePublishedActiveManifest_(activeVersionId));
-	if (options.compact === true) {
-		return {
-			schemaVersion: 2,
-			generatedAt: String(options.generatedAt || new Date().toISOString()),
-			activeVersionId: activeVersionId,
-			active: {
-				versionId: activeVersionId,
-				manifest: manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : null,
-			},
-		};
-	}
-	const seasonEvents = attachCloudflarePreviousSeasonBundle_(buildCloudflareCurrentSeasonEventsBundle_());
-	const donationRefresh = buildCloudflareDonationRefreshBundleForSeasonEvents_(seasonEvents);
-	const generatedAt = String(options.generatedAt || new Date().toISOString());
+	const previousVersionId = normalizeActiveVersionId_(options.previousVersionIdOverride || options.previousVersionId);
+	const manifestObject = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : {};
 	return {
-		schemaVersion: 1,
-		generatedAt: generatedAt,
+		schemaVersion: 2,
+		generatedAt: String(options.generatedAt || new Date().toISOString()),
+		currentVersionId: activeVersionId,
 		activeVersionId: activeVersionId,
+		previousVersionId: previousVersionId && previousVersionId !== activeVersionId ? previousVersionId : "",
+		generation: Math.max(0, Number(options.generationOverride || options.generation) || 0),
 		active: {
 			versionId: activeVersionId,
-			manifest: manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : null,
+			pageTitle: String(manifestObject.pageTitle || ""),
+			lastUpdatedAt: String(manifestObject.lastUpdatedAt || ""),
+			rosterCount: Array.isArray(manifestObject.rosterIds) ? manifestObject.rosterIds.length : 0,
 		},
-		seasonEvents: seasonEvents,
-		donationRefresh: donationRefresh,
 	};
 }
 
