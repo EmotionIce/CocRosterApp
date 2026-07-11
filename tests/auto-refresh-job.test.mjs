@@ -832,9 +832,9 @@ test("deferred queue work keeps independent watchdog and normal continuation pat
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
   assert.equal(workerRequests.length, 2);
   assert.ok(workerRequests[0].delayMs <= 960000 && workerRequests[0].delayMs >= 959000);
-  assert.equal(workerRequests[1].delayMs, 60000);
+  assert.ok(workerRequests[1].delayMs >= 59500 && workerRequests[1].delayMs <= 60000);
   assert.equal(workerTriggers.length, 2);
-  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 60000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs >= 59500 && trigger.requestedDelayMs <= 60000), true);
   assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs <= 960000 && trigger.requestedDelayMs >= 959000), true);
 });
 
@@ -878,9 +878,9 @@ test("watchdog and continuation scheduling keep one effective trigger of each ki
 
   assert.equal(workerRequests.length, 2);
   assert.ok(workerRequests[0].delayMs <= 960000 && workerRequests[0].delayMs >= 959000);
-  assert.equal(workerRequests[1].delayMs, 60000);
+  assert.ok(workerRequests[1].delayMs >= 59500 && workerRequests[1].delayMs <= 60000);
   assert.equal(workerTriggers.length, 2);
-  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 60000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs >= 59500 && trigger.requestedDelayMs <= 60000), true);
   assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs <= 960000 && trigger.requestedDelayMs >= 959000), true);
   assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
 });
@@ -926,10 +926,11 @@ test("deferred finalization leaves the task pending with one normal continuation
 
   assert.equal(result.reason, "beforeFinalize");
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
-  assert.deepEqual(workerRequests.map((request) => request.delayMs), [960000, 60000]);
+  assert.ok(workerRequests[0].delayMs >= 959000 && workerRequests[0].delayMs <= 960000);
+  assert.ok(workerRequests[1].delayMs >= 59500 && workerRequests[1].delayMs <= 60000);
   assert.equal(workerTriggers.length, 2);
-  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 60000), true);
-  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 960000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs >= 59500 && trigger.requestedDelayMs <= 60000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs >= 959000 && trigger.requestedDelayMs <= 960000), true);
 });
 
 const stageCompletedRosterOutputs = (backend, runId, dataRaw, rosterIdsRaw = ["main"]) => {
@@ -3819,9 +3820,90 @@ test("Cloudflare degraded scheduling completes the roster run and records repair
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
 });
 
-test("already-published recovery does not terminalize incomplete canonical roster work", () => {
+test("failed CWL side work gets an independent retry whose marker survives scheduling failure and clears on success", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: { seasonEvents: { currentCwl: { eventId: "cwl-retry" }, current: { cwl: { eventId: "cwl-retry" } }, byId: { "cwl-retry": { eventId: "cwl-retry", type: "cwl", status: "open", cwlTrackingState: "active", cwl: {}, participantsByDiscordId: {}, participantsByTag: {} } } } },
+  });
+  const scope = backend.buildCwlRuntimeRecoveryScope_("cwl-retry");
+  backend.markRuntimeRecoveryNeeded_(scope, "side-phase-failed", { eventId: "cwl-retry" });
+  backend.__failNextTriggerCreates(1);
+  const failedSchedule = backend.scheduleCwlSeasonEventRecovery_();
+  assert.equal(failedSchedule.scheduled, false);
+  assert.ok(backend.readRuntimeRecoveryMarker_().scopes[scope]);
+
+  const watchdogRepair = backend.repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_();
+  assert.equal(watchdogRepair.scheduled, true);
+  const configuredTriggerId = backend.__properties.get("CWL_RECOVERY_TRIGGER_ID");
+  backend.refreshCurrentCwlSeasonEventCore_ = () => ({ ok: true, status: "active", eventId: "cwl-retry" });
+  const recovered = backend.runOneCwlSeasonEventRecovery_();
+  assert.equal(recovered.cleared, true);
+  assert.equal(backend.readRuntimeRecoveryMarker_().scopes[scope], undefined);
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+
+  backend.markRuntimeRecoveryNeeded_("cwl-refresh", "legacy-side-marker", { eventId: "cwl-retry" });
+  const migratedLegacy = backend.runOneCwlSeasonEventRecovery_();
+  assert.equal(migratedLegacy.cleared, true);
+  assert.equal(backend.readRuntimeRecoveryMarker_().scopes["cwl-refresh"], undefined);
+
+  const otherScope = backend.buildCwlRuntimeRecoveryScope_("cwl-other");
+  backend.markRuntimeRecoveryNeeded_(otherScope, "other-event-failed", { eventId: "cwl-other" });
+  backend.recordAutoRefreshCwlFinalOutcomeRecovery_("deleted-run", { eventId: "cwl-retry", status: "successful", retryPending: false });
+  assert.ok(backend.readRuntimeRecoveryMarker_().scopes[otherScope]);
+  assert.equal(backend.runOneCwlSeasonEventRecovery_.toString().includes("readAutoRefreshRunShard_"), false);
+
+  const foreignConsume = backend.consumeCwlSeasonEventRecoveryTrigger_({ triggerUid: "another-owner" });
+  assert.equal(foreignConsume.owned, false);
+  assert.equal(backend.__properties.get("CWL_RECOVERY_TRIGGER_ID"), configuredTriggerId);
+});
+
+test("auto-refresh reconciliation queues exact new push and donation events while roster completion stays independent", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"], currentTaskIndex: 2, processedTasks: 2, processedRosters: 1, sourceVersionId: "source-1",
+  });
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
+  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: false });
+  backend.enqueueCloudflareActiveTarget_ = () => ({ ok: false, queued: true, scheduled: false, degradedScheduling: true });
+  let exactMutation = null;
+  let broadRepairs = 0;
+  backend.enqueueCloudflareSeasonEventReconciliation_ = (mutation) => { exactMutation = clone(mutation); return { ok: false, scheduled: false, repairPending: true }; };
+  backend.enqueueCloudflareRelevantSeasonPublication_ = () => { broadRepairs++; return { ok: true }; };
+
+  const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+  assert.equal(result.status, "completed");
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.deepEqual(exactMutation.eventIds.map((id) => id.split("-")[0]).sort(), ["donation", "push"]);
+  assert.equal(exactMutation.pointerPaths.length, 4);
+  assert.equal(broadRepairs, 0);
+});
+
+test("continuation and watchdog replacement failures preserve the previously owned recovery triggers", () => {
+  const backend = loadBackend();
+  const oldContinuation = backend.scheduleAutoRefreshJobResume_();
+  const continuationId = oldContinuation.triggerId;
+  backend.__properties.set("AUTO_REFRESH_JOB_TRIGGER_AT", String(Date.now() + 10 * 60 * 1000));
+  backend.__failNextTriggerCreates(1);
+  const continuationFailure = backend.scheduleAutoRefreshJobResume_();
+  assert.equal(continuationFailure.scheduled, false);
+  assert.equal(continuationFailure.preservedTriggerId, continuationId);
+  assert.equal(backend.__triggers.some((trigger) => trigger.getUniqueId() === continuationId), true);
+
+  const oldWatchdog = backend.scheduleAutoRefreshJobWatchdog_();
+  const watchdogId = oldWatchdog.triggerId;
+  backend.__properties.set("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT", String(Date.now() + 1000));
+  backend.__failNextTriggerCreates(1);
+  const watchdogFailure = backend.scheduleAutoRefreshJobWatchdog_();
+  assert.equal(watchdogFailure.scheduled, false);
+  assert.equal(watchdogFailure.preservedTriggerId, watchdogId);
+  assert.equal(backend.__triggers.some((trigger) => trigger.getUniqueId() === watchdogId), true);
+});
+
+test("already-published recovery never resumes writes into an incomplete selected immutable version", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  backend.writeActiveRosterVersionShards_("source-1", data, { source: "test-source", publishedAt: "2026-07-10T00:00:00.000Z", publish: true });
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
     currentTaskIndex: 3,
@@ -3831,20 +3913,22 @@ test("already-published recovery does not terminalize incomplete canonical roste
     status: "finalizing",
   });
   backend.writeActiveRosterVersionShards_(runId, data, { source: "test", runId, publish: true });
-  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId }, "PUT");
-  backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true }, "PUT");
+  backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/main`, "DELETE");
   let enqueues = 0;
   backend.enqueueCloudflareActiveTarget_ = () => { enqueues++; return { ok: true }; };
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
-  const queued = backend.readAutoRefreshQueueCurrent_();
-  const rosterTask = tasks.find((task) => task.type === "roster");
-  assert.equal(result.deferred, true);
-  assert.equal(result.reason, "canonicalWorkIncomplete");
-  assert.equal(result.taskId, rosterTask.taskId);
-  assert.equal(queued.runId, runId);
-  assert.equal(queued.currentTaskIndex, rosterTask.index);
-  assert.equal(enqueues, 0);
+  assert.equal(result.terminal, true);
+  assert.equal(result.status, "repaired");
+  assert.equal(result.canonicalRepair.status, "rolled-back-to-known-good");
+  assert.equal(backend.readPublishedActiveVersionId_(), "source-1");
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/main`, "GET"), null);
+  assert.equal(enqueues, 1);
+  const repeated = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  assert.equal(repeated.reason, "noRun");
+  assert.equal(backend.readPublishedActiveVersionId_(), "source-1");
+  assert.equal(enqueues, 1);
 });
 
 test("terminal cleanup preserves a newer run and its owned dynamic triggers", () => {
@@ -4062,7 +4146,7 @@ test("queue finalization aborts when the active source fingerprint changed", () 
   assert.equal(backend.firebaseRequestJson_("activeVersions/run-1", "GET"), null);
 });
 
-test("queue finalization completes already-published recovery without reading the full active snapshot", () => {
+test("selected complete canonical version terminalizes with missing internal task and source markers", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
@@ -4071,22 +4155,11 @@ test("queue finalization completes already-published recovery without reading th
     processedTasks: 2,
     processedRosters: 1,
   });
-  stageCompletedRosterOutputs(backend, runId, data, ["main"]);
-  backend.firebaseRequestJson_("activeVersions/" + runId + "/manifest", "PUT", backend.encodeFirebaseObjectKeysRecursive_({
-    versionId: runId,
-    publishedAt: "2026-05-25T00:00:00.000Z",
-    schemaVersion: 1,
-    pageTitle: data.pageTitle,
-    rosterOrder: ["main"],
-    rosterIds: ["main"],
-    connectedClanTags: ["#CLAN"],
-    lastUpdatedAt: data.lastUpdatedAt,
-  }));
-  backend.publishActiveRosterVersionPointer_(runId, {
-    versionId: runId,
-    publishedAt: "2026-05-25T00:00:00.000Z",
-    rosterIds: ["main"],
-  });
+  backend.writeActiveRosterVersionShards_(runId, data, { source: "auto-refresh", runId, publishedAt: "2026-05-25T00:00:00.000Z", publish: true });
+  backend.firebaseRequestJson_(`internal/autoRefresh/runs/${runId}/source`, "DELETE");
+  backend.firebaseRequestJson_(`internal/autoRefresh/runs/${runId}/tasks`, "DELETE");
+  backend.firebaseRequestJson_(`internal/autoRefresh/runs/${runId}/results`, "DELETE");
+  backend.firebaseRequestJson_(`internal/autoRefresh/runs/${runId}/rosterWrites`, "DELETE");
   let activeReads = 0;
   let cloudflarePublishSawClearedQueue = false;
   backend.readActiveRosterSnapshot_ = () => {

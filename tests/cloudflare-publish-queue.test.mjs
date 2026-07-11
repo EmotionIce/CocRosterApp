@@ -269,6 +269,52 @@ test("permanent watchdog merges a failed active enqueue idempotently and never r
   assert.equal(q.__getState().active.targetVersionId, "version-B");
 });
 
+test("permanent watchdog clears a terminal matching active repair marker without changing generation", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.active.targetVersionId = "version-B";
+  state.active.targetGeneration = 41;
+  state.active.committedVersionId = "version-B";
+  state.active.phase = "idle";
+  q.__setState(state);
+  q.readPublishedActiveVersionId_ = () => "version-B";
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-B", activeReason: "terminal-test" }));
+
+  const first = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+  const repeated = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+
+  assert.equal(first.ok, true);
+  assert.equal(first.alreadyCommitted, true);
+  assert.equal(first.pending, false);
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
+  assert.equal(q.__getState().active.targetGeneration, 41);
+  assert.equal(repeated.ok, true);
+  assert.equal(q.__getState().active.targetGeneration, 41);
+});
+
+test("lifecycle descriptors dirty canonical event, exact aggregates, and pointers without payload trust", () => {
+  const q = loadQueue();
+  let state = q.createEmptyCloudflarePublishQueueState_();
+  q.mutateCloudflarePublishQueueState_ = (callback) => callback(state);
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  const descriptor = {
+    category: "cwl-lifecycle", eventId: "cwl-1", lifecycleState: "completed",
+    eventAction: "put", liveAggregateAction: "delete", finalAggregateAction: "put", pointerAction: "put",
+  };
+  q.enqueueCloudflareSeasonEventPublication_("cwl-1", "completion", {
+    cwlLifecycle: descriptor,
+    cwlLive: false,
+    cwlFinal: false,
+    pointers: false,
+    eventPayload: { forged: true },
+  });
+  assert.ok(state.dirty.events["cwl-1"]);
+  assert.ok(state.dirty.cwlAggregates["cwl-1"].live);
+  assert.ok(state.dirty.cwlAggregates["cwl-1"].final);
+  assert.ok(state.dirty.seasonPointers);
+  assert.equal(JSON.stringify(state).includes("forged"), false);
+});
+
 test("lease lifetime exceeds the maximum live Apps Script execution and recovery is later", () => {
   const q = loadQueue();
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS > 360000);

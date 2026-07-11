@@ -2196,7 +2196,9 @@ test("CWL participant mutations enqueue the participant-projected aggregate imme
 
   assert.equal(cancel.status, "cancelled");
   assert.equal(calls.length, 3);
-  assert.deepEqual(calls.map(call => call.options.cwlLive), [true, true, true]);
+  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.liveAggregateAction), ["put", "put", "put"]);
+  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.finalAggregateAction), ["delete", "delete", "delete"]);
+  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.pointerAction), ["put", "put", "put"]);
 });
 
 test("Cloudflare enqueue failure cannot block a canonical Discord mutation", () => {
@@ -2519,10 +2521,14 @@ test("season event leaderboards score push and donation events from event-cycle 
   assert.equal(donation.leaderboard[1].accounts[0].debug.donationCycleLedger.seasonId, "ranked-legend-i-2026-05-18");
 });
 
-test("current season event leaderboards reconcile before reading current pointers", () => {
+test("current season event leaderboards ensure local push and donation metadata without CWL discovery", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.reconcileCurrentSeasonEvents_({ now: "2026-05-20T15:00:00.000Z" });
   backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventLeaderboardRosterData(), text: "" });
+  let discoveryCalls = 0;
+  let broadRepairCalls = 0;
+  backend.collectFreshCwlTargetEvidence_ = () => { discoveryCalls++; throw new Error("leaderboard must not discover CWL"); };
+  backend.enqueueCloudflareRelevantSeasonPublication_ = () => { broadRepairCalls++; return { ok: true }; };
 
   const result = backend.getCurrentSeasonEventLeaderboards({
     now: "2026-06-15T05:00:00.000Z",
@@ -2532,6 +2538,9 @@ test("current season event leaderboards reconcile before reading current pointer
   assert.equal(result.leaderboards.push.event.eventId, "push-ranked-legend-i-2026-06-15");
   assert.equal(result.leaderboards.donation.event.eventId, "donation-ranked-legend-i-2026-06-15");
   assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/push").eventId, "push-ranked-legend-i-2026-06-15");
+  assert.equal(discoveryCalls, 0);
+  assert.equal(broadRepairCalls, 0);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl"), null);
 });
 
 test("CWL league signup options store the active message snapshot", () => {
@@ -3561,6 +3570,7 @@ test("CWL refresh repairs a resolved empty target eligibility snapshot", () => {
   const leaderboard = backend.buildSeasonEventLeaderboard_(event, rosterData, { nowIso: "2026-07-05T00:00:00.000Z" });
 
   assert.equal(result.status, "active");
+  assert.equal(result.publication.lifecycleState, "active");
   assert.equal(JSON.stringify(event.cwl.target.eligibleAccountTags), JSON.stringify(["#PLAYER"]));
   assert.equal(backend.summarizeSeasonEvent_(event).activeParticipantCount, 1);
   assert.equal(JSON.stringify(live.rankedTags), JSON.stringify(["#PLAYER"]));
@@ -3589,6 +3599,8 @@ test("CWL runtime aggregation is target-only and ignores non-target discovery an
         groupState: "ended",
         observedAt: nowIso,
         evidenceStatus: "authoritative",
+        evidenceObservationId: "runtime-target-observation",
+        evidenceProvenance: "deterministic-fresh-observation-v1",
         eligibleAccountTags: ["#2LUCULP"],
       },
     },
@@ -3953,6 +3965,7 @@ test("authenticated CWL event refresh callable binds the current published group
   const live = backend.readCwlSeasonEventAggregate_("cwl-waiting", "live");
 
   assert.equal(result.status, "active");
+  assert.equal(result.publication.lifecycleState, "active");
   assert.equal(result.requestCounts.leagueGroup, 1);
   assert.equal(result.requestCounts.cwlWar, 1);
   assert.equal(event.cwlTrackingState, "active");
@@ -4228,6 +4241,8 @@ test("CWL partial refresh marks previous aggregate stale without replacing score
                 season: "2026-07",
                 observedAt: "2026-07-03T23:55:00.000Z",
                 evidenceStatus: "authoritative",
+                evidenceObservationId: "ended-target-observation",
+                evidenceProvenance: "deterministic-fresh-observation-v1",
                 eligibleAccountTags: ["#A"],
               },
               groups: {
@@ -4341,7 +4356,10 @@ test("CWL completion requires authoritative group end plus two spaced complete o
 
   assert.equal(first.status, "finalizing");
   assert.equal(second.status, "completed");
+  assert.equal(first.publication.lifecycleState, "finalizing");
+  assert.equal(second.publication.lifecycleState, "completed");
   assert.equal(db.currentCwl, null);
+  assert.equal(db.current.cwl, null);
   assert.equal(db.latestCompletedCwl.eventId, "cwl-active");
   assert.equal(db.cwlAggregates.byEvent["cwl-active"].live, null);
   assert.equal(finalAggregate.byTag["#A"].starsTotal, 3);
@@ -4913,7 +4931,7 @@ test("CWL completion integrity audit is read-only and guarded recovery atomicall
   const target = {
     resolved: true, status: "resolved", rosterId: "main", rosterTitle: "Main", clanTag: "#CLAN",
     leagueName: "Champion I", leagueRank: 0, groupId, season: "2026-07", groupState: "inwar",
-    observedAt: nowIso, boundAt: nowIso, evidenceStatus: "authoritative", eligibleAccountTags: ["#PLAYER"],
+    observedAt: nowIso, boundAt: nowIso, evidenceStatus: "authoritative", evidenceObservationId: "integrity-observation-1", evidenceProvenance: "deterministic-fresh-observation-v1", eligibleAccountTags: ["#PLAYER"],
   };
   const event = {
     eventId: "cwl-false-complete", type: "cwl", status: "closed", signupsOpen: false,
@@ -4937,7 +4955,9 @@ test("CWL completion integrity audit is read-only and guarded recovery atomicall
 
   const recovered = backend.recoverFalseCompletedCwlSeasonEvent_({ eventId: event.eventId, nowIso, freshEvidence: evidence });
   assert.equal(recovered.recovered, true);
+  assert.equal(recovered.publication.lifecycleState, "active");
   assert.equal(backend.readSeasonEventById_(event.eventId).cwlTrackingState, "active");
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl").eventId, event.eventId);
   assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, event.eventId);
   assert.equal(backend.readCwlSeasonEventAggregate_(event.eventId, "final"), null);
 
@@ -4960,11 +4980,55 @@ test("scheduled reconciliation creates a missing current CWL event from fresh cu
     });
     const result = backend.reconcileMissingCurrentCwlSeasonEvent_({ nowIso: "2026-07-11T12:00:00.000Z" });
     const current = backend.readCurrentCwlSeasonEvent_();
-    assert.equal(result.created, true);
-    assert.equal(current.cwl.target.groupId, backend.buildCwlRuntimeGroupId_(group));
-    assert.equal(current.cwlTrackingState, "active");
-    assert.equal(current.signupsOpen, state !== "ended");
+  assert.equal(result.created, true);
+  assert.equal(current.cwl.target.groupId, backend.buildCwlRuntimeGroupId_(group));
+  assert.equal(current.cwlTrackingState, "active");
+  assert.equal(current.signupsOpen, state !== "ended");
+  assert.equal(result.publication.lifecycleState, "active");
+    assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, current.eventId);
+    assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl").eventId, current.eventId);
   }
+});
+
+test("scheduled reconciliation does not duplicate an already genuinely completed ended group", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = buildValidRosterData();
+  const nowIso = "2026-07-11T12:00:00.000Z";
+  const group = buildOneRoundCwlLeagueGroup({ state: "ended", season: "2026-07" });
+  const groupId = backend.buildCwlRuntimeGroupId_(group);
+  const completed = {
+    eventId: "cwl-completed-group", type: "cwl", status: "closed", signupsOpen: false, cwlTrackingState: "completed", updatedAt: nowIso,
+    cwl: { target: { resolved: true, status: "resolved", rosterId: "main", clanTag: "#CLAN", leagueName: "Champion I", leagueRank: 0, groupId, season: "2026-07", observedAt: nowIso, evidenceStatus: "authoritative", evidenceObservationId: "completed-group-observation", evidenceProvenance: "deterministic-fresh-observation-v1", eligibleAccountTags: ["#PLAYER"] }, finalizedAt: nowIso, groups: {} },
+    participantsByDiscordId: {}, participantsByTag: {},
+  };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(completed.eventId), "PUT", completed);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/latestCompletedCwl", "PUT", { eventId: completed.eventId, type: "cwl" });
+  backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_(completed.eventId, "final"), "PUT", { eventId: completed.eventId, kind: "final", byTag: {}, rankedTags: [], warTags: [] });
+  backend.readAutoRefreshCoordinatorSourceSnapshot_ = () => ({ rosterData });
+  backend.collectFreshCwlTargetEvidence_ = () => ({ capturedAt: nowIso, observationId: "ended-current", leaguegroupRawByClanTag: { "#CLAN": group }, leaguegroupErrorByClanTag: {}, clanDetailsRawByClanTag: {}, clanDetailsErrorByClanTag: {} });
+  const result = backend.reconcileMissingCurrentCwlSeasonEvent_({ nowIso });
+  assert.equal(result.created, false);
+  assert.equal(result.status, "current-cwl-group-already-completed");
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl"), null);
+});
+
+test("atomic legacy target reset failure preserves event, aggregates, runtime, and both pointers", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const nowIso = "2026-07-11T12:00:00.000Z";
+  const rosterData = buildValidRosterData();
+  const group = buildOneRoundCwlLeagueGroup({ state: "inWar" });
+  const evidence = { capturedAt: nowIso, observationId: "atomic-failure", leaguegroupRawByClanTag: { "#CLAN": group }, leaguegroupErrorByClanTag: {}, clanDetailsRawByClanTag: {}, clanDetailsErrorByClanTag: {} };
+  const event = { eventId: "cwl-atomic", type: "cwl", status: "open", signupsOpen: true, cwlTrackingState: "active", updatedAt: nowIso, cwl: { target: { resolved: true, status: "resolved", rosterId: "wrong", clanTag: "#WRONG", leagueName: "Unranked", leagueRank: 99, evidenceStatus: "legacy-unverified", eligibleAccountTags: [] }, groups: {} }, participantsByDiscordId: {}, participantsByTag: {} };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(event.eventId), "PUT", event);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: event.eventId });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", { eventId: event.eventId });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/privateCwlRuntime/current", "PUT", backend.createEmptyCwlRuntime_(event.eventId, nowIso));
+  backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_(event.eventId, "live"), "PUT", { eventId: event.eventId, kind: "live", byTag: {} });
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData });
+  const before = clone(backend.__getFirebaseDb());
+  backend.firebaseBatchPutJson_ = () => { throw new Error("injected atomic write failure"); };
+  assert.throws(() => backend.repairLegacyCwlSeasonEventBinding_({ eventId: event.eventId, nowIso, freshEvidence: evidence }), /atomic write failure/);
+  assert.deepEqual(backend.__getFirebaseDb(), before);
 });
 
 test("legacy CWL binding repair is explicit, revision-guarded, and refuses meaningful activity", () => {
@@ -4984,17 +5048,204 @@ test("legacy CWL binding repair is explicit, revision-guarded, and refuses meani
   });
   const repairable = makeEvent("cwl-repairable");
   backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(repairable.eventId), "PUT", repairable);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: repairable.eventId, type: "cwl" });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", { eventId: repairable.eventId, type: "cwl" });
   const fingerprint = backend.buildCwlSeasonEventTargetFingerprint_(repairable.cwl.target);
   const repaired = backend.repairLegacyCwlSeasonEventBinding_({ eventId: repairable.eventId, expectedTargetFingerprint: fingerprint, nowIso: evidence.capturedAt, freshEvidence: evidence });
   assert.equal(repaired.repaired, true);
+  assert.equal(repaired.publication.lifecycleState, "waiting");
   assert.equal(backend.readSeasonEventById_(repairable.eventId).cwl.target.clanTag, "#CLAN");
 
   const scored = makeEvent("cwl-stable", { "100": { discordId: "100", status: "signed_up", accounts: [{ tag: "#PLAYER" }] } });
   backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(scored.eventId), "PUT", scored);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: scored.eventId, type: "cwl" });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", { eventId: scored.eventId, type: "cwl" });
   const refused = backend.repairLegacyCwlSeasonEventBinding_({ eventId: scored.eventId, nowIso: evidence.capturedAt, freshEvidence: evidence });
   assert.equal(refused.repaired, false);
   assert.equal(refused.status, "stable-binding-has-meaningful-activity");
   assert.equal(backend.readSeasonEventById_(scored.eventId).cwl.target.clanTag, "#WRONG");
+});
+
+test("CWL target provenance never promotes complete legacy evidence without a fresh observation identity", () => {
+  const backend = loadBackend();
+  const base = {
+    resolved: true, status: "resolved", rosterId: "main", clanTag: "#CLAN", leagueName: "Champion I", leagueRank: 0,
+    groupId: "group-1", season: "2026-07", observedAt: "2026-07-11T12:00:00.000Z", eligibleAccountTags: ["#PLAYER"],
+  };
+  assert.equal(backend.sanitizeCwlSeasonEventTarget_({ ...base, evidenceStatus: "legacy-unverified" }).evidenceStatus, "legacy-unverified");
+  assert.equal(backend.sanitizeCwlSeasonEventTarget_({ ...base }).evidenceStatus, "legacy-unverified");
+  assert.equal(backend.sanitizeCwlSeasonEventTarget_({ ...base, evidenceStatus: "authoritative" }).evidenceStatus, "legacy-unverified");
+  const authoritative = backend.sanitizeCwlSeasonEventTarget_({ ...base, evidenceStatus: "authoritative", evidenceObservationId: "fresh-observation", evidenceProvenance: "deterministic-fresh-observation-v1" });
+  assert.equal(authoritative.evidenceStatus, "authoritative");
+  assert.equal(authoritative.groupId, "group-1");
+});
+
+test("false-completion recovery audits frozen Clan A directly even when Clan B now ranks higher", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const nowIso = "2026-07-11T12:00:00.000Z";
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  rosterData.rosters.push({ ...clone(rosterData.rosters[0]), id: "higher", title: "Higher", connectedClanTag: "#HIGH", main: [{ ...clone(rosterData.rosters[0].main[0]), tag: "#HIGHPLAYER" }] });
+  rosterData.rosterOrder.push("higher");
+  rosterData.publicConfig = { cwlEventTargetPriorityByRosterId: { higher: -100 } };
+  const groupA = buildOneRoundCwlLeagueGroup({ clanTag: "#CLAN", leagueName: "Master I", state: "inWar" });
+  const groupB = buildOneRoundCwlLeagueGroup({ clanTag: "#HIGH", leagueName: "Champion I", state: "inWar", warTag: "#WAR2" });
+  const groupIdA = backend.buildCwlRuntimeGroupId_(groupA);
+  const event = {
+    eventId: "cwl-frozen-a", type: "cwl", status: "closed", signupsOpen: false, cwlTrackingState: "completed", updatedAt: "2026-07-11T11:50:00.000Z",
+    cwl: { target: { resolved: true, status: "resolved", rosterId: "main", clanTag: "#CLAN", leagueName: "Master I", leagueRank: 3, groupId: groupIdA, season: "2026-07", observedAt: nowIso, evidenceStatus: "authoritative", evidenceObservationId: "frozen-a-observation", evidenceProvenance: "deterministic-fresh-observation-v1", eligibleAccountTags: ["#PLAYER"] }, finalizedAt: "2026-07-11T11:50:00.000Z" },
+    participantsByDiscordId: {}, participantsByTag: {},
+  };
+  const evidence = { capturedAt: nowIso, observationId: "fresh-audit", leaguegroupRawByClanTag: { "#CLAN": groupA, "#HIGH": groupB }, leaguegroupErrorByClanTag: {}, clanDetailsRawByClanTag: {}, clanDetailsErrorByClanTag: {} };
+  const audit = backend.buildCwlIntegrityAuditResult_(event, rosterData, evidence, nowIso);
+  assert.equal(audit.recoverable, true);
+  assert.equal(audit.eventId, "cwl-frozen-a");
+});
+
+test("strict CWL runtime failures abort coordinator, finalization, repair, and recovery mutations", () => {
+  const nowIso = "2026-07-11T12:00:00.000Z";
+  const rosterData = buildValidRosterData();
+  const group = buildOneRoundCwlLeagueGroup({ state: "inWar" });
+  const groupId = (() => { const b = loadBackend(); return b.buildCwlRuntimeGroupId_(group); })();
+  const authoritativeTarget = { resolved: true, status: "resolved", rosterId: "main", clanTag: "#CLAN", leagueName: "Champion I", leagueRank: 0, groupId, season: "2026-07", observedAt: nowIso, evidenceStatus: "authoritative", evidenceObservationId: "strict-read-observation", evidenceProvenance: "deterministic-fresh-observation-v1", eligibleAccountTags: ["#PLAYER"] };
+  const evidence = { capturedAt: nowIso, observationId: "strict-read-evidence", leaguegroupRawByClanTag: { "#CLAN": group }, leaguegroupErrorByClanTag: {}, clanDetailsRawByClanTag: {}, clanDetailsErrorByClanTag: {} };
+  const installFailure = (backend) => {
+    const original = backend.firebaseRequestJson_;
+    backend.firebaseRequestJson_ = (path, method = "GET", payload) => {
+      if (String(path) === "events/seasonEvents/privateCwlRuntime/current" && String(method).toUpperCase() === "GET") throw new Error("injected runtime GET failure");
+      return original(path, method, payload);
+    };
+  };
+
+  {
+    const event = { eventId: "cwl-coordinator", type: "cwl", status: "open", signupsOpen: true, cwlTrackingState: "active", cwl: { target: authoritativeTarget, groups: {} }, participantsByDiscordId: {}, participantsByTag: {} };
+    const backend = installMemoryFirebase(loadBackend(), { sentinel: { value: 1 } });
+    const before = clone(backend.__getFirebaseDb());
+    installFailure(backend);
+    assert.throws(() => backend.buildCwlCoordinatorResult_(rosterData, { event, nowIso, prefetchedLeaguegroupRawByClanTag: { "#CLAN": group }, prefetchedLeaguegroupErrorByClanTag: {} }), /runtime for mutation/);
+    assert.deepEqual(backend.__getFirebaseDb(), before);
+  }
+  {
+    const event = { eventId: "cwl-finalize", type: "cwl", status: "open", signupsOpen: true, cwlTrackingState: "active", updatedAt: nowIso, cwl: { target: authoritativeTarget, groups: {} }, participantsByDiscordId: {}, participantsByTag: {} };
+    const backend = installMemoryFirebase(loadBackend(), { events: { seasonEvents: { currentCwl: { eventId: event.eventId }, current: { cwl: { eventId: event.eventId } }, byId: { [event.eventId]: event } } } });
+    const before = clone(backend.__getFirebaseDb());
+    installFailure(backend);
+    assert.throws(() => backend.publishCwlSeasonEventRefreshResult_(event, event.cwl, { ok: true, aggregate: { eventId: event.eventId, kind: "live", byTag: {}, rankedTags: [], warTags: [] }, hash: "hash", runtimeState: {} }, nowIso), /runtime for mutation/);
+    assert.deepEqual(backend.__getFirebaseDb(), before);
+  }
+  for (const lifecycle of ["repair", "recovery"]) {
+    const completed = lifecycle === "recovery";
+    const target = completed ? authoritativeTarget : { ...authoritativeTarget, clanTag: "#WRONG", groupId: "", season: "", observedAt: "", evidenceStatus: "legacy-unverified", evidenceObservationId: "" };
+    const event = { eventId: `cwl-${lifecycle}`, type: "cwl", status: completed ? "closed" : "open", signupsOpen: !completed, cwlTrackingState: completed ? "completed" : "active", updatedAt: nowIso, cwl: { target, groups: {}, finalizedAt: completed ? nowIso : "" }, participantsByDiscordId: {}, participantsByTag: {} };
+    const seasonEvents = { byId: { [event.eventId]: event }, currentCwl: completed ? null : { eventId: event.eventId }, current: completed ? {} : { cwl: { eventId: event.eventId } }, latestCompletedCwl: completed ? { eventId: event.eventId } : null };
+    const backend = installMemoryFirebase(loadBackend(), { events: { seasonEvents } });
+    backend.readActiveRosterSnapshot_ = () => ({ rosterData });
+    const before = clone(backend.__getFirebaseDb());
+    installFailure(backend);
+    const call = () => completed
+      ? backend.recoverFalseCompletedCwlSeasonEvent_({ eventId: event.eventId, nowIso, freshEvidence: evidence })
+      : backend.repairLegacyCwlSeasonEventBinding_({ eventId: event.eventId, nowIso, freshEvidence: evidence });
+    assert.throws(call, /runtime for mutation/);
+    assert.deepEqual(backend.__getFirebaseDb(), before);
+  }
+});
+
+test("legacy repair removes same-event wrong-target runtime atomically and refuses historical completed events", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const nowIso = "2026-07-11T12:00:00.000Z";
+  const rosterData = buildValidRosterData();
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData });
+  const group = buildOneRoundCwlLeagueGroup({ state: "inWar" });
+  const evidence = { capturedAt: nowIso, observationId: "repair-reset", leaguegroupRawByClanTag: { "#CLAN": group }, leaguegroupErrorByClanTag: {}, clanDetailsRawByClanTag: {}, clanDetailsErrorByClanTag: {} };
+  const repairable = { eventId: "cwl-reset", type: "cwl", status: "open", signupsOpen: true, cwlTrackingState: "active", updatedAt: nowIso, cwl: { target: { resolved: true, status: "resolved", rosterId: "old", clanTag: "#WRONG", leagueName: "Unranked", leagueRank: 99, evidenceStatus: "legacy-unverified", eligibleAccountTags: [] }, groups: {} }, participantsByDiscordId: {}, participantsByTag: {} };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(repairable.eventId), "PUT", repairable);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: repairable.eventId });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", { eventId: repairable.eventId });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/privateCwlRuntime/current", "PUT", backend.createEmptyCwlRuntime_(repairable.eventId, nowIso));
+  backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_(repairable.eventId, "live"), "PUT", { eventId: repairable.eventId, kind: "live", byTag: {} });
+  const repaired = backend.repairLegacyCwlSeasonEventBinding_({ eventId: repairable.eventId, nowIso, freshEvidence: evidence });
+  assert.equal(repaired.repaired, true);
+  assert.equal(backend.firebaseRequestJson_("events/seasonEvents/privateCwlRuntime/current", "GET"), null);
+  assert.equal(backend.readCwlSeasonEventAggregate_(repairable.eventId, "live"), null);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, repairable.eventId);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl").eventId, repairable.eventId);
+
+  const historical = { ...clone(repairable), eventId: "cwl-historical", status: "closed", cwlTrackingState: "completed" };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(historical.eventId), "PUT", historical);
+  const refused = backend.repairLegacyCwlSeasonEventBinding_({ eventId: historical.eventId, nowIso, freshEvidence: evidence });
+  assert.equal(refused.repaired, false);
+  assert.equal(refused.status, "event-not-current-on-both-pointers");
+
+  const otherBackend = installMemoryFirebase(loadBackend());
+  otherBackend.readActiveRosterSnapshot_ = () => ({ rosterData });
+  otherBackend.writeSeasonEventFirebasePayload_(otherBackend.buildSeasonEventByIdPath_(repairable.eventId), "PUT", repairable);
+  otherBackend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: repairable.eventId });
+  otherBackend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", { eventId: repairable.eventId });
+  const otherRuntime = otherBackend.createEmptyCwlRuntime_("cwl-other-owner", nowIso);
+  otherBackend.writeSeasonEventFirebasePayload_("events/seasonEvents/privateCwlRuntime/current", "PUT", otherRuntime);
+  const preserved = otherBackend.repairLegacyCwlSeasonEventBinding_({ eventId: repairable.eventId, nowIso, freshEvidence: evidence });
+  assert.equal(preserved.repaired, true);
+  assert.equal(otherBackend.readCwlRuntimeStrict_(repairable.eventId).runtimeEventId, "cwl-other-owner");
+});
+
+test("fresh CWL evidence avoids clan-detail requests when successful group evidence already contains ranking", () => {
+  const backend = loadBackend();
+  const rosterData = buildValidRosterData();
+  rosterData.rosters.push({ ...clone(rosterData.rosters[0]), id: "second", connectedClanTag: "#SECOND", main: [{ ...clone(rosterData.rosters[0].main[0]), tag: "#SECONDPLAYER" }] });
+  rosterData.rosterOrder.push("second");
+  const paths = [];
+  backend.cocFetchAllByPathEntries_ = (entriesRaw) => {
+    const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+    const dataByKey = {};
+    for (const entry of entries) {
+      paths.push(entry.path);
+      if (entry.path.includes("leaguegroup")) dataByKey[entry.key] = buildOneRoundCwlLeagueGroup({ clanTag: entry.key, leagueName: entry.key === "#CLAN" ? "Champion I" : "Master I", warTag: entry.key === "#CLAN" ? "#WAR1" : "#WAR2" });
+      else throw new Error(`avoidable clan-detail request: ${entry.path}`);
+    }
+    return { dataByKey, errorByKey: {}, requestCount: entries.length, batchCount: entries.length ? 1 : 0 };
+  };
+  const evidence = backend.collectFreshCwlTargetEvidence_(rosterData, { nowIso: "2026-07-11T12:00:00.000Z" });
+  assert.equal(evidence.requestCounts.leagueGroup, 2);
+  assert.equal(evidence.requestCounts.clanDetails, 0);
+  assert.equal(evidence.requestCounts.total, 2);
+  assert.equal(paths.filter((path) => path.includes("/clans/") && !path.includes("leaguegroup")).length, 0);
+});
+
+test("CWL lifecycle descriptors map waiting, active, finalizing, and completion to exact canonical categories", () => {
+  const backend = loadBackend();
+  const waiting = backend.buildCwlLifecyclePublicationDescriptor_("cwl-1", "waiting");
+  const active = backend.buildCwlLifecyclePublicationDescriptor_("cwl-1", "active");
+  const finalizing = backend.buildCwlLifecyclePublicationDescriptor_("cwl-1", "finalizing");
+  const completed = backend.buildCwlLifecyclePublicationDescriptor_("cwl-1", "completed");
+  assert.deepEqual({ event: waiting.eventAction, live: waiting.liveAggregateAction, final: waiting.finalAggregateAction, pointers: waiting.pointerAction }, { event: "put", live: "delete", final: "delete", pointers: "put" });
+  assert.deepEqual({ live: active.liveAggregateAction, final: active.finalAggregateAction }, { live: "put", final: "delete" });
+  assert.deepEqual({ live: finalizing.liveAggregateAction, final: finalizing.finalAggregateAction }, { live: "put", final: "delete" });
+  assert.deepEqual({ live: completed.liveAggregateAction, final: completed.finalAggregateAction, pointers: completed.pointerAction }, { live: "delete", final: "put", pointers: "put" });
+});
+
+test("ensure-current CWL creation uses the shared waiting lifecycle publication and both pointers", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildValidRosterData() });
+  const result = backend.ensureCurrentCwlSeasonEvent({}, "secret");
+  assert.equal(result.created, true);
+  assert.equal(result.publication.lifecycleState, "waiting");
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, result.event.eventId);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl").eventId, result.event.eventId);
+});
+
+test("CWL current-pointer migration is idempotent and preserves the valid newer event", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const older = { eventId: "cwl-older", type: "cwl", status: "open", cwlTrackingState: "active", createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z", cwl: {}, participantsByDiscordId: {}, participantsByTag: {} };
+  const newer = { ...clone(older), eventId: "cwl-newer", createdAt: "2026-07-02T00:00:00.000Z", updatedAt: "2026-07-02T00:00:00.000Z" };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(older.eventId), "PUT", older);
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(newer.eventId), "PUT", newer);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: older.eventId });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", { eventId: newer.eventId });
+  const repaired = backend.repairCwlCurrentPointerRepresentations_();
+  const repeated = backend.repairCwlCurrentPointerRepresentations_();
+  assert.equal(repaired.changed, true);
+  assert.equal(repeated.changed, false);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, newer.eventId);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl").eventId, newer.eventId);
 });
 
 test("unsafe legacy active version ids are read by their exact encoded key and republished without switching the selector", () => {

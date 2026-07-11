@@ -3815,15 +3815,10 @@ function publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(refreshRaw,
 	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : {};
 	const label = String(labelRaw || "auto-refresh-cwl-season-events").trim() || "auto-refresh-cwl-season-events";
 	const eventId = sanitizeSeasonEventText_(refresh.eventId || (refresh.event && refresh.event.eventId), 180);
-	if (eventId && typeof publishCloudflareSeasonEventsAfterMutation_ === "function") {
-		return publishCloudflareSeasonEventsAfterMutation_(label, eventId, {
-			cwlLive: refresh.finalized !== true,
-			cwlFinal: refresh.finalized === true,
-			pointers: refresh.finalized === true,
-		});
+	if (eventId && typeof buildCwlLifecyclePublicationDescriptor_ === "function" && typeof publishCwlLifecycleDescriptor_ === "function") {
+		const descriptor = buildCwlLifecyclePublicationDescriptor_(eventId, refresh.status || (refresh.finalized === true ? "completed" : "active"), { reason: label });
+		return publishCwlLifecycleDescriptor_(descriptor);
 	}
-	if (typeof publishCloudflareSeasonEventsAfterMutation_ === "function") return publishCloudflareSeasonEventsAfterMutation_(label);
-	if (typeof enqueueCloudflareRelevantSeasonPublication_ === "function") return enqueueCloudflareRelevantSeasonPublication_(label);
 	return { ok: true, skipped: true, reason: "queue-unavailable", label: label };
 }
 
@@ -4080,6 +4075,7 @@ function buildAutoRefreshCwlFinalOutcome_(captureRaw, refreshRaw) {
 	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : null;
 	const captureStatus = String((capture && capture.status) || "").trim().toLowerCase();
 	const lifecycleStatus = String((refresh && refresh.status) || "").trim().toLowerCase();
+	const refreshTarget = refresh && refresh.event && refresh.event.cwl && refresh.event.cwl.target && typeof refresh.event.cwl.target === "object" ? refresh.event.cwl.target : {};
 	let status = "successful";
 	if (lifecycleStatus === "stale") status = "stale";
 	else if (lifecycleStatus === "bootstrap-incomplete" || lifecycleStatus === "deferred" || lifecycleStatus === "unavailable") status = "deferred";
@@ -4094,6 +4090,8 @@ function buildAutoRefreshCwlFinalOutcome_(captureRaw, refreshRaw) {
 	return {
 		status: status,
 		eventId: String((refresh && refresh.eventId) || (capture && capture.eventId) || ""),
+		groupId: String(refreshTarget.groupId || ""),
+		season: String(refreshTarget.season || ""),
 		captureStatus: captureStatus,
 		lifecycleStatus: lifecycleStatus,
 		aggregateOk: !capture || capture.aggregateOk !== false,
@@ -4107,17 +4105,24 @@ function buildAutoRefreshCwlFinalOutcome_(captureRaw, refreshRaw) {
 function recordAutoRefreshCwlFinalOutcomeRecovery_(runIdRaw, outcomeRaw) {
 	const runId = normalizeActiveVersionId_(runIdRaw);
 	const outcome = outcomeRaw && typeof outcomeRaw === "object" ? outcomeRaw : {};
+	const recoveryScope = typeof buildCwlRuntimeRecoveryScope_ === "function" ? buildCwlRuntimeRecoveryScope_(outcome.eventId) : "cwl-refresh";
 	if (outcome.retryPending === true) {
 		if (typeof markRuntimeRecoveryNeeded_ === "function") {
-			markRuntimeRecoveryNeeded_("cwl-refresh", "auto-refresh-side-phase-" + String(outcome.status || "failed"), {
-				runId: runId,
+			markRuntimeRecoveryNeeded_(recoveryScope, "auto-refresh-side-phase-" + String(outcome.status || "failed"), {
+				originRunId: runId,
 				eventId: String(outcome.eventId || ""),
+				groupId: String(outcome.groupId || ""),
+				season: String(outcome.season || ""),
 				captureStatus: String(outcome.captureStatus || ""),
 				lifecycleStatus: String(outcome.lifecycleStatus || ""),
 			});
 		}
+		if (typeof scheduleCwlSeasonEventRecovery_ === "function") scheduleCwlSeasonEventRecovery_();
 	} else if (typeof clearRuntimeRecoveryNeeded_ === "function") {
-		clearRuntimeRecoveryNeeded_("cwl-refresh");
+		clearRuntimeRecoveryNeeded_(recoveryScope);
+		const legacyMarker = typeof readRuntimeRecoveryMarker_ === "function" ? readRuntimeRecoveryMarker_() : { scopes: {} };
+		const legacyCwl = legacyMarker.scopes && legacyMarker.scopes["cwl-refresh"];
+		if (legacyCwl && (!legacyCwl.eventId || String(legacyCwl.eventId) === String(outcome.eventId || ""))) clearRuntimeRecoveryNeeded_("cwl-refresh");
 	}
 	return outcome;
 }
@@ -4209,71 +4214,133 @@ function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRa
 	};
 }
 
-function findIncompleteAutoRefreshCanonicalTask_(currentRaw) {
-	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
-	if (!current || !current.runId) return null;
-	for (let i = 0; i < current.taskIds.length; i++) {
-		const task = readAutoRefreshTask_(current.runId, current.taskIds[i]);
-		if (!task) continue;
-		const type = String(task.type || "");
-		if (type !== "metricCopy" && type !== "roster") continue;
-		if (!isAutoRefreshTaskResultComplete_(current.runId, task)) return task;
+function inspectActiveVersionCanonicalContents_(versionIdRaw, optionsRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (!versionId) return { complete: false, reason: "missing-version-id" };
+	try {
+		const paths = [
+			buildActiveVersionPath_(versionId, "manifest"),
+			buildActiveVersionPath_(versionId, "playerMetrics/schemaVersion"),
+			buildActiveVersionPath_(versionId, "playerMetrics/updatedAt"),
+			buildActiveVersionPath_(versionId, "playerMetrics/byTag"),
+		];
+		if (options.requirePublishedManifest === true) paths.push(FIREBASE_ACTIVE_PUBLISHED_CURRENT_MANIFEST_PATH);
+		const values = firebaseBatchGetJson_(paths);
+		const encodedManifest = values[paths[0]];
+		const manifest = encodedManifest && typeof encodedManifest === "object" && !Array.isArray(encodedManifest)
+			? decodeFirebaseObjectKeysRecursive_(encodedManifest)
+			: null;
+		if (!manifest || normalizeActiveVersionId_(manifest.versionId) !== versionId) {
+			return { complete: false, reason: "missing-or-mismatched-manifest", versionId: versionId };
+		}
+		const rosterIdsRaw = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : [];
+		const rosterIds = [];
+		const rosterSeen = {};
+		for (let i = 0; i < rosterIdsRaw.length; i++) {
+			const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
+			if (!rosterId || rosterSeen[rosterId]) return { complete: false, reason: "invalid-manifest-roster-ids", versionId: versionId, manifest: manifest };
+			rosterSeen[rosterId] = true;
+			rosterIds.push(rosterId);
+		}
+		if (!rosterIds.length || !Array.isArray(manifest.rosterOrder) || !String(manifest.publishedAt || "").trim()) {
+			return { complete: false, reason: "incomplete-supporting-manifest", versionId: versionId, manifest: manifest };
+		}
+		if (values[paths[1]] == null || !String(values[paths[2]] || "").trim()) {
+			return { complete: false, reason: "missing-player-metrics-metadata", versionId: versionId, manifest: manifest };
+		}
+		const metricByTag = values[paths[3]];
+		const expectedMetricCount = Math.max(0, toNonNegativeInt_(manifest.playerMetricEntryCount));
+		const actualMetricCount = metricByTag && typeof metricByTag === "object" && !Array.isArray(metricByTag) ? Object.keys(metricByTag).length : 0;
+		if (expectedMetricCount > 0 && (!metricByTag || typeof metricByTag !== "object" || Array.isArray(metricByTag))) {
+			return { complete: false, reason: "missing-player-metrics-shards", versionId: versionId, manifest: manifest };
+		}
+		if (actualMetricCount !== expectedMetricCount || toNonNegativeInt_(manifest.playerMetricsSchemaVersion) !== toNonNegativeInt_(values[paths[1]]) || manifest.layoutVersion == null) {
+			return { complete: false, reason: "inconsistent-player-metrics-or-layout-metadata", versionId: versionId, manifest: manifest };
+		}
+		if (options.requirePublishedManifest === true) {
+			const encodedPublishedManifest = values[paths[4]];
+			const publishedManifest = encodedPublishedManifest && typeof encodedPublishedManifest === "object" && !Array.isArray(encodedPublishedManifest)
+				? decodeFirebaseObjectKeysRecursive_(encodedPublishedManifest)
+				: null;
+			if (!publishedManifest || normalizeActiveVersionId_(publishedManifest.versionId) !== versionId) {
+				return { complete: false, reason: "missing-published-manifest", versionId: versionId, manifest: manifest };
+			}
+			if (JSON.stringify(publishedManifest.rosterIds || []) !== JSON.stringify(manifest.rosterIds || []) || String(publishedManifest.publishedAt || "") !== String(manifest.publishedAt || "")) {
+				return { complete: false, reason: "mismatched-published-manifest", versionId: versionId, manifest: manifest };
+			}
+		}
+		const rosterShards = readActiveVersionRosterShards_(versionId, manifest);
+		for (let i = 0; i < rosterIds.length; i++) {
+			const roster = rosterShards.rosterMap[rosterIds[i]];
+			if (!roster || String(roster.id || "").trim() !== rosterIds[i]) {
+				return { complete: false, reason: "missing-or-mismatched-roster-shard", versionId: versionId, rosterId: rosterIds[i], manifest: manifest };
+			}
+		}
+		// This final reconstruction applies the production schema validator to the
+		// immutable roster and metric shards, without consulting queue diagnostics.
+		readActiveRosterSnapshotFromVersion_(versionId);
+		return { complete: true, reason: "canonical-version-complete", versionId: versionId, manifest: manifest };
+	} catch (err) {
+		return { complete: false, reason: "canonical-content-read-failed", versionId: versionId, error: errorMessage_(err) };
 	}
-	return null;
 }
 
 function inspectAlreadyPublishedAutoRefreshCanonicalCompletion_(currentRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const runId = current && current.runId;
 	if (!runId || readPublishedActiveVersionId_() !== runId) return { complete: false, reason: "active-version-mismatch" };
-	const incompleteTask = findIncompleteAutoRefreshCanonicalTask_(current);
-	if (incompleteTask) return { complete: false, reason: "incomplete-task", task: incompleteTask };
-	const sourceMeta = readAutoRefreshRunShard_(runId, "source/meta");
-	if (!sourceMeta || typeof sourceMeta !== "object") return { complete: false, reason: "missing-source-meta" };
-	verifyAutoRefreshMetricCopyTasksComplete_(runId, current.taskIds);
-	verifyAutoRefreshFinalizeResultMarkers_(runId, current.rosterIds, { includeActiveRosters: true });
-	const encodedManifest = firebaseRequestJson_(buildActiveVersionPath_(runId, "manifest"), "GET");
-	const manifest = decodeFirebaseObjectKeysRecursive_(encodedManifest);
-	if (!manifest || typeof manifest !== "object" || normalizeActiveVersionId_(manifest.versionId) !== runId) {
-		return { complete: false, reason: "missing-manifest", sourceMeta: sourceMeta };
-	}
-	const manifestRosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds.map(function (value) { return String(value || ""); }) : [];
-	for (let i = 0; i < current.rosterIds.length; i++) {
-		if (manifestRosterIds.indexOf(current.rosterIds[i]) < 0) return { complete: false, reason: "incomplete-manifest", sourceMeta: sourceMeta, manifest: manifest };
-	}
-	const metricsSchemaVersion = firebaseRequestJson_(buildActiveVersionPath_(runId, "playerMetrics/schemaVersion"), "GET");
-	if (metricsSchemaVersion == null) return { complete: false, reason: "missing-player-metrics", sourceMeta: sourceMeta, manifest: manifest };
-	return { complete: true, sourceMeta: sourceMeta, manifest: manifest };
+	const inspection = inspectActiveVersionCanonicalContents_(runId, { requirePublishedManifest: true });
+	try { inspection.sourceMeta = readAutoRefreshRunShard_(runId, "source/meta"); } catch (err) { inspection.sourceMeta = null; }
+	return inspection;
 }
 
-function resumeIncompleteAlreadyPublishedAutoRefreshRun_(currentRaw, inspectionRaw) {
+function recordAlreadyPublishedCanonicalRepairDiagnostic_(currentRaw, inspectionRaw, statusRaw, extraRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const inspection = inspectionRaw && typeof inspectionRaw === "object" ? inspectionRaw : {};
-	const task = inspection.task && typeof inspection.task === "object" ? inspection.task : null;
-	if (current && task) {
-		task.status = "pending";
-		task.error = "";
-		task.summary = "canonical-work-incomplete";
-		task.updatedAt = new Date().toISOString();
-		writeAutoRefreshTask_(current.runId, task);
-		current.status = "running";
-		current.phase = "processing";
-		current.error = "";
-		current.currentTaskIndex = Math.max(0, toNonNegativeInt_(task.index));
-		current.processedTasks = Math.min(current.processedTasks, current.currentTaskIndex);
-		writeAutoRefreshQueueCurrent_(current, false);
+	const status = String(statusRaw || "repair-required");
+	const runId = current && current.runId;
+	if (!runId) return null;
+	const diagnostic = Object.assign({
+		runId: runId,
+		status: status,
+		reason: String(inspection.reason || "canonical-version-incomplete"),
+		error: String(inspection.error || "").slice(0, 500),
+		sourceVersionId: normalizeActiveVersionId_(current.sourceVersionId),
+		updatedAt: new Date().toISOString(),
+	}, extraRaw && typeof extraRaw === "object" ? extraRaw : {});
+	try {
+		firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH, encodeFirebaseObjectKey_(runId)), "PUT", encodeFirebaseObjectKeysRecursive_(diagnostic));
+	} catch (err) {}
+	if (typeof markRuntimeRecoveryNeeded_ === "function") {
+		markRuntimeRecoveryNeeded_("canonical-roster-repair:" + runId, diagnostic.reason, diagnostic);
 	}
-	return {
-		ok: true,
-		status: "inProgress",
-		inProgress: true,
-		deferred: true,
-		reason: task ? "canonicalWorkIncomplete" : String(inspection.reason || "canonicalCompletionIncomplete"),
-		runId: current ? current.runId : "",
-		taskId: String((task && task.taskId) || ""),
-		processedRosters: current ? current.processedRosters : 0,
-		totalRosters: current ? current.rosterIds.length : 0,
-	};
+	return diagnostic;
+}
+
+function recoverIncompleteAlreadyPublishedAutoRefreshCanonical_(currentRaw, inspectionRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const inspection = inspectionRaw && typeof inspectionRaw === "object" ? inspectionRaw : {};
+	const runId = current && current.runId;
+	const sourceVersionId = normalizeActiveVersionId_(current && current.sourceVersionId);
+	let sourceInspection = null;
+	if (runId && sourceVersionId && sourceVersionId !== runId) {
+		sourceInspection = inspectActiveVersionCanonicalContents_(sourceVersionId, { requirePublishedManifest: false });
+	}
+	if (sourceInspection && sourceInspection.complete === true && readPublishedActiveVersionId_() === runId) {
+		publishActiveRosterVersionPointer_(sourceVersionId, sourceInspection.manifest);
+		clearActiveRosterDataCache_();
+		const diagnostic = recordAlreadyPublishedCanonicalRepairDiagnostic_(current, inspection, "rolled-back-to-known-good", {
+			recoveredVersionId: sourceVersionId,
+			repairedAt: new Date().toISOString(),
+		});
+		if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("canonical-roster-repair:" + runId);
+		return { repaired: true, status: "rolled-back-to-known-good", versionId: sourceVersionId, diagnostic: diagnostic };
+	}
+	const diagnostic = recordAlreadyPublishedCanonicalRepairDiagnostic_(current, inspection, "repair-required", {
+		sourceInspection: sourceInspection ? { complete: sourceInspection.complete === true, reason: String(sourceInspection.reason || "") } : null,
+	});
+	return { repaired: false, status: "repair-required", versionId: runId, diagnostic: diagnostic };
 }
 
 // Execute finalization task: verify shards, guard source fingerprint, write final
@@ -4308,7 +4375,34 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			canonicalInspection = { complete: false, reason: "canonical-inspection-failed", error: errorMessage_(err) };
 		}
 		if (!canonicalInspection || canonicalInspection.complete !== true) {
-			return resumeIncompleteAlreadyPublishedAutoRefreshRun_(current, canonicalInspection);
+			const repair = recoverIncompleteAlreadyPublishedAutoRefreshCanonical_(current, canonicalInspection);
+			const repairedVersionId = normalizeActiveVersionId_(repair && repair.versionId);
+			let cloudflareRepair = null;
+			if (repair && repair.repaired === true && repairedVersionId) {
+				try { cloudflareRepair = ensureAutoRefreshCloudflarePublicDataPublished_(Object.assign({}, current, { runId: repairedVersionId }), "auto-refresh-canonical-selector-recovery"); } catch (err) {
+					cloudflareRepair = { ok: false, repairPending: true, error: errorMessage_(err) };
+				}
+			}
+			const summary = repair && repair.repaired === true
+				? "The selected auto-refresh version was incomplete; the Firebase selector was restored to the last verified canonical version."
+				: "The selected auto-refresh version is incomplete and requires guarded canonical repair; the old queue was terminalized without mutating the selected immutable version.";
+			current.status = repair && repair.repaired === true ? "repaired" : "failed";
+			current.phase = "terminal-canonical-repair";
+			current.completedAt = new Date().toISOString();
+			current.error = String((canonicalInspection && (canonicalInspection.reason || canonicalInspection.error)) || "canonical-version-incomplete");
+			current.cloudflarePublicDataPublish = cloudflareRepair && cloudflareRepair.summary ? cloudflareRepair.summary : null;
+			setAutoRefreshRunResult_(current.status, summary, current.error, current.issueCount, current.issueSummary, current.startedAt, current.completedAt);
+			archiveAndClearAutoRefreshQueueStateBestEffort_(current, current.status, summary, current.error, "autoRefresh incomplete selected-version cleanup");
+			return {
+				ok: repair && repair.repaired === true,
+				status: current.status,
+				terminal: true,
+				canonicalRepair: sanitizeAutoRefreshDiagnosticFragment_(repair, 3),
+				cloudflarePublicDataPublish: sanitizeAutoRefreshDiagnosticFragment_(cloudflareRepair, 2),
+				summary: summary,
+				runId: runId,
+				skipPostTickMirrorRepair: true,
+			};
 		}
 		const summary = "Auto-refresh version was already published; completed required final CWL and Cloudflare phases.";
 		const finalPhases = runAutoRefreshRequiredFinalPhases_(current, sourceMetaForCwl, summary, executionStartMsRaw, {
@@ -5466,6 +5560,126 @@ function repairAutoRefreshSchedulingFromPermanentWatchdog_() {
 	};
 }
 
+function listCwlSeasonEventRecoveryTriggers_() {
+	return ScriptApp.getProjectTriggers().filter(function (trigger) { return trigger.getHandlerFunction() === CWL_RECOVERY_HANDLER_NAME; });
+}
+
+function listPendingCwlRuntimeRecoveryScopes_() {
+	const scopes = typeof listRuntimeRecoveryScopes_ === "function" ? listRuntimeRecoveryScopes_("cwl-refresh:") : [];
+	const marker = typeof readRuntimeRecoveryMarker_ === "function" ? readRuntimeRecoveryMarker_() : { scopes: {} };
+	if (marker.scopes && marker.scopes["cwl-refresh"] && scopes.indexOf("cwl-refresh") < 0) scopes.push("cwl-refresh");
+	return scopes.sort();
+}
+
+function findCwlSeasonEventRecoveryTriggerById_(triggersRaw, triggerIdRaw) {
+	const triggers = Array.isArray(triggersRaw) ? triggersRaw : [];
+	const triggerId = String(triggerIdRaw || "").trim();
+	for (let i = 0; i < triggers.length; i++) if (getTriggerUniqueId_(triggers[i]) === triggerId) return triggers[i];
+	return null;
+}
+
+function scheduleCwlSeasonEventRecovery_(notBeforeMsRaw) {
+	const scopes = listPendingCwlRuntimeRecoveryScopes_();
+	if (!scopes.length) return { scheduled: false, skipped: true, reason: "no-cwl-recovery-marker" };
+	const props = PropertiesService.getScriptProperties();
+	const desiredAtMs = Math.max(Date.now() + 1000, Number(notBeforeMsRaw) || Date.now() + CWL_RECOVERY_TRIGGER_DELAY_MS, getRuntimeUrlFetchQuotaCooldownUntilMs_());
+	const lock = LockService.getScriptLock();
+	const didLock = typeof lock.tryLock === "function" ? lock.tryLock(1000) : (lock.waitLock(1000), true);
+	if (!didLock) return { scheduled: false, degraded: true, reason: "lock-busy" };
+	try {
+		const triggers = listCwlSeasonEventRecoveryTriggers_();
+		const configuredId = String(props.getProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY) || "").trim();
+		const configuredAtMs = Math.max(0, Number(props.getProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY) || 0));
+		const configured = findCwlSeasonEventRecoveryTriggerById_(triggers, configuredId);
+		if (configured && configuredAtMs > 0 && configuredAtMs <= desiredAtMs) {
+			return { scheduled: true, reused: true, triggerId: configuredId, scheduledAtMs: configuredAtMs };
+		}
+		let created;
+		try { created = ScriptApp.newTrigger(CWL_RECOVERY_HANDLER_NAME).timeBased().after(Math.max(1000, desiredAtMs - Date.now())).create(); }
+		catch (err) { return { scheduled: false, degraded: true, reason: "create-failed", error: errorMessage_(err), preservedTriggerId: configuredId }; }
+		const createdId = getTriggerUniqueId_(created);
+		if (!createdId) return { scheduled: false, degraded: true, reason: "missing-trigger-id", preservedTriggerId: configuredId };
+		props.setProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY, createdId);
+		props.setProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY, String(desiredAtMs));
+		if (configured && configuredId !== createdId) {
+			try { ScriptApp.deleteTrigger(configured); } catch (err) {}
+		}
+		return { scheduled: true, reused: false, triggerId: createdId, scheduledAtMs: desiredAtMs };
+	} finally {
+		try { lock.releaseLock(); } catch (err) {}
+	}
+}
+
+function consumeCwlSeasonEventRecoveryTrigger_(eventRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const firedId = String(event.triggerUid || event.triggerId || "").trim();
+	if (!firedId) return { consumed: false, reason: "missing-trigger-id" };
+	const props = PropertiesService.getScriptProperties();
+	const configuredId = String(props.getProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY) || "").trim();
+	const trigger = findCwlSeasonEventRecoveryTriggerById_(listCwlSeasonEventRecoveryTriggers_(), firedId);
+	if (trigger) { try { ScriptApp.deleteTrigger(trigger); } catch (err) {} }
+	if (firedId === configuredId) {
+		props.deleteProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY);
+		props.deleteProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY);
+	}
+	return { consumed: !!trigger || firedId === configuredId, triggerId: firedId, owned: firedId === configuredId };
+}
+
+function runOneCwlSeasonEventRecovery_() {
+	const scopes = listPendingCwlRuntimeRecoveryScopes_();
+	if (!scopes.length) return { ok: true, skipped: true, reason: "no-cwl-recovery-marker" };
+	const scope = scopes[0];
+	const marker = readRuntimeRecoveryMarker_();
+	const detail = marker.scopes && marker.scopes[scope] && typeof marker.scopes[scope] === "object" ? marker.scopes[scope] : {};
+	const eventId = String(detail.eventId || "").trim();
+	let result;
+	try {
+		if (eventId) {
+			const current = readCurrentCwlSeasonEvent_();
+			if (!current || String(current.eventId || "") !== eventId) {
+				clearRuntimeRecoveryNeeded_(scope);
+				return { ok: true, status: "superseded", cleared: true, scope: scope, eventId: eventId };
+			}
+			const target = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(current.cwl).target);
+			if ((detail.groupId && String(detail.groupId) !== target.groupId) || (detail.season && String(detail.season) !== target.season)) {
+				clearRuntimeRecoveryNeeded_(scope);
+				return { ok: true, status: "target-superseded", cleared: true, scope: scope, eventId: eventId };
+			}
+			result = refreshCurrentCwlSeasonEventCore_({ source: { type: "independent-cwl-recovery", recoveryScope: scope } });
+		} else {
+			result = reconcileMissingCurrentCwlSeasonEvent_({ source: { type: "independent-cwl-recovery", recoveryScope: scope } });
+		}
+		const status = String(result && result.status || "").toLowerCase();
+		const successful = !!(result && result.ok !== false && status !== "stale" && status !== "deferred" && status !== "bootstrap-incomplete" && status !== "unavailable" && status !== "error" && status !== "cwl-reconciliation-deferred");
+		if (successful) clearRuntimeRecoveryNeeded_(scope);
+		else markRuntimeRecoveryNeeded_(scope, "independent-cwl-recovery-" + (status || "failed"), Object.assign({}, detail, { eventId: eventId, lastAttemptAt: new Date().toISOString(), lastStatus: status || "failed" }));
+		return { ok: successful, status: status || "failed", cleared: successful, scope: scope, eventId: eventId, result: sanitizeAutoRefreshDiagnosticFragment_(result, 3) };
+	} catch (err) {
+		markRuntimeRecoveryNeeded_(scope, "independent-cwl-recovery-failed", Object.assign({}, detail, { eventId: eventId, lastAttemptAt: new Date().toISOString(), error: errorMessage_(err).slice(0, 500) }));
+		return { ok: false, status: "failed", cleared: false, scope: scope, eventId: eventId, error: errorMessage_(err) };
+	}
+}
+
+function cwlSeasonEventRecoveryTick(eventRaw) {
+	consumeCwlSeasonEventRecoveryTrigger_(eventRaw);
+	return runWithExecutionDeadline_("independent-cwl-recovery", 120 * 1000, function () {
+		if (getRuntimeUrlFetchQuotaCooldownUntilMs_() > Date.now()) {
+			const scheduled = scheduleCwlSeasonEventRecovery_(getRuntimeUrlFetchQuotaCooldownUntilMs_());
+			return { ok: true, skipped: true, reason: "urlFetchQuotaCooldown", scheduled: scheduled };
+		}
+		const result = runOneCwlSeasonEventRecovery_();
+		if (listPendingCwlRuntimeRecoveryScopes_().length) result.next = scheduleCwlSeasonEventRecovery_();
+		return result;
+	}, { cleanupReserveMs: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS, recoveryScope: "cwl-independent-recovery" });
+}
+
+function repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_() {
+	const scopes = listPendingCwlRuntimeRecoveryScopes_();
+	if (!scopes.length) return { ok: true, pending: false, scheduled: false };
+	const scheduled = scheduleCwlSeasonEventRecovery_();
+	return { ok: !!(scheduled && scheduled.scheduled), pending: true, scheduled: !!(scheduled && scheduled.scheduled), detail: scheduled };
+}
+
 function permanentSchedulerWatchdogTickInternal_() {
 	const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
 	if (cooldownUntilMs > Date.now()) {
@@ -5477,6 +5691,7 @@ function permanentSchedulerWatchdogTickInternal_() {
 		permanent: ensurePermanentSchedulerWatchdogTrigger_(),
 		autoRefresh: null,
 		donationRefresh: null,
+		cwlRecovery: null,
 		cloudflare: null,
 	};
 	try {
@@ -5492,6 +5707,13 @@ function permanentSchedulerWatchdogTickInternal_() {
 	} catch (err) {
 		result.ok = false;
 		result.donationRefresh = { ok: false, error: errorMessage_(err) };
+	}
+	try {
+		result.cwlRecovery = repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_();
+		if (result.cwlRecovery && result.cwlRecovery.ok === false) result.ok = false;
+	} catch (err) {
+		result.ok = false;
+		result.cwlRecovery = { ok: false, error: errorMessage_(err) };
 	}
 	if (typeof repairCloudflarePublishSchedulingFromPermanentWatchdog_ === "function") {
 		try {

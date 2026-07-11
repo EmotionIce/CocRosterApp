@@ -729,23 +729,58 @@ function enqueueCloudflareSeasonEventPublication_(eventIdRaw, reasonRaw, options
 	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
 	if (!eventId || !isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: !eventId ? "missing-event" : "disabled" };
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const lifecycle = options.cwlLifecycle && typeof options.cwlLifecycle === "object" ? options.cwlLifecycle : null;
+	const dirtyCwlLive = lifecycle ? String(lifecycle.liveAggregateAction || "") === "put" || String(lifecycle.liveAggregateAction || "") === "delete" : options.cwlLive === true;
+	const dirtyCwlFinal = lifecycle ? String(lifecycle.finalAggregateAction || "") === "put" || String(lifecycle.finalAggregateAction || "") === "delete" : options.cwlFinal === true;
+	const dirtyPointers = lifecycle ? String(lifecycle.pointerAction || "") === "put" || String(lifecycle.pointerAction || "") === "delete" : options.pointers === true;
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
 			clearSupersededCloudflareDeadLetters_(state, "event", eventId, "");
 			state.dirty.events[eventId] = makeCloudflareDirtyRevision_(state, reasonRaw || "event-mutation", { eventId: eventId, category: "event" });
-			if (options.cwlLive === true || options.cwlFinal === true) {
+			if (dirtyCwlLive || dirtyCwlFinal) {
 				const kinds = state.dirty.cwlAggregates[eventId] && typeof state.dirty.cwlAggregates[eventId] === "object" ? state.dirty.cwlAggregates[eventId] : {};
-				if (options.cwlLive === true) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "live"); kinds.live = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-live", { eventId: eventId, kind: "live", category: "cwlAggregate" }); }
-				if (options.cwlFinal === true) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "final"); kinds.final = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-final", { eventId: eventId, kind: "final", category: "cwlAggregate" }); }
+				if (dirtyCwlLive) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "live"); kinds.live = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-live", { eventId: eventId, kind: "live", category: "cwlAggregate" }); }
+				if (dirtyCwlFinal) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "final"); kinds.final = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-final", { eventId: eventId, kind: "final", category: "cwlAggregate" }); }
 				state.dirty.cwlAggregates[eventId] = kinds;
 			}
-			if (options.pointers === true) { clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", ""); state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "event-pointers", { category: "seasonPointers" }); }
+			if (dirtyPointers) { clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", ""); state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "event-pointers", { category: "seasonPointers" }); }
 			return { ok: true, eventId: eventId, revision: state.dirty.events[eventId].revision, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
 		return finalizeCloudflareEnqueueResult_(result);
 	} catch (err) {
 		Logger.log("Cloudflare event enqueue failed eventId=%s error=%s", eventId, errorMessage_(err));
 		return { ok: false, error: errorMessage_(err), eventId: eventId };
+	}
+}
+
+function enqueueCloudflareSeasonEventReconciliation_(mutationsRaw, reasonRaw) {
+	if (!isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: "disabled" };
+	const mutations = mutationsRaw && typeof mutationsRaw === "object" ? mutationsRaw : {};
+	const eventIdsRaw = Array.isArray(mutations.eventIds) ? mutations.eventIds : [];
+	const eventIds = [];
+	for (let i = 0; i < eventIdsRaw.length; i++) {
+		const eventId = sanitizeSeasonEventText_(eventIdsRaw[i], 180);
+		if (eventId && eventIds.indexOf(eventId) < 0) eventIds.push(eventId);
+	}
+	const pointerPaths = Array.isArray(mutations.pointerPaths) ? mutations.pointerPaths.filter(Boolean) : [];
+	if (!eventIds.length && !pointerPaths.length) return { ok: true, skipped: true, reason: "no-reconciliation-mutations" };
+	try {
+		const result = mutateCloudflarePublishQueueState_(function (state) {
+			for (let i = 0; i < eventIds.length; i++) {
+				const eventId = eventIds[i];
+				clearSupersededCloudflareDeadLetters_(state, "event", eventId, "");
+				state.dirty.events[eventId] = makeCloudflareDirtyRevision_(state, reasonRaw || "season-event-reconciliation", { eventId: eventId, category: "event" });
+			}
+			if (pointerPaths.length) {
+				clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", "");
+				state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "season-event-reconciliation-pointers", { category: "seasonPointers", pointerPaths: pointerPaths.slice() });
+			}
+			return { ok: true, eventIds: eventIds.slice(), pointerPaths: pointerPaths.slice(), pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+		});
+		return finalizeCloudflareEnqueueResult_(result);
+	} catch (err) {
+		Logger.log("Cloudflare reconciliation enqueue failed: %s", errorMessage_(err));
+		return { ok: false, error: errorMessage_(err), eventIds: eventIds, pointerPaths: pointerPaths };
 	}
 }
 
@@ -2008,6 +2043,17 @@ function repairCloudflarePublishSchedulingFromPermanentWatchdog_() {
 	if (repairVersionId && String((state.active && state.active.targetVersionId) || "") !== repairVersionId) {
 		activeRepair = enqueueCloudflareActiveTarget_(repairVersionId, marker.activeReason || "permanent-watchdog-active-repair");
 		state = readCloudflarePublishQueueState_();
+	}
+	const activeState = state.active && typeof state.active === "object" ? state.active : {};
+	const matchingTargetCommittedIdle = !!(
+		repairVersionId &&
+		String(activeState.targetVersionId || "") === repairVersionId &&
+		String(activeState.committedVersionId || "") === repairVersionId &&
+		String(activeState.phase || "") === "idle"
+	);
+	if (matchingTargetCommittedIdle && !hasPendingCloudflarePublishWork_(state)) {
+		clearCloudflarePublishSchedulerRepair_();
+		return { ok: true, pending: false, repaired: true, healthy: true, alreadyCommitted: true, activeRepair: activeRepair };
 	}
 	const pending = hasPendingCloudflarePublishWork_(state);
 	if (!pending) {

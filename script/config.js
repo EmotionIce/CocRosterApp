@@ -114,6 +114,10 @@ const RUNTIME_URLFETCH_QUOTA_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME = "permanentSchedulerWatchdogTick";
 const PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY = "PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID";
 const PERMANENT_SCHEDULER_WATCHDOG_INTERVAL_HOURS = 6;
+const CWL_RECOVERY_HANDLER_NAME = "cwlSeasonEventRecoveryTick";
+const CWL_RECOVERY_TRIGGER_ID_PROPERTY = "CWL_RECOVERY_TRIGGER_ID";
+const CWL_RECOVERY_TRIGGER_AT_PROPERTY = "CWL_RECOVERY_TRIGGER_AT";
+const CWL_RECOVERY_TRIGGER_DELAY_MS = 5 * 60 * 1000;
 let executionDeadlineContextStack_ = [];
 
 function readRuntimeRecoveryMarker_() {
@@ -135,9 +139,11 @@ function markRuntimeRecoveryNeeded_(scopeRaw, reasonRaw, extraRaw) {
 	try {
 		const props = PropertiesService.getScriptProperties();
 		const marker = readRuntimeRecoveryMarker_();
-		marker.scopes[scope] = Object.assign({
+		const existing = marker.scopes[scope] && typeof marker.scopes[scope] === "object" ? marker.scopes[scope] : {};
+		marker.scopes[scope] = Object.assign({}, existing, {
 			pending: true,
 			reason: reason,
+			createdAt: String(existing.createdAt || new Date().toISOString()),
 			updatedAt: new Date().toISOString(),
 		}, extraRaw && typeof extraRaw === "object" ? extraRaw : {});
 		props.setProperty(RUNTIME_RECOVERY_MARKER_PROPERTY, JSON.stringify(marker));
@@ -161,6 +167,17 @@ function clearRuntimeRecoveryNeeded_(scopeRaw) {
 	} catch (err) {
 		return false;
 	}
+}
+
+function listRuntimeRecoveryScopes_(prefixRaw) {
+	const prefix = String(prefixRaw == null ? "" : prefixRaw).trim();
+	const marker = readRuntimeRecoveryMarker_();
+	return Object.keys(marker.scopes || {}).filter(function (scope) { return !prefix || scope.indexOf(prefix) === 0; }).sort();
+}
+
+function buildCwlRuntimeRecoveryScope_(eventIdRaw) {
+	const eventId = String(eventIdRaw == null ? "" : eventIdRaw).trim().replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 180);
+	return "cwl-refresh:" + (eventId || "unbound");
 }
 
 function getRuntimeUrlFetchQuotaCooldownUntilMs_() {
@@ -335,6 +352,7 @@ const FIREBASE_DONATION_REFRESH_PATH = "donationRefresh";
 const FIREBASE_INTERNAL_AUTO_REFRESH_JOB_PATH = "internal/autoRefresh/current";
 const FIREBASE_INTERNAL_AUTO_REFRESH_LAST_JOB_PATH = "internal/autoRefresh/lastJob";
 const FIREBASE_INTERNAL_AUTO_REFRESH_RUNS_PATH = "internal/autoRefresh/runs";
+const FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH = "internal/autoRefresh/canonicalRepairs";
 const FIREBASE_META_PATH = "meta";
 const FIREBASE_PUBLISH_ARCHIVE_KEEP_COUNT = 10;
 const FIREBASE_AUTOREFRESH_DAILY_KEEP_COUNT = 2;

@@ -60,7 +60,7 @@ test("normal publisher wrappers enqueue targeted work instead of writing pointer
   const seasonWrapper = seasonEvents.match(/function publishCloudflareSeasonEventsAfterMutation_[\s\S]*?\n\}/)?.[0] || "";
   const cwlWrapper = autoRefresh.match(/function publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_[\s\S]*?\n\}/)?.[0] || "";
   assert.match(seasonWrapper, /enqueueCloudflareSeasonEventPublication_|enqueueCloudflareRelevantSeasonPublication_/);
-  assert.match(cwlWrapper, /enqueueCloudflareSeasonEventPublication_|enqueueCloudflareRelevantSeasonPublication_/);
+  assert.match(cwlWrapper, /publishCwlLifecycleDescriptor_/);
   assert.equal(seasonWrapper.includes("UrlFetchApp"), false);
   assert.equal(cwlWrapper.includes("UrlFetchApp"), false);
 });
