@@ -1844,6 +1844,13 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 // Public refresh-all entrypoint that wraps the unlocked core with the job lock lifecycle.
 function runRefreshAllRostersCore_(rosterDataOrLoaderRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (options.executionDeadlineActive !== true && typeof isExecutionDeadlineActive_ === "function" && !isExecutionDeadlineActive_()) {
+		return runWithExecutionDeadline_("refresh-all", APP_SCRIPT_HTTP_EXECUTION_BUDGET_MS, function () {
+			return runRefreshAllRostersCore_(rosterDataOrLoaderRaw, Object.assign({}, options, { executionDeadlineActive: true }));
+		}, {
+			recoveryScope: "refreshAll",
+		});
+	}
 	const lockOwner = String(options.lockOwner == null ? "refresh-all" : options.lockOwner).trim() || "refresh-all";
 	const lockWaitRaw = Number(options.lockWaitMs);
 	const lockWaitMs = Math.max(0, isFinite(lockWaitRaw) ? lockWaitRaw : ACTIVE_ROSTER_JOB_LOCK_WAIT_MS);

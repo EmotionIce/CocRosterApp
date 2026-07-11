@@ -112,6 +112,38 @@ test("bot active routes resolve immutable versioned objects with the existing sc
   assert.deepEqual(await index.json(), linked);
 });
 
+test("sharded bot-active publication reconstructs the unchanged active route contract", async () => {
+  const worker = loadWorker();
+  const selector = { schemaVersion: 1, currentVersionId: "version-sharded", previousVersionId: "", generation: 9, committedAt: "now" };
+  const rosters = [{ id: "main", main: [{ tag: "#PLAYER" }], subs: [], missing: [] }];
+  const byTag = { "#PLAYER": { identity: { tag: "#PLAYER", name: "Player" } } };
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+      "public-data/activeVersions/version-sharded/manifest.json": JSON.stringify({ versionId: "version-sharded", rosterIds: ["main"] }),
+      "public-data/activeVersions/version-sharded/rosters.json": JSON.stringify({ main: rosters[0] }),
+      "public-data/activeVersions/version-sharded/playerMetrics.json": JSON.stringify({ schemaVersion: 1, byTag }),
+      "bot-data/activeVersions/version-sharded/active.json": JSON.stringify({ shardedActive: true, activeMeta: { schemaVersion: 1, pageTitle: "Roster", rosterOrder: ["main"] } }),
+      "bot-data/activeVersions/version-sharded/rosters.json": JSON.stringify(rosters),
+      "bot-data/activeVersions/version-sharded/playerMetrics/meta.json": JSON.stringify({ schemaVersion: 1, updatedAt: "now" }),
+      "bot-data/activeVersions/version-sharded/playerMetrics/byTag.json": JSON.stringify(byTag),
+      "bot-data/activeVersions/version-sharded/indexes/linkedAccountsByDiscordId.json": JSON.stringify({}),
+      "bot-data/activeVersions/version-sharded/indexes/linkedAccountsByDiscordUsername.json": JSON.stringify({}),
+    }),
+  };
+  const response = await worker.fetch(new Request("https://worker.test/api/bot-data/active.json", { headers: { authorization: "Bearer secret" } }), env, {});
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1,
+    pageTitle: "Roster",
+    rosterOrder: ["main"],
+    activeVersionId: "version-sharded",
+    rosters,
+    playerMetrics: { schemaVersion: 1, updatedAt: "now", byTag },
+  });
+});
+
 test("one shared selector drives public and bot reads for the same version", async () => {
   const worker = loadWorker();
   const selector = { schemaVersion: 1, currentVersionId: "version-current", previousVersionId: "version-previous", generation: 4, committedAt: "now" };

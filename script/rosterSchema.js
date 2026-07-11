@@ -328,6 +328,21 @@ function sanitizePublicConfig_(raw) {
 	const mediaKeys = ["bannerMediaUrl", "bannerUrl", "bannerGifUrl", "squareMediaUrl", "squareUrl", "squareGifUrl", "discordInviteUrl"];
 	const out = {};
 	copySanitizedPublicConfigUrls_(out, source, mediaKeys);
+	const preferredCwlRosterId = String(source.cwlEventTargetRosterId == null ? "" : source.cwlEventTargetRosterId).trim().slice(0, 120);
+	if (preferredCwlRosterId) out.cwlEventTargetRosterId = preferredCwlRosterId;
+	const priorityRaw = source.cwlEventTargetPriorityByRosterId && typeof source.cwlEventTargetPriorityByRosterId === "object" && !Array.isArray(source.cwlEventTargetPriorityByRosterId)
+		? source.cwlEventTargetPriorityByRosterId
+		: null;
+	if (priorityRaw) {
+		const priority = {};
+		const rosterIds = Object.keys(priorityRaw).sort().slice(0, 80);
+		for (let i = 0; i < rosterIds.length; i++) {
+			const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim().slice(0, 120);
+			const value = Number(priorityRaw[rosterIds[i]]);
+			if (rosterId && isFinite(value)) priority[rosterId] = value;
+		}
+		if (Object.keys(priority).length) out.cwlEventTargetPriorityByRosterId = priority;
+	}
 
 	const profile = sanitizePublicProfileNode_(source.profile, 0);
 	if (profile) out.profile = profile;

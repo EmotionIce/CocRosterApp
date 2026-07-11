@@ -53,6 +53,12 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getCurrentCwlSeasonEvent(args[0], args[1]);
 		case "refreshCurrentCwlSeasonEvent":
 			return refreshCurrentCwlSeasonEvent(args[0], args[1]);
+		case "auditCwlSeasonEventCompletionIntegrity":
+			return auditCwlSeasonEventCompletionIntegrity(args[0], args[1]);
+		case "recoverFalseCompletedCwlSeasonEvent":
+			return recoverFalseCompletedCwlSeasonEvent(args[0], args[1]);
+		case "repairLegacyCwlSeasonEventBinding":
+			return repairLegacyCwlSeasonEventBinding(args[0], args[1]);
 		case "getSeasonEvent":
 			return getSeasonEvent(args[0], args[1]);
 		case "getSeasonEventMutationContext":
@@ -94,6 +100,7 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 		case "repairCloudflareActiveRosterMirror":
 			return repairCloudflareActiveRosterMirror(args[0], args[1]);
 		case "initializeCloudflarePublishQueue":
+			if (typeof ensurePermanentSchedulerWatchdogTrigger_ === "function") ensurePermanentSchedulerWatchdogTrigger_();
 			return initializeCloudflarePublishQueue(args[0], args[1]);
 		case "setCloudflarePublicationMode":
 			return setCloudflarePublicationMode(args[0], args[1]);

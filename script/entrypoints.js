@@ -1,7 +1,7 @@
 // Request entrypoints and response helpers.
 
 // Handle do get.
-function doGet(e) {
+function doGetWithExecutionDeadline_(e) {
 	const p = e && e.parameter ? e.parameter : {};
 	const asset = p.asset ? String(p.asset) : "";
 	if (asset) return serveAsset_(asset);
@@ -34,13 +34,19 @@ function doGet(e) {
 	return HtmlService.createHtmlOutput(redirectHtml).setTitle("Redirecting to CWL Roster").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
+function doGet(e) {
+	return runWithExecutionDeadline_("http-get", APP_SCRIPT_HTTP_EXECUTION_BUDGET_MS, function () {
+		return doGetWithExecutionDeadline_(e);
+	});
+}
+
 /**
  * Cloudflare admin bridge endpoint.
  * Accepts JSON: { method: string, args: any[] } and returns { ok, result|error }.
  */
 
 // Handle do post.
-function doPost(e) {
+function doPostWithExecutionDeadline_(e) {
 	let payload = {};
 	try {
 		payload = parseAdminApiPayload_(e);
@@ -67,6 +73,12 @@ function doPost(e) {
 		if (err && err.code) errorPayload.code = String(err.code);
 		return createAdminApiJsonResponse_(errorPayload);
 	}
+}
+
+function doPost(e) {
+	return runWithExecutionDeadline_("http-post", APP_SCRIPT_HTTP_EXECUTION_BUDGET_MS, function () {
+		return doPostWithExecutionDeadline_(e);
+	});
 }
 
 // Parse admin API payload.

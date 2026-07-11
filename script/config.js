@@ -17,7 +17,11 @@ const AUTO_REFRESH_INTERVAL_MS = AUTO_REFRESH_INTERVAL_HOURS * 60 * 60 * 1000;
 const AUTO_REFRESH_ENABLED_PROPERTY = "AUTO_REFRESH_ENABLED";
 const AUTO_REFRESH_TRIGGER_ID_PROPERTY = "AUTO_REFRESH_TRIGGER_ID";
 const AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY = "AUTO_REFRESH_JOB_TRIGGER_ID";
+const AUTO_REFRESH_JOB_TRIGGER_AT_PROPERTY = "AUTO_REFRESH_JOB_TRIGGER_AT";
+const AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY = "AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID";
+const AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT_PROPERTY = "AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT";
 const AUTO_REFRESH_JOB_PENDING_FRESH_RETRY_PROPERTY = "AUTO_REFRESH_JOB_PENDING_FRESH_RETRY";
+const AUTO_REFRESH_SCHEDULER_REPAIR_MARKER_PROPERTY = "AUTO_REFRESH_SCHEDULER_REPAIR";
 const AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY = "AUTO_REFRESH_LAST_RUN_STARTED_AT";
 const AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY = "AUTO_REFRESH_LAST_RUN_FINISHED_AT";
 const AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY = "AUTO_REFRESH_LAST_RUN_STATUS";
@@ -40,6 +44,8 @@ const DONATION_REFRESH_LAST_RUN_SUMMARY_PROPERTY = "DONATION_REFRESH_LAST_RUN_SU
 const DONATION_REFRESH_LAST_RUN_ERROR_PROPERTY = "DONATION_REFRESH_LAST_RUN_ERROR";
 const DONATION_REFRESH_LAST_SEASON_ID_PROPERTY = "DONATION_REFRESH_LAST_SEASON_ID";
 const DONATION_REFRESH_LAST_WRITE_AT_PROPERTY = "DONATION_REFRESH_LAST_WRITE_AT";
+const DONATION_REFRESH_EXECUTION_BUDGET_MS = 240 * 1000;
+const DONATION_REFRESH_CLEANUP_RESERVE_MS = 30 * 1000;
 const REGULAR_WAR_FINALIZATION_HANDLER_NAME = "regularWarFinalizationTick";
 const REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY = "REGULAR_WAR_FINALIZATION_TRIGGER_ID";
 const REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY = "REGULAR_WAR_FINALIZATION_TRIGGER_AT";
@@ -96,6 +102,204 @@ const FIREBASE_REQUEST_TIMEOUT_SECONDS = 15;
 const FIREBASE_BATCH_REQUEST_TIMEOUT_SECONDS = 15;
 const COC_API_REQUEST_TIMEOUT_SECONDS = 15;
 
+// Apps Script entrypoints share one propagated wall-clock deadline. Individual
+// transports still retain their own operator-configurable timeout, but that
+// timeout is clamped to the usable time left after reserving cleanup. Nested
+// flows inherit the earlier deadline so a helper can never extend its caller.
+const APP_SCRIPT_HTTP_EXECUTION_BUDGET_MS = 270 * 1000;
+const APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS = 30 * 1000;
+const RUNTIME_RECOVERY_MARKER_PROPERTY = "RUNTIME_RECOVERY_MARKER";
+const RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL_PROPERTY = "RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL";
+const RUNTIME_URLFETCH_QUOTA_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME = "permanentSchedulerWatchdogTick";
+const PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY = "PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID";
+const PERMANENT_SCHEDULER_WATCHDOG_INTERVAL_HOURS = 6;
+let executionDeadlineContextStack_ = [];
+
+function readRuntimeRecoveryMarker_() {
+	try {
+		const raw = String(PropertiesService.getScriptProperties().getProperty(RUNTIME_RECOVERY_MARKER_PROPERTY) || "").trim();
+		if (!raw) return { scopes: {} };
+		const parsed = JSON.parse(raw);
+		return parsed && typeof parsed === "object" && parsed.scopes && typeof parsed.scopes === "object"
+			? parsed
+			: { scopes: {} };
+	} catch (err) {
+		return { scopes: {} };
+	}
+}
+
+function markRuntimeRecoveryNeeded_(scopeRaw, reasonRaw, extraRaw) {
+	const scope = String(scopeRaw == null ? "runtime" : scopeRaw).trim() || "runtime";
+	const reason = String(reasonRaw == null ? "recovery-required" : reasonRaw).trim().slice(0, 240) || "recovery-required";
+	try {
+		const props = PropertiesService.getScriptProperties();
+		const marker = readRuntimeRecoveryMarker_();
+		marker.scopes[scope] = Object.assign({
+			pending: true,
+			reason: reason,
+			updatedAt: new Date().toISOString(),
+		}, extraRaw && typeof extraRaw === "object" ? extraRaw : {});
+		props.setProperty(RUNTIME_RECOVERY_MARKER_PROPERTY, JSON.stringify(marker));
+		return marker.scopes[scope];
+	} catch (err) {
+		return null;
+	}
+}
+
+function clearRuntimeRecoveryNeeded_(scopeRaw) {
+	const scope = String(scopeRaw == null ? "" : scopeRaw).trim();
+	if (!scope) return false;
+	try {
+		const props = PropertiesService.getScriptProperties();
+		const marker = readRuntimeRecoveryMarker_();
+		if (!Object.prototype.hasOwnProperty.call(marker.scopes, scope)) return false;
+		delete marker.scopes[scope];
+		if (Object.keys(marker.scopes).length) props.setProperty(RUNTIME_RECOVERY_MARKER_PROPERTY, JSON.stringify(marker));
+		else props.deleteProperty(RUNTIME_RECOVERY_MARKER_PROPERTY);
+		return true;
+	} catch (err) {
+		return false;
+	}
+}
+
+function getRuntimeUrlFetchQuotaCooldownUntilMs_() {
+	try {
+		return Math.max(0, Number(PropertiesService.getScriptProperties().getProperty(RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL_PROPERTY) || 0));
+	} catch (err) {
+		return 0;
+	}
+}
+
+function isRuntimeUrlFetchQuotaCooldownActive_() {
+	return getRuntimeUrlFetchQuotaCooldownUntilMs_() > Date.now();
+}
+
+function clearExpiredRuntimeUrlFetchQuotaCooldown_() {
+	const untilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+	if (!untilMs || untilMs > Date.now()) return false;
+	try {
+		PropertiesService.getScriptProperties().deleteProperty(RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL_PROPERTY);
+		clearRuntimeRecoveryNeeded_("urlFetchQuota");
+		return true;
+	} catch (err) {
+		return false;
+	}
+}
+
+function getExecutionDeadlineContext_() {
+	return executionDeadlineContextStack_.length
+		? executionDeadlineContextStack_[executionDeadlineContextStack_.length - 1]
+		: null;
+}
+
+function getExecutionDeadlineMs_() {
+	const context = getExecutionDeadlineContext_();
+	let deadlineMs = context ? Math.max(0, Number(context.deadlineMs) || 0) : 0;
+	try {
+		if (typeof cloudflarePublishQueueDeadlineMs_ !== "undefined" && Number(cloudflarePublishQueueDeadlineMs_) > 0) {
+			const cloudflareDeadlineMs = Number(cloudflarePublishQueueDeadlineMs_);
+			deadlineMs = deadlineMs > 0 ? Math.min(deadlineMs, cloudflareDeadlineMs) : cloudflareDeadlineMs;
+		}
+	} catch (err) {}
+	return deadlineMs;
+}
+
+function getExecutionRemainingMs_() {
+	const deadlineMs = getExecutionDeadlineMs_();
+	return deadlineMs > 0 ? Math.max(0, deadlineMs - Date.now()) : Number.POSITIVE_INFINITY;
+}
+
+function getExecutionCleanupReserveMs_() {
+	const context = getExecutionDeadlineContext_();
+	return context
+		? Math.max(0, Number(context.cleanupReserveMs) || 0)
+		: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS;
+}
+
+function isExecutionDeadlineActive_() {
+	return isFinite(getExecutionRemainingMs_());
+}
+
+function isExecutionDeadlineError_(errRaw) {
+	return !!(errRaw && String(errRaw.code || "") === "EXECUTION_DEADLINE");
+}
+
+function createExecutionDeadlineError_(labelRaw, requiredMsRaw) {
+	const label = String(labelRaw == null ? "operation" : labelRaw).trim() || "operation";
+	const requiredMs = Math.max(0, Number(requiredMsRaw) || 0);
+	const context = getExecutionDeadlineContext_();
+	const error = new Error("Execution deadline reserve is unavailable before " + label + ".");
+	error.code = "EXECUTION_DEADLINE";
+	error.resumable = true;
+	error.autoRefreshDefer = true;
+	error.reason = "executionDeadline";
+	error.requiredMs = requiredMs;
+	error.remainingMs = getExecutionRemainingMs_();
+	let recoveryScope = context && context.recoveryScope ? String(context.recoveryScope) : "";
+	if (!recoveryScope) {
+		try {
+			if (typeof cloudflarePublishQueueDeadlineMs_ !== "undefined" && Number(cloudflarePublishQueueDeadlineMs_) > 0) recoveryScope = "cloudflarePublish";
+		} catch (err) {}
+	}
+	if (recoveryScope) markRuntimeRecoveryNeeded_(recoveryScope, "deadline:" + label, { remainingMs: error.remainingMs });
+	return error;
+}
+
+function assertExecutionBudget_(worstCaseMsRaw, labelRaw, optionsRaw) {
+	const remainingMs = getExecutionRemainingMs_();
+	if (!isFinite(remainingMs)) return true;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const cleanupReserveMs = options.includeCleanupReserve === false ? 0 : getExecutionCleanupReserveMs_();
+	const worstCaseMs = Math.max(0, Number(worstCaseMsRaw) || 0);
+	if (remainingMs >= worstCaseMs + cleanupReserveMs) return true;
+	throw createExecutionDeadlineError_(labelRaw, worstCaseMs + cleanupReserveMs);
+}
+
+function getExecutionClampedTimeoutSeconds_(configuredSecondsRaw, labelRaw, extraReserveMsRaw) {
+	const configuredSeconds = Math.max(1, Math.floor(Number(configuredSecondsRaw) || 1));
+	const remainingMs = getExecutionRemainingMs_();
+	if (!isFinite(remainingMs)) return configuredSeconds;
+	const extraReserveMs = Math.max(0, Number(extraReserveMsRaw) || 0);
+	const usableMs = remainingMs - getExecutionCleanupReserveMs_() - extraReserveMs;
+	if (usableMs < 1000) throw createExecutionDeadlineError_(labelRaw || "external request", 1000 + extraReserveMs + getExecutionCleanupReserveMs_());
+	return Math.max(1, Math.min(configuredSeconds, Math.floor(usableMs / 1000)));
+}
+
+function sleepWithExecutionDeadline_(sleepMsRaw, labelRaw) {
+	const sleepMs = Math.max(0, Number(sleepMsRaw) || 0);
+	if (!sleepMs) return;
+	assertExecutionBudget_(sleepMs, labelRaw || "sleep");
+	Utilities.sleep(sleepMs);
+}
+
+function runWithExecutionDeadline_(labelRaw, budgetMsRaw, callback, optionsRaw) {
+	if (typeof callback !== "function") throw new Error("Execution deadline callback is required.");
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowMs = Date.now();
+	const requestedDeadlineMs = nowMs + Math.max(1000, Number(budgetMsRaw) || APP_SCRIPT_HTTP_EXECUTION_BUDGET_MS);
+	const parent = getExecutionDeadlineContext_();
+	const parentCleanupReserveMs = parent ? Math.max(0, Number(parent.cleanupReserveMs) || 0) : 0;
+	const hasRequestedCleanupReserve = Object.prototype.hasOwnProperty.call(options, "cleanupReserveMs");
+	const requestedCleanupReserveMs = hasRequestedCleanupReserve
+		? Math.max(0, Number(options.cleanupReserveMs) || 0)
+		: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS;
+	const context = {
+		label: String(labelRaw || "entrypoint"),
+		deadlineMs: parent && parent.deadlineMs ? Math.min(Number(parent.deadlineMs), requestedDeadlineMs) : requestedDeadlineMs,
+		// A nested helper may ask for more cleanup time but can never consume the
+		// caller's reserve. An explicit zero is honored only at the outermost scope.
+		cleanupReserveMs: Math.max(parentCleanupReserveMs, requestedCleanupReserveMs),
+		recoveryScope: String(options.recoveryScope || (parent && parent.recoveryScope) || ""),
+	};
+	executionDeadlineContextStack_.push(context);
+	try {
+		return callback(context);
+	} finally {
+		executionDeadlineContextStack_.pop();
+	}
+}
+
 // Read one bounded external transport timeout. Operators can tune a policy
 // without changing code, but values are always clamped so a request cannot
 // silently become an execution-length operation.
@@ -112,7 +316,8 @@ function getExternalRequestTimeoutSeconds_(propertyNameRaw, fallbackRaw, minimum
 	} catch (err) {
 		configured = 0;
 	}
-	return Math.max(minimum, Math.min(maximum, Math.floor(configured > 0 ? configured : fallback)));
+	const bounded = Math.max(minimum, Math.min(maximum, Math.floor(configured > 0 ? configured : fallback)));
+	return getExecutionClampedTimeoutSeconds_(bounded, propertyName || "external request", 1000);
 }
 const FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_PATH = "internal/cloudflarePublish";
 const FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_STATE_PATH = "internal/cloudflarePublish/state";
@@ -163,10 +368,10 @@ const AUTO_REFRESH_PREFETCH_BATCH_SIZE = 8;
 const AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS = 1000;
 const AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS = 270 * 1000;
 const AUTO_REFRESH_JOB_RESUME_DELAY_MS = 60 * 1000;
-// A worker may consume the full 270-second budget. Keep its emergency watchdog
-// beyond that budget by half a normal retry interval (30 seconds), so it does
-// not normally race the worker's active-roster lock while preserving recovery.
-const AUTO_REFRESH_JOB_WATCHDOG_DELAY_MS = AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS + (AUTO_REFRESH_JOB_RESUME_DELAY_MS / 2);
+// A hard-killed worker retains the active-roster lease. Its recovery watchdog
+// must therefore run only after that lease expires plus a safety margin.
+const AUTO_REFRESH_JOB_WATCHDOG_SAFETY_MS = 60 * 1000;
+const AUTO_REFRESH_JOB_WATCHDOG_DELAY_MS = ACTIVE_ROSTER_JOB_LOCK_LEASE_MS + AUTO_REFRESH_JOB_WATCHDOG_SAFETY_MS;
 const AUTO_REFRESH_QUEUE_TASK_STALE_MS = 8 * 60 * 1000;
 const AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS = 90 * 1000;
 const AUTO_REFRESH_QUEUE_FINALIZE_RESERVE_MS = 120 * 1000;

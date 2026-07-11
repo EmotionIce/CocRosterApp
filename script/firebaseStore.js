@@ -409,6 +409,17 @@ function isFirebaseDailyUrlFetchQuotaError_(errRaw) {
 // Preserve a resumable queue pause marker on a daily UrlFetch quota error.
 function markFirebaseDailyUrlFetchQuotaError_(errRaw) {
 	if (!isFirebaseDailyUrlFetchQuotaError_(errRaw)) return errRaw;
+	try {
+		const props = PropertiesService.getScriptProperties();
+		const existingUntilMs = Math.max(0, Number(props.getProperty(RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL_PROPERTY) || 0));
+		const cooldownUntilMs = Math.max(existingUntilMs, Date.now() + RUNTIME_URLFETCH_QUOTA_COOLDOWN_MS);
+		props.setProperty(RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL_PROPERTY, String(cooldownUntilMs));
+		if (typeof markRuntimeRecoveryNeeded_ === "function") {
+			markRuntimeRecoveryNeeded_("urlFetchQuota", "daily-urlfetch-quota", {
+				cooldownUntilMs: cooldownUntilMs,
+			});
+		}
+	} catch (markerErr) {}
 	if (errRaw && typeof errRaw === "object") {
 		errRaw.firebaseDailyUrlFetchQuota = true;
 		errRaw.autoRefreshDefer = true;
@@ -443,6 +454,7 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 			},
 		};
 		if (payloadRaw !== undefined) {
+			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "Firebase request serialization");
 			if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase request serialization");
 			options.contentType = "application/json";
 			options.payload = JSON.stringify(payloadRaw);
@@ -518,6 +530,7 @@ function firebaseRequestJsonWithEtag_(pathRaw, methodRaw, payloadRaw, queryParam
 			headers: headers,
 		};
 		if (payloadRaw !== undefined) {
+			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "Firebase ETag serialization");
 			if (typeof assertCloudflarePublishQueueDeadline_ === "function") assertCloudflarePublishQueueDeadline_(15000, "Firebase ETag serialization");
 			options.contentType = "application/json";
 			options.payload = JSON.stringify(payloadRaw);
@@ -572,7 +585,7 @@ function buildFirebaseBatchFallbackDisabledError_(operationRaw, detailRaw) {
 // Batch Firebase GET requests with per-entry fallback to the single-request path.
 function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const disableFallback = options.disableFallback === true;
+	const disableFallback = options.disableFallback === true || (typeof isExecutionDeadlineActive_ === "function" && isExecutionDeadlineActive_());
 	const input = Array.isArray(pathsRaw) ? pathsRaw : [];
 	const paths = [];
 	const seen = {};
@@ -662,7 +675,7 @@ function firebaseBatchGetJson_(pathsRaw, optionsRaw) {
 // Batch Firebase write requests with per-entry fallback to the single-request path.
 function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const disableFallback = options.disableFallback === true;
+	const disableFallback = options.disableFallback === true || (typeof isExecutionDeadlineActive_ === "function" && isExecutionDeadlineActive_());
 	const input = Array.isArray(entriesRaw) ? entriesRaw : [];
 	const entries = [];
 	for (let i = 0; i < input.length; i++) {
@@ -766,7 +779,7 @@ function firebaseBatchWriteJson_(entriesRaw, optionsRaw) {
 // Write multiple exact child paths with one Firebase multi-location PATCH.
 function firebaseBatchPutJson_(entriesRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const disableFallback = options.disableFallback === true;
+	const disableFallback = options.disableFallback === true || (typeof isExecutionDeadlineActive_ === "function" && isExecutionDeadlineActive_());
 	const input = Array.isArray(entriesRaw) ? entriesRaw : [];
 	const entries = [];
 	for (let i = 0; i < input.length; i++) {
@@ -795,6 +808,7 @@ function firebaseBatchPutJson_(entriesRaw, optionsRaw) {
 	}
 
 	const patch = {};
+	if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(10000, "Firebase multi-location write serialization");
 	for (let i = 0; i < entries.length; i++) {
 		patch[entries[i].path] = entries[i].payload;
 	}
@@ -853,15 +867,45 @@ function normalizeActiveVersionId_(versionIdRaw) {
 		.slice(0, 160);
 }
 
+// Active version ids are shared by Firebase paths, Cloudflare object keys, and
+// public/bot route segments. New ids therefore use one deliberately smaller
+// alphabet that requires no Firebase or URL escaping. normalizeActiveVersionId_
+// remains legacy-tolerant so already-written snapshots can still be read and
+// migrated instead of being orphaned.
+function isSafeActiveVersionId_(versionIdRaw) {
+	const value = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+	return /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(value);
+}
+
+function sanitizeActiveVersionIdPrefix_(prefixRaw) {
+	return String(prefixRaw == null ? "version" : prefixRaw)
+		.trim()
+		.replace(/[^A-Za-z0-9_-]/g, "_")
+		.replace(/^_+/, "")
+		.slice(0, 40) || "version";
+}
+
 // Create a new active version id.
 function createActiveVersionId_(prefixRaw) {
-	const prefix = String(prefixRaw == null ? "version" : prefixRaw)
-		.trim()
-		.replace(/[^A-Za-z0-9_.-]/g, "_")
-		.slice(0, 40) || "version";
+	const prefix = sanitizeActiveVersionIdPrefix_(prefixRaw);
 	const date = new Date();
 	const timestamp = Utilities.formatDate(date, "Etc/UTC", "yyyyMMdd'T'HHmmss_SSS'Z'");
-	return normalizeActiveVersionId_(prefix + "-" + timestamp + "-" + Utilities.getUuid().slice(0, 8));
+	const versionId = prefix + "-" + timestamp + "-" + Utilities.getUuid().slice(0, 8).replace(/[^A-Za-z0-9_-]/g, "_");
+	if (!isSafeActiveVersionId_(versionId)) throw new Error("Unable to create a safe active version id.");
+	return versionId;
+}
+
+// Produce one deterministic safe id for an unsafe legacy id. Determinism makes
+// migration idempotent across retries and hard execution cutoffs.
+function createMigratedActiveVersionId_(legacyVersionIdRaw, prefixRaw) {
+	const legacyVersionId = String(legacyVersionIdRaw == null ? "" : legacyVersionIdRaw).trim();
+	if (!legacyVersionId) throw new Error("Legacy active version id is required.");
+	const prefix = sanitizeActiveVersionIdPrefix_(prefixRaw || "legacy-migration").slice(0, 32);
+	const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, legacyVersionId);
+	const suffix = Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32);
+	const versionId = (prefix + "-" + suffix).slice(0, 160);
+	if (!isSafeActiveVersionId_(versionId)) throw new Error("Unable to create a safe migrated active version id.");
+	return versionId;
 }
 
 // Build a Firebase path below /activeVersions/{versionId}.
@@ -877,6 +921,21 @@ function buildActiveVersionPath_(versionIdRaw, childPathRaw) {
 function readPublishedActiveVersionId_() {
 	const value = firebaseRequestJson_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH, "GET");
 	return normalizeActiveVersionId_(value);
+}
+
+// Address an unsafe legacy id exactly as it was stored. Encoding happens before
+// any normalization so '.', '#', '/', brackets, and literal __FB64__ prefixes
+// resolve to their original single Firebase child key.
+function buildRawLegacyActiveVersionPath_(versionIdRaw, childPathRaw) {
+	const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+	if (!versionId) throw new Error("Legacy active version id is required.");
+	const basePath = buildFirebaseChildPath_(FIREBASE_ACTIVE_VERSIONS_PATH, encodeFirebaseObjectKey_(versionId));
+	const childPath = normalizeFirebasePath_(childPathRaw);
+	return childPath ? buildFirebaseChildPath_(basePath, childPath) : basePath;
+}
+
+function readPublishedActiveVersionIdRaw_() {
+	return String(firebaseRequestJson_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH, "GET") || "").trim().slice(0, 160);
 }
 
 // Build a small active-version manifest from a validated payload.
@@ -924,6 +983,7 @@ function buildActiveVersionManifestFromValidatedData_(versionIdRaw, validatedRos
 function publishActiveRosterVersionPointer_(versionIdRaw, manifestRaw) {
 	const versionId = normalizeActiveVersionId_(versionIdRaw);
 	if (!versionId) throw new Error("Active version id is required.");
+	if (!isSafeActiveVersionId_(versionId)) throw new Error("New active version ids must use only letters, digits, underscore, and hyphen.");
 	const manifest = manifestRaw && typeof manifestRaw === "object" ? manifestRaw : { versionId: versionId };
 	const pointer = {
 		currentVersionId: versionId,
@@ -940,6 +1000,7 @@ function writeActiveRosterVersionShards_(versionIdRaw, validatedRosterData, opti
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const versionId = normalizeActiveVersionId_(versionIdRaw);
 	if (!versionId) throw new Error("Active version id is required.");
+	if (!isSafeActiveVersionId_(versionId)) throw new Error("New active version ids must use only letters, digits, underscore, and hyphen.");
 	const validated = validateRosterData_(validatedRosterData);
 	const basePath = buildActiveVersionPath_(versionId, "");
 	firebaseRequestJson_(basePath, "DELETE");
@@ -2331,6 +2392,43 @@ function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 		enqueue();
 	}
 	return { rosterData: validated, text: payloadText, storageCleanup: storageCleanup };
+}
+
+function readLegacyActiveRosterSnapshotFromRawVersion_(versionIdRaw) {
+	const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+	if (!versionId) throw new Error("Legacy active version id is required.");
+	const encodedManifest = firebaseRequestJson_(buildRawLegacyActiveVersionPath_(versionId, "manifest"), "GET");
+	if (!encodedManifest || typeof encodedManifest !== "object" || Array.isArray(encodedManifest)) throw new Error("Missing legacy active version manifest for " + versionId + ".");
+	const manifest = decodeFirebaseObjectKeysRecursive_(encodedManifest);
+	const rosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds.map(function (id) { return String(id || "").trim(); }).filter(function (id) { return !!id; }) : [];
+	let rosters = [];
+	if (rosterIds.length) {
+		const paths = rosterIds.map(function (rosterId) { return buildRawLegacyActiveVersionPath_(versionId, "rosters/" + encodeFirebaseObjectKey_(rosterId)); });
+		const encodedByPath = firebaseBatchGetJson_(paths);
+		for (let i = 0; i < paths.length; i++) {
+			const encoded = encodedByPath[paths[i]];
+			if (!encoded || typeof encoded !== "object" || Array.isArray(encoded)) throw new Error("Missing legacy active version roster shard '" + rosterIds[i] + "'.");
+			rosters.push(decodeFirebaseObjectKeysRecursive_(encoded));
+		}
+	} else {
+		const encodedRosters = firebaseRequestJson_(buildRawLegacyActiveVersionPath_(versionId, "rosters"), "GET");
+		const rosterMap = encodedRosters && typeof encodedRosters === "object" && !Array.isArray(encodedRosters) ? decodeFirebaseObjectKeysRecursive_(encodedRosters) : {};
+		const ids = Object.keys(rosterMap).sort();
+		rosters = ids.map(function (id) { return rosterMap[id]; });
+	}
+	const encodedMetrics = firebaseRequestJson_(buildRawLegacyActiveVersionPath_(versionId, "playerMetrics"), "GET");
+	const playerMetrics = encodedMetrics && typeof encodedMetrics === "object" && !Array.isArray(encodedMetrics) ? decodeFirebaseObjectKeysRecursive_(encodedMetrics) : createEmptyPlayerMetricsStore_();
+	const payload = {
+		schemaVersion: typeof manifest.schemaVersion === "number" && isFinite(manifest.schemaVersion) ? manifest.schemaVersion : 1,
+		pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
+		rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder : rosterIds,
+		rosters: rosters,
+		playerMetrics: playerMetrics,
+	};
+	if (manifest.lastUpdatedAt) payload.lastUpdatedAt = String(manifest.lastUpdatedAt || "");
+	if (manifest.publicConfig && typeof manifest.publicConfig === "object") payload.publicConfig = manifest.publicConfig;
+	const rosterData = validateRosterData_(payload);
+	return { text: JSON.stringify(rosterData), rosterData: rosterData, source: "firebase:/activeVersions/" + encodeFirebaseObjectKey_(versionId), versionId: versionId, manifest: manifest };
 }
 
 // Handle write already-validated active roster data to Firebase.

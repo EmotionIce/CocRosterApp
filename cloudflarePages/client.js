@@ -5550,8 +5550,11 @@
         return out;
     };
 
-    // Build one season event leaderboard model.
-    const getCwlSeasonEventAggregateForEvent = (dataRaw, eventRaw) => {
+    // Resolve one internally consistent CWL aggregate view. A completed event
+    // may be observed before its final object reaches the edge. In that short
+    // window retain the last live view, when available, and explicitly mark it
+    // as propagating instead of rendering an empty completed leaderboard.
+    const getCwlSeasonEventAggregateViewForEvent = (dataRaw, eventRaw) => {
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
         const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
@@ -5561,10 +5564,23 @@
         const eventId = toStr(event.eventId).trim();
         const byKind = eventId && aggregates[eventId] && typeof aggregates[eventId] === "object" ? aggregates[eventId] : {};
         const state = toStr(event.cwlTrackingState || event.cwlStatus).trim().toLowerCase();
-        return state === "completed"
-            ? (byKind.final && typeof byKind.final === "object" ? byKind.final : null)
-            : (byKind.live && typeof byKind.live === "object" ? byKind.live : null);
+        const finalAggregate = byKind.final && typeof byKind.final === "object" ? byKind.final : null;
+        const liveAggregate = byKind.live && typeof byKind.live === "object" ? byKind.live : null;
+        if (state === "completed") {
+            return {
+                aggregate: finalAggregate || liveAggregate,
+                source: finalAggregate ? "final" : liveAggregate ? "live" : "",
+                finalDataPending: !finalAggregate,
+            };
+        }
+        return {
+            aggregate: liveAggregate,
+            source: liveAggregate ? "live" : "",
+            finalDataPending: false,
+        };
     };
+
+    const getCwlSeasonEventAggregateForEvent = (dataRaw, eventRaw) => getCwlSeasonEventAggregateViewForEvent(dataRaw, eventRaw).aggregate;
 
     const sanitizeCwlAggregateStat = (entryRaw) => {
         const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
@@ -5642,7 +5658,8 @@
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
         if (!event) return { event: null, rows: [], activeParticipantCount: 0, aggregate: null };
         const participants = listCwlSeasonEventSignedUpParticipants(event);
-        const aggregate = getCwlSeasonEventAggregateForEvent(dataRaw, event);
+        const aggregateView = getCwlSeasonEventAggregateViewForEvent(dataRaw, event);
+        const aggregate = aggregateView.aggregate;
         const byTag = aggregate && aggregate.byTag && typeof aggregate.byTag === "object" ? aggregate.byTag : {};
         const rankedTags = Array.isArray(aggregate && aggregate.rankedTags)
             ? aggregate.rankedTags.map((tag) => normalizeClanTag(tag)).filter((tag) => tag)
@@ -5701,6 +5718,8 @@
             activeParticipantCount: participants.length,
             seasonId: "",
             aggregate: aggregate,
+            aggregateSource: aggregateView.source,
+            finalDataPending: aggregateView.finalDataPending,
         };
     };
 
@@ -5830,13 +5849,56 @@
         return dateRange + " \u00b7 Discord signups";
     };
 
-    const getLatestCompletedCwlSeasonEvent = (dataRaw) => {
-        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
-        const seasonEvents = data.seasonEvents && typeof data.seasonEvents === "object" ? data.seasonEvents : {};
-        const pointer = seasonEvents.latestCompletedCwl && typeof seasonEvents.latestCompletedCwl === "object" ? seasonEvents.latestCompletedCwl : {};
+    const getLatestCompletedCwlSeasonEvent = (dataRaw, modeRaw) => {
+        const bundle = getSeasonEventsBundle(dataRaw, modeRaw);
+        const pointer = bundle.latestCompletedCwl && typeof bundle.latestCompletedCwl === "object" ? bundle.latestCompletedCwl : {};
         const eventId = toStr(pointer.eventId).trim();
-        const byId = seasonEvents.byId && typeof seasonEvents.byId === "object" ? seasonEvents.byId : {};
+        const byId = bundle.byId && typeof bundle.byId === "object" ? bundle.byId : {};
         return eventId && byId[eventId] && typeof byId[eventId] === "object" ? byId[eventId] : null;
+    };
+
+    const resolveCwlSeasonEventDisplayState = (eventRaw, leaderboardRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+        const leaderboard = leaderboardRaw && typeof leaderboardRaw === "object" ? leaderboardRaw : {};
+        if (!event || !toStr(event.eventId).trim()) return "stale-unavailable";
+        const state = toStr(event.cwlTrackingState || event.cwlStatus).trim().toLowerCase();
+        const aggregate = leaderboard.aggregate && typeof leaderboard.aggregate === "object" ? leaderboard.aggregate : null;
+        if (!getCwlSeasonEventTarget(event) && !isLegacyCompletedTargetlessCwlEvent(event)) return "resolving-target";
+        if (state === "waiting") return "waiting-for-group";
+        if (state === "completed") return leaderboard.finalDataPending ? "stale-unavailable" : "completed";
+        if (aggregate && aggregate.stale === true) return "stale-unavailable";
+        if ((state === "active" || state === "finalizing") && !aggregate) return "stale-unavailable";
+        if (state === "finalizing") return "finalizing";
+        if (state === "active") return "active";
+        return "stale-unavailable";
+    };
+
+    const buildCwlSeasonEventCard = (eventRaw, dataRaw, optionsRaw) => {
+        const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const leaderboard = buildSeasonEventLeaderboardModel(event, dataRaw);
+        const objectAvailable = options.objectAvailable !== false && !!(event && toStr(event.eventId).trim());
+        const lifecycleDisplayState = objectAvailable ? resolveCwlSeasonEventDisplayState(event, leaderboard) : "stale-unavailable";
+        return {
+            type: "cwl",
+            event: event,
+            leaderboardEvent: event,
+            title: options.historical === true ? "Previous CWL results" : "CWL",
+            status: lifecycleDisplayState,
+            underlyingStatus: toStr(event && (event.cwlTrackingState || event.cwlStatus || event.status)).trim().toLowerCase(),
+            signupsOpen: event && event.signupsOpen === true,
+            dateRange: event ? formatSeasonEventDateRange(event) : "CWL window unavailable",
+            activeParticipantCount: leaderboard.activeParticipantCount,
+            rows: leaderboard.rows,
+            seasonId: "",
+            unavailable: !objectAvailable,
+            cwlTrackingState: toStr(event && (event.cwlTrackingState || event.cwlStatus)).trim().toLowerCase(),
+            lifecycleDisplayState: lifecycleDisplayState,
+            aggregate: leaderboard.aggregate || null,
+            aggregateSource: leaderboard.aggregateSource || "",
+            finalDataPending: leaderboard.finalDataPending === true,
+            historical: options.historical === true,
+        };
     };
 
     // Build public model for selected seasonal event results.
@@ -5844,9 +5906,10 @@
         const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
         const mode = sanitizeSeasonEventResultsMode(modeRaw);
         const bundle = getSeasonEventsBundle(data, mode);
+        const modelData = Object.assign({}, data, { seasonEvents: bundle });
         const cards = ["push", "donation"].map((type) => {
             const event = getCurrentSeasonEventForType(data, type, mode);
-            const leaderboard = buildSeasonEventLeaderboardModel(event, data);
+            const leaderboard = buildSeasonEventLeaderboardModel(event, modelData);
             return {
                 type: type,
                 event: event,
@@ -5860,30 +5923,18 @@
                 unavailable: !event || !toStr(event.eventId).trim() || !bundle.byId[toStr(event.eventId).trim()],
             };
         });
-        const currentCwlEvent = getCurrentSeasonEventForType(data, "cwl", SEASON_EVENT_RESULT_MODE_VALUES.current);
-        const latestCompletedCwlEvent = getLatestCompletedCwlSeasonEvent(data);
-        const cwlState = toStr(currentCwlEvent && (currentCwlEvent.cwlTrackingState || currentCwlEvent.cwlStatus)).trim().toLowerCase();
-        const showLatestCompleted = (!currentCwlEvent || cwlState === "waiting") && !!latestCompletedCwlEvent;
-        const cwlDisplayEvent = showLatestCompleted ? latestCompletedCwlEvent : (currentCwlEvent || latestCompletedCwlEvent);
-        const cwlLeaderboardEvent = showLatestCompleted ? latestCompletedCwlEvent : cwlDisplayEvent;
-        const cwlLeaderboard = buildSeasonEventLeaderboardModel(cwlLeaderboardEvent, data);
-        if (cwlDisplayEvent) {
-            cards.push({
-                type: "cwl",
-                event: cwlDisplayEvent,
-                leaderboardEvent: cwlLeaderboardEvent,
-                title: "CWL",
-                status: toStr(cwlDisplayEvent && (cwlDisplayEvent.cwlTrackingState || cwlDisplayEvent.cwlStatus || cwlDisplayEvent.status)).trim() || "unavailable",
-                signupsOpen: cwlDisplayEvent && cwlDisplayEvent.signupsOpen === true,
-                dateRange: cwlDisplayEvent ? formatSeasonEventDateRange(cwlDisplayEvent) : "CWL window unavailable",
-                activeParticipantCount: cwlLeaderboard.activeParticipantCount,
-                rows: cwlLeaderboard.rows,
-                seasonId: "",
-                unavailable: !cwlDisplayEvent || !toStr(cwlDisplayEvent.eventId).trim(),
-                cwlTrackingState: cwlState || toStr(cwlDisplayEvent && cwlDisplayEvent.cwlTrackingState).trim().toLowerCase(),
-                aggregate: cwlLeaderboard.aggregate || null,
-                showingLatestCompleted: showLatestCompleted,
-            });
+        const currentCwlEvent = getCurrentSeasonEventForType(data, "cwl", mode);
+        const latestCompletedCwlEvent = getLatestCompletedCwlSeasonEvent(data, mode);
+        const currentCwlEventId = toStr(currentCwlEvent && currentCwlEvent.eventId).trim();
+        cards.push(buildCwlSeasonEventCard(currentCwlEvent, modelData, {
+            objectAvailable: !!(currentCwlEventId && bundle.byId[currentCwlEventId] && typeof bundle.byId[currentCwlEventId] === "object"),
+        }));
+        if (
+            mode === SEASON_EVENT_RESULT_MODE_VALUES.current &&
+            latestCompletedCwlEvent &&
+            toStr(latestCompletedCwlEvent.eventId).trim() !== toStr(currentCwlEvent && currentCwlEvent.eventId).trim()
+        ) {
+            cards.push(buildCwlSeasonEventCard(latestCompletedCwlEvent, modelData, { historical: true }));
         }
         const sharedMetaLine = buildSeasonEventsSharedMetaLine(cards);
         return {
@@ -5898,9 +5949,11 @@
     // Format event status label.
     const formatSeasonEventStatusLabel = (statusRaw) => {
         const status = toStr(statusRaw).trim().toLowerCase();
-        if (status === "waiting") return "Waiting for next CWL";
-        if (status === "active") return "Active provisional";
+        if (status === "resolving-target") return "Resolving target";
+        if (status === "waiting-for-group" || status === "waiting") return "Waiting for group";
+        if (status === "active") return "Active";
         if (status === "finalizing") return "Finalizing";
+        if (status === "stale-unavailable") return "Stale / unavailable";
         if (status === "completed") return "Completed";
         if (status === "open") return "Open";
         if (status === "closed") return "Closed";
@@ -5918,23 +5971,23 @@
             " \u00b7 " +
             formatSeasonEventNumber(card.activeParticipantCount) +
             " signed up";
-        if (normalizeSeasonEventType(card.type) === "cwl" && !getCwlSeasonEventTarget(card.event) && !isLegacyCompletedTargetlessCwlEvent(card.event)) {
-            return base + " \u00b7 roster resolving";
-        }
         if (stale) {
             const refreshedAt = toStr(aggregate.lastSuccessfulRefreshAt).trim();
             const refreshedDate = refreshedAt ? new Date(refreshedAt) : null;
             const refreshedLabel = refreshedDate && Number.isFinite(refreshedDate.getTime()) ? refreshedDate.toLocaleDateString() : "";
             return base + " \u00b7 stale" + (refreshedLabel ? (" since " + refreshedLabel) : "");
         }
-        if (card.showingLatestCompleted) return base + " \u00b7 latest completed shown";
+        if (card.finalDataPending) return base + " \u00b7 final data updating";
+        if (card.historical) return base + " \u00b7 previous result";
         return base;
     };
 
     // Build a stable state key for one Season Events card.
     const getSeasonEventCardStateKey = (cardRaw) => {
         const card = cardRaw && typeof cardRaw === "object" ? cardRaw : {};
-        return normalizeSeasonEventType(card.type) || toStr(card.event && card.event.eventId).trim() || "unknown";
+        const type = normalizeSeasonEventType(card.type) || "unknown";
+        const eventId = toStr(card.event && card.event.eventId).trim() || "unavailable";
+        return type + ":" + eventId;
     };
 
     // Read whether a Season Events card is expanded.
@@ -6001,7 +6054,15 @@
         }
 
         const rows = Array.isArray(card.rows) ? card.rows : [];
-        if (card.unavailable) {
+        if (card.finalDataPending && !rows.length) {
+            wrap.appendChild(el("div", "season-event-card__empty", "Final results are updating. The last consistent standings are temporarily unavailable."));
+        } else if (card.lifecycleDisplayState === "resolving-target" && !rows.length) {
+            wrap.appendChild(el("div", "season-event-card__empty", "Resolving the CWL target from fresh league and group evidence."));
+        } else if (card.lifecycleDisplayState === "waiting-for-group" && !rows.length) {
+            wrap.appendChild(el("div", "season-event-card__empty", "Waiting for an authoritative CWL group."));
+        } else if (card.lifecycleDisplayState === "stale-unavailable" && !rows.length) {
+            wrap.appendChild(el("div", "season-event-card__empty", "CWL data is stale or temporarily unavailable; an update is pending."));
+        } else if (card.unavailable) {
             wrap.appendChild(el("div", "season-event-card__empty", "Event data is currently unavailable."));
         } else if (!rows.length) {
             wrap.appendChild(el("div", "season-event-card__empty", "No signed-up players yet."));

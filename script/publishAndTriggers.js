@@ -688,6 +688,11 @@ function buildAutoRefreshTriggerDiagnostics_() {
 		resumeCount: resumeCount,
 		configuredAutoRefreshTriggerId: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || ""),
 		configuredResumeTriggerId: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || ""),
+		configuredResumeTriggerAt: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_TRIGGER_AT_PROPERTY) || ""),
+		configuredWatchdogTriggerId: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || ""),
+		configuredWatchdogTriggerAt: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT_PROPERTY) || ""),
+		configuredPermanentWatchdogTriggerId: String(PropertiesService.getScriptProperties().getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || ""),
+		schedulerRepairMarker: readAutoRefreshSchedulerRepairMarker_(),
 	};
 }
 
@@ -937,6 +942,7 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 	const connectedClanTags = [];
 	const connectedClanSeen = {};
 	const cwlRosterClanSet = {};
+	const cwlEligibleAccountTagsByRosterId = {};
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 		const rosterId = String(roster.id || "").trim();
@@ -949,7 +955,12 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 			connectedClanSeen[clanTag] = true;
 			connectedClanTags.push(clanTag);
 		}
-		if (getRosterTrackingMode_(roster) === "cwl") cwlRosterClanSet[clanTag] = true;
+		if (getRosterTrackingMode_(roster) === "cwl") {
+			cwlRosterClanSet[clanTag] = true;
+			cwlEligibleAccountTagsByRosterId[rosterId] = typeof collectCwlSeasonEventRosterEligibleAccountTags_ === "function"
+				? collectCwlSeasonEventRosterEligibleAccountTags_(roster)
+				: collectRosterPoolTags_(roster);
+		}
 	}
 	const meta = {
 		runId: runId,
@@ -962,6 +973,7 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		connectedRosterIds: connectedRosterIds,
 		connectedClanTags: connectedClanTags,
 		cwlRosterClanTags: Object.keys(cwlRosterClanSet).sort(),
+		cwlEligibleAccountTagsByRosterId: cwlEligibleAccountTagsByRosterId,
 		sourceFingerprint: String(sourceFingerprintRaw || ""),
 		sourceVersionId: sourceVersionId,
 		sourceShardMode: sourceVersionId ? "activeVersion" : "runCopy",
@@ -1640,16 +1652,20 @@ function buildAutoRefreshCwlCoordinatorRosterDataFromSourceMeta_(sourceMetaRaw, 
 		sourceMeta.trackingModeByRosterId && typeof sourceMeta.trackingModeByRosterId === "object"
 			? sourceMeta.trackingModeByRosterId
 			: {};
+	const cwlEligibleAccountTagsByRosterId = sourceMeta.cwlEligibleAccountTagsByRosterId && typeof sourceMeta.cwlEligibleAccountTagsByRosterId === "object"
+		? sourceMeta.cwlEligibleAccountTagsByRosterId
+		: {};
 	const rosters = [];
 	for (let i = 0; i < rosterIdsRaw.length; i++) {
 		const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
 		if (!rosterId) continue;
+		const eligibleTags = Array.isArray(cwlEligibleAccountTagsByRosterId[rosterId]) ? cwlEligibleAccountTagsByRosterId[rosterId] : [];
 		rosters.push({
 			id: rosterId,
 			title: rosterId,
 			connectedClanTag: normalizeTag_(connectedClanTagByRosterId[rosterId]),
 			trackingMode: trackingModeByRosterId[rosterId] === "regularWar" ? "regularWar" : "cwl",
-			main: [],
+			main: eligibleTags.map(function (tag, index) { return { tag: normalizeTag_(tag), slot: index + 1, th: 1 }; }).filter(function (player) { return !!player.tag; }),
 			subs: [],
 			missing: [],
 		});
@@ -1688,6 +1704,19 @@ function writeAutoRefreshCwlCoordinatorResult_(runIdRaw, coordinatorRaw, options
 	const capturePhase = String(options.capturePhase || coordinator.capturePhase || "early").trim() || "early";
 	const views = coordinator.viewsByClanTag && typeof coordinator.viewsByClanTag === "object" ? coordinator.viewsByClanTag : {};
 	const writes = [];
+	const targetEvidenceRaw = coordinator.targetEvidence && typeof coordinator.targetEvidence === "object"
+		? coordinator.targetEvidence
+		: null;
+	const targetEvidenceCandidates = [];
+	const targetEvidenceCandidatesRaw = targetEvidenceRaw && Array.isArray(targetEvidenceRaw.candidates)
+		? targetEvidenceRaw.candidates
+		: [];
+	for (let i = 0; i < targetEvidenceCandidatesRaw.length; i++) {
+		const candidate = typeof sanitizeCwlSeasonEventTargetCandidate_ === "function"
+			? sanitizeCwlSeasonEventTargetCandidate_(targetEvidenceCandidatesRaw[i])
+			: targetEvidenceCandidatesRaw[i];
+		if (candidate && typeof candidate === "object" && candidate.rosterId && candidate.clanTag) targetEvidenceCandidates.push(candidate);
+	}
 	const clanTags = Object.keys(views).sort();
 	for (let i = 0; i < clanTags.length; i++) {
 		const clanTag = normalizeTag_(clanTags[i]);
@@ -1704,6 +1733,12 @@ function writeAutoRefreshCwlCoordinatorResult_(runIdRaw, coordinatorRaw, options
 		finalCapture: capturePhase === "final",
 		eventId: String(coordinator.eventId || ""),
 		capturedAt: String(coordinator.capturedAt || new Date().toISOString()),
+		observationId: String(coordinator.observationId || ""),
+		targetEvidence: targetEvidenceRaw ? {
+			capturedAt: String(targetEvidenceRaw.capturedAt || coordinator.capturedAt || ""),
+			observationId: String(targetEvidenceRaw.observationId || coordinator.observationId || ""),
+			candidates: targetEvidenceCandidates,
+		} : null,
 		aggregateHash: getAutoRefreshCwlCoordinatorAggregateHash_(coordinator),
 		requestCounts: coordinator.requestCounts && typeof coordinator.requestCounts === "object" ? coordinator.requestCounts : {},
 		requestPlan: coordinator.requestPlan && typeof coordinator.requestPlan === "object" ? coordinator.requestPlan : {},
@@ -1745,6 +1780,8 @@ function buildAutoRefreshCwlCoordinatorPipelineStubFromSummary_(summaryRaw) {
 		status: "captured",
 		eventId: String(summary.eventId || ""),
 		capturedAt: String(summary.capturedAt || ""),
+		observationId: String(summary.observationId || ""),
+		targetEvidence: summary.targetEvidence && typeof summary.targetEvidence === "object" ? summary.targetEvidence : null,
 		requestCounts: summary.requestCounts && typeof summary.requestCounts === "object" ? summary.requestCounts : {},
 		requestPlan: summary.requestPlan && typeof summary.requestPlan === "object" ? summary.requestPlan : {},
 		runtimeState: summary.runtimeState && typeof summary.runtimeState === "object" ? summary.runtimeState : {},
@@ -1758,6 +1795,8 @@ function buildAutoRefreshNoCurrentCwlCoordinatorPipelineStub_(eventIdRaw) {
 		status: "no-current-cwl-event",
 		eventId: String(eventIdRaw || ""),
 		capturedAt: new Date().toISOString(),
+		observationId: "",
+		targetEvidence: null,
 		requestCounts: { leagueGroup: 0, cwlWar: 0, total: 0 },
 		requestPlan: {},
 		runtimeState: {},
@@ -3303,10 +3342,9 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 					if (cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
 						cwlSeasonEventRefresh.requestCounts = coordinator.requestCounts || {};
 					}
-					cwlSeasonEventCloudflarePublish = publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(
-						cwlSeasonEventRefresh,
-						"auto-refresh-cooldown-cwl",
-					);
+					cwlSeasonEventCloudflarePublish = cwlSeasonEventRefresh && cwlSeasonEventRefresh.cloudflarePublish
+						? cwlSeasonEventRefresh.cloudflarePublish
+						: publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(cwlSeasonEventRefresh, "auto-refresh-cooldown-cwl");
 				}
 			} catch (err) {
 				Logger.log("Auto-refresh cooldown CWL event update failed: %s", errorMessage_(err));
@@ -3611,16 +3649,20 @@ function buildAutoRefreshCwlRosterDataFromSourceMeta_(sourceMetaRaw, lastUpdated
 		sourceMeta.connectedClanTagByRosterId && typeof sourceMeta.connectedClanTagByRosterId === "object"
 			? sourceMeta.connectedClanTagByRosterId
 			: {};
+	const cwlEligibleAccountTagsByRosterId = sourceMeta.cwlEligibleAccountTagsByRosterId && typeof sourceMeta.cwlEligibleAccountTagsByRosterId === "object"
+		? sourceMeta.cwlEligibleAccountTagsByRosterId
+		: {};
 	const rosters = [];
 	for (let i = 0; i < rosterIdsRaw.length; i++) {
 		const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
 		if (!rosterId) continue;
+		const eligibleTags = Array.isArray(cwlEligibleAccountTagsByRosterId[rosterId]) ? cwlEligibleAccountTagsByRosterId[rosterId] : [];
 		rosters.push({
 			id: rosterId,
 			title: rosterId,
 			connectedClanTag: normalizeTag_(connectedClanTagByRosterId[rosterId]),
 			trackingMode: "regularWar",
-			main: [],
+			main: eligibleTags.map(function (tag, index) { return { tag: normalizeTag_(tag), slot: index + 1, th: 1 }; }).filter(function (player) { return !!player.tag; }),
 			subs: [],
 			missing: [],
 		});
@@ -3718,7 +3760,7 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 		}
 		const out = result || { ok: false, status: "unknown" };
 		const outStatus = String(out.status || "");
-		const completed = out.ok !== false && outStatus !== "stale";
+		const completed = out.ok !== false && outStatus !== "stale" && outStatus !== "bootstrap-incomplete" && outStatus !== "error";
 		const persisted = Object.assign({}, out, {
 			ok: completed ? out.ok : false,
 			completed: completed,
@@ -3748,6 +3790,7 @@ function shouldPublishCloudflareAfterAutoRefreshCwlSeasonEventRefresh_(refreshRa
 }
 
 function publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(refreshRaw, labelRaw) {
+	if (refreshRaw && typeof refreshRaw === "object" && refreshRaw.cloudflarePublish) return refreshRaw.cloudflarePublish;
 	if (!shouldPublishCloudflareAfterAutoRefreshCwlSeasonEventRefresh_(refreshRaw)) {
 		return { ok: true, skipped: true, reason: "cwl-refresh-not-publishable" };
 	}
@@ -4776,7 +4819,15 @@ function getAutoRefreshJobElapsedMs_(executionStartMsRaw) {
 
 // Return remaining milliseconds inside the conservative resumable auto-refresh budget.
 function getAutoRefreshJobRemainingMs_(executionStartMsRaw) {
-	return Math.max(0, AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS - getAutoRefreshJobElapsedMs_(executionStartMsRaw));
+	let remainingMs = Math.max(0, AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS - getAutoRefreshJobElapsedMs_(executionStartMsRaw));
+	if (typeof getExecutionRemainingMs_ === "function") {
+		const propagatedRemainingMs = getExecutionRemainingMs_();
+		if (isFinite(propagatedRemainingMs)) {
+			const cleanupReserveMs = typeof getExecutionCleanupReserveMs_ === "function" ? getExecutionCleanupReserveMs_() : 0;
+			remainingMs = Math.min(remainingMs, Math.max(0, propagatedRemainingMs - cleanupReserveMs));
+		}
+	}
+	return remainingMs;
 }
 
 // Return whether a non-interruptible auto-refresh phase should be allowed to start.
@@ -4956,46 +5007,228 @@ function listAutoRefreshJobResumeTriggers_() {
 	});
 }
 
-// Remove resumable auto-refresh resume triggers.
+function readAutoRefreshSchedulerRepairMarker_() {
+	try {
+		const raw = String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_SCHEDULER_REPAIR_MARKER_PROPERTY) || "").trim();
+		if (!raw) return null;
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object") return null;
+		if (!parsed.kinds || typeof parsed.kinds !== "object") {
+			const legacyKind = String(parsed.kind || "continuation");
+			parsed.kinds = {};
+			parsed.kinds[legacyKind] = Object.assign({}, parsed);
+		}
+		return parsed;
+	} catch (err) {
+		return null;
+	}
+}
+
+function markAutoRefreshSchedulerRepairNeeded_(kindRaw, reasonRaw, notBeforeMsRaw) {
+	const kind = String(kindRaw || "continuation");
+	const detail = {
+		pending: true,
+		kind: kind,
+		reason: String(reasonRaw || "dynamic-trigger-unavailable").slice(0, 300),
+		notBeforeMs: Math.max(0, Number(notBeforeMsRaw) || 0),
+		updatedAt: new Date().toISOString(),
+	};
+	try {
+		const marker = readAutoRefreshSchedulerRepairMarker_() || { pending: true, kinds: {} };
+		marker.pending = true;
+		marker.kind = kind;
+		marker.reason = detail.reason;
+		marker.notBeforeMs = detail.notBeforeMs;
+		marker.updatedAt = detail.updatedAt;
+		marker.kinds[kind] = detail;
+		PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_SCHEDULER_REPAIR_MARKER_PROPERTY, JSON.stringify(marker));
+		if (typeof markRuntimeRecoveryNeeded_ === "function") markRuntimeRecoveryNeeded_("autoRefresh", detail.reason, marker);
+	} catch (err) {}
+	return detail;
+}
+
+function clearAutoRefreshSchedulerRepairMarker_(kindRaw) {
+	try {
+		const props = PropertiesService.getScriptProperties();
+		const kind = String(kindRaw || "").trim();
+		const marker = readAutoRefreshSchedulerRepairMarker_();
+		if (kind && marker && marker.kinds && typeof marker.kinds === "object") {
+			delete marker.kinds[kind];
+			const remainingKinds = Object.keys(marker.kinds);
+			if (remainingKinds.length) {
+				const latest = marker.kinds[remainingKinds[remainingKinds.length - 1]] || {};
+				marker.kind = String(latest.kind || remainingKinds[remainingKinds.length - 1]);
+				marker.reason = String(latest.reason || "scheduler-repair-pending");
+				marker.notBeforeMs = Math.max(0, Number(latest.notBeforeMs) || 0);
+				marker.updatedAt = String(latest.updatedAt || new Date().toISOString());
+				props.setProperty(AUTO_REFRESH_SCHEDULER_REPAIR_MARKER_PROPERTY, JSON.stringify(marker));
+				return true;
+			}
+		}
+		props.deleteProperty(AUTO_REFRESH_SCHEDULER_REPAIR_MARKER_PROPERTY);
+		if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("autoRefresh");
+		return true;
+	} catch (err) {
+		return false;
+	}
+}
+
+function getAutoRefreshDynamicTriggerProperties_(kindRaw) {
+	const kind = String(kindRaw || "continuation") === "watchdog" ? "watchdog" : "continuation";
+	return kind === "watchdog"
+		? { kind: kind, idProperty: AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY, atProperty: AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT_PROPERTY }
+		: { kind: kind, idProperty: AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY, atProperty: AUTO_REFRESH_JOB_TRIGGER_AT_PROPERTY };
+}
+
+function findAutoRefreshTriggerById_(triggersRaw, triggerIdRaw) {
+	const triggers = Array.isArray(triggersRaw) ? triggersRaw : [];
+	const triggerId = String(triggerIdRaw || "").trim();
+	if (!triggerId) return null;
+	for (let i = 0; i < triggers.length; i++) if (getTriggerUniqueId_(triggers[i]) === triggerId) return triggers[i];
+	return null;
+}
+
+function clearAutoRefreshDynamicTriggerProperties_(kindRaw) {
+	const meta = getAutoRefreshDynamicTriggerProperties_(kindRaw);
+	const props = PropertiesService.getScriptProperties();
+	props.deleteProperty(meta.idProperty);
+	props.deleteProperty(meta.atProperty);
+}
+
+// Consume only the one-shot trigger that fired. An overlapping invocation must
+// never enumerate and delete the current owner's separately installed watchdog.
+function consumeAutoRefreshFiredTrigger_(eventRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const firedId = String(event.triggerUid || event.triggerId || "").trim();
+	if (!firedId) return { consumed: false, reason: "missing-trigger-id" };
+	const props = PropertiesService.getScriptProperties();
+	const continuationId = String(props.getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || "").trim();
+	const watchdogId = String(props.getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim();
+	let kind = "";
+	if (firedId === continuationId) kind = "continuation";
+	else if (firedId === watchdogId) kind = "watchdog";
+	const triggers = listAutoRefreshJobResumeTriggers_();
+	const fired = findAutoRefreshTriggerById_(triggers, firedId);
+	if (fired) {
+		try { ScriptApp.deleteTrigger(fired); } catch (err) { Logger.log("Unable to consume fired auto-refresh trigger %s: %s", firedId, errorMessage_(err)); }
+	}
+	if (kind) clearAutoRefreshDynamicTriggerProperties_(kind);
+	return { consumed: !!kind || !!fired, triggerId: firedId, kind: kind || "unknown" };
+}
+
+function removeAutoRefreshDynamicTriggerKind_(kindRaw) {
+	const meta = getAutoRefreshDynamicTriggerProperties_(kindRaw);
+	const props = PropertiesService.getScriptProperties();
+	const triggerId = String(props.getProperty(meta.idProperty) || "").trim();
+	const triggers = listAutoRefreshJobResumeTriggers_();
+	const trigger = findAutoRefreshTriggerById_(triggers, triggerId);
+	let removed = 0;
+	if (trigger) {
+		try { ScriptApp.deleteTrigger(trigger); removed = 1; } catch (err) { Logger.log("Unable to delete auto-refresh %s trigger: %s", meta.kind, errorMessage_(err)); }
+	}
+	clearAutoRefreshDynamicTriggerProperties_(meta.kind);
+	return removed;
+}
+
+// Terminal cleanup removes both dynamic paths. Ordinary scheduling below only
+// mutates its own kind and therefore preserves the other recovery path.
 function removeAutoRefreshJobResumeTriggers_() {
 	const triggers = listAutoRefreshJobResumeTriggers_();
 	let removed = 0;
 	for (let i = 0; i < triggers.length; i++) {
-		try {
-			ScriptApp.deleteTrigger(triggers[i]);
-			removed++;
-		} catch (err) {
-			Logger.log("Unable to delete auto-refresh resume trigger: %s", errorMessage_(err));
-		}
+		try { ScriptApp.deleteTrigger(triggers[i]); removed++; } catch (err) { Logger.log("Unable to delete auto-refresh worker trigger: %s", errorMessage_(err)); }
 	}
-	PropertiesService.getScriptProperties().deleteProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY);
+	clearAutoRefreshDynamicTriggerProperties_("continuation");
+	clearAutoRefreshDynamicTriggerProperties_("watchdog");
 	return removed;
 }
 
-// Schedule exactly one one-shot auto-refresh worker trigger.
+function ensureAutoRefreshDynamicTrigger_(kindRaw, desiredAtMsRaw, minimumAtMsRaw) {
+	const meta = getAutoRefreshDynamicTriggerProperties_(kindRaw);
+	const nowMs = Date.now();
+	const desiredAtMs = Math.max(nowMs + 1000, Number(desiredAtMsRaw) || nowMs + AUTO_REFRESH_JOB_RESUME_DELAY_MS);
+	const minimumAtMs = Math.max(0, Number(minimumAtMsRaw) || 0);
+	const props = PropertiesService.getScriptProperties();
+	const lock = LockService.getScriptLock();
+	const didLock = typeof lock.tryLock === "function" ? lock.tryLock(1000) : (lock.waitLock(1000), true);
+	if (!didLock) {
+		markAutoRefreshSchedulerRepairNeeded_(meta.kind, "trigger-edit-lock-busy", desiredAtMs);
+		return { scheduled: false, degraded: true, kind: meta.kind, reason: "lock-busy" };
+	}
+	try {
+		const triggers = listAutoRefreshJobResumeTriggers_();
+		const configuredId = String(props.getProperty(meta.idProperty) || "").trim();
+		const configuredAtMs = Math.max(0, Number(props.getProperty(meta.atProperty) || 0));
+		const configured = findAutoRefreshTriggerById_(triggers, configuredId);
+		const reusable = meta.kind === "watchdog"
+			? !!configured && configuredAtMs >= minimumAtMs
+			: !!configured && configuredAtMs > 0 && configuredAtMs <= desiredAtMs;
+		if (reusable) {
+			clearAutoRefreshSchedulerRepairMarker_(meta.kind);
+			return { scheduled: true, reused: true, degraded: false, kind: meta.kind, triggerId: configuredId, scheduledAtMs: configuredAtMs };
+		}
+
+		const delayMs = Math.max(1000, desiredAtMs - Date.now());
+		let created = null;
+		try {
+			created = ScriptApp.newTrigger(AUTO_REFRESH_JOB_HANDLER_NAME).timeBased().after(delayMs).create();
+		} catch (err) {
+			markAutoRefreshSchedulerRepairNeeded_(meta.kind, "trigger-create-failed:" + errorMessage_(err), desiredAtMs);
+			return { scheduled: false, degraded: true, kind: meta.kind, reason: "create-failed", error: errorMessage_(err), preservedTriggerId: configuredId };
+		}
+		const createdId = getTriggerUniqueId_(created);
+		if (!createdId) {
+			try { if (created) ScriptApp.deleteTrigger(created); } catch (err) {}
+			markAutoRefreshSchedulerRepairNeeded_(meta.kind, "trigger-id-missing", desiredAtMs);
+			return { scheduled: false, degraded: true, kind: meta.kind, reason: "missing-trigger-id", preservedTriggerId: configuredId };
+		}
+		// Publish the replacement identity before deleting the previous trigger.
+		props.setProperty(meta.idProperty, createdId);
+		props.setProperty(meta.atProperty, String(Date.now() + delayMs));
+		if (configured && configured !== created) {
+			try { ScriptApp.deleteTrigger(configured); } catch (err) { Logger.log("Unable to delete replaced auto-refresh %s trigger: %s", meta.kind, errorMessage_(err)); }
+		}
+		const otherMeta = getAutoRefreshDynamicTriggerProperties_(meta.kind === "watchdog" ? "continuation" : "watchdog");
+		const otherId = String(props.getProperty(otherMeta.idProperty) || "").trim();
+		for (let i = 0; i < triggers.length; i++) {
+			const id = getTriggerUniqueId_(triggers[i]);
+			if (!id || id === configuredId || id === otherId || id === createdId) continue;
+			try { ScriptApp.deleteTrigger(triggers[i]); } catch (err) {}
+		}
+		clearAutoRefreshSchedulerRepairMarker_(meta.kind);
+		Logger.log("autoRefresh worker scheduled triggerId=%s delayMs=%s kind=%s", createdId, delayMs, meta.kind);
+		return { scheduled: true, reused: false, degraded: false, kind: meta.kind, triggerId: createdId, delayMs: delayMs, scheduledAtMs: Date.now() + delayMs };
+	} finally {
+		lock.releaseLock();
+	}
+}
+
 function scheduleAutoRefreshJobTrigger_(delayMsRaw, kindRaw) {
-	const delayMs = Math.max(1, Number(delayMsRaw) || AUTO_REFRESH_JOB_RESUME_DELAY_MS);
-	const kind = String(kindRaw || "resume");
-	removeAutoRefreshJobResumeTriggers_();
-	const trigger = ScriptApp.newTrigger(AUTO_REFRESH_JOB_HANDLER_NAME)
-		.timeBased()
-		.after(delayMs)
-		.create();
-	const triggerId = getTriggerUniqueId_(trigger);
-	if (triggerId) PropertiesService.getScriptProperties().setProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY, triggerId);
-	else PropertiesService.getScriptProperties().deleteProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY);
-	Logger.log("autoRefresh worker scheduled triggerId=%s delayMs=%s kind=%s", triggerId, delayMs, kind);
-	return { triggerId: triggerId, delayMs: delayMs, kind: kind };
+	const kind = String(kindRaw || "resume") === "watchdog" ? "watchdog" : "continuation";
+	const delayMs = Math.max(1000, Number(delayMsRaw) || AUTO_REFRESH_JOB_RESUME_DELAY_MS);
+	const desiredAtMs = Date.now() + delayMs;
+	return ensureAutoRefreshDynamicTrigger_(kind, desiredAtMs, kind === "watchdog" ? desiredAtMs : 0);
 }
 
-// Schedule the normal one-shot continuation after an intentional in-progress exit.
 function scheduleAutoRefreshJobResume_() {
-	return scheduleAutoRefreshJobTrigger_(AUTO_REFRESH_JOB_RESUME_DELAY_MS, "resume");
+	return ensureAutoRefreshDynamicTrigger_("continuation", Date.now() + AUTO_REFRESH_JOB_RESUME_DELAY_MS, 0);
 }
 
-// Schedule the later emergency watchdog for a worker that has started draining tasks.
 function scheduleAutoRefreshJobWatchdog_() {
-	return scheduleAutoRefreshJobTrigger_(AUTO_REFRESH_JOB_WATCHDOG_DELAY_MS, "watchdog");
+	const nowMs = Date.now();
+	let desiredAtMs = nowMs + AUTO_REFRESH_JOB_WATCHDOG_DELAY_MS;
+	// Reuse is governed by the recovery invariant, not by a freshly sliding
+	// "now + full delay" target. Otherwise every later caller moves the minimum
+	// forward by a few milliseconds and replaces an already-safe watchdog.
+	let minimumAtMs = nowMs + AUTO_REFRESH_JOB_WATCHDOG_SAFETY_MS;
+	try {
+		const lockState = typeof readActiveRosterJobLockState_ === "function" ? readActiveRosterJobLockState_() : null;
+		if (lockState && Number(lockState.expiresAt) > 0) {
+			minimumAtMs = Math.max(minimumAtMs, Number(lockState.expiresAt) + AUTO_REFRESH_JOB_WATCHDOG_SAFETY_MS);
+			desiredAtMs = Math.max(desiredAtMs, minimumAtMs);
+		}
+	} catch (err) {}
+	return ensureAutoRefreshDynamicTrigger_("watchdog", desiredAtMs, minimumAtMs);
 }
 
 // Ensure single auto refresh trigger.
@@ -5034,9 +5267,112 @@ function ensureSingleAutoRefreshTrigger_() {
 	return keep;
 }
 
+function listPermanentSchedulerWatchdogTriggers_() {
+	const all = ScriptApp.getProjectTriggers();
+	return all.filter((trigger) => {
+		try { return String(trigger.getHandlerFunction() || "") === PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME; } catch (err) { return false; }
+	});
+}
+
+function ensurePermanentSchedulerWatchdogTrigger_() {
+	const props = PropertiesService.getScriptProperties();
+	const configuredId = String(props.getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim();
+	const triggers = listPermanentSchedulerWatchdogTriggers_();
+	let keep = findAutoRefreshTriggerById_(triggers, configuredId);
+	if (!keep && triggers.length) keep = triggers[0];
+	if (!keep) {
+		try {
+			keep = ScriptApp.newTrigger(PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME)
+				.timeBased()
+				.everyHours(PERMANENT_SCHEDULER_WATCHDOG_INTERVAL_HOURS)
+				.create();
+		} catch (err) {
+			markRuntimeRecoveryNeeded_("permanentScheduler", "permanent-watchdog-create-failed", { error: errorMessage_(err).slice(0, 300) });
+			return { scheduled: false, degraded: true, error: errorMessage_(err) };
+		}
+	}
+	const keepId = getTriggerUniqueId_(keep);
+	if (keepId) props.setProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY, keepId);
+	for (let i = 0; i < triggers.length; i++) {
+		if (triggers[i] === keep || getTriggerUniqueId_(triggers[i]) === keepId) continue;
+		try { ScriptApp.deleteTrigger(triggers[i]); } catch (err) {}
+	}
+	if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("permanentScheduler");
+	return { scheduled: !!keepId, degraded: !keepId, triggerId: keepId, reused: triggers.length > 0 };
+}
+
+function repairAutoRefreshSchedulingFromPermanentWatchdog_() {
+	const periodic = isAutoRefreshEnabled_() ? ensureSingleAutoRefreshTrigger_() : null;
+	if (!isAutoRefreshEnabled_()) return { ok: true, enabled: false, scheduled: false };
+	const current = readAutoRefreshQueueCurrent_();
+	let dynamic = null;
+	if (current && current.kind === "auto-refresh-queue" && (current.status === "running" || current.status === "finalizing")) {
+		dynamic = scheduleAutoRefreshJobResume_();
+	} else if (isAutoRefreshFreshRetryPending_()) {
+		dynamic = scheduleAutoRefreshJobResume_();
+	} else {
+		clearAutoRefreshSchedulerRepairMarker_();
+	}
+	return {
+		ok: !dynamic || dynamic.scheduled !== false,
+		enabled: true,
+		periodicTriggerId: getTriggerUniqueId_(periodic),
+		dynamic: dynamic,
+	};
+}
+
+function permanentSchedulerWatchdogTickInternal_() {
+	const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+	if (cooldownUntilMs > Date.now()) {
+		return { ok: true, skipped: true, reason: "urlFetchQuotaCooldown", cooldownUntil: new Date(cooldownUntilMs).toISOString() };
+	}
+	clearExpiredRuntimeUrlFetchQuotaCooldown_();
+	const result = {
+		ok: true,
+		permanent: ensurePermanentSchedulerWatchdogTrigger_(),
+		autoRefresh: null,
+		donationRefresh: null,
+		cloudflare: null,
+	};
+	try {
+		result.autoRefresh = repairAutoRefreshSchedulingFromPermanentWatchdog_();
+	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) return { ok: true, skipped: true, reason: "urlFetchQuota", cooldownUntil: new Date(getRuntimeUrlFetchQuotaCooldownUntilMs_()).toISOString() };
+		result.ok = false;
+		result.autoRefresh = { ok: false, error: errorMessage_(err) };
+		markAutoRefreshSchedulerRepairNeeded_("continuation", "permanent-repair-failed:" + errorMessage_(err), 0);
+	}
+	try {
+		result.donationRefresh = reconcileDonationRefreshTriggerState_();
+	} catch (err) {
+		result.ok = false;
+		result.donationRefresh = { ok: false, error: errorMessage_(err) };
+	}
+	if (typeof repairCloudflarePublishSchedulingFromPermanentWatchdog_ === "function") {
+		try {
+			result.cloudflare = repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+		} catch (err) {
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) return { ok: true, skipped: true, reason: "urlFetchQuota", cooldownUntil: new Date(getRuntimeUrlFetchQuotaCooldownUntilMs_()).toISOString() };
+			result.ok = false;
+			result.cloudflare = { ok: false, error: errorMessage_(err) };
+		}
+	}
+	return result;
+}
+
+function permanentSchedulerWatchdogTick() {
+	return runWithExecutionDeadline_("permanent-scheduler-watchdog", 120 * 1000, function () {
+		return permanentSchedulerWatchdogTickInternal_();
+	}, {
+		cleanupReserveMs: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS,
+		recoveryScope: "permanentScheduler",
+	});
+}
+
 // Handle reconcile auto refresh trigger state.
 function reconcileAutoRefreshTriggerState_() {
 	const props = PropertiesService.getScriptProperties();
+	ensurePermanentSchedulerWatchdogTrigger_();
 	const enabled = isAutoRefreshEnabled_();
 	if (!enabled) {
 		removeAutoRefreshTriggers_();
@@ -5059,14 +5395,31 @@ function repairAutoRefreshScheduler_(optionsRaw) {
 	const enabled = isAutoRefreshEnabled_();
 	const startedAt = new Date().toISOString();
 	const before = buildAutoRefreshTriggerDiagnostics_();
-	const removedAutoRefresh = removeAutoRefreshTriggers_();
-	const removedResume = removeAutoRefreshJobResumeTriggers_();
-	props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
+	const oldPeriodicTriggers = listAutoRefreshTriggers_();
+	let removedAutoRefresh = 0;
+	let removedResume = 0;
 	let triggerId = "";
 	if (enabled) {
-		const trigger = ScriptApp.newTrigger(AUTO_REFRESH_HANDLER_NAME).timeBased().everyHours(AUTO_REFRESH_INTERVAL_HOURS).create();
-		triggerId = getTriggerUniqueId_(trigger);
-		if (triggerId) props.setProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
+		let replacement = null;
+		try {
+			replacement = ScriptApp.newTrigger(AUTO_REFRESH_HANDLER_NAME).timeBased().everyHours(AUTO_REFRESH_INTERVAL_HOURS).create();
+		} catch (err) {
+			markAutoRefreshSchedulerRepairNeeded_("periodic", "periodic-trigger-create-failed:" + errorMessage_(err), 0);
+		}
+		triggerId = getTriggerUniqueId_(replacement);
+		if (triggerId) {
+			props.setProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
+			for (let i = 0; i < oldPeriodicTriggers.length; i++) {
+				try { ScriptApp.deleteTrigger(oldPeriodicTriggers[i]); removedAutoRefresh++; } catch (err) {}
+			}
+		} else if (oldPeriodicTriggers.length) {
+			triggerId = getTriggerUniqueId_(oldPeriodicTriggers[0]);
+			if (triggerId) props.setProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
+		}
+	} else {
+		removedAutoRefresh = removeAutoRefreshTriggers_();
+		removedResume = removeAutoRefreshJobResumeTriggers_();
+		props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
 	}
 	let resume = null;
 	let currentStatus = "";
@@ -5084,13 +5437,15 @@ function repairAutoRefreshScheduler_(optionsRaw) {
 			resume = scheduleAutoRefreshJobResume_();
 		} else if (enabled && isAutoRefreshFreshRetryPending_()) {
 			resume = scheduleAutoRefreshJobResume_();
+		} else if (enabled) {
+			removedResume = removeAutoRefreshJobResumeTriggers_();
 		}
 	} catch (err) {
 		Logger.log("autoRefresh scheduler repair resume check failed: %s", errorMessage_(err));
 	}
 	const after = buildAutoRefreshTriggerDiagnostics_();
 	const result = {
-		ok: true,
+		ok: !!triggerId || !enabled,
 		status: enabled ? "repaired" : "disabled",
 		enabled: enabled,
 		startedAt: startedAt,
@@ -5362,6 +5717,9 @@ function readAutoRefreshSettings_() {
 		hasTrigger: !!triggerId,
 		resumeTriggerId: String(props.getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || "").trim(),
 		hasResumeTrigger: !!String(props.getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || "").trim(),
+		watchdogTriggerId: String(props.getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
+		hasWatchdogTrigger: !!String(props.getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
+		permanentWatchdogTriggerId: String(props.getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
 		lastRunStartedAt: String(props.getProperty(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim(),
 		lastRunFinishedAt: String(props.getProperty(AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY) || "").trim(),
 		lastRunStatus: String(props.getProperty(AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY) || "").trim(),
@@ -5391,13 +5749,19 @@ function runAutoRefreshActiveRosterTick(payloadRaw, secretOrPasswordRaw) {
 	return autoRefreshActiveRosterTick();
 }
 
-function autoRefreshActiveRosterTick() {
+function autoRefreshActiveRosterTickInternal_() {
 	const tickStartMs = Date.now();
 	const startedAt = new Date().toISOString();
 	let resultForLog = null;
 	Logger.log("autoRefreshActiveRosterTick start startedAt=%s", startedAt);
 
 	try {
+		if (isRuntimeUrlFetchQuotaCooldownActive_()) {
+			const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+			resultForLog = { ok: true, status: "skipped", skipped: true, reason: "urlFetchQuotaCooldown", cooldownUntil: new Date(cooldownUntilMs).toISOString() };
+			return resultForLog;
+		}
+		clearExpiredRuntimeUrlFetchQuotaCooldown_();
 		if (!isAutoRefreshEnabled_()) {
 			cleanupAutoRefreshJobAfterDisabled_();
 			setAutoRefreshRunResult_("skipped", "Auto-refresh skipped because it is disabled.", "", 0, "", startedAt, new Date().toISOString());
@@ -5426,6 +5790,7 @@ function autoRefreshActiveRosterTick() {
 	} catch (err) {
 		if (isFirebaseDailyUrlFetchQuotaError_(err)) {
 			removeAutoRefreshJobResumeTriggers_();
+			markAutoRefreshSchedulerRepairNeeded_("continuation", "firebase-urlfetch-quota", getRuntimeUrlFetchQuotaCooldownUntilMs_());
 			Logger.log("Auto-refresh coordinator paused without short retry because Firebase UrlFetch daily quota is exhausted.");
 			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseUrlFetchQuota", quotaPaused: true };
 			return resultForLog;
@@ -5464,18 +5829,34 @@ function autoRefreshActiveRosterTick() {
 	}
 }
 
+function autoRefreshActiveRosterTick() {
+	return runWithExecutionDeadline_("auto-refresh-coordinator", AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS, function () {
+		return autoRefreshActiveRosterTickInternal_();
+	}, {
+		cleanupReserveMs: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS,
+		recoveryScope: "autoRefresh",
+	});
+}
+
 // Handle sharded auto-refresh worker one-shot trigger.
 function runAutoRefreshWorkerTick(payloadRaw, secretOrPasswordRaw) {
 	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
 	return autoRefreshWorkerTick();
 }
 
-function autoRefreshWorkerTick() {
+function autoRefreshWorkerTickInternal_() {
 	const tickStartMs = Date.now();
 	const startedAt = new Date().toISOString();
 	let resultForLog = null;
 	Logger.log("autoRefreshWorkerTick start startedAt=%s", startedAt);
 	try {
+		if (isRuntimeUrlFetchQuotaCooldownActive_()) {
+			const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+			markAutoRefreshSchedulerRepairNeeded_("continuation", "firebase-urlfetch-quota-cooldown", cooldownUntilMs);
+			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "urlFetchQuotaCooldown", quotaPaused: true, cooldownUntil: new Date(cooldownUntilMs).toISOString() };
+			return resultForLog;
+		}
+		clearExpiredRuntimeUrlFetchQuotaCooldown_();
 		if (!isAutoRefreshEnabled_()) {
 			cleanupAutoRefreshJobAfterDisabled_();
 			setAutoRefreshRunResult_("skipped", "Auto-refresh worker skipped because auto-refresh is disabled.", "", 0, "", startedAt, new Date().toISOString());
@@ -5508,6 +5889,7 @@ function autoRefreshWorkerTick() {
 	} catch (err) {
 		if (isFirebaseDailyUrlFetchQuotaError_(err)) {
 			removeAutoRefreshJobResumeTriggers_();
+			markAutoRefreshSchedulerRepairNeeded_("continuation", "firebase-urlfetch-quota", getRuntimeUrlFetchQuotaCooldownUntilMs_());
 			Logger.log("Auto-refresh worker paused without short retry because Firebase UrlFetch daily quota is exhausted.");
 			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseUrlFetchQuota", quotaPaused: true };
 			return resultForLog;
@@ -5546,14 +5928,24 @@ function autoRefreshWorkerTick() {
 	}
 }
 
+function autoRefreshWorkerTick(eventRaw) {
+	consumeAutoRefreshFiredTrigger_(eventRaw);
+	return runWithExecutionDeadline_("auto-refresh-worker", AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS, function () {
+		return autoRefreshWorkerTickInternal_();
+	}, {
+		cleanupReserveMs: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS,
+		recoveryScope: "autoRefresh",
+	});
+}
+
 // Legacy one-shot trigger alias. Existing installed triggers with the old
 // handler name should continue the new sharded queue instead of becoming no-ops.
-function autoRefreshJobResumeTick() {
-	return autoRefreshWorkerTick();
+function autoRefreshJobResumeTick(eventRaw) {
+	return autoRefreshWorkerTick(eventRaw);
 }
 
 // Handle one-shot regular-war finalization attempts near war end.
-function regularWarFinalizationTick() {
+function regularWarFinalizationTickInternal_() {
 	const startedAt = new Date().toISOString();
 	if (!isAutoRefreshEnabled_()) {
 		reconcileRegularWarFinalizationTriggerState_();
@@ -5620,6 +6012,15 @@ function regularWarFinalizationTick() {
 		}
 		return { ok: false, error: message };
 	}
+}
+
+function regularWarFinalizationTick() {
+	return runWithExecutionDeadline_("regular-war-finalization", AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS, function () {
+		return regularWarFinalizationTickInternal_();
+	}, {
+		cleanupReserveMs: APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS,
+		recoveryScope: "autoRefresh",
+	});
 }
 
 /**

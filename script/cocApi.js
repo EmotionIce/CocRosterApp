@@ -129,6 +129,26 @@ function buildCocFetchRequestConfig_(pathRaw, tokenRaw) {
 	};
 }
 
+// Re-clamp a previously built descriptor immediately before dispatch. Batch
+// planning may have happened much earlier in the invocation, so its original
+// timeout must not be allowed to outlive the propagated execution budget.
+function prepareCocFetchAttempt_(requestConfigRaw, labelRaw) {
+	const requestConfig = requestConfigRaw && typeof requestConfigRaw === "object" ? requestConfigRaw : {};
+	const params = Object.assign({}, requestConfig.params || {});
+	params.headers = Object.assign({}, params.headers || {});
+	params.timeoutSeconds = typeof getExternalRequestTimeoutSeconds_ === "function"
+		? getExternalRequestTimeoutSeconds_("COC_API_REQUEST_TIMEOUT_SECONDS", COC_API_REQUEST_TIMEOUT_SECONDS, 5, 25)
+		: Math.max(1, Number(params.timeoutSeconds) || 15);
+	if (typeof assertExecutionBudget_ === "function") {
+		assertExecutionBudget_(params.timeoutSeconds * 1000 + 1000, String(labelRaw || "Clash API request"));
+	}
+	return {
+		url: String(requestConfig.url || ""),
+		params: params,
+		fetchAllRequest: Object.assign({ url: String(requestConfig.url || "") }, params),
+	};
+}
+
 // Parse CoC retry after ms.
 function parseCocRetryAfterMs_(retryAfterRaw) {
 	const retryAfter = String(retryAfterRaw == null ? "" : retryAfterRaw).trim();
@@ -184,17 +204,25 @@ function cocFetchWithRetry_(requestConfigRaw, labelRaw, optionsRaw) {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		try {
 			touchActiveRosterLockLease_("cocFetch");
-			const res = UrlFetchApp.fetch(requestConfig.url, requestConfig.params);
+			const attemptConfig = prepareCocFetchAttempt_(requestConfig, label + " attempt " + attempt);
+			const res = UrlFetchApp.fetch(attemptConfig.url, attemptConfig.params);
 			return parseCocFetchResponse_(res);
 		} catch (err) {
+			if (typeof isExecutionDeadlineError_ === "function" && isExecutionDeadlineError_(err)) throw err;
+			if (typeof isFirebaseDailyUrlFetchQuotaError_ === "function" && isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 			if (!shouldRetryCocFetchError_(err) || attempt >= maxAttempts) throw err;
 			const waitMs = computeCocRetryDelayMs_(err, attempt);
+			const nextTimeoutSeconds = typeof getExternalRequestTimeoutSeconds_ === "function"
+				? getExternalRequestTimeoutSeconds_("COC_API_REQUEST_TIMEOUT_SECONDS", COC_API_REQUEST_TIMEOUT_SECONDS, 5, 25)
+				: 15;
+			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(waitMs + nextTimeoutSeconds * 1000 + 1000, "Clash API retry");
 			const statusCode = Number(err && err.statusCode);
 			const statusLabel = isFinite(statusCode) ? String(Math.floor(statusCode)) : "transport";
 			Logger.log("cocFetch retry %s/%s path=%s status=%s waitMs=%s", attempt + 1, maxAttempts, label, statusLabel, waitMs);
 			if (waitMs > 0) {
 				touchActiveRosterLockLease_("cocFetch retry wait");
-				Utilities.sleep(waitMs);
+				if (typeof sleepWithExecutionDeadline_ === "function") sleepWithExecutionDeadline_(waitMs, "Clash API retry wait");
+				else Utilities.sleep(waitMs);
 			}
 		}
 	}
@@ -259,6 +287,9 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const batchSize = Math.max(1, toNonNegativeInt_(options.batchSize) || AUTO_REFRESH_PREFETCH_BATCH_SIZE);
 	const batchDelayMs = Math.max(0, toNonNegativeInt_(options.batchDelayMs) || AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS);
+	const maxBatchRetryAttempts = options.maxBatchRetryAttempts == null
+		? 1
+		: Math.max(0, Math.min(1, toNonNegativeInt_(options.maxBatchRetryAttempts)));
 	const out = {
 		dataByKey: {},
 		errorByKey: {},
@@ -315,14 +346,15 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 		if (!batch.length) continue;
 		if (out.batchCount > 0 && batchDelayMs > 0) {
 			touchActiveRosterLockLease_("cocFetchAll batch delay");
-			Utilities.sleep(batchDelayMs);
+			if (typeof sleepWithExecutionDeadline_ === "function") sleepWithExecutionDeadline_(batchDelayMs, "Clash API batch delay");
+			else Utilities.sleep(batchDelayMs);
 		}
 		out.batchCount++;
 
 		const fetchAllRequests = [];
 		for (let i = 0; i < batch.length; i++) {
 			const config = requestConfigByKey[batch[i].key];
-			fetchAllRequests.push(config.fetchAllRequest);
+			fetchAllRequests.push(prepareCocFetchAttempt_(config, "Clash API batch request").fetchAllRequest);
 		}
 
 		let responses = null;
@@ -330,40 +362,63 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 			touchActiveRosterLockLease_("cocFetchAll fetch");
 			responses = UrlFetchApp.fetchAll(fetchAllRequests);
 		} catch (err) {
+			if (typeof isExecutionDeadlineError_ === "function" && isExecutionDeadlineError_(err)) throw err;
+			if (typeof isFirebaseDailyUrlFetchQuotaError_ === "function" && isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
 			Logger.log("cocFetchAllByPathEntries: fetchAll batch failed (%s request(s)): %s", batch.length, errorMessage_(err));
-			responses = null;
+			for (let i = 0; i < batch.length; i++) out.errorByKey[batch[i].key] = err;
+			continue;
 		}
-
+		const retryItems = [];
 		for (let i = 0; i < batch.length; i++) {
 			const entry = batch[i];
-			const config = requestConfigByKey[entry.key];
 			try {
 				const response = responses && Array.isArray(responses) && responses[i] && typeof responses[i].getResponseCode === "function" ? responses[i] : null;
-				if (response) {
-					try {
-						out.dataByKey[entry.key] = parseCocFetchResponse_(response);
-						continue;
-					} catch (err) {
-						if (!shouldRetryCocFetchError_(err)) throw err;
-						const remainingAttempts = Math.max(1, COC_FETCH_MAX_ATTEMPTS - 1);
-						const initialWaitMs = computeCocRetryDelayMs_(err, 1);
-						Logger.log(
-							"cocFetchAllByPathEntries: retrying path=%s after transient fetchAll response error (waitMs=%s): %s",
-							entry.path,
-							initialWaitMs,
-							errorMessage_(err),
-						);
-						if (initialWaitMs > 0) {
-							touchActiveRosterLockLease_("cocFetchAll response retry wait");
-							Utilities.sleep(initialWaitMs);
-						}
-						out.dataByKey[entry.key] = cocFetchWithRetry_(config, entry.path, { maxAttempts: remainingAttempts });
-						continue;
-					}
-				}
-				out.dataByKey[entry.key] = cocFetchWithRetry_(config, entry.path);
+				if (!response) throw new Error("Clash API fetchAll returned no response for " + entry.path + ".");
+				out.dataByKey[entry.key] = parseCocFetchResponse_(response);
 			} catch (err) {
-				out.errorByKey[entry.key] = err;
+				if (maxBatchRetryAttempts > 0 && shouldRetryCocFetchError_(err)) retryItems.push({ entry: entry, error: err });
+				else out.errorByKey[entry.key] = err;
+			}
+		}
+
+		// Retry the failed subset once as one parallel chunk. A failed fetchAll is
+		// never expanded into a serial per-item fallback chain in this invocation.
+		if (retryItems.length) {
+			let retryWaitMs = 0;
+			for (let i = 0; i < retryItems.length; i++) retryWaitMs = Math.max(retryWaitMs, computeCocRetryDelayMs_(retryItems[i].error, 1));
+			const retryRequests = [];
+			for (let i = 0; i < retryItems.length; i++) {
+				const config = requestConfigByKey[retryItems[i].entry.key];
+				retryRequests.push(prepareCocFetchAttempt_(config, "Clash API failed-chunk retry").fetchAllRequest);
+			}
+			if (typeof assertExecutionBudget_ === "function") {
+				const timeoutSeconds = retryRequests.reduce((maxValue, request) => Math.max(maxValue, Number(request.timeoutSeconds) || 0), 0);
+				assertExecutionBudget_(retryWaitMs + timeoutSeconds * 1000 + 1000, "Clash API failed-chunk retry");
+			}
+			if (retryWaitMs > 0) {
+				touchActiveRosterLockLease_("cocFetchAll failed-chunk retry wait");
+				if (typeof sleepWithExecutionDeadline_ === "function") sleepWithExecutionDeadline_(retryWaitMs, "Clash API failed-chunk retry wait");
+				else Utilities.sleep(retryWaitMs);
+			}
+			let retryResponses = null;
+			try {
+				touchActiveRosterLockLease_("cocFetchAll failed-chunk retry");
+				retryResponses = UrlFetchApp.fetchAll(retryRequests);
+			} catch (err) {
+				if (typeof isExecutionDeadlineError_ === "function" && isExecutionDeadlineError_(err)) throw err;
+				if (typeof isFirebaseDailyUrlFetchQuotaError_ === "function" && isFirebaseDailyUrlFetchQuotaError_(err)) throw markFirebaseDailyUrlFetchQuotaError_(err);
+				for (let i = 0; i < retryItems.length; i++) out.errorByKey[retryItems[i].entry.key] = err;
+				continue;
+			}
+			for (let i = 0; i < retryItems.length; i++) {
+				const entry = retryItems[i].entry;
+				try {
+					const response = retryResponses && retryResponses[i] && typeof retryResponses[i].getResponseCode === "function" ? retryResponses[i] : null;
+					if (!response) throw new Error("Clash API failed-chunk retry returned no response for " + entry.path + ".");
+					out.dataByKey[entry.key] = parseCocFetchResponse_(response);
+				} catch (err) {
+					out.errorByKey[entry.key] = err;
+				}
 			}
 		}
 	}

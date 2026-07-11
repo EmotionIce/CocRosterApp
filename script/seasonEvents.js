@@ -14,6 +14,10 @@ const CWL_RUNTIME_SCHEMA_VERSION = 1;
 const CWL_RUNTIME_DIAGNOSTIC_LIMIT = 40;
 const CWL_RUNTIME_CONFIRMATION_MIN_DELAY_MS = 2 * 60 * 1000;
 const CWL_RUNTIME_POST_SETTLEMENT_AUDIT_DELAY_MS = 2 * 60 * 1000;
+const CWL_LIFECYCLE_CONFIRMATION_MIN_DELAY_MS = 2 * 60 * 1000;
+const CWL_LIFECYCLE_FINAL_WAR_GRACE_MS = 5 * 60 * 1000;
+const CWL_LIFECYCLE_EVIDENCE_MAX_AGE_MS = 15 * 60 * 1000;
+const CWL_LIFECYCLE_RECENTLY_ENDED_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 const SEASON_EVENT_SEASON_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const SEASON_EVENT_LOCK_WAIT_MS = 30 * 1000;
 const SEASON_EVENT_CWL_GROUP_BIND_TOLERANCE_MS = 72 * 60 * 60 * 1000;
@@ -329,6 +333,40 @@ function readSeasonEventPointer_(pathRaw) {
 // Write encoded Firebase payload.
 function writeSeasonEventFirebasePayload_(pathRaw, methodRaw, payloadRaw) {
 	return firebaseRequestJson_(pathRaw, methodRaw, encodeFirebaseObjectKeysRecursive_(payloadRaw));
+}
+
+// Commit a set of lifecycle paths with one Firebase multi-location write.
+function writeSeasonEventAtomicPayloads_(entriesRaw) {
+	const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+	const writes = [];
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i] && typeof entries[i] === "object" ? entries[i] : {};
+		const path = sanitizeSeasonEventText_(entry.path, 500);
+		if (!path || entry.payload === undefined) continue;
+		writes.push({ path: path, payload: entry.payload === null ? null : encodeFirebaseObjectKeysRecursive_(entry.payload) });
+	}
+	if (!writes.length) return null;
+	if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(12000, "CWL lifecycle atomic checkpoint");
+	return firebaseBatchPutJson_(writes, { disableFallback: true });
+}
+
+// Describe the one lifecycle publication contract used by every CWL mutation entrypoint.
+function buildCwlLifecyclePublicationDescriptor_(eventIdRaw, lifecycleStateRaw, optionsRaw) {
+	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
+	const lifecycleState = normalizeCwlTrackingState_(lifecycleStateRaw) || "waiting";
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	return {
+		schemaVersion: 1,
+		category: "cwl-lifecycle",
+		eventId: eventId,
+		lifecycleState: lifecycleState,
+		eventAction: "put",
+		liveAggregateAction: lifecycleState === "completed" ? "delete" : lifecycleState === "active" || lifecycleState === "finalizing" ? "put" : "delete",
+		finalAggregateAction: lifecycleState === "completed" ? "put" : "delete",
+		pointerAction: "put",
+		objectBeforePointers: true,
+		reason: sanitizeSeasonEventText_(options.reason, 160) || "cwl-lifecycle-transition",
+	};
 }
 
 function publishCloudflareSeasonEventsAfterMutation_(labelRaw, eventIdRaw, optionsRaw) {
@@ -648,6 +686,9 @@ function sanitizeCwlSeasonEventGroup_(groupRaw) {
 		groupId: sanitizeSeasonEventText_(group.groupId, 180),
 		anchorWarTag: normalizeTag_(group.anchorWarTag),
 		season: sanitizeSeasonEventText_(group.season, 40),
+		state: normalizeWarState_(group.state || group.groupState),
+		observedAt: sanitizeSeasonEventTimestampOrEmpty_(group.observedAt || group.lastObservedAt),
+		source: sanitizeSeasonEventSource_(group.source || group.evidenceSource || ""),
 		firstWarStartTime: sanitizeSeasonEventTimestampOrEmpty_(group.firstWarStartTime),
 		lastWarEndTime: sanitizeSeasonEventTimestampOrEmpty_(group.lastWarEndTime),
 		projectedLastWarEndTime: sanitizeSeasonEventTimestampOrEmpty_(group.projectedLastWarEndTime),
@@ -738,6 +779,11 @@ function sanitizeCwlSeasonEventTarget_(targetRaw) {
 	const clanTag = normalizeTag_(target.clanTag || target.targetClanTag);
 	const rosterId = sanitizeSeasonEventText_(target.rosterId || target.targetRosterId, 120);
 	const statusRaw = sanitizeSeasonEventText_(target.status, 40).toLowerCase();
+	const groupId = sanitizeSeasonEventText_(target.groupId || target.boundGroupId, 180);
+	const season = sanitizeSeasonEventText_(target.season || target.boundSeason, 40);
+	const observedAt = sanitizeSeasonEventTimestampOrEmpty_(target.observedAt || target.lastObservedAt);
+	const evidenceStatusRaw = sanitizeSeasonEventText_(target.evidenceStatus, 40).toLowerCase();
+	const evidenceComplete = !!(groupId && season && observedAt);
 	const resolved = (target.resolved === true || statusRaw === "resolved") && !!(rosterId && clanTag && leagueRank != null);
 	return {
 		resolved: resolved,
@@ -749,6 +795,13 @@ function sanitizeCwlSeasonEventTarget_(targetRaw) {
 		leagueName: sanitizeSeasonEventText_(target.leagueName || target.resolvedLeague || target.league, 80),
 		leagueKey: sanitizeSeasonEventText_(target.leagueKey || leagueSort.leagueKey, 80),
 		leagueRank: leagueRank == null ? null : leagueRank,
+		groupId: groupId,
+		season: season,
+		groupState: normalizeWarState_(target.groupState || target.state),
+		observedAt: observedAt,
+		boundAt: sanitizeSeasonEventTimestampOrEmpty_(target.boundAt || target.resolvedAt || target.timestamp),
+		evidenceStatus: evidenceComplete ? "authoritative" : evidenceStatusRaw || (resolved ? "legacy-unverified" : "unresolved"),
+		evidenceSource: sanitizeSeasonEventSource_(target.evidenceSource || target.source || ""),
 		resolvedAt: sanitizeSeasonEventTimestampOrEmpty_(target.resolvedAt || target.timestamp),
 		source: sanitizeSeasonEventSource_(target.source || ""),
 		eligibleAccountTags: eligibleAccountTags,
@@ -832,6 +885,7 @@ function sanitizeCwlSeasonEventTargetCandidate_(candidateRaw) {
 	const rawLeagueRank = Number(candidate.leagueRank);
 	const leagueRank = isFinite(rawLeagueRank) ? rawLeagueRank : leagueSort.leagueRank;
 	const rawRosterOrderIndex = Number(candidate.rosterOrderIndex != null ? candidate.rosterOrderIndex : candidate.order);
+	const rawExplicitPriority = Number(candidate.explicitPriority != null ? candidate.explicitPriority : candidate.priority);
 	const eligibleRaw = Array.isArray(candidate.eligibleAccountTags) ? candidate.eligibleAccountTags : [];
 	const eligibleAccountTags = [];
 	const seenEligible = {};
@@ -850,6 +904,12 @@ function sanitizeCwlSeasonEventTargetCandidate_(candidateRaw) {
 		leagueKey: sanitizeSeasonEventText_(candidate.leagueKey || leagueSort.leagueKey, 80),
 		leagueRank: leagueRank == null ? null : leagueRank,
 		rosterOrderIndex: isFinite(rawRosterOrderIndex) ? rawRosterOrderIndex : 100000,
+		explicitPriority: isFinite(rawExplicitPriority) ? rawExplicitPriority : null,
+		groupId: sanitizeSeasonEventText_(candidate.groupId || candidate.boundGroupId, 180),
+		season: sanitizeSeasonEventText_(candidate.season || candidate.boundSeason, 40),
+		groupState: normalizeWarState_(candidate.groupState || candidate.state),
+		observedAt: sanitizeSeasonEventTimestampOrEmpty_(candidate.observedAt || candidate.lastObservedAt),
+		evidenceSource: sanitizeSeasonEventSource_(candidate.evidenceSource || candidate.source || ""),
 		eligibleAccountTags: eligibleAccountTags,
 	};
 }
@@ -885,7 +945,6 @@ function completeCwlSeasonEventTargetCandidate_(candidateRaw, optionsRaw) {
 					: ""
 			);
 		leagueName = sanitizeSeasonEventText_(leagueNameRaw, 80);
-		if (!leagueName && options.defaultMissingLeagueToUnranked !== false) leagueName = "Unranked";
 		const leagueSort = parseCwlSeasonEventLeagueSort_(leagueName);
 		leagueName = leagueSort.leagueName || leagueName;
 		leagueKey = leagueSort.leagueKey;
@@ -908,6 +967,12 @@ function completeCwlSeasonEventTargetCandidate_(candidateRaw, optionsRaw) {
 		leagueKey: leagueKey,
 		leagueRank: leagueRank,
 		rosterOrderIndex: candidate.rosterOrderIndex,
+		explicitPriority: candidate.explicitPriority,
+		groupId: candidate.groupId,
+		season: candidate.season,
+		groupState: candidate.groupState,
+		observedAt: candidate.observedAt,
+		evidenceSource: candidate.evidenceSource,
 		eligibleAccountTags: candidate.eligibleAccountTags,
 	});
 }
@@ -916,8 +981,139 @@ function compareCwlSeasonEventTargetCandidates_(leftRaw, rightRaw) {
 	const left = sanitizeCwlSeasonEventTargetCandidate_(leftRaw);
 	const right = sanitizeCwlSeasonEventTargetCandidate_(rightRaw);
 	if (left.leagueRank !== right.leagueRank) return left.leagueRank - right.leagueRank;
-	if (left.rosterOrderIndex !== right.rosterOrderIndex) return left.rosterOrderIndex - right.rosterOrderIndex;
+	const leftPriority = left.explicitPriority == null ? Number.MAX_SAFE_INTEGER : left.explicitPriority;
+	const rightPriority = right.explicitPriority == null ? Number.MAX_SAFE_INTEGER : right.explicitPriority;
+	if (leftPriority !== rightPriority) return leftPriority - rightPriority;
 	return left.rosterId < right.rosterId ? -1 : left.rosterId > right.rosterId ? 1 : 0;
+}
+
+// Read a clan's CWL league only from the freshly returned group payload.
+function readCwlSeasonEventLeagueFromFreshGroup_(leaguegroupRaw, clanTagRaw) {
+	const leaguegroup = leaguegroupRaw && typeof leaguegroupRaw === "object" ? leaguegroupRaw : {};
+	const clanTag = normalizeTag_(clanTagRaw);
+	const clans = Array.isArray(leaguegroup.clans) ? leaguegroup.clans : [];
+	let clan = null;
+	for (let i = 0; i < clans.length; i++) {
+		if (normalizeTag_(clans[i] && clans[i].tag) === clanTag) {
+			clan = clans[i];
+			break;
+		}
+	}
+	const candidates = [
+		clan && clan.warLeague,
+		clan && clan.league,
+		clan && clan.warLeagueName,
+		clan && clan.leagueName,
+		leaguegroup.league,
+		leaguegroup.warLeague,
+		leaguegroup.leagueName,
+		leaguegroup.warLeagueName,
+	];
+	for (let i = 0; i < candidates.length; i++) {
+		const value = candidates[i];
+		const text = sanitizeSeasonEventText_(value && typeof value === "object" ? value.name || value.label : value, 80);
+		if (text) return text;
+	}
+	return "";
+}
+
+function readCwlSeasonEventExplicitPriority_(rosterDataRaw, rosterRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const rosterId = sanitizeSeasonEventText_(roster.id, 120);
+	const publicConfig = rosterData.publicConfig && typeof rosterData.publicConfig === "object" ? rosterData.publicConfig : {};
+	const priorityMaps = [rosterData.cwlEventTargetPriorityByRosterId, publicConfig.cwlEventTargetPriorityByRosterId];
+	const directValues = [roster.cwlEventPriority, roster.cwlTargetPriority];
+	for (let i = 0; i < directValues.length; i++) {
+		const value = Number(directValues[i]);
+		if (isFinite(value)) return value;
+	}
+	for (let i = 0; i < priorityMaps.length; i++) {
+		const map = priorityMaps[i] && typeof priorityMaps[i] === "object" ? priorityMaps[i] : {};
+		const value = Number(map[rosterId]);
+		if (isFinite(value)) return value;
+	}
+	const preferredRosterId = sanitizeSeasonEventText_(rosterData.cwlEventTargetRosterId || publicConfig.cwlEventTargetRosterId, 120);
+	return preferredRosterId && preferredRosterId === rosterId ? -1000000 : null;
+}
+
+// Build target candidates only from successful group evidence observed in this refresh.
+function buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterDataRaw, evidenceRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const evidence = evidenceRaw && typeof evidenceRaw === "object" ? evidenceRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.nowIso || options.now) || new Date().toISOString();
+	const observedAt = sanitizeSeasonEventTimestampOrEmpty_(evidence.capturedAt || evidence.observedAt);
+	const observationId = sanitizeSeasonEventText_(evidence.observationId, 120);
+	const observationAgeMs = parseIsoToMs_(nowIso) - parseIsoToMs_(observedAt);
+	if (!observedAt || !observationId || observationAgeMs < 0 || observationAgeMs > CWL_LIFECYCLE_EVIDENCE_MAX_AGE_MS) return [];
+	const source = sanitizeSeasonEventSource_(options.source || evidence.source || { type: "cwl-group-evidence" });
+	const rawByClanTag = evidence.leaguegroupRawByClanTag && typeof evidence.leaguegroupRawByClanTag === "object" ? evidence.leaguegroupRawByClanTag : {};
+	const errorByClanTag = evidence.leaguegroupErrorByClanTag && typeof evidence.leaguegroupErrorByClanTag === "object" ? evidence.leaguegroupErrorByClanTag : {};
+	const clanDetailsByClanTag = evidence.clanDetailsRawByClanTag && typeof evidence.clanDetailsRawByClanTag === "object" ? evidence.clanDetailsRawByClanTag : {};
+	const clanDetailsErrorByClanTag = evidence.clanDetailsErrorByClanTag && typeof evidence.clanDetailsErrorByClanTag === "object" ? evidence.clanDetailsErrorByClanTag : {};
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const out = [];
+	const suppliedCandidates = Array.isArray(evidence.candidates) ? evidence.candidates : [];
+	if (suppliedCandidates.length) {
+		const rosterById = {};
+		for (let i = 0; i < rosters.length; i++) {
+			const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+			const rosterId = sanitizeSeasonEventText_(roster.id, 120);
+			if (rosterId) rosterById[rosterId] = roster;
+		}
+		for (let i = 0; i < suppliedCandidates.length; i++) {
+			const candidate = sanitizeCwlSeasonEventTargetCandidate_(suppliedCandidates[i]);
+			const roster = rosterById[candidate.rosterId];
+			if (!roster || getRosterTrackingMode_(roster) !== "cwl" || normalizeTag_(roster.connectedClanTag) !== candidate.clanTag) continue;
+			if (!candidate.groupId || !candidate.season || candidate.observedAt !== observedAt || candidate.leagueRank == null) continue;
+			const currentEligible = collectCwlSeasonEventRosterEligibleAccountTags_(roster);
+			if (currentEligible.length) candidate.eligibleAccountTags = currentEligible;
+			if (candidate.eligibleAccountTags.length) out.push(candidate);
+		}
+		return out;
+	}
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		if (getRosterTrackingMode_(roster) !== "cwl") continue;
+		const rosterId = sanitizeSeasonEventText_(roster.id, 120);
+		const clanTag = normalizeTag_(roster.connectedClanTag);
+		if (!rosterId || !clanTag || Object.prototype.hasOwnProperty.call(errorByClanTag, clanTag)) continue;
+		const leaguegroup = rawByClanTag[clanTag] && typeof rawByClanTag[clanTag] === "object" ? rawByClanTag[clanTag] : null;
+		if (!leaguegroup || !Array.isArray(leaguegroup.clans) || !Array.isArray(leaguegroup.rounds) || !leagueGroupContainsClan_(leaguegroup, clanTag)) continue;
+		const groupId = buildCwlRuntimeGroupId_(leaguegroup);
+		const season = sanitizeSeasonEventText_(leaguegroup.season, 40);
+		if (!groupId || !season) continue;
+		let leagueName = readCwlSeasonEventLeagueFromFreshGroup_(leaguegroup, clanTag);
+		let leagueEvidenceSource = "league-group";
+		if (!leagueName && !Object.prototype.hasOwnProperty.call(clanDetailsErrorByClanTag, clanTag)) {
+			const clan = clanDetailsByClanTag[clanTag] && typeof clanDetailsByClanTag[clanTag] === "object" ? clanDetailsByClanTag[clanTag] : null;
+			const warLeague = clan && typeof clan === "object" ? clan.warLeague : null;
+			leagueName = sanitizeSeasonEventText_((warLeague && (warLeague.name || warLeague.label)) || (clan && (clan.warLeagueName || clan.clanWarLeagueName)), 80);
+			if (leagueName) leagueEvidenceSource = "clan-details";
+		}
+		const leagueSort = parseCwlSeasonEventLeagueSort_(leagueName);
+		if (!leagueName || leagueSort.leagueRank == null) continue;
+		const eligibleAccountTags = collectCwlSeasonEventRosterEligibleAccountTags_(roster);
+		if (!eligibleAccountTags.length) continue;
+		out.push(sanitizeCwlSeasonEventTargetCandidate_({
+			rosterId: rosterId,
+			rosterTitle: sanitizeSeasonEventText_(roster.title, 160) || rosterId,
+			clanTag: clanTag,
+			clanName: sanitizeSeasonEventText_(roster.clanName || roster.connectedClanName || roster.title, 120) || clanTag,
+			leagueName: leagueSort.leagueName,
+			leagueKey: leagueSort.leagueKey,
+			leagueRank: leagueSort.leagueRank,
+			explicitPriority: readCwlSeasonEventExplicitPriority_(rosterData, roster),
+			groupId: groupId,
+			season: season,
+			groupState: normalizeWarState_(leaguegroup.state),
+			observedAt: observedAt,
+			evidenceSource: { type: leagueEvidenceSource, method: typeof source === "string" ? source : source.type || "" },
+			eligibleAccountTags: eligibleAccountTags,
+		}));
+	}
+	return out;
 }
 
 // Build compact CWL event target candidates from roster data or stored metadata.
@@ -980,6 +1176,7 @@ function buildCwlSeasonEventTargetCandidatesFromRosterData_(rosterDataRaw, optio
 function buildCwlSeasonEventTargetFromCandidate_(candidateRaw, nowIsoRaw, sourceRaw, currentTargetRaw) {
 	const candidate = sanitizeCwlSeasonEventTargetCandidate_(candidateRaw);
 	const currentTarget = sanitizeCwlSeasonEventTarget_(currentTargetRaw);
+	const observedAt = candidate.observedAt || currentTarget.observedAt || sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw);
 	return sanitizeCwlSeasonEventTarget_({
 		resolved: true,
 		status: "resolved",
@@ -990,6 +1187,13 @@ function buildCwlSeasonEventTargetFromCandidate_(candidateRaw, nowIsoRaw, source
 		leagueName: candidate.leagueName || currentTarget.leagueName,
 		leagueKey: candidate.leagueKey || currentTarget.leagueKey,
 		leagueRank: candidate.leagueRank == null ? currentTarget.leagueRank : candidate.leagueRank,
+		groupId: candidate.groupId || currentTarget.groupId,
+		season: candidate.season || currentTarget.season,
+		groupState: candidate.groupState || currentTarget.groupState,
+		observedAt: observedAt,
+		boundAt: currentTarget.boundAt || sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw),
+		evidenceStatus: candidate.groupId && candidate.season && observedAt ? "authoritative" : currentTarget.evidenceStatus,
+		evidenceSource: candidate.evidenceSource || sourceRaw || currentTarget.evidenceSource,
 		resolvedAt: currentTarget.resolvedAt || sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw),
 		source: sourceRaw || currentTarget.source || { type: "auto-cwl-target" },
 		eligibleAccountTags: candidate.eligibleAccountTags,
@@ -1053,12 +1257,14 @@ function resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.now || options.nowIso) || new Date().toISOString();
 	const source = options.source || { type: "auto-cwl-target" };
-	const rawCandidates = buildCwlSeasonEventTargetCandidatesFromRosterData_(rosterData, {
-		nowIso: nowIso,
-		source: source,
-		fetchMissing: options.fetchMissing !== false,
-		defaultMissingLeagueToUnranked: true,
-	});
+	const freshEvidence = options.freshEvidence && typeof options.freshEvidence === "object" ? options.freshEvidence : null;
+	const rawCandidates = freshEvidence
+		? buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterData, freshEvidence, {
+			nowIso: nowIso,
+			source: source,
+			fetchClanLeague: options.fetchClanLeague !== false,
+		})
+		: [];
 	const candidates = [];
 	let emptyEligibilityCandidateCount = 0;
 	for (let i = 0; i < rawCandidates.length; i++) {
@@ -1069,13 +1275,13 @@ function resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, optionsRaw) {
 		}
 		candidates.push(candidate);
 	}
-	const cwlRosterCount = rawCandidates.length || (Array.isArray(rosterData.rosters) ? rosterData.rosters.filter((roster) => getRosterTrackingMode_(roster) === "cwl").length : 0);
+	const cwlRosterCount = Array.isArray(rosterData.rosters) ? rosterData.rosters.filter((roster) => getRosterTrackingMode_(roster) === "cwl").length : 0;
 	if (!candidates.length) {
 		return {
 			ok: false,
 			status: "unresolved",
 			target: buildUnresolvedCwlSeasonEventTarget_(
-				emptyEligibilityCandidateCount ? "no-cwl-target-eligible-accounts" : cwlRosterCount ? "no-current-cwl-league" : "no-eligible-cwl-roster",
+				emptyEligibilityCandidateCount ? "no-cwl-target-eligible-accounts" : !freshEvidence ? "fresh-cwl-evidence-required" : cwlRosterCount ? "no-fresh-current-cwl-evidence" : "no-eligible-cwl-roster",
 				nowIso,
 				source,
 			),
@@ -1083,7 +1289,24 @@ function resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, optionsRaw) {
 		};
 	}
 	candidates.sort(compareCwlSeasonEventTargetCandidates_);
-	const selected = candidates[0];
+	const bestRank = candidates[0].leagueRank;
+	const bestLeague = candidates.filter((candidate) => candidate.leagueRank === bestRank);
+	let selected = bestLeague.length === 1 ? bestLeague[0] : null;
+	if (!selected) {
+		const prioritized = bestLeague.filter((candidate) => candidate.explicitPriority != null);
+		if (prioritized.length) {
+			prioritized.sort(compareCwlSeasonEventTargetCandidates_);
+			if (prioritized.length === 1 || prioritized[0].explicitPriority < prioritized[1].explicitPriority) selected = prioritized[0];
+		}
+	}
+	if (!selected) {
+		return {
+			ok: false,
+			status: "unresolved",
+			target: buildUnresolvedCwlSeasonEventTarget_("tied-cwl-target-evidence", nowIso, source),
+			candidates: candidates,
+		};
+	}
 	return {
 		ok: true,
 		status: "resolved",
@@ -1118,9 +1341,17 @@ function sanitizeCwlSeasonEventMeta_(metaRaw) {
 		lastDataSuccessAt: sanitizeSeasonEventTimestampOrEmpty_(meta.lastDataSuccessAt),
 		lastCompleteRefreshAt: sanitizeSeasonEventTimestampOrEmpty_(meta.lastCompleteRefreshAt),
 		lastAggregateHash: sanitizeSeasonEventText_(meta.lastAggregateHash, 120),
+		// finalizationHash is retained as a read-compatibility alias for pre-v2 state.
 		finalizationHash: sanitizeSeasonEventText_(meta.finalizationHash, 120),
+		finalizationFingerprint: sanitizeSeasonEventText_(meta.finalizationFingerprint || meta.finalizationHash, 120),
 		finalizationFirstSeenAt: sanitizeSeasonEventTimestampOrEmpty_(meta.finalizationFirstSeenAt),
+		finalizationObservationAt: sanitizeSeasonEventTimestampOrEmpty_(meta.finalizationObservationAt),
+		finalizationEventRevision: sanitizeSeasonEventText_(meta.finalizationEventRevision, 120),
+		finalizationTargetFingerprint: sanitizeSeasonEventText_(meta.finalizationTargetFingerprint, 120),
 		finalizedAt: sanitizeSeasonEventTimestampOrEmpty_(meta.finalizedAt),
+		lastIntegrityAuditAt: sanitizeSeasonEventTimestampOrEmpty_(meta.lastIntegrityAuditAt),
+		lastIntegrityAuditStatus: sanitizeSeasonEventText_(meta.lastIntegrityAuditStatus, 120),
+		falseCompletionRecoveredAt: sanitizeSeasonEventTimestampOrEmpty_(meta.falseCompletionRecoveredAt),
 		stale: toBooleanFlag_(meta.stale),
 		staleSince: sanitizeSeasonEventTimestampOrEmpty_(meta.staleSince),
 		staleReason: sanitizeSeasonEventText_(meta.staleReason, 160),
@@ -1143,6 +1374,8 @@ function pruneCwlSeasonEventMetaToTarget_(metaRaw, targetRaw) {
 	const groupIds = Object.keys(meta.groups).sort();
 	for (let i = 0; i < groupIds.length; i++) {
 		const group = sanitizeCwlSeasonEventGroup_(meta.groups[groupIds[i]]);
+		if (target.groupId && group.groupId !== target.groupId) continue;
+		if (target.season && group.season && group.season !== target.season) continue;
 		const clanTags = group.clanTags.filter((tag) => tag === target.clanTag);
 		if (!clanTags.length) continue;
 		group.clanTags = clanTags;
@@ -1153,6 +1386,29 @@ function pruneCwlSeasonEventMetaToTarget_(metaRaw, targetRaw) {
 	if (meta.firstBoundGroupId && !groups[meta.firstBoundGroupId]) meta.firstBoundGroupId = "";
 	if (!meta.firstBoundGroupId && meta.groupCount) meta.firstBoundGroupId = Object.keys(groups).sort()[0];
 	if (!meta.groupCount) meta.firstBoundAt = "";
+	return meta;
+}
+
+function remapUnambiguousLegacyCwlGroupToTarget_(metaRaw, targetRaw) {
+	let meta = sanitizeCwlSeasonEventMeta_(metaRaw);
+	const target = sanitizeCwlSeasonEventTarget_(targetRaw);
+	if (!target.resolved || !target.groupId || !target.clanTag || meta.groups[target.groupId]) return meta;
+	const compatible = [];
+	const groupIds = Object.keys(meta.groups).sort();
+	for (let i = 0; i < groupIds.length; i++) {
+		const group = sanitizeCwlSeasonEventGroup_(meta.groups[groupIds[i]]);
+		if (group.clanTags.indexOf(target.clanTag) < 0) continue;
+		if (group.season && target.season && group.season !== target.season) continue;
+		compatible.push(group);
+	}
+	if (compatible.length !== 1) return meta;
+	const legacy = compatible[0];
+	const legacyId = legacy.groupId;
+	delete meta.groups[legacyId];
+	legacy.groupId = target.groupId;
+	legacy.season = target.season || legacy.season;
+	meta = mergeCwlSeasonEventGroupBinding_(meta, legacy);
+	if (meta.firstBoundGroupId === legacyId || !meta.firstBoundGroupId) meta.firstBoundGroupId = target.groupId;
 	return meta;
 }
 
@@ -1171,27 +1427,62 @@ function applyCwlSeasonEventTargetResolution_(eventRaw, rosterDataRaw, optionsRa
 		const resolved = resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, {
 			nowIso: nowIso,
 			source: source,
-			fetchMissing: options.fetchMissing !== false,
+			fetchMissing: false,
+			freshEvidence: options.freshEvidence,
+			fetchClanLeague: options.fetchClanLeague !== false,
 		});
 		target = sanitizeCwlSeasonEventTarget_(resolved && resolved.target);
 		status = target.resolved ? "resolved" : target.status || "unresolved";
 	} else {
-		const repairCandidate = findCwlSeasonEventTargetRepairCandidate_(currentTarget, rosterDataRaw, {
+		const eventState = normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting";
+		const canSyncEligibility = event.signupsOpen === true && (eventState === "waiting" || eventState === "active");
+		const rosterCandidate = findCwlSeasonEventTargetRepairCandidate_(currentTarget, rosterDataRaw, {
 			nowIso: nowIso,
 			source: source,
-			fetchMissing: options.fetchMissing !== false,
-			defaultMissingLeagueToUnranked: true,
+			fetchMissing: false,
+			allowUnresolvedLeague: true,
 		});
-		if (shouldRepairCwlSeasonEventTargetEligibility_(event, currentTarget, repairCandidate)) {
-			target = buildCwlSeasonEventTargetFromCandidate_(repairCandidate, nowIso, source, currentTarget);
-			status = "resolved";
-			repairedTarget = true;
+		if (canSyncEligibility && rosterCandidate && rosterCandidate.rosterId === currentTarget.rosterId && rosterCandidate.clanTag === currentTarget.clanTag) {
+			const beforeEligible = JSON.stringify(currentTarget.eligibleAccountTags.slice().sort());
+			const afterEligible = JSON.stringify(rosterCandidate.eligibleAccountTags.slice().sort());
+			if (beforeEligible !== afterEligible) {
+				target = sanitizeCwlSeasonEventTarget_(Object.assign({}, currentTarget, { eligibleAccountTags: rosterCandidate.eligibleAccountTags }));
+				repairedTarget = true;
+			}
+		}
+		if (options.freshEvidence && currentTarget.evidenceStatus !== "authoritative") {
+			const verified = resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, {
+				nowIso: nowIso,
+				source: source,
+				freshEvidence: options.freshEvidence,
+				fetchClanLeague: options.fetchClanLeague !== false,
+			});
+			const verifiedTarget = verified && verified.ok ? sanitizeCwlSeasonEventTarget_(verified.target) : null;
+			if (verifiedTarget && verifiedTarget.rosterId === currentTarget.rosterId && verifiedTarget.clanTag === currentTarget.clanTag) {
+				target = sanitizeCwlSeasonEventTarget_(Object.assign({}, target, {
+					groupId: verifiedTarget.groupId,
+					season: verifiedTarget.season,
+					groupState: verifiedTarget.groupState,
+					observedAt: verifiedTarget.observedAt,
+					boundAt: verifiedTarget.boundAt || nowIso,
+					evidenceStatus: "authoritative",
+					evidenceSource: verifiedTarget.evidenceSource,
+				}));
+				repairedTarget = true;
+			} else if (verifiedTarget) {
+				status = "legacy-binding-needs-audited-repair";
+			}
 		}
 	}
-	let nextMeta = pruneCwlSeasonEventMetaToTarget_(currentMeta, target);
+	let nextMeta = remapUnambiguousLegacyCwlGroupToTarget_(currentMeta, target);
+	nextMeta = pruneCwlSeasonEventMetaToTarget_(nextMeta, target);
 	if ((!currentTarget.resolved && target.resolved) || repairedTarget) {
 		nextMeta.finalizationHash = "";
+		nextMeta.finalizationFingerprint = "";
 		nextMeta.finalizationFirstSeenAt = "";
+		nextMeta.finalizationObservationAt = "";
+		nextMeta.finalizationEventRevision = "";
+		nextMeta.finalizationTargetFingerprint = "";
 		nextMeta.finalizedAt = "";
 		nextMeta.lastAggregateHash = "";
 		nextMeta.stale = false;
@@ -1206,7 +1497,8 @@ function applyCwlSeasonEventTargetResolution_(eventRaw, rosterDataRaw, optionsRa
 		status: status,
 		resolved: target.resolved,
 		changed: beforeJson !== afterJson,
-		targetChanged: (!currentTarget.resolved && target.resolved) || repairedTarget,
+		targetChanged: (!currentTarget.resolved && target.resolved) || (currentTarget.resolved && target.resolved && (currentTarget.rosterId !== target.rosterId || currentTarget.clanTag !== target.clanTag)),
+		eligibilityChanged: repairedTarget && currentTarget.rosterId === target.rosterId && currentTarget.clanTag === target.clanTag,
 	};
 }
 
@@ -1289,8 +1581,15 @@ function buildDefaultCwlSeasonEvent_(sourceRaw) {
 			lastCompleteRefreshAt: "",
 			lastAggregateHash: "",
 			finalizationHash: "",
+			finalizationFingerprint: "",
 			finalizationFirstSeenAt: "",
+			finalizationObservationAt: "",
+			finalizationEventRevision: "",
+			finalizationTargetFingerprint: "",
 			finalizedAt: "",
+			lastIntegrityAuditAt: "",
+			lastIntegrityAuditStatus: "",
+			falseCompletionRecoveredAt: "",
 			stale: false,
 			staleSince: "",
 			staleReason: "",
@@ -1402,6 +1701,77 @@ function putSeasonEventPointerIfChanged_(pathRaw, pointerRaw) {
 	return true;
 }
 
+function reconcileMissingCurrentCwlSeasonEvent_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const existing = readCurrentCwlSeasonEvent_();
+	if (existing && existing.type === "cwl" && normalizeCwlTrackingState_(existing.cwlTrackingState) !== "completed") {
+		return { ok: true, status: "current-cwl-event-present", created: false, recovered: false, eventId: existing.eventId };
+	}
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.now || options.nowIso) || new Date().toISOString();
+	try {
+		const activeSnapshot = typeof readAutoRefreshCoordinatorSourceSnapshot_ === "function"
+			? readAutoRefreshCoordinatorSourceSnapshot_()
+			: readActiveRosterSnapshot_();
+		const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+		const evidence = collectFreshCwlTargetEvidence_(rosterData, { nowIso: nowIso, source: options.source || { type: "scheduled-cwl-reconcile" } });
+		const latestPointer = readSeasonEventPointer_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+		const latestEventId = sanitizeSeasonEventText_(latestPointer && latestPointer.eventId, 180);
+		const latestEvent = latestEventId ? readSeasonEventById_(latestEventId) : null;
+		if (buildCwlIntegrityAuditResult_(latestEvent, rosterData, evidence, nowIso).recoverable) {
+			return recoverFalseCompletedCwlSeasonEvent_({ eventId: latestEventId, nowIso: nowIso, freshEvidence: evidence, source: options.source || { type: "scheduled-cwl-reconcile" } });
+		}
+		const resolved = resolveCwlSeasonEventTargetFromRosterData_(rosterData, { nowIso: nowIso, source: options.source || { type: "scheduled-cwl-reconcile" }, freshEvidence: evidence });
+		if (!resolved.ok) return { ok: true, status: "no-unambiguous-current-cwl-target", created: false, recovered: false };
+		const target = sanitizeCwlSeasonEventTarget_(resolved.target);
+		if (!target.groupId || target.season !== nowIso.slice(0, 7)) return { ok: true, status: "no-current-season-cwl-group", created: false, recovered: false };
+		const groups = evidence.leaguegroupRawByClanTag && typeof evidence.leaguegroupRawByClanTag === "object" ? evidence.leaguegroupRawByClanTag : {};
+		const groupRaw = groups[target.clanTag] && typeof groups[target.clanTag] === "object" ? groups[target.clanTag] : null;
+		if (!groupRaw || buildCwlRuntimeGroupId_(groupRaw) !== target.groupId) return { ok: true, status: "current-group-evidence-changed", created: false, recovered: false };
+		const groupState = normalizeWarState_(groupRaw.state);
+		if (!(isCwlLeagueGroupPotentiallyLive_(groupRaw) || groupState === "ended" || groupState === "warended")) return { ok: true, status: "current-cwl-group-not-active-or-ended", created: false, recovered: false };
+		let event = buildDefaultCwlSeasonEvent_(options.source || { type: "scheduled-cwl-reconcile" });
+		event.cwl.target = target;
+		const runtimeGroup = buildCwlRuntimeGroupFromLeagueGroup_(groupRaw, [target.clanTag], nowIso);
+		event.cwl = mergeCwlSeasonEventGroupBinding_(event.cwl, {
+			groupId: runtimeGroup.groupId,
+			season: runtimeGroup.season,
+			state: runtimeGroup.state,
+			observedAt: runtimeGroup.observedAt,
+			expectedRounds: runtimeGroup.expectedRounds,
+			clanTags: [target.clanTag],
+			warTags: runtimeGroup.relevantWarTags,
+			firstWarStartTime: runtimeGroup.firstWarStartTime,
+			lastWarEndTime: runtimeGroup.lastWarEndTime,
+			projectedLastWarEndTime: runtimeGroup.projectedLastWarEndTime,
+			source: { type: "scheduled-cwl-reconcile" },
+		});
+		event.cwlTrackingState = "active";
+		event.signupsOpen = groupState !== "ended" && groupState !== "warended";
+		event.updatedAt = nowIso;
+		const created = withSeasonEventParticipantWriteLock_(function () {
+			const concurrent = readCurrentCwlSeasonEvent_();
+			if (concurrent && normalizeCwlTrackingState_(concurrent.cwlTrackingState) !== "completed") return { event: concurrent, created: false };
+			writeSeasonEventAtomicPayloads_([
+				{ path: buildSeasonEventByIdPath_(event.eventId), payload: event },
+				{ path: SEASON_EVENTS_CURRENT_CWL_PATH, payload: buildSeasonEventPointerPayload_(event, event) },
+				{ path: buildSeasonEventCurrentPointerPath_("cwl"), payload: buildSeasonEventPointerPayload_(event, event) },
+			]);
+			writeSeasonEventAuditEntry_(event.eventId, { action: "event-created-from-scheduled-group-discovery", createdAt: nowIso, source: options.source || { type: "scheduled-cwl-reconcile" }, details: { target: target, observationId: evidence.observationId, groupState: groupState } });
+			return { event: event, created: true };
+		});
+		const out = { ok: true, status: created.created ? "current-cwl-event-created-from-group" : "current-cwl-event-present", created: created.created, recovered: false, eventId: created.event.eventId, event: summarizeSeasonEvent_(created.event) };
+		if (created.created) {
+			const descriptor = buildCwlLifecyclePublicationDescriptor_(created.event.eventId, "active", { reason: "scheduled-cwl-group-discovery" });
+			out.publication = descriptor;
+			out.cloudflarePublish = publishCloudflareSeasonEventsAfterMutation_(descriptor.reason, created.event.eventId, { cwlLive: true, cwlFinal: true, pointers: true, cwlLifecycle: descriptor });
+		}
+		return out;
+	} catch (err) {
+		Logger.log("Scheduled CWL reconciliation deferred: %s", errorMessage_(err));
+		return { ok: false, status: "cwl-reconciliation-deferred", created: false, recovered: false, error: errorMessage_(err) };
+	}
+}
+
 // Reconcile current season events.
 function reconcileCurrentSeasonEvents_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -1441,6 +1811,8 @@ function reconcileCurrentSeasonEvents_(optionsRaw) {
 
 	// TODO: Close/archive prior-season current events after an explicit retention
 	// policy exists. Phase 1 leaves previous events untouched.
+	const cwlReconciliation = reconcileMissingCurrentCwlSeasonEvent_(options);
+	if (cwlReconciliation && cwlReconciliation.event) events.cwl = cwlReconciliation.event;
 	return {
 		ok: true,
 		season: season,
@@ -1448,6 +1820,7 @@ function reconcileCurrentSeasonEvents_(optionsRaw) {
 		createdEventIds: createdEventIds,
 		pointerChangedCount: pointerChangedCount,
 		previousEventsClosed: false,
+		cwlReconciliation: cwlReconciliation,
 	};
 }
 
@@ -1587,10 +1960,8 @@ function getCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 
 // Public current-CWL refresh callable. This uses the same shared snapshot and
 // aggregation path as refresh-all without mutating roster payloads.
-function refreshCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
-	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPassword);
-	const payload = parsed.payload;
-	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
+function refreshCurrentCwlSeasonEventCore_(payloadRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
 	const sourceSnapshot =
 		typeof readAutoRefreshCoordinatorSourceSnapshot_ === "function"
 			? readAutoRefreshCoordinatorSourceSnapshot_()
@@ -1613,41 +1984,227 @@ function refreshCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 			}
 			: {};
 	}
-	if (result && result.ok !== false) publishCloudflareSeasonEventsAfterMutation_("api-refresh-current-cwl", result.eventId || (result.event && result.event.eventId), { cwlLive: true, pointers: true });
 	return result || { ok: false, status: "unknown" };
+}
+
+// Collect one fresh deterministic target observation without mutating event state.
+function collectFreshCwlTargetEvidence_(rosterDataRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.nowIso || options.now) || new Date().toISOString();
+	if (options.freshEvidence && typeof options.freshEvidence === "object") return options.freshEvidence;
+	if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "CWL target evidence collection");
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	const clanTags = [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const clanTag = normalizeTag_(roster.connectedClanTag);
+		if (getRosterTrackingMode_(roster) === "cwl" && clanTag) clanTags.push(clanTag);
+	}
+	const uniqueClanTags = dedupeCwlRuntimeTags_(clanTags);
+	const groups = prefetchLeagueGroupRawByClanTag_(uniqueClanTags, {
+		batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
+		batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
+	});
+	const details = prefetchCwlCoordinatorClanDetails_(uniqueClanTags);
+	const rawByClanTag = groups.rawByClanTag && typeof groups.rawByClanTag === "object" ? groups.rawByClanTag : {};
+	const errorByClanTag = groups.errorByClanTag && typeof groups.errorByClanTag === "object" ? groups.errorByClanTag : {};
+	const observationId = buildSeasonEventStableHash_({
+		capturedAt: nowIso,
+		clanTags: uniqueClanTags,
+		groups: Object.keys(rawByClanTag).sort().map(function (tag) {
+			const raw = rawByClanTag[tag] || {};
+			return { tag: tag, groupId: buildCwlRuntimeGroupId_(raw), season: raw.season || "", state: normalizeWarState_(raw.state), rounds: Array.isArray(raw.rounds) ? raw.rounds.length : 0 };
+		}),
+		failedClanTags: Object.keys(errorByClanTag).sort(),
+	});
+	return {
+		capturedAt: nowIso,
+		observationId: observationId,
+		source: options.source || { type: "cwl-integrity-observation" },
+		leaguegroupRawByClanTag: rawByClanTag,
+		leaguegroupErrorByClanTag: errorByClanTag,
+		clanDetailsRawByClanTag: details.rawByClanTag || {},
+		clanDetailsErrorByClanTag: details.errorByClanTag || {},
+	};
+}
+
+function buildCwlIntegrityAuditResult_(eventRaw, rosterDataRaw, evidenceRaw, nowIsoRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
+	if (!event || event.type !== "cwl") return { ok: true, status: "event-not-found", recoverable: false };
+	const state = normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting";
+	if (state !== "completed") return { ok: true, status: "event-not-completed", recoverable: false, eventId: event.eventId };
+	const target = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event.cwl).target);
+	if (!target.resolved || target.evidenceStatus !== "authoritative" || !target.groupId || !target.season) {
+		return { ok: true, status: "ambiguous-legacy-completion", recoverable: false, eventId: event.eventId };
+	}
+	if (target.season !== nowIso.slice(0, 7)) return { ok: true, status: "not-current-season", recoverable: false, eventId: event.eventId };
+	const resolved = resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, {
+		nowIso: nowIso,
+		source: { type: "cwl-integrity-audit" },
+		freshEvidence: evidenceRaw,
+	});
+	const observedTarget = resolved && resolved.ok ? sanitizeCwlSeasonEventTarget_(resolved.target) : null;
+	if (!observedTarget || observedTarget.rosterId !== target.rosterId || observedTarget.clanTag !== target.clanTag || observedTarget.groupId !== target.groupId || observedTarget.season !== target.season) {
+		return { ok: true, status: "fresh-evidence-ambiguous-or-changed", recoverable: false, eventId: event.eventId };
+	}
+	const groups = evidenceRaw && evidenceRaw.leaguegroupRawByClanTag && typeof evidenceRaw.leaguegroupRawByClanTag === "object" ? evidenceRaw.leaguegroupRawByClanTag : {};
+	const group = groups[target.clanTag] && typeof groups[target.clanTag] === "object" ? groups[target.clanTag] : null;
+	const groupState = normalizeWarState_(group && group.state);
+	const groupActive = !!(group && buildCwlRuntimeGroupId_(group) === target.groupId && isCwlLeagueGroupPotentiallyLive_(group) && groupState !== "ended" && groupState !== "warended");
+	return {
+		ok: true,
+		status: groupActive ? "false-completion-active-group" : "completion-not-proven-false",
+		recoverable: groupActive,
+		eventId: event.eventId,
+		eventRevision: buildCwlSeasonEventRevision_(event),
+		targetFingerprint: buildCwlSeasonEventTargetFingerprint_(target),
+		observationId: sanitizeSeasonEventText_(evidenceRaw && evidenceRaw.observationId, 120),
+		observedAt: sanitizeSeasonEventTimestampOrEmpty_(evidenceRaw && evidenceRaw.capturedAt),
+		groupState: groupState,
+	};
+}
+
+// Read-only integrity audit for a potentially false-completed current-season event.
+function auditCwlSeasonEventCompletionIntegrity_(payloadRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(payload.nowIso || payload.now) || new Date().toISOString();
+	const eventId = sanitizeSeasonEventText_(payload.eventId, 180) || sanitizeSeasonEventText_((readSeasonEventPointer_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH) || {}).eventId, 180);
+	const event = eventId ? readSeasonEventById_(eventId) : null;
+	const activeSnapshot = readActiveRosterSnapshot_();
+	const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+	const evidence = collectFreshCwlTargetEvidence_(rosterData, { nowIso: nowIso, source: { type: "cwl-integrity-audit" }, freshEvidence: payload.freshEvidence });
+	return buildCwlIntegrityAuditResult_(event, rosterData, evidence, nowIso);
+}
+
+function auditCwlSeasonEventCompletionIntegrity(payloadRaw, secretOrPassword) {
+	assertSeasonEventSecretOrAdmin_(secretOrPassword);
+	return runWithExecutionDeadline_("audit-cwl-completion", 4 * 60 * 1000, function () {
+		return auditCwlSeasonEventCompletionIntegrity_(payloadRaw);
+	}, { cleanupReserveMs: 30000, recoveryScope: "cwl-integrity-audit" });
+}
+
+// Guarded atomic recovery; only the exact event/target revision audited above may reopen.
+function recoverFalseCompletedCwlSeasonEvent_(payloadRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const audit = auditCwlSeasonEventCompletionIntegrity_(payload);
+	if (!audit.recoverable) return Object.assign({}, audit, { recovered: false });
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(payload.nowIso || payload.now) || new Date().toISOString();
+	const recovered = withSeasonEventParticipantWriteLock_(function () {
+		const event = readSeasonEventById_(audit.eventId);
+		const target = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event && event.cwl).target);
+		if (!event || normalizeCwlTrackingState_(event.cwlTrackingState) !== "completed" || buildCwlSeasonEventRevision_(event) !== audit.eventRevision || buildCwlSeasonEventTargetFingerprint_(target) !== audit.targetFingerprint) {
+			return { ok: false, status: "recovery-revalidation-failed", recovered: false, eventId: audit.eventId };
+		}
+		let meta = clearCwlSeasonEventTentativeFinalization_(event.cwl);
+		meta.finalizedAt = "";
+		meta.falseCompletionRecoveredAt = nowIso;
+		meta.lastIntegrityAuditAt = nowIso;
+		meta.lastIntegrityAuditStatus = audit.status;
+		meta.stale = true;
+		meta.staleSince = nowIso;
+		meta.staleReason = "false-completion-recovered";
+		const nextEvent = Object.assign({}, event, { status: "open", signupsOpen: false, cwlTrackingState: "active", cwl: meta, updatedAt: nowIso });
+		const runtime = readCwlRuntime_(event.eventId);
+		runtime.finalizedAt = "";
+		runtime.updatedAt = nowIso;
+		const latest = readSeasonEventPointer_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+		const writes = [
+			{ path: buildSeasonEventByIdPath_(event.eventId), payload: nextEvent },
+			{ path: buildCwlSeasonEventAggregatePath_(event.eventId, "final"), payload: null },
+			{ path: buildCwlSeasonEventAggregatePath_(event.eventId, "live"), payload: null },
+			{ path: SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, payload: runtime },
+			{ path: SEASON_EVENTS_CURRENT_CWL_PATH, payload: buildSeasonEventPointerPayload_(nextEvent, nextEvent) },
+			{ path: buildSeasonEventCurrentPointerPath_("cwl"), payload: buildSeasonEventPointerPayload_(nextEvent, nextEvent) },
+		];
+		if (sanitizeSeasonEventText_(latest && latest.eventId, 180) === event.eventId) writes.push({ path: SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, payload: null });
+		writeSeasonEventAtomicPayloads_(writes);
+		writeSeasonEventAuditEntry_(event.eventId, { action: "false-completion-recovered", createdAt: nowIso, source: payload.source || { type: "cwl-integrity-recovery" }, details: audit });
+		return { ok: true, status: "recovered", recovered: true, eventId: event.eventId, event: summarizeSeasonEvent_(nextEvent) };
+	});
+	if (recovered.recovered) {
+		const descriptor = buildCwlLifecyclePublicationDescriptor_(recovered.eventId, "active", { reason: "cwl-false-completion-recovery" });
+		recovered.publication = descriptor;
+		recovered.cloudflarePublish = publishCloudflareSeasonEventsAfterMutation_(descriptor.reason, recovered.eventId, { cwlLive: true, cwlFinal: true, pointers: true, cwlLifecycle: descriptor });
+	}
+	return recovered;
+}
+
+function recoverFalseCompletedCwlSeasonEvent(payloadRaw, secretOrPassword) {
+	assertSeasonEventSecretOrAdmin_(secretOrPassword);
+	return runWithExecutionDeadline_("recover-false-cwl-completion", 5 * 60 * 1000, function () {
+		return recoverFalseCompletedCwlSeasonEvent_(payloadRaw);
+	}, { cleanupReserveMs: 30000, recoveryScope: "cwl-integrity-recovery" });
+}
+
+// Explicit repair for a legacy binding. Stable events with signups or score data are never switched.
+function repairLegacyCwlSeasonEventBinding_(payloadRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const eventId = sanitizeSeasonEventText_(payload.eventId, 180);
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(payload.nowIso || payload.now) || new Date().toISOString();
+	const activeSnapshot = readActiveRosterSnapshot_();
+	const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+	const evidence = collectFreshCwlTargetEvidence_(rosterData, { nowIso: nowIso, source: { type: "cwl-binding-repair" }, freshEvidence: payload.freshEvidence });
+	const resolved = resolveCwlSeasonEventTargetFromRosterData_(rosterData, { nowIso: nowIso, source: { type: "cwl-binding-repair" }, freshEvidence: evidence });
+	if (!resolved.ok) return { ok: true, status: "repair-evidence-unresolved", repaired: false, eventId: eventId };
+	const result = withSeasonEventParticipantWriteLock_(function () {
+		const event = eventId ? readSeasonEventById_(eventId) : readCurrentCwlSeasonEvent_();
+		if (!event || event.type !== "cwl") return { ok: true, status: "event-not-found", repaired: false };
+		const currentTarget = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event.cwl).target);
+		const expectedFingerprint = sanitizeSeasonEventText_(payload.expectedTargetFingerprint, 120);
+		if (expectedFingerprint && expectedFingerprint !== buildCwlSeasonEventTargetFingerprint_(currentTarget)) return { ok: false, status: "target-guard-mismatch", repaired: false, eventId: event.eventId };
+		const counts = summarizeSeasonEventParticipantCounts_(event);
+		const signedUpAccountTags = collectCwlSeasonEventSignedUpAccountTags_(event);
+		const live = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(event.eventId, "live"));
+		const final = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(event.eventId, "final"));
+		if (counts.activeParticipantCount > 0 || signedUpAccountTags.length > 0 || live.playerCount > 0 || final.playerCount > 0) return { ok: true, status: "stable-binding-has-meaningful-activity", repaired: false, eventId: event.eventId };
+		if (currentTarget.evidenceStatus === "authoritative" && currentTarget.rosterId && currentTarget.clanTag) return { ok: true, status: "authoritative-binding-not-repairable", repaired: false, eventId: event.eventId };
+		const nextTarget = sanitizeCwlSeasonEventTarget_(resolved.target);
+		let meta = pruneCwlSeasonEventMetaToTarget_(clearCwlSeasonEventTentativeFinalization_(event.cwl), nextTarget);
+		meta.target = nextTarget;
+		meta.finalizedAt = "";
+		const nextEvent = Object.assign({}, event, { cwl: meta, cwlTrackingState: "waiting", status: "open", updatedAt: nowIso });
+		writeSeasonEventAtomicPayloads_([
+			{ path: buildSeasonEventByIdPath_(event.eventId), payload: nextEvent },
+			{ path: buildCwlSeasonEventAggregatePath_(event.eventId, "live"), payload: null },
+			{ path: buildCwlSeasonEventAggregatePath_(event.eventId, "final"), payload: null },
+			{ path: SEASON_EVENTS_CURRENT_CWL_PATH, payload: buildSeasonEventPointerPayload_(nextEvent, nextEvent) },
+		]);
+		writeSeasonEventAuditEntry_(event.eventId, { action: "legacy-binding-repaired", createdAt: nowIso, source: payload.source || { type: "cwl-binding-repair" }, details: { previousTarget: currentTarget, nextTarget: nextTarget, observationId: evidence.observationId } });
+		return { ok: true, status: "repaired", repaired: true, eventId: event.eventId, event: summarizeSeasonEvent_(nextEvent) };
+	});
+	if (result.repaired) {
+		const descriptor = buildCwlLifecyclePublicationDescriptor_(result.eventId, "waiting", { reason: "cwl-legacy-binding-repair" });
+		result.publication = descriptor;
+		result.cloudflarePublish = publishCloudflareSeasonEventsAfterMutation_(descriptor.reason, result.eventId, { cwlLive: true, cwlFinal: true, pointers: true, cwlLifecycle: descriptor });
+	}
+	return result;
+}
+
+function repairLegacyCwlSeasonEventBinding(payloadRaw, secretOrPassword) {
+	assertSeasonEventSecretOrAdmin_(secretOrPassword);
+	return runWithExecutionDeadline_("repair-legacy-cwl-binding", 5 * 60 * 1000, function () { return repairLegacyCwlSeasonEventBinding_(payloadRaw); }, { cleanupReserveMs: 30000, recoveryScope: "cwl-binding-repair" });
+}
+
+function refreshCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
+	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPassword);
+	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
+	return runWithExecutionDeadline_("refresh-current-cwl", 5 * 60 * 1000, function () {
+		return refreshCurrentCwlSeasonEventCore_(parsed.payload);
+	}, { cleanupReserveMs: 30000, recoveryScope: "cwl-refresh" });
 }
 
 // Public Apps Script run-menu wrapper for a one-time current CWL event refresh.
 function runCurrentCwlSeasonEventRefreshOnce() {
-	const sourceSnapshot =
-		typeof readAutoRefreshCoordinatorSourceSnapshot_ === "function"
-			? readAutoRefreshCoordinatorSourceSnapshot_()
-			: readActiveRosterSnapshot_();
-	const rosterData = validateRosterData_(sourceSnapshot && sourceSnapshot.rosterData);
-	const snapshot = buildAutoRefreshSnapshot_(rosterData, {
-		sourceRosters: Array.isArray(rosterData.rosters) ? rosterData.rosters : [],
-		allowRegularWarHistoryRepair: false,
-	});
-	const result = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, {
-		source: { type: "manual-current-cwl-refresh" },
-	});
-	if (result && typeof result === "object") {
-		result.requestCounts = snapshot && snapshot.requestCounts && typeof snapshot.requestCounts === "object"
-			? {
-				leagueGroup: toNonNegativeInt_(snapshot.requestCounts.leagueGroup),
-				cwlWar: toNonNegativeInt_(snapshot.requestCounts.cwlWar),
-				total: toNonNegativeInt_(snapshot.requestCounts.total),
-			}
-			: {};
-	}
-	const cloudflarePublish = result && result.ok !== false
-		? publishCloudflareSeasonEventsAfterMutation_("manual-current-cwl-refresh", result.eventId || (result.event && result.event.eventId), { cwlLive: true, pointers: true })
-		: null;
-	return {
-		ok: !!(result && result.ok !== false),
-		refresh: result || { ok: false, status: "unknown" },
-		cloudflarePublish: cloudflarePublish,
-	};
+	return runWithExecutionDeadline_("manual-current-cwl-refresh", 5 * 60 * 1000, function () {
+		const result = refreshCurrentCwlSeasonEventCore_({ source: { type: "manual-current-cwl-refresh" } });
+		return {
+			ok: !!(result && result.ok !== false),
+			refresh: result || { ok: false, status: "unknown" },
+			cloudflarePublish: result && result.cloudflarePublish ? result.cloudflarePublish : null,
+		};
+	}, { cleanupReserveMs: 30000, recoveryScope: "cwl-refresh" });
 }
 
 // Sanitize participant account.
@@ -3286,6 +3843,13 @@ function sanitizeCwlRuntimeGroup_(groupRaw) {
 	const candidateClanTags = dedupeCwlRuntimeTags_(group.candidateClanTags);
 	const relevantWarTags = dedupeCwlRuntimeTags_(group.relevantWarTags);
 	const roundCount = toNonNegativeInt_(group.expectedRounds);
+	const roundWarTagsRaw = group.roundWarTagsByIndex && typeof group.roundWarTagsByIndex === "object" ? group.roundWarTagsByIndex : {};
+	const roundWarTagsByIndex = {};
+	const roundWarKeys = Object.keys(roundWarTagsRaw).sort((left, right) => toNonNegativeInt_(left) - toNonNegativeInt_(right));
+	for (let i = 0; i < roundWarKeys.length; i++) {
+		const index = toNonNegativeInt_(roundWarKeys[i]);
+		roundWarTagsByIndex[String(index)] = dedupeCwlRuntimeTags_(roundWarTagsRaw[roundWarKeys[i]], true);
+	}
 	const materializedRoundIndexesRaw = Array.isArray(group.materializedRoundIndexes) ? group.materializedRoundIndexes : [];
 	const materializedRoundIndexes = [];
 	const seenIndexes = {};
@@ -3300,6 +3864,12 @@ function sanitizeCwlRuntimeGroup_(groupRaw) {
 		groupId: sanitizeSeasonEventText_(group.groupId, 180),
 		season: sanitizeSeasonEventText_(group.season, 40),
 		expectedRounds: roundCount,
+		state: normalizeWarState_(group.state || group.lifecycleState),
+		observedAt: sanitizeSeasonEventTimestampOrEmpty_(group.observedAt || group.lastObservedAt),
+		observationSucceeded: group.observationSucceeded === true,
+		observedRoundCount: toNonNegativeInt_(group.observedRoundCount),
+		observationTopologyComplete: group.observationTopologyComplete === true,
+		roundWarTagsByIndex: roundWarTagsByIndex,
 		clanTags: clanTags,
 		candidateClanTags: candidateClanTags,
 		relevantWarTags: relevantWarTags,
@@ -3853,8 +4423,12 @@ function updateCwlRuntimeWarRecordFromContribution_(runtimeRaw, contributionRaw,
 		}
 		if (contribution.endTime && (!group.lastWarEndTime || parseIsoToMs_(contribution.endTime) > parseIsoToMs_(group.lastWarEndTime))) {
 			group.lastWarEndTime = contribution.endTime;
-			group.projectedLastWarEndTime = contribution.endTime;
 		}
+		const contributionEndMs = parseIsoToMs_(contribution.endTime);
+		const remainingRounds = Math.max(0, toNonNegativeInt_(group.expectedRounds) - contribution.roundIndex - 1);
+		const projectedEndMs = contributionEndMs > 0 ? contributionEndMs + remainingRounds * 24 * 60 * 60 * 1000 : 0;
+		const existingProjectedMs = parseIsoToMs_(group.projectedLastWarEndTime);
+		if (projectedEndMs > existingProjectedMs) group.projectedLastWarEndTime = new Date(projectedEndMs).toISOString();
 		group.updatedAt = nowIso;
 		runtime.groups[record.groupId] = group;
 	}
@@ -3947,14 +4521,25 @@ function buildCwlRuntimeGroupFromLeagueGroup_(leaguegroupRaw, candidateClanTagsR
 	const groupId = buildCwlRuntimeGroupId_(leaguegroup);
 	const rounds = Array.isArray(leaguegroup.rounds) ? leaguegroup.rounds : [];
 	const materializedRoundIndexes = [];
+	const roundWarTagsByIndex = {};
+	let observationTopologyComplete = rounds.length > 0;
 	for (let i = 0; i < rounds.length; i++) {
-		const tags = getCwlRuntimeRoundWarTags_(leaguegroup, i).filter((tag) => tag !== "#0");
+		const allTags = getCwlRuntimeRoundWarTags_(leaguegroup, i);
+		const tags = allTags.filter((tag) => tag !== "#0");
+		roundWarTagsByIndex[String(i)] = allTags;
+		if (!tags.length) observationTopologyComplete = false;
 		if (tags.length) materializedRoundIndexes.push(i);
 	}
 	return sanitizeCwlRuntimeGroup_({
 		groupId: groupId,
 		season: typeof leaguegroup.season === "string" ? leaguegroup.season : "",
 		expectedRounds: rounds.length,
+		state: normalizeWarState_(leaguegroup.state),
+		observedAt: nowIsoRaw,
+		observationSucceeded: true,
+		observedRoundCount: rounds.length,
+		observationTopologyComplete: observationTopologyComplete,
+		roundWarTagsByIndex: roundWarTagsByIndex,
 		clanTags: getCwlLeagueGroupClanTags_(leaguegroup),
 		candidateClanTags: candidateClanTagsRaw,
 		relevantWarTags: [],
@@ -4123,8 +4708,9 @@ function updateKnownCwlRuntimeWar_(runtimeRaw, recordRaw, fetchCacheRaw, errorCa
 
 function shouldAuditSettledCwlRuntimeWar_(recordRaw, finalAuditRaw, nowIsoRaw) {
 	const record = sanitizeCwlRuntimeWarRecord_(recordRaw);
-	if (record.status !== "settled" || record.auditStatus === "matched") return false;
+	if (record.status !== "settled") return false;
 	if (finalAuditRaw === true) return true;
+	if (record.auditStatus === "matched") return false;
 	const nowMs = parseIsoToMs_(nowIsoRaw);
 	const settledMs = parseIsoToMs_(record.settledAt);
 	if (!nowMs || !settledMs || nowMs - settledMs < CWL_RUNTIME_POST_SETTLEMENT_AUDIT_DELAY_MS) return false;
@@ -4237,6 +4823,12 @@ function buildCwlRuntimeViews_(runtimeRaw, clanTagsRaw) {
 			groupStates.push({
 				groupId: group.groupId,
 				season: group.season,
+				state: group.state,
+				observedAt: group.observedAt,
+				observationSucceeded: group.observationSucceeded,
+				observedRoundCount: group.observedRoundCount,
+				observationTopologyComplete: group.observationTopologyComplete,
+				roundWarTagsByIndex: group.roundWarTagsByIndex,
 				expectedRounds: group.expectedRounds,
 				materializedRoundCount: group.materializedRoundIndexes.length,
 				relevantWarTags: group.relevantWarTags,
@@ -4319,15 +4911,47 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 
 	const requestCounts = {
 		leagueGroup: 0,
+		clanDetails: 0,
 		cwlWar: 0,
 		total: 0,
 	};
 	const leaguegroupRawByClanTag = {};
 	const leaguegroupErrorByClanTag = {};
+	let clanDetailsRawByClanTag = {};
+	let clanDetailsErrorByClanTag = {};
 	const fetchCache = {};
 	const errorCache = {};
+	const suppliedWarRawByTag = options.prefetchedCwlWarRawByTag && typeof options.prefetchedCwlWarRawByTag === "object" ? options.prefetchedCwlWarRawByTag : {};
+	const suppliedWarErrorByTag = options.prefetchedCwlWarErrorByTag && typeof options.prefetchedCwlWarErrorByTag === "object" ? options.prefetchedCwlWarErrorByTag : {};
+	Object.keys(suppliedWarRawByTag).forEach(function (warTagRaw) {
+		const warTag = normalizeTag_(warTagRaw);
+		if (warTag) fetchCache[warTag] = suppliedWarRawByTag[warTagRaw];
+	});
+	Object.keys(suppliedWarErrorByTag).forEach(function (warTagRaw) {
+		const warTag = normalizeTag_(warTagRaw);
+		if (warTag) errorCache[warTag] = suppliedWarErrorByTag[warTagRaw];
+	});
 
-	if (plan.requestClanTags.length) {
+	const suppliedLeaguegroupRawByClanTag = options.prefetchedLeaguegroupRawByClanTag && typeof options.prefetchedLeaguegroupRawByClanTag === "object"
+		? options.prefetchedLeaguegroupRawByClanTag
+		: null;
+	const suppliedLeaguegroupErrorByClanTag = options.prefetchedLeaguegroupErrorByClanTag && typeof options.prefetchedLeaguegroupErrorByClanTag === "object"
+		? options.prefetchedLeaguegroupErrorByClanTag
+		: {};
+	if (plan.requestClanTags.length && suppliedLeaguegroupRawByClanTag) {
+		for (let i = 0; i < plan.requestClanTags.length; i++) {
+			const clanTag = plan.requestClanTags[i];
+			if (Object.prototype.hasOwnProperty.call(suppliedLeaguegroupRawByClanTag, clanTag)) leaguegroupRawByClanTag[clanTag] = suppliedLeaguegroupRawByClanTag[clanTag];
+			if (Object.prototype.hasOwnProperty.call(suppliedLeaguegroupErrorByClanTag, clanTag)) {
+				leaguegroupErrorByClanTag[clanTag] = suppliedLeaguegroupErrorByClanTag[clanTag];
+				runtime.discoveryIncomplete = true;
+				pushCwlRuntimeDiagnostic_(runtime, "group-discovery-failed", {
+					clanTag: clanTag,
+					message: errorMessage_(suppliedLeaguegroupErrorByClanTag[clanTag]),
+				}, nowIso);
+			}
+		}
+	} else if (plan.requestClanTags.length) {
 		const fetchedGroups = prefetchLeagueGroupRawByClanTag_(plan.requestClanTags, {
 			batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
 			batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
@@ -4351,6 +4975,24 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 		}
 	}
 
+	const initialTarget = event ? sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event.cwl).target) : sanitizeCwlSeasonEventTarget_(null);
+	const suppliedClanDetailsRawByClanTag = options.prefetchedClanDetailsRawByClanTag && typeof options.prefetchedClanDetailsRawByClanTag === "object"
+		? options.prefetchedClanDetailsRawByClanTag
+		: null;
+	const suppliedClanDetailsErrorByClanTag = options.prefetchedClanDetailsErrorByClanTag && typeof options.prefetchedClanDetailsErrorByClanTag === "object"
+		? options.prefetchedClanDetailsErrorByClanTag
+		: {};
+	if (suppliedClanDetailsRawByClanTag) {
+		clanDetailsRawByClanTag = suppliedClanDetailsRawByClanTag;
+		clanDetailsErrorByClanTag = suppliedClanDetailsErrorByClanTag;
+	} else if (options.includeTargetEvidence !== false && (!initialTarget.resolved || initialTarget.evidenceStatus !== "authoritative")) {
+		const details = prefetchCwlCoordinatorClanDetails_(plan.cwlRosterClanTags);
+		clanDetailsRawByClanTag = details.rawByClanTag;
+		clanDetailsErrorByClanTag = details.errorByClanTag;
+		requestCounts.clanDetails = toNonNegativeInt_(details.requestCount);
+		requestCounts.total += requestCounts.clanDetails;
+	}
+
 	const groupById = {};
 	const candidateClanTagsByGroupId = {};
 	const leaguegroupByGroupId = {};
@@ -4368,7 +5010,11 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 			}, nowIso);
 			continue;
 		}
-		if (plan.eventState === "waiting" && plan.eventNeedsCwl && !isCwlLeagueGroupPotentiallyLive_(raw)) continue;
+		if (plan.eventState === "waiting" && plan.eventNeedsCwl && !isCwlLeagueGroupPotentiallyLive_(raw)) {
+			const groupSeason = sanitizeSeasonEventText_(raw.season, 40);
+			const currentSeason = nowIso.slice(0, 7);
+			if (!groupSeason || groupSeason !== currentSeason) continue;
+		}
 		const groupId = buildCwlRuntimeGroupId_(raw);
 		if (!groupCandidateClanTags[groupId]) groupCandidateClanTags[groupId] = {};
 		groupCandidateClanTags[groupId][clanTag] = true;
@@ -4397,6 +5043,15 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 			group.firstWarStartTime = existing.firstWarStartTime || group.firstWarStartTime;
 			group.lastWarEndTime = group.lastWarEndTime || existing.lastWarEndTime;
 			group.projectedLastWarEndTime = group.projectedLastWarEndTime || existing.projectedLastWarEndTime || group.lastWarEndTime;
+			group.expectedRounds = Math.max(existing.expectedRounds, group.expectedRounds);
+			const priorRoundKeys = Object.keys(existing.roundWarTagsByIndex || {});
+			for (let j = 0; j < priorRoundKeys.length; j++) {
+				group.roundWarTagsByIndex[priorRoundKeys[j]] = dedupeCwlRuntimeTags_(
+					(existing.roundWarTagsByIndex[priorRoundKeys[j]] || []).concat(group.roundWarTagsByIndex[priorRoundKeys[j]] || []),
+					true,
+				);
+			}
+			if (group.observedRoundCount < group.expectedRounds) group.observationTopologyComplete = false;
 		}
 		if (!runtime.season && group.season) runtime.season = group.season;
 		runtime.groups[group.groupId] = group;
@@ -4441,7 +5096,15 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 	}
 
 	const recordKeys = Object.keys(runtime.warRecords).sort();
-	const finalAudit = options.finalAudit === true || (event && normalizeCwlTrackingState_(event.cwlTrackingState) === "finalizing");
+	const boundTarget = event ? getResolvedCwlSeasonEventTarget_(event) : null;
+	const freshlyEndedBoundGroup = !!(
+		boundTarget &&
+		boundTarget.groupId &&
+		groupById[boundTarget.groupId] &&
+		groupById[boundTarget.groupId].season === boundTarget.season &&
+		(groupById[boundTarget.groupId].state === "ended" || groupById[boundTarget.groupId].state === "warended")
+	);
+	const finalAudit = options.finalAudit === true || freshlyEndedBoundGroup || (event && normalizeCwlTrackingState_(event.cwlTrackingState) === "finalizing");
 	const pollWarTags = [];
 	const pollRecords = [];
 	for (let i = 0; i < recordKeys.length; i++) {
@@ -4539,11 +5202,32 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 	};
 	runtime.updatedAt = nowIso;
 	runtime = writeCwlRuntime_(runtime);
+	const observationId = buildSeasonEventStableHash_({
+		capturedAt: nowIso,
+		eventId: eventId,
+		requestClanTags: plan.requestClanTags,
+		successfulClanTags: Object.keys(leaguegroupRawByClanTag).sort(),
+		failedClanTags: Object.keys(leaguegroupErrorByClanTag).sort(),
+	});
+	const targetEvidence = {
+		capturedAt: nowIso,
+		observationId: observationId,
+		candidates: buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterDataRaw, {
+			capturedAt: nowIso,
+			observationId: observationId,
+			leaguegroupRawByClanTag: leaguegroupRawByClanTag,
+			leaguegroupErrorByClanTag: leaguegroupErrorByClanTag,
+			clanDetailsRawByClanTag: clanDetailsRawByClanTag,
+			clanDetailsErrorByClanTag: clanDetailsErrorByClanTag,
+		}, { nowIso: nowIso, source: options.source || { type: "cwl-coordinator" } }),
+	};
 	const result = {
 		ok: true,
 		schemaVersion: CWL_RUNTIME_SCHEMA_VERSION,
 		eventId: eventId,
 		capturedAt: nowIso,
+		observationId: observationId,
+		targetEvidence: targetEvidence,
 		runtimeState: {
 			season: runtime.season,
 			discoveryIncomplete: runtime.discoveryIncomplete,
@@ -4561,6 +5245,8 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 		requestCounts: requestCounts,
 		leaguegroupRawByClanTag: leaguegroupRawByClanTag,
 		leaguegroupErrorByClanTag: leaguegroupErrorByClanTag,
+		clanDetailsRawByClanTag: clanDetailsRawByClanTag,
+		clanDetailsErrorByClanTag: clanDetailsErrorByClanTag,
 		viewsByClanTag: viewsByClanTag,
 		eventAggregateResult: eventAggregateResult,
 		diagnostics: Array.isArray(runtime.diagnostics) ? runtime.diagnostics.slice(-CWL_RUNTIME_DIAGNOSTIC_LIMIT) : [],
@@ -4585,14 +5271,13 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 function buildCwlSeasonEventAggregateFromRuntime_(eventRaw, runtimeRaw, planRaw, nowIsoRaw) {
 	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
 	const runtime = sanitizeCwlRuntime_(runtimeRaw, event.eventId);
-	const plan = planRaw && typeof planRaw === "object" ? planRaw : buildCwlCoordinatorClanPlan_({}, event, {});
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
+	const observationIso = sanitizeSeasonEventTimestampOrEmpty_(planRaw && planRaw.observationAt) || nowIso;
+	const observationAgeMs = parseIsoToMs_(nowIso) - parseIsoToMs_(observationIso);
 	const aggregateByTag = {};
 	const relevantWarTagSet = {};
-	const processedWarClanKey = {};
 	const target = getResolvedCwlSeasonEventTarget_(event);
-	const allowLegacyTargetless = isLegacyCompletedCwlSeasonEventWithoutTarget_(event);
-	if (!target && !allowLegacyTargetless) {
+	if (!target) {
 		return {
 			ok: true,
 			status: "target-unresolved",
@@ -4608,64 +5293,85 @@ function buildCwlSeasonEventAggregateFromRuntime_(eventRaw, runtimeRaw, planRaw,
 			discoveryIncomplete: false,
 			auditIncomplete: false,
 			bootstrapBlocked: false,
-			currentRunDataSuccess: true,
+			currentRunDataSuccess: false,
 			currentRunDataSuccessAt: "",
 		};
 	}
-	const eventBoundClanTags = target
-		? [target.clanTag]
-		: Array.isArray(plan.eventBoundClanTags) && plan.eventBoundClanTags.length
-			? plan.eventBoundClanTags
-			: readCwlRuntimeBoundClanTagsFromEvent_(event);
-	const completionClanTags = target
-		? [target.clanTag]
-		: eventBoundClanTags.length
-			? eventBoundClanTags
-			: Array.isArray(plan.cwlRosterClanTags)
-				? plan.cwlRosterClanTags
-				: [];
-	const completionClanSet = {};
-	for (let i = 0; i < completionClanTags.length; i++) {
-		const tag = normalizeTag_(completionClanTags[i]);
-		if (tag) completionClanSet[tag] = true;
+	const boundGroup = target.groupId && runtime.groups[target.groupId] ? sanitizeCwlRuntimeGroup_(runtime.groups[target.groupId]) : null;
+	const currentObservation = !!(
+		boundGroup &&
+		boundGroup.observationSucceeded &&
+		boundGroup.observedAt === observationIso &&
+		observationAgeMs >= 0 && observationAgeMs <= CWL_LIFECYCLE_EVIDENCE_MAX_AGE_MS &&
+		boundGroup.season === target.season
+	);
+	let contradictoryFreshEvidence = false;
+	const runtimeGroupIds = Object.keys(runtime.groups || {});
+	for (let i = 0; i < runtimeGroupIds.length; i++) {
+		const observedGroup = sanitizeCwlRuntimeGroup_(runtime.groups[runtimeGroupIds[i]]);
+		if (observedGroup.observedAt !== observationIso || observedGroup.candidateClanTags.indexOf(target.clanTag) < 0) continue;
+		if (observedGroup.groupId !== target.groupId || observedGroup.season !== target.season) contradictoryFreshEvidence = true;
 	}
+	if (currentObservation && boundGroup.state !== "ended" && boundGroup.state !== "warended") contradictoryFreshEvidence = true;
+	const expectedRelevantRounds = boundGroup ? toNonNegativeInt_(boundGroup.expectedRounds) : 0;
+	const observedTopologyComplete = !!(
+		currentObservation &&
+		boundGroup.observationTopologyComplete &&
+		boundGroup.observedRoundCount >= expectedRelevantRounds &&
+		expectedRelevantRounds > 0
+	);
+	const roundMap = runtime.roundsByClanTag[target.clanTag] && typeof runtime.roundsByClanTag[target.clanTag] === "object" ? runtime.roundsByClanTag[target.clanTag] : {};
 	const records = runtime.warRecords && typeof runtime.warRecords === "object" ? runtime.warRecords : {};
-	const recordKeys = Object.keys(records).sort();
 	let unsettledRelevantRounds = 0;
-	let currentRunDataSuccess = false;
-	for (let i = 0; i < recordKeys.length; i++) {
-		const record = sanitizeCwlRuntimeWarRecord_(records[recordKeys[i]]);
-		if (!record.warTag || !record.clanTag) continue;
-		if (completionClanTags.length && !completionClanSet[record.clanTag]) continue;
+	let identifiedRelevantRounds = 0;
+	let finalEndMs = 0;
+	let finalEndTime = "";
+	let auditIncomplete = false;
+	let freshAuditIncomplete = false;
+	let roundMappingComplete = expectedRelevantRounds > 0;
+	const roundEvidence = [];
+	const seenWarTags = {};
+	for (let roundIndex = 0; roundIndex < expectedRelevantRounds; roundIndex++) {
+		const round = sanitizeCwlRuntimeRound_(roundMap[String(roundIndex)]);
+		if (!round.warTag || round.groupId !== target.groupId || seenWarTags[round.warTag]) {
+			roundMappingComplete = false;
+			continue;
+		}
+		seenWarTags[round.warTag] = true;
+		identifiedRelevantRounds++;
+		const record = sanitizeCwlRuntimeWarRecord_(records[round.warTag + "|" + target.clanTag]);
+		if (!record.warTag || record.groupId !== target.groupId || record.roundIndex !== roundIndex) {
+			roundMappingComplete = false;
+			continue;
+		}
 		const contribution = sanitizeCwlRuntimeContribution_(record.lastValidContribution);
-		if (!contribution || !contribution.hash) continue;
-		if (record.status !== "settled" && record.status !== "active" && record.status !== "confirming") continue;
-		const key = record.warTag + "|" + record.clanTag;
-		if (processedWarClanKey[key]) continue;
-		processedWarClanKey[key] = true;
+		if (!contribution || !contribution.hash) {
+			roundMappingComplete = false;
+			continue;
+		}
 		relevantWarTagSet[record.warTag] = true;
 		mergeCwlAggregateByTag_(aggregateByTag, contribution.aggregateByTag);
-		if (completionClanSet[record.clanTag] && record.status !== "settled") unsettledRelevantRounds++;
-		if (record.lastFetchedAt === nowIso && contribution.hash) currentRunDataSuccess = true;
-	}
-	let expectedRelevantRounds = 0;
-	let identifiedRelevantRounds = 0;
-	for (let i = 0; i < completionClanTags.length; i++) {
-		const clanTag = normalizeTag_(completionClanTags[i]);
-		if (!clanTag) continue;
-		const roundMap = runtime.roundsByClanTag[clanTag] && typeof runtime.roundsByClanTag[clanTag] === "object" ? runtime.roundsByClanTag[clanTag] : {};
-		let clanExpected = 0;
-		const groupIds = Object.keys(runtime.groups);
-		for (let j = 0; j < groupIds.length; j++) {
-			const group = sanitizeCwlRuntimeGroup_(runtime.groups[groupIds[j]]);
-			if (group.candidateClanTags.indexOf(clanTag) >= 0 || group.clanTags.indexOf(clanTag) >= 0) clanExpected = Math.max(clanExpected, group.expectedRounds);
+		const settled = record.status === "settled" && record.state === "warended" && contribution.state === "warended";
+		if (!settled) unsettledRelevantRounds++;
+		if (settled && record.auditStatus !== "matched") auditIncomplete = true;
+		if (settled && (record.auditStatus !== "matched" || record.auditedAt !== observationIso)) freshAuditIncomplete = true;
+		const endMs = parseIsoToMs_(contribution.endTime);
+		if (!endMs) roundMappingComplete = false;
+		if (endMs > finalEndMs) {
+			finalEndMs = endMs;
+			finalEndTime = contribution.endTime;
 		}
-		expectedRelevantRounds += clanExpected;
-		const roundKeys = Object.keys(roundMap);
-		for (let j = 0; j < roundKeys.length; j++) {
-			const round = sanitizeCwlRuntimeRound_(roundMap[roundKeys[j]]);
-			if (round.warTag) identifiedRelevantRounds++;
-		}
+		roundEvidence.push({
+			roundIndex: roundIndex,
+			warTag: record.warTag,
+			status: record.status,
+			state: record.state,
+			contributionHash: contribution.hash,
+			auditStatus: record.auditStatus,
+			auditedAt: record.auditedAt,
+			fetchedAt: record.lastFetchedAt,
+			endTime: contribution.endTime,
+		});
 	}
 	const byTag = {};
 	const playerTags = Object.keys(aggregateByTag).sort();
@@ -4679,34 +5385,77 @@ function buildCwlSeasonEventAggregateFromRuntime_(eventRaw, runtimeRaw, planRaw,
 		warTags: relevantWarTags,
 		byTag: byTag,
 	});
-	const auditIncomplete = recordKeys.some((key) => {
-		const record = sanitizeCwlRuntimeWarRecord_(records[key]);
-		if (completionClanTags.length && !completionClanSet[record.clanTag]) return false;
-		return record.status === "settled" && record.auditStatus && record.auditStatus !== "matched";
-	});
-	const targetDiscoveryIncomplete = expectedRelevantRounds > 0 && identifiedRelevantRounds < expectedRelevantRounds;
-	const complete =
-		relevantWarTags.length > 0 &&
-		!targetDiscoveryIncomplete &&
-		!auditIncomplete &&
+	const targetDiscoveryIncomplete = !boundGroup || !roundMappingComplete || identifiedRelevantRounds < expectedRelevantRounds;
+	const graceElapsed = finalEndMs > 0 && parseIsoToMs_(nowIso) >= finalEndMs + CWL_LIFECYCLE_FINAL_WAR_GRACE_MS;
+	const authoritativeEnded = !!(
+		target.evidenceStatus === "authoritative" &&
+		currentObservation &&
+		(boundGroup.state === "ended" || boundGroup.state === "warended")
+	);
+	const deadlineExhausted = !!(planRaw && typeof planRaw === "object" && planRaw.deadlineExhausted === true);
+	const complete = !!(
+		authoritativeEnded &&
+		observedTopologyComplete &&
+		roundMappingComplete &&
 		unsettledRelevantRounds === 0 &&
-		(expectedRelevantRounds <= 0 || identifiedRelevantRounds >= expectedRelevantRounds);
+		!auditIncomplete &&
+		!freshAuditIncomplete &&
+		graceElapsed &&
+		!deadlineExhausted
+	);
 	const bootstrapBlocked = runtime.bootstrapRequired && !runtime.bootstrapCompletedAt;
+	const currentRunDataSuccess = roundEvidence.some((entry) => entry.auditedAt === observationIso || entry.fetchedAt === observationIso);
 	const aggregateLastSuccess = currentRunDataSuccess ? nowIso : runtime.lastDataSuccessAt || "";
+	let reason = "";
+	if (bootstrapBlocked) reason = "bootstrap-incomplete";
+	else if (target.evidenceStatus !== "authoritative") reason = "cwl-target-evidence-unverified";
+	else if (!currentObservation) reason = "cwl-bound-group-unavailable";
+	else if (boundGroup.state !== "ended" && boundGroup.state !== "warended") reason = "cwl-bound-group-active";
+	else if (!observedTopologyComplete) reason = "cwl-round-topology-incomplete";
+	else if (!roundMappingComplete) reason = "cwl-round-mapping-incomplete";
+	else if (unsettledRelevantRounds > 0) reason = "cwl-war-unsettled";
+	else if (freshAuditIncomplete) reason = "cwl-final-audit-incomplete";
+	else if (!graceElapsed) reason = finalEndMs > parseIsoToMs_(nowIso) ? "cwl-final-war-end-in-future" : "cwl-final-war-grace-pending";
+	else if (deadlineExhausted) reason = "execution-deadline";
+	const completionFingerprint = complete
+		? buildSeasonEventStableHash_(JSON.parse(stringifySeasonEventCanonicalJson_({
+			eventId: sanitizeSeasonEventText_(event.eventId, 180),
+			targetFingerprint: buildCwlSeasonEventTargetFingerprint_(target),
+			groupId: target.groupId,
+			season: target.season,
+			lifecycleState: "finalizing",
+			groupState: boundGroup.state,
+			expectedRounds: expectedRelevantRounds,
+			observedRoundCount: boundGroup.observedRoundCount,
+			roundWarTagsByIndex: boundGroup.roundWarTagsByIndex,
+			roundEvidence: roundEvidence.map((entry) => ({
+				roundIndex: entry.roundIndex,
+				warTag: entry.warTag,
+				status: entry.status,
+				state: entry.state,
+				contributionHash: entry.contributionHash,
+				auditStatus: entry.auditStatus,
+				endTime: entry.endTime,
+			})),
+			finalEndTime: finalEndTime,
+			aggregateHash: hash,
+			byTag: byTag,
+		})))
+		: "";
 	return {
 		ok: !bootstrapBlocked || !!runtime.lastDataSuccessAt,
 		status: bootstrapBlocked ? "bootstrap-incomplete" : "ok",
-		reason: bootstrapBlocked ? "bootstrap-incomplete" : "",
-		partial: !!targetDiscoveryIncomplete,
+		reason: reason,
+		partial: !currentObservation || !!targetDiscoveryIncomplete,
 		aggregate: {
 			eventId: sanitizeSeasonEventText_(event.eventId, 180),
 			kind: "live",
 			cwlTrackingState: normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting",
 			generatedAt: nowIso,
 			lastSuccessfulRefreshAt: aggregateLastSuccess,
-			stale: !!targetDiscoveryIncomplete,
+			stale: !currentObservation || !!targetDiscoveryIncomplete,
 			staleSince: "",
-			staleReason: targetDiscoveryIncomplete ? "cwl-target-discovery-incomplete" : "",
+			staleReason: !currentObservation || targetDiscoveryIncomplete ? reason || "cwl-target-discovery-incomplete" : "",
 			hash: hash,
 			scoreSchema: "cwl-offense-stars-defense-stars-v2",
 			playerCount: Object.keys(byTag).length,
@@ -4715,6 +5464,13 @@ function buildCwlSeasonEventAggregateFromRuntime_(eventRaw, runtimeRaw, planRaw,
 		},
 		hash: hash,
 		complete: complete,
+		completionFingerprint: completionFingerprint,
+		completionObservationAt: currentObservation ? boundGroup.observedAt : "",
+		completionEvidence: complete ? { target: target, group: boundGroup, rounds: roundEvidence, finalEndTime: finalEndTime } : null,
+		freshAuthoritativeEvidence: authoritativeEnded,
+		contradictoryFreshEvidence: contradictoryFreshEvidence,
+		finalEndTime: finalEndTime,
+		graceElapsed: graceElapsed,
 		relevantWarCount: relevantWarTags.length,
 		expectedRelevantRounds: expectedRelevantRounds,
 		materializedRelevantRounds: identifiedRelevantRounds,
@@ -5759,11 +6515,16 @@ function bindEligibleCwlSeasonEventGroupsFromCoordinator_(eventRaw, coordinatorR
 			const groupState = groupStates[j] && typeof groupStates[j] === "object" ? groupStates[j] : {};
 			const groupId = sanitizeSeasonEventText_(groupState.groupId, 180);
 			if (!groupId) continue;
+			if (target.groupId && groupId !== target.groupId) continue;
+			if (target.season && sanitizeSeasonEventText_(groupState.season, 40) !== target.season) continue;
 			if (!groupById[groupId]) {
 				groupById[groupId] = {
 					groupId: groupId,
 					anchorWarTag: "",
 					season: sanitizeSeasonEventText_(groupState.season, 40),
+					state: normalizeWarState_(groupState.state),
+					observedAt: sanitizeSeasonEventTimestampOrEmpty_(groupState.observedAt || coordinator.capturedAt),
+					source: { type: "cwl-coordinator" },
 					firstWarStartTime: sanitizeSeasonEventTimestampOrEmpty_(groupState.firstWarStartTime),
 					lastWarEndTime: sanitizeSeasonEventTimestampOrEmpty_(groupState.lastWarEndTime),
 					projectedLastWarEndTime: sanitizeSeasonEventTimestampOrEmpty_(groupState.projectedLastWarEndTime || groupState.lastWarEndTime),
@@ -5772,19 +6533,21 @@ function bindEligibleCwlSeasonEventGroupsFromCoordinator_(eventRaw, coordinatorR
 					warTags: [],
 				};
 			}
-			const target = groupById[groupId];
-			if (clanTag && target.clanTags.indexOf(clanTag) < 0) target.clanTags.push(clanTag);
+			const groupBinding = groupById[groupId];
+			if (clanTag && groupBinding.clanTags.indexOf(clanTag) < 0) groupBinding.clanTags.push(clanTag);
 			const warTags = Array.isArray(groupState.relevantWarTags) ? groupState.relevantWarTags : [];
 			for (let k = 0; k < warTags.length; k++) {
 				const warTag = normalizeTag_(warTags[k]);
-				if (!warTag || warTag === "#0" || target.warTags.indexOf(warTag) >= 0) continue;
-				target.warTags.push(warTag);
+				if (!warTag || warTag === "#0" || groupBinding.warTags.indexOf(warTag) >= 0) continue;
+				groupBinding.warTags.push(warTag);
 			}
-			target.expectedRounds = Math.max(target.expectedRounds, toNonNegativeInt_(groupState.expectedRounds));
-			if (!target.season) target.season = sanitizeSeasonEventText_(groupState.season, 40);
-			if (!target.firstWarStartTime) target.firstWarStartTime = sanitizeSeasonEventTimestampOrEmpty_(groupState.firstWarStartTime);
-			if (!target.lastWarEndTime) target.lastWarEndTime = sanitizeSeasonEventTimestampOrEmpty_(groupState.lastWarEndTime);
-			if (!target.projectedLastWarEndTime) target.projectedLastWarEndTime = sanitizeSeasonEventTimestampOrEmpty_(groupState.projectedLastWarEndTime || groupState.lastWarEndTime);
+			groupBinding.expectedRounds = Math.max(groupBinding.expectedRounds, toNonNegativeInt_(groupState.expectedRounds));
+			groupBinding.state = normalizeWarState_(groupState.state) || groupBinding.state;
+			groupBinding.observedAt = sanitizeSeasonEventTimestampOrEmpty_(groupState.observedAt || coordinator.capturedAt) || groupBinding.observedAt;
+			if (!groupBinding.season) groupBinding.season = sanitizeSeasonEventText_(groupState.season, 40);
+			if (!groupBinding.firstWarStartTime) groupBinding.firstWarStartTime = sanitizeSeasonEventTimestampOrEmpty_(groupState.firstWarStartTime);
+			if (!groupBinding.lastWarEndTime) groupBinding.lastWarEndTime = sanitizeSeasonEventTimestampOrEmpty_(groupState.lastWarEndTime);
+			if (!groupBinding.projectedLastWarEndTime) groupBinding.projectedLastWarEndTime = sanitizeSeasonEventTimestampOrEmpty_(groupState.projectedLastWarEndTime || groupState.lastWarEndTime);
 		}
 	}
 	const groupIds = Object.keys(groupById).sort();
@@ -5968,6 +6731,67 @@ function stringifySeasonEventCanonicalJson_(valueRaw) {
 	return JSON.stringify(canonicalize(valueRaw == null ? null : valueRaw));
 }
 
+function buildCwlSeasonEventTargetFingerprint_(targetRaw) {
+	const target = sanitizeCwlSeasonEventTarget_(targetRaw);
+	return buildSeasonEventStableHash_({
+		rosterId: target.rosterId,
+		clanTag: target.clanTag,
+		leagueName: target.leagueName,
+		leagueRank: target.leagueRank,
+		groupId: target.groupId,
+		season: target.season,
+		evidenceStatus: target.evidenceStatus,
+	});
+}
+
+function prefetchCwlCoordinatorClanDetails_(clanTagsRaw) {
+	const clanTags = dedupeCwlRuntimeTags_(clanTagsRaw);
+	const entries = [];
+	for (let i = 0; i < clanTags.length; i++) entries.push({ key: clanTags[i], path: "/clans/" + encodeTagForPath_(clanTags[i]) });
+	const fetched = entries.length
+		? cocFetchAllByPathEntries_(entries, {
+			batchSize: AUTO_REFRESH_PREFETCH_BATCH_SIZE,
+			batchDelayMs: AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS,
+		})
+		: { dataByKey: {}, errorByKey: {}, requestCount: 0 };
+	const rawByClanTag = {};
+	const errorByClanTag = {};
+	for (let i = 0; i < entries.length; i++) {
+		const clanTag = entries[i].key;
+		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey || {}, clanTag)) rawByClanTag[clanTag] = fetched.dataByKey[clanTag];
+		else if (Object.prototype.hasOwnProperty.call(fetched.errorByKey || {}, clanTag)) errorByClanTag[clanTag] = fetched.errorByKey[clanTag];
+		else errorByClanTag[clanTag] = new Error("Missing fresh clan details for " + clanTag + ".");
+	}
+	return { rawByClanTag: rawByClanTag, errorByClanTag: errorByClanTag, requestCount: toNonNegativeInt_(fetched.requestCount) };
+}
+
+// Revision used only as an optimistic guard immediately before finalization.
+function buildCwlSeasonEventRevision_(eventRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const cwl = sanitizeCwlSeasonEventMeta_(event.cwl);
+	return buildSeasonEventStableHash_(JSON.parse(stringifySeasonEventCanonicalJson_({
+		eventId: sanitizeSeasonEventText_(event.eventId, 180),
+		status: normalizeSeasonEventStatus_(event.status),
+		signupsOpen: event.signupsOpen === true,
+		cwlTrackingState: normalizeCwlTrackingState_(event.cwlTrackingState),
+		updatedAt: sanitizeSeasonEventTimestampOrEmpty_(event.updatedAt),
+		target: cwl.target,
+		participantsByDiscordId: event.participantsByDiscordId || {},
+		participantsByTag: event.participantsByTag || {},
+	})));
+}
+
+function clearCwlSeasonEventTentativeFinalization_(metaRaw) {
+	const meta = sanitizeCwlSeasonEventMeta_(metaRaw);
+	meta.finalizationHash = "";
+	meta.finalizationFingerprint = "";
+	meta.finalizationFirstSeenAt = "";
+	meta.finalizationObservationAt = "";
+	meta.finalizationEventRevision = "";
+	meta.finalizationTargetFingerprint = "";
+	return meta;
+}
+
 // Rewrite stored CWL season-event aggregates through the current stat schema.
 function migrateCwlSeasonEventDefenseStarsStorage_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -6083,8 +6907,18 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 		const lockedEvent = readSeasonEventById_(eventId);
 		const lockedState = lockedEvent ? normalizeCwlTrackingState_(lockedEvent.cwlTrackingState) || "waiting" : "";
 		if (!lockedEvent || lockedState === "completed") return { ok: false, status: "event-not-refreshable", eventId: eventId };
+		const lockedRevision = buildCwlSeasonEventRevision_(lockedEvent);
+		const lockedTarget = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(lockedEvent.cwl).target);
+		const lockedTargetFingerprint = buildCwlSeasonEventTargetFingerprint_(lockedTarget);
+		if (aggregateResult.eventRevision && aggregateResult.eventRevision !== lockedRevision) {
+			return { ok: false, status: "event-revision-changed", eventId: eventId };
+		}
+		if (aggregateResult.targetFingerprint && aggregateResult.targetFingerprint !== lockedTargetFingerprint) {
+			return { ok: false, status: "target-fingerprint-changed", eventId: eventId };
+		}
 
-		const meta = sanitizeCwlSeasonEventMeta_(metaRaw);
+		let meta = sanitizeCwlSeasonEventMeta_(metaRaw);
+		meta.target = lockedTarget;
 		const runtimeState = aggregateResult.runtimeState && typeof aggregateResult.runtimeState === "object" ? aggregateResult.runtimeState : {};
 		const eventDataSuccessAt = sanitizeSeasonEventTimestampOrEmpty_(aggregateResult.currentRunDataSuccessAt);
 		const partialRefresh = aggregateResult.partial === true || aggregateResult.discoveryIncomplete === true || (aggregateResult.aggregate && aggregateResult.aggregate.stale === true);
@@ -6114,159 +6948,246 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 		let nextState = lockedState === "waiting" ? "active" : lockedState;
 		let finalAggregate = null;
 		if (aggregateResult.complete) {
-			if (lockedState === "finalizing" && meta.finalizationHash && meta.finalizationHash === aggregate.hash) {
+			const fingerprint = sanitizeSeasonEventText_(aggregateResult.completionFingerprint, 120);
+			const observationAt = sanitizeSeasonEventTimestampOrEmpty_(aggregateResult.completionObservationAt);
+			const firstSeenMs = parseIsoToMs_(meta.finalizationFirstSeenAt);
+			const previousObservationMs = parseIsoToMs_(meta.finalizationObservationAt);
+			const currentObservationMs = parseIsoToMs_(observationAt);
+			const confirmationReady = !!(
+				lockedState === "finalizing" &&
+				fingerprint &&
+				meta.finalizationFingerprint === fingerprint &&
+				meta.finalizationTargetFingerprint === lockedTargetFingerprint &&
+				firstSeenMs > 0 &&
+				currentObservationMs > previousObservationMs &&
+				currentObservationMs - firstSeenMs >= CWL_LIFECYCLE_CONFIRMATION_MIN_DELAY_MS
+			);
+			if (confirmationReady) {
 				nextState = "completed";
 				meta.finalizedAt = nowIso;
 				meta.lastCompleteRefreshAt = sanitizeSeasonEventTimestampOrEmpty_(runtimeState.lastCompleteRefreshAt) || nowIso;
 				finalAggregate = filterCwlAggregateToRegisteredParticipants_(lockedEvent, aggregate);
-				writeSeasonEventFirebasePayload_(buildCwlSeasonEventAggregatePath_(eventId, "final"), "PUT", finalAggregate);
-				try {
-					firebaseRequestJson_(buildCwlSeasonEventAggregatePath_(eventId, "live"), "DELETE");
-				} catch (deleteErr) {
-					Logger.log("Unable to delete completed CWL live aggregate for %s: %s", eventId, errorMessage_(deleteErr));
+				const cwlWindow = getCwlSeasonEventWindowFromMeta_(meta);
+				const updatedEvent = Object.assign({}, lockedEvent, {
+					cwlTrackingState: "completed",
+					status: "closed",
+					signupsOpen: false,
+					cwl: meta,
+					startsAt: lockedEvent.startsAt || cwlWindow.startsAt || "",
+					endsAt: cwlWindow.endsAt || lockedEvent.endsAt || aggregateResult.finalEndTime || "",
+					updatedAt: nowIso,
+				});
+				// Re-read immediately before the atomic write so a concurrent signup/edit cannot be retired.
+				const revalidatedPointer = readSeasonEventPointer_(SEASON_EVENTS_CURRENT_CWL_PATH);
+				const revalidatedEvent = readSeasonEventById_(eventId);
+				if (
+					sanitizeSeasonEventText_(revalidatedPointer && revalidatedPointer.eventId, 180) !== eventId ||
+					buildCwlSeasonEventRevision_(revalidatedEvent) !== lockedRevision ||
+					buildCwlSeasonEventTargetFingerprint_(sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(revalidatedEvent && revalidatedEvent.cwl).target)) !== lockedTargetFingerprint
+				) {
+					return { ok: false, status: "finalization-revalidation-failed", eventId: eventId };
 				}
+				const runtime = readCwlRuntime_(eventId);
+				runtime.finalizedAt = nowIso;
+				runtime.finalEventBoundClanTags = [lockedTarget.clanTag];
+				runtime.updatedAt = nowIso;
+				const genericPointer = readSeasonEventPointer_(buildSeasonEventCurrentPointerPath_("cwl"));
+				const writes = [
+					{ path: buildCwlSeasonEventAggregatePath_(eventId, "final"), payload: finalAggregate },
+					{ path: buildCwlSeasonEventAggregatePath_(eventId, "live"), payload: null },
+					{ path: buildSeasonEventByIdPath_(eventId), payload: updatedEvent },
+					{ path: SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, payload: runtime },
+					{ path: SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, payload: buildSeasonEventPointerPayload_(updatedEvent, updatedEvent) },
+					{ path: SEASON_EVENTS_CURRENT_CWL_PATH, payload: null },
+				];
+				if (sanitizeSeasonEventText_(genericPointer && genericPointer.eventId, 180) === eventId) writes.push({ path: buildSeasonEventCurrentPointerPath_("cwl"), payload: null });
+				writeSeasonEventAtomicPayloads_(writes);
+				return {
+					ok: true,
+					status: "completed",
+					eventId: eventId,
+					event: summarizeSeasonEvent_(updatedEvent),
+					aggregateHash: aggregate.hash,
+					completionFingerprint: fingerprint,
+					finalized: true,
+					finalPlayerCount: finalAggregate.playerCount,
+				};
 			} else {
 				nextState = "finalizing";
+				if (meta.finalizationFingerprint !== fingerprint) meta.finalizationFirstSeenAt = observationAt || nowIso;
 				meta.finalizationHash = aggregate.hash;
-				meta.finalizationFirstSeenAt = nowIso;
+				meta.finalizationFingerprint = fingerprint;
+				meta.finalizationObservationAt = observationAt;
+				meta.finalizationEventRevision = lockedRevision;
+				meta.finalizationTargetFingerprint = lockedTargetFingerprint;
 			}
-		} else if (lockedState === "finalizing" && aggregateResult.auditIncomplete) {
-			nextState = "finalizing";
-		} else if (lockedState === "finalizing") {
+		} else if (lockedState === "finalizing" && aggregateResult.contradictoryFreshEvidence === true) {
 			nextState = "active";
-			meta.finalizationHash = "";
-			meta.finalizationFirstSeenAt = "";
+			meta = clearCwlSeasonEventTentativeFinalization_(meta);
+		} else if (lockedState === "finalizing") {
+			nextState = "finalizing";
 		}
 
 		const cwlWindow = getCwlSeasonEventWindowFromMeta_(meta);
 		const patch = {
 			cwlTrackingState: nextState,
 			cwl: meta,
+			signupsOpen: nextState === "finalizing" ? false : lockedEvent.signupsOpen === true,
 			startsAt: lockedEvent.startsAt || cwlWindow.startsAt || "",
 			endsAt: cwlWindow.endsAt || lockedEvent.endsAt || "",
 			updatedAt: nowIso,
 		};
 		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(eventId), "PATCH", patch);
 		const updatedEvent = Object.assign({}, lockedEvent, patch);
-		if (nextState === "completed") {
-			writeSeasonEventFirebasePayload_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, "PUT", buildSeasonEventPointerPayload_(updatedEvent, updatedEvent));
-			writeSeasonEventFirebasePayload_(SEASON_EVENTS_CURRENT_CWL_PATH, "DELETE");
-			markCwlRuntimeFinalizedForRosterAck_(eventId, readCwlRuntimeBoundClanTagsFromEvent_(updatedEvent), nowIso);
-		}
 		return {
 			ok: true,
 			status: nextState,
+			eventId: eventId,
 			event: summarizeSeasonEvent_(updatedEvent),
 			aggregateHash: aggregate.hash,
-			finalized: nextState === "completed",
+			finalized: false,
 			finalPlayerCount: finalAggregate ? finalAggregate.playerCount : 0,
 		};
 	});
 }
 
-// Refresh current CWL season event from a shared refresh-all snapshot.
+function finishCwlLifecycleRefreshPublication_(resultRaw, eventRaw) {
+	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : { ok: false, status: "unknown" };
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const eventId = sanitizeSeasonEventText_(result.eventId || (result.event && result.event.eventId) || event.eventId, 180);
+	if (!eventId || result.ok === false) return result;
+	const resultState = normalizeCwlTrackingState_(result.status);
+	const lifecycleState = resultState || normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting";
+	const descriptor = buildCwlLifecyclePublicationDescriptor_(eventId, lifecycleState, {
+		reason: "cwl-lifecycle-" + lifecycleState,
+	});
+	result.publication = descriptor;
+	result.cloudflarePublish = publishCloudflareSeasonEventsAfterMutation_(descriptor.reason, eventId, {
+		cwlLive: true,
+		cwlFinal: true,
+		pointers: true,
+		cwlLifecycle: descriptor,
+	});
+	return result;
+}
+
+// Refresh current CWL season event through the authoritative coordinator only.
 function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.now || options.nowIso) || new Date().toISOString();
+	if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(15000, "CWL lifecycle refresh");
 	let event = readCurrentCwlSeasonEvent_();
 	const state = event ? normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting" : "";
-	if (!event || event.type !== "cwl" || !isCwlSeasonEventRefreshableState_(state)) {
-		return { ok: true, status: "no-current-cwl-event" };
+	if (!event || event.type !== "cwl" || !isCwlSeasonEventRefreshableState_(state)) return { ok: true, status: "no-current-cwl-event" };
+
+	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+	let coordinator = snapshot.cwlCoordinator && typeof snapshot.cwlCoordinator === "object" ? snapshot.cwlCoordinator : null;
+	if (!coordinator || !sanitizeSeasonEventTimestampOrEmpty_(coordinator.capturedAt) || !sanitizeSeasonEventText_(coordinator.observationId, 120)) {
+		const suppliedSnapshot = !!(
+			snapshot.leaguegroupRawByClanTag ||
+			snapshot.leaguegroupErrorByClanTag ||
+			snapshot.cwlWarRawByTag ||
+			snapshot.cwlWarErrorByTag
+		);
+		coordinator = buildCwlCoordinatorResult_(rosterDataRaw, {
+			event: event,
+			nowIso: nowIso,
+			source: options.source || "cwl-event-refresh",
+			prefetchedLeaguegroupRawByClanTag: suppliedSnapshot ? snapshot.leaguegroupRawByClanTag || {} : null,
+			prefetchedLeaguegroupErrorByClanTag: suppliedSnapshot ? snapshot.leaguegroupErrorByClanTag || {} : null,
+			prefetchedClanDetailsRawByClanTag: suppliedSnapshot ? snapshot.clanDetailsRawByClanTag || {} : null,
+			prefetchedClanDetailsErrorByClanTag: suppliedSnapshot ? snapshot.clanDetailsErrorByClanTag || {} : null,
+			prefetchedCwlWarRawByTag: suppliedSnapshot ? snapshot.cwlWarRawByTag || {} : null,
+			prefetchedCwlWarErrorByTag: suppliedSnapshot ? snapshot.cwlWarErrorByTag || {} : null,
+		});
 	}
+	const freshEvidence = coordinator.targetEvidence && typeof coordinator.targetEvidence === "object"
+		? coordinator.targetEvidence
+		: {
+			capturedAt: coordinator.capturedAt,
+			observationId: coordinator.observationId,
+			leaguegroupRawByClanTag: coordinator.leaguegroupRawByClanTag,
+			leaguegroupErrorByClanTag: coordinator.leaguegroupErrorByClanTag,
+			clanDetailsRawByClanTag: coordinator.clanDetailsRawByClanTag,
+			clanDetailsErrorByClanTag: coordinator.clanDetailsErrorByClanTag,
+		};
 	const targetResult = applyCwlSeasonEventTargetResolution_(event, rosterDataRaw, {
 		nowIso: nowIso,
 		source: options.source || { type: "cwl-event-refresh" },
+		freshEvidence: freshEvidence,
 	});
 	if (targetResult.changed) {
 		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(event.eventId), "PATCH", {
 			cwl: targetResult.event.cwl,
 			updatedAt: targetResult.event.updatedAt,
 		});
-		if (shouldResetCwlSeasonEventAggregateForTargetMigration_(event, targetResult.target)) resetCwlSeasonEventUnsafeAggregateState_(event.eventId);
+		if (targetResult.targetChanged && shouldResetCwlSeasonEventAggregateForTargetMigration_(event, targetResult.target)) resetCwlSeasonEventUnsafeAggregateState_(event.eventId);
 		event = targetResult.event;
 	}
-	const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
-	const hasLegacyCwlSnapshot =
-		(snapshot.leaguegroupRawByClanTag && typeof snapshot.leaguegroupRawByClanTag === "object" && Object.keys(snapshot.leaguegroupRawByClanTag).length > 0) ||
-		(snapshot.leaguegroupErrorByClanTag && typeof snapshot.leaguegroupErrorByClanTag === "object" && Object.keys(snapshot.leaguegroupErrorByClanTag).length > 0) ||
-		(snapshot.cwlWarRawByTag && typeof snapshot.cwlWarRawByTag === "object" && Object.keys(snapshot.cwlWarRawByTag).length > 0) ||
-		(snapshot.cwlWarErrorByTag && typeof snapshot.cwlWarErrorByTag === "object" && Object.keys(snapshot.cwlWarErrorByTag).length > 0);
-	const snapshotCoordinator = snapshot.cwlCoordinator && typeof snapshot.cwlCoordinator === "object" ? snapshot.cwlCoordinator : null;
-	const allowSnapshotCoordinatorAfterTargetChange = options.allowSnapshotCoordinatorAfterTargetChange === true;
-	let coordinator = snapshotCoordinator && (!targetResult.targetChanged || allowSnapshotCoordinatorAfterTargetChange) ? snapshotCoordinator : null;
-	if (
-		!coordinator &&
-		(!hasLegacyCwlSnapshot || (targetResult.targetChanged && !!snapshotCoordinator && !allowSnapshotCoordinatorAfterTargetChange)) &&
-		typeof buildCwlCoordinatorResult_ === "function"
-	) {
-		coordinator = buildCwlCoordinatorResult_(rosterDataRaw, {
-			event: event,
-			nowIso: nowIso,
-			source: options.source || "cwl-event-refresh",
-		});
-	}
-	if (coordinator && coordinator.eventAggregateResult && typeof coordinator.eventAggregateResult === "object") {
-		const meta = bindEligibleCwlSeasonEventGroupsFromCoordinator_(event, coordinator);
-		if (!Object.keys(meta.groups).length) {
-			meta.lastAttemptedRefreshAt = nowIso;
-			writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(event.eventId), "PATCH", {
-				cwl: meta,
-				updatedAt: nowIso,
-			});
-			return { ok: true, status: "waiting", event: summarizeSeasonEvent_(Object.assign({}, event, { cwl: meta })) };
+	if (!targetResult.resolved) {
+		const preservedLive = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(event.eventId, "live"));
+		if (preservedLive && preservedLive.eventId) {
+			const stale = markCwlSeasonEventAggregateStale_(event, targetResult.status || "cwl-target-unresolved", nowIso);
+			stale.targetStatus = targetResult.status;
+			stale.event = summarizeSeasonEvent_(event);
+			return finishCwlLifecycleRefreshPublication_(stale, event);
 		}
-		let aggregateResult = coordinator.eventAggregateResult;
-		if (
-			allowSnapshotCoordinatorAfterTargetChange &&
-			(
-				!aggregateResult ||
-				typeof aggregateResult !== "object" ||
-				!aggregateResult.aggregate ||
-				aggregateResult.status === "target-unresolved"
-			)
-		) {
-			aggregateResult = buildCwlSeasonEventAggregateFromCoordinatorView_(event, coordinator, meta, nowIso);
-		}
-		if (coordinator.runtimeState && typeof coordinator.runtimeState === "object") aggregateResult.runtimeState = coordinator.runtimeState;
-		if (aggregateResult.bootstrapBlocked || aggregateResult.status === "bootstrap-incomplete") {
-			meta.lastAttemptedRefreshAt = nowIso;
-			if (coordinator.runtimeState && typeof coordinator.runtimeState === "object") {
-				meta.lastDiscoveryAttemptedAt = coordinator.runtimeState.lastDiscoveryAttemptedAt || meta.lastDiscoveryAttemptedAt;
-				meta.lastDataSuccessAt = sanitizeSeasonEventTimestampOrEmpty_(aggregateResult.currentRunDataSuccessAt) || meta.lastDataSuccessAt;
-				meta.lastCompleteRefreshAt = coordinator.runtimeState.lastCompleteRefreshAt || meta.lastCompleteRefreshAt;
-			}
-			writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(event.eventId), "PATCH", {
-				cwl: meta,
-				updatedAt: nowIso,
-			});
-			return {
-				ok: true,
-				status: "bootstrap-incomplete",
-				eventId: sanitizeSeasonEventText_(event.eventId, 180),
-				discoveryIncomplete: !!aggregateResult.discoveryIncomplete,
-				requestCounts: coordinator.requestCounts || {},
-			};
-		}
-		if (!aggregateResult.ok) {
-			return markCwlSeasonEventAggregateStale_(event, aggregateResult.reason || "partial-cwl-refresh", nowIso);
-		}
-		return publishCwlSeasonEventRefreshResult_(event, meta, aggregateResult, nowIso);
+		const unresolved = {
+			ok: true,
+			status: "waiting",
+			eventId: event.eventId,
+			targetStatus: targetResult.status,
+			event: summarizeSeasonEvent_(event),
+		};
+		return finishCwlLifecycleRefreshPublication_(unresolved, event);
 	}
 
-	const meta = bindEligibleCwlSeasonEventGroupsFromSnapshot_(event, rosterDataRaw, snapshotRaw);
+	let meta = bindEligibleCwlSeasonEventGroupsFromCoordinator_(event, coordinator);
+	event = Object.assign({}, event, { cwl: meta });
 	if (!Object.keys(meta.groups).length) {
 		meta.lastAttemptedRefreshAt = nowIso;
-		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(event.eventId), "PATCH", {
-			cwl: meta,
-			updatedAt: nowIso,
-		});
-		return { ok: true, status: "waiting", event: summarizeSeasonEvent_(Object.assign({}, event, { cwl: meta })) };
+		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(event.eventId), "PATCH", { cwl: meta, updatedAt: nowIso });
+		return finishCwlLifecycleRefreshPublication_({
+			ok: true,
+			status: "waiting",
+			eventId: event.eventId,
+			event: summarizeSeasonEvent_(Object.assign({}, event, { updatedAt: nowIso })),
+		}, event);
 	}
-	const aggregateResult = buildCwlSeasonEventAggregateFromSnapshot_(event, rosterDataRaw, snapshotRaw, meta, nowIso);
+
+	const observationAt = sanitizeSeasonEventTimestampOrEmpty_(coordinator.capturedAt);
+	const aggregatePlan = Object.assign({}, coordinator.requestPlan || {}, {
+		observationAt: observationAt,
+		deadlineExhausted: options.deadlineExhausted === true,
+	});
+	const runtime = readCwlRuntime_(event.eventId);
+	const aggregateResult = buildCwlSeasonEventAggregateFromRuntime_(event, runtime, aggregatePlan, nowIso);
+	aggregateResult.runtimeState = coordinator.runtimeState && typeof coordinator.runtimeState === "object" ? coordinator.runtimeState : {};
+	aggregateResult.eventRevision = buildCwlSeasonEventRevision_(readSeasonEventById_(event.eventId));
+	aggregateResult.targetFingerprint = buildCwlSeasonEventTargetFingerprint_(sanitizeCwlSeasonEventTarget_(meta.target));
+	if (aggregateResult.bootstrapBlocked || aggregateResult.status === "bootstrap-incomplete") {
+		meta.lastAttemptedRefreshAt = nowIso;
+		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(event.eventId), "PATCH", { cwl: meta, updatedAt: nowIso });
+		const preservedLive = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(event.eventId, "live"));
+		if (preservedLive && preservedLive.eventId) {
+			const stale = markCwlSeasonEventAggregateStale_(event, aggregateResult.reason || "bootstrap-incomplete", nowIso);
+			stale.bootstrapIncomplete = true;
+			stale.discoveryIncomplete = !!aggregateResult.discoveryIncomplete;
+			stale.requestCounts = coordinator.requestCounts || {};
+			return finishCwlLifecycleRefreshPublication_(stale, event);
+		}
+		return finishCwlLifecycleRefreshPublication_({
+			ok: true,
+			status: "bootstrap-incomplete",
+			eventId: event.eventId,
+			discoveryIncomplete: !!aggregateResult.discoveryIncomplete,
+			requestCounts: coordinator.requestCounts || {},
+		}, event);
+	}
 	if (!aggregateResult.ok) {
-		return markCwlSeasonEventAggregateStale_(event, aggregateResult.reason || "partial-cwl-refresh", nowIso);
+		return finishCwlLifecycleRefreshPublication_(markCwlSeasonEventAggregateStale_(event, aggregateResult.reason || "partial-cwl-refresh", nowIso), event);
 	}
-	return publishCwlSeasonEventRefreshResult_(event, meta, aggregateResult, nowIso);
+	return finishCwlLifecycleRefreshPublication_(publishCwlSeasonEventRefreshResult_(event, meta, aggregateResult, nowIso), event);
 }
 
 // Safe auto-refresh wrapper for CWL events.

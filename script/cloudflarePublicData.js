@@ -1119,6 +1119,7 @@ function verifyCloudflarePublicActiveVersionId_(expectedVersionIdRaw) {
 			expectedVersionId: expectedVersionId,
 			actualVersionId: actualVersionId,
 			activeVersionShards: shards || null,
+			sharedSelector: health && health.sharedSelector && typeof health.sharedSelector === "object" ? health.sharedSelector : null,
 		};
 	} catch (err) {
 		return { ok: false, error: errorMessage_(err) };

@@ -154,7 +154,28 @@ function chooseLatestDonationLedger_(baseLedgerRaw, overlayLedgerRaw, seasonIdRa
 	if (!overlay) return base;
 	const baseMs = getDonationLedgerLastSeenMs_(base);
 	const overlayMs = getDonationLedgerLastSeenMs_(overlay);
-	return overlayMs >= baseMs ? overlay : base;
+	const newer = overlayMs >= baseMs ? overlay : base;
+	const older = newer === overlay ? base : overlay;
+	const firstSeenValues = [parseIsoToMs_(base.firstSeenAt), parseIsoToMs_(overlay.firstSeenAt)].filter((value) => value > 0);
+	const latestSeenMs = Math.max(baseMs, overlayMs);
+	// Active versions and detached overlays can advance independently. Merge the
+	// cumulative maxima while taking raw counters from the newest observation;
+	// the next snapshot then adds only the delta from that raw baseline and can
+	// never reset a larger additive total from either canonical source.
+	return sanitizeMetricsDonationCycleLedger_(Object.assign({}, newer, {
+		seasonId: seasonId,
+		startsAt: newer.startsAt || older.startsAt,
+		endsAt: newer.endsAt || older.endsAt,
+		rawDonationsLastSeen: toNonNegativeInt_(newer.rawDonationsLastSeen),
+		rawDonationsReceivedLastSeen: toNonNegativeInt_(newer.rawDonationsReceivedLastSeen),
+		cycleTotalDonations: Math.max(toNonNegativeInt_(base.cycleTotalDonations), toNonNegativeInt_(overlay.cycleTotalDonations)),
+		cycleTotalDonationsReceived: Math.max(toNonNegativeInt_(base.cycleTotalDonationsReceived), toNonNegativeInt_(overlay.cycleTotalDonationsReceived)),
+		firstSeenAt: firstSeenValues.length ? new Date(Math.min.apply(Math, firstSeenValues)).toISOString() : (newer.firstSeenAt || older.firstSeenAt || ""),
+		lastSeenAt: latestSeenMs > 0 ? new Date(latestSeenMs).toISOString() : (newer.lastSeenAt || older.lastSeenAt || ""),
+		lastClanTag: newer.lastClanTag || older.lastClanTag || "",
+		resetCount: Math.max(toNonNegativeInt_(base.resetCount), toNonNegativeInt_(overlay.resetCount)),
+		receivedResetCount: Math.max(toNonNegativeInt_(base.receivedResetCount), toNonNegativeInt_(overlay.receivedResetCount)),
+	}), seasonId);
 }
 
 function readActiveDonationLedgersForTags_(versionIdRaw, seasonIdRaw, tagsRaw) {
@@ -175,7 +196,8 @@ function readActiveDonationLedgersForTags_(versionIdRaw, seasonIdRaw, tagsRaw) {
 		pathByTag[tag] = path;
 		paths.push(path);
 	}
-	const encodedByPath = firebaseBatchGetJson_(paths);
+	if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation canonical ledger batch read");
+	const encodedByPath = firebaseBatchGetJson_(paths, { disableFallback: true });
 	const out = {};
 	const outTags = Object.keys(pathByTag);
 	for (let i = 0; i < outTags.length; i++) {
@@ -370,13 +392,23 @@ function setDonationRefreshRunResult_(statusRaw, summaryRaw, errorRaw, startedAt
 
 function runDonationRefreshCore_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (options.executionDeadlineActive !== true && typeof isExecutionDeadlineActive_ === "function" && !isExecutionDeadlineActive_()) {
+		return runWithExecutionDeadline_("donation-refresh-core", DONATION_REFRESH_EXECUTION_BUDGET_MS, function () {
+			return runDonationRefreshCore_(Object.assign({}, options, { executionDeadlineActive: true }));
+		}, {
+			cleanupReserveMs: DONATION_REFRESH_CLEANUP_RESERVE_MS,
+			recoveryScope: "donationRefresh",
+		});
+	}
 	const startedAt = String(options.startedAt || new Date().toISOString());
 	const refreshResult = withDonationRefreshLock_(options.lockOwner || "donation-refresh", Math.max(0, Number(options.lockWaitMs) || 0), function () {
+		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(30000, "donation source read");
 		const source = readDonationRefreshSource_();
 		const clanTags = Array.isArray(source.clanTags) ? source.clanTags : [];
 		if (!clanTags.length) {
 			return { ok: true, status: "skipped", skipped: true, reason: "noConnectedClans", seasonId: "" };
 		}
+		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(45000, "donation clan collection");
 		const fetched = collectDonationRefreshSnapshots_(clanTags, options);
 		const snapshotByClanTag = fetched.snapshotByClanTag && typeof fetched.snapshotByClanTag === "object" ? fetched.snapshotByClanTag : {};
 		const errorByClanTag = fetched.errorByClanTag && typeof fetched.errorByClanTag === "object" ? fetched.errorByClanTag : {};
@@ -411,6 +443,12 @@ function runDonationRefreshCore_(optionsRaw) {
 			}
 		}
 
+		if (clanTags.length > 0 && capturedClans < 1) {
+			const failed = new Error("Donation refresh could not capture any configured clan; the previous overlay remains current.");
+			failed.code = "DONATION_REFRESH_COLLECTION_FAILED";
+			throw failed;
+		}
+		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation overlay read");
 		const overlay = readDonationRefreshOverlayBySeason_(seasonId);
 		const overlayEntries = overlay && overlay.byTag && typeof overlay.byTag === "object" ? overlay.byTag : {};
 		const overlayMeta = overlay && overlay.meta && typeof overlay.meta === "object" ? overlay.meta : {};
@@ -418,7 +456,7 @@ function runDonationRefreshCore_(optionsRaw) {
 		const baseReadTags = [];
 		for (let i = 0; i < touchedTags.length; i++) {
 			const tag = normalizeTag_(touchedTags[i]);
-			if (tag && !overlayEntries[tag]) baseReadTags.push(tag);
+			if (tag) baseReadTags.push(tag);
 		}
 		const baseLedgers = readActiveDonationLedgersForTags_(source.versionId, seasonId, baseReadTags);
 		const writes = [];
@@ -466,9 +504,25 @@ function runDonationRefreshCore_(optionsRaw) {
 		};
 		writes.push({ path: buildDonationRefreshSeasonPath_(seasonId, "meta"), payload: encodeFirebaseObjectKeysRecursive_(meta) });
 		writes.push({ path: buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), payload: encodeFirebaseObjectKeysRecursive_(meta) });
+		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation retention and atomic write");
 		const cleanupWrites = cleanupDonationRefreshSeasonRetentionWrites_();
 		for (let i = 0; i < cleanupWrites.length; i++) writes.push(cleanupWrites[i]);
-		firebaseBatchPutJson_(writes);
+		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation source revalidation");
+		const currentSourceVersionId = readPublishedActiveVersionId_();
+		if (currentSourceVersionId !== source.versionId) {
+			const changed = new Error("Donation refresh source version changed before commit; retrying from the new canonical version.");
+			changed.code = "DONATION_REFRESH_SOURCE_CHANGED";
+			changed.autoRefreshDefer = true;
+			changed.reason = "donationSourceChanged";
+			throw changed;
+		}
+		try {
+			firebaseBatchPutJson_(writes, { disableFallback: true });
+		} catch (err) {
+			if (typeof markRuntimeRecoveryNeeded_ === "function") markRuntimeRecoveryNeeded_("donationRefresh", "atomic-write-failed", { error: errorMessage_(err).slice(0, 500) });
+			throw err;
+		}
+		if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("donationRefresh");
 		const cloudflareDonationPublish = { ok: true, skipped: true, reason: "queued-after-lock" };
 		const cloudflareActiveMirrorRepair = { ok: true, skipped: true, reason: "not-run-for-donation-refresh" };
 		return {
@@ -488,13 +542,16 @@ function runDonationRefreshCore_(optionsRaw) {
 	});
 	if (refreshResult && refreshResult.seasonId && typeof enqueueCloudflareDonationSeasonPublication_ === "function") {
 		try {
+			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "donation Cloudflare enqueue");
 			refreshResult.cloudflareDonationPublish = enqueueCloudflareDonationSeasonPublication_(refreshResult.seasonId, "donation-refresh-write");
 		} catch (err) {
 			Logger.log("Donation refresh Cloudflare enqueue failed after canonical write: %s", errorMessage_(err));
 			refreshResult.cloudflareDonationPublish = { ok: false, error: errorMessage_(err), queued: false };
+			if (typeof markRuntimeRecoveryNeeded_ === "function") markRuntimeRecoveryNeeded_("donationPublication", "enqueue-failed", { seasonId: refreshResult.seasonId });
 		}
 	} else if (refreshResult && refreshResult.skipped && typeof enqueueCloudflareRelevantSeasonPublication_ === "function") {
 		try {
+			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "donation current-pointer repair enqueue");
 			refreshResult.cloudflareDonationPublish = enqueueCloudflareRelevantSeasonPublication_("donation-refresh-current-repair");
 		} catch (err) {
 			Logger.log("Donation refresh current-pointer repair enqueue failed: %s", errorMessage_(err));
@@ -575,6 +632,7 @@ function ensureSingleDonationRefreshTrigger_() {
 
 function reconcileDonationRefreshTriggerState_() {
 	const props = PropertiesService.getScriptProperties();
+	if (typeof ensurePermanentSchedulerWatchdogTrigger_ === "function") ensurePermanentSchedulerWatchdogTrigger_();
 	if (!isDonationRefreshEnabled_()) {
 		removeDonationRefreshTriggers_();
 		props.deleteProperty(DONATION_REFRESH_TRIGGER_ID_PROPERTY);
@@ -605,8 +663,14 @@ function readDonationRefreshSettings_() {
 	};
 }
 
-function donationRefreshTick() {
+function donationRefreshTickInternal_() {
 	const startedAt = new Date().toISOString();
+	if (typeof isRuntimeUrlFetchQuotaCooldownActive_ === "function" && isRuntimeUrlFetchQuotaCooldownActive_()) {
+		const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+		setDonationRefreshRunResult_("skipped", "Donation refresh skipped during the UrlFetch quota cooldown.", "", startedAt, new Date().toISOString(), {});
+		return { ok: true, status: "skipped", skipped: true, reason: "urlFetchQuotaCooldown", cooldownUntil: new Date(cooldownUntilMs).toISOString() };
+	}
+	if (typeof clearExpiredRuntimeUrlFetchQuotaCooldown_ === "function") clearExpiredRuntimeUrlFetchQuotaCooldown_();
 	if (!isDonationRefreshEnabled_()) {
 		removeDonationRefreshTriggers_();
 		setDonationRefreshRunResult_("skipped", "Donation refresh skipped because it is disabled.", "", startedAt, new Date().toISOString(), {});
@@ -632,16 +696,30 @@ function donationRefreshTick() {
 	}
 }
 
-function runDonationRefreshNow(password) {
-	assertAdminPassword_(password);
-	const startedAt = new Date().toISOString();
-	const result = runDonationRefreshCore_({ startedAt: startedAt, lockOwner: "donation-refresh-manual", lockWaitMs: ACTIVE_ROSTER_JOB_LOCK_WAIT_MS });
-	const summary = result && result.skipped
-		? "Donation refresh skipped: " + String(result.reason || "no work") + "."
-		: "Donation refresh updated " + toNonNegativeInt_(result && result.playerCount) + " player(s) across " + toNonNegativeInt_(result && result.capturedClanCount) + " clan(s).";
-	setDonationRefreshRunResult_(result.status || "ok", summary, "", startedAt, new Date().toISOString(), {
-		seasonId: result.seasonId,
-		writtenAt: result.writtenAt,
+function donationRefreshTick() {
+	return runWithExecutionDeadline_("donation-refresh-trigger", DONATION_REFRESH_EXECUTION_BUDGET_MS, function () {
+		return donationRefreshTickInternal_();
+	}, {
+		cleanupReserveMs: DONATION_REFRESH_CLEANUP_RESERVE_MS,
+		recoveryScope: "donationRefresh",
 	});
-	return result;
+}
+
+function runDonationRefreshNow(password) {
+	return runWithExecutionDeadline_("donation-refresh-manual", DONATION_REFRESH_EXECUTION_BUDGET_MS, function () {
+		assertAdminPassword_(password);
+		const startedAt = new Date().toISOString();
+		const result = runDonationRefreshCore_({ startedAt: startedAt, lockOwner: "donation-refresh-manual", lockWaitMs: ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, executionDeadlineActive: true });
+		const summary = result && result.skipped
+			? "Donation refresh skipped: " + String(result.reason || "no work") + "."
+			: "Donation refresh updated " + toNonNegativeInt_(result && result.playerCount) + " player(s) across " + toNonNegativeInt_(result && result.capturedClanCount) + " clan(s).";
+		setDonationRefreshRunResult_(result.status || "ok", summary, "", startedAt, new Date().toISOString(), {
+			seasonId: result.seasonId,
+			writtenAt: result.writtenAt,
+		});
+		return result;
+	}, {
+		cleanupReserveMs: DONATION_REFRESH_CLEANUP_RESERVE_MS,
+		recoveryScope: "donationRefresh",
+	});
 }

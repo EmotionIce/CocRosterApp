@@ -315,6 +315,11 @@ function touchActiveRosterLockLease_(reasonRaw) {
 		const touched = ctx.touch(reasonRaw);
 		if (touched !== false) {
 			ctx.lastTouchedAtMs = nowMs;
+			if (String(ctx.owner || "") === "auto-refresh-worker" && typeof scheduleAutoRefreshJobWatchdog_ === "function") {
+				try { scheduleAutoRefreshJobWatchdog_(); } catch (scheduleErr) {
+					if (typeof markAutoRefreshSchedulerRepairNeeded_ === "function") markAutoRefreshSchedulerRepairNeeded_("watchdog", "lease-renew-watchdog-failed:" + errorMessage_(scheduleErr), 0);
+				}
+			}
 			return true;
 		}
 	} catch (err) {

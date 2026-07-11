@@ -6,6 +6,11 @@
 // Apps Script lock is held during OAuth, Firebase, or Cloudflare I/O.
 
 var cloudflarePublishQueueDeadlineMs_ = 0;
+var cloudflarePublishQueueCurrentClaim_ = null;
+
+const CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_ = "CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR";
+const CLOUDFLARE_QUEUE_ITEM_MAX_ATTEMPTS_ = 3;
+const CLOUDFLARE_QUEUE_REPAIR_BURST_LIMIT_ = 1;
 
 function cloudflareQueueConstant_(nameRaw, fallbackRaw) {
 	const name = String(nameRaw || "");
@@ -161,7 +166,7 @@ function releaseCloudflarePublishQueueLease_(tokenRaw) {
 
 function createEmptyCloudflarePublishQueueState_() {
 	return {
-		schemaVersion: 3,
+		schemaVersion: 4,
 		paused: false,
 		nextRevision: 0,
 		nextDispatchGeneration: 0,
@@ -171,7 +176,10 @@ function createEmptyCloudflarePublishQueueState_() {
 			phase: "idle",
 			cursor: 0,
 			committedVersionId: "",
+			committedGeneration: 0,
 			dispatch: null,
+			failure: null,
+			migration: null,
 			activeBurst: 0,
 			republish: false,
 			updatedAt: "",
@@ -183,9 +191,12 @@ function createEmptyCloudflarePublishQueueState_() {
 			cwlLeagueSignups: null,
 			seasonPointers: null,
 			repair: null,
+			repairBurst: 0,
 			bootstrap: null,
 		},
-		retry: { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "", permanent: false },
+		infrastructure: { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "" },
+		deadLetters: {},
+		versionMigrations: {},
 		lastSuccessAt: "",
 		lastBatch: null,
 		lastDriftRepairAt: "",
@@ -203,27 +214,84 @@ function normalizeCloudflareQueuePhase_(phaseRaw, hasTargetRaw) {
 	return "public-manifest-rosters";
 }
 
+function normalizeCloudflareQueueFailure_(raw) {
+	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+	if (!source) return null;
+	return {
+		revision: Math.max(0, toNonNegativeInt_(source.revision)),
+		itemKey: String(source.itemKey || "").slice(0, 300),
+		attempt: Math.max(0, toNonNegativeInt_(source.attempt)),
+		nextAttemptAt: String(source.nextAttemptAt || ""),
+		lastError: String(source.lastError || "").slice(0, 2000),
+		lastFailureAt: String(source.lastFailureAt || ""),
+		deadLetter: source.deadLetter === true,
+		permanent: source.permanent === true,
+		scope: String(source.scope || "").slice(0, 40),
+		path: String(source.path || "").slice(0, 500),
+	};
+}
+
+function normalizeCloudflareDirtyMarker_(raw) {
+	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+	const marker = Object.assign({}, source);
+	marker.revision = Math.max(0, toNonNegativeInt_(source.revision));
+	marker.updatedAt = String(source.updatedAt || "");
+	marker.reason = String(source.reason || "").slice(0, 160);
+	marker.failure = normalizeCloudflareQueueFailure_(source.failure);
+	return marker;
+}
+
+function normalizeCloudflareDirtyMap_(raw) {
+	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+	const out = {};
+	Object.keys(source).forEach(function (key) { out[key] = normalizeCloudflareDirtyMarker_(source[key]); });
+	return out;
+}
+
+function normalizeCloudflareCwlAggregateMap_(raw) {
+	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+	const out = {};
+	Object.keys(source).forEach(function (eventId) {
+		const kindsRaw = source[eventId] && typeof source[eventId] === "object" ? source[eventId] : {};
+		const kinds = {};
+		if (kindsRaw.live) kinds.live = normalizeCloudflareDirtyMarker_(kindsRaw.live);
+		if (kindsRaw.final) kinds.final = normalizeCloudflareDirtyMarker_(kindsRaw.final);
+		if (Object.keys(kinds).length) out[eventId] = kinds;
+	});
+	return out;
+}
+
+function normalizeCloudflareRepairMarker_(raw) {
+	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+	if (!source) return null;
+	const reasons = (Array.isArray(source.reasons) ? source.reasons : [source.reason || "repair"])
+		.map((value) => String(value || "").slice(0, 160)).filter((value, index, all) => value && all.indexOf(value) === index);
+	const scopes = (Array.isArray(source.scopes) ? source.scopes : ["current", "previous"])
+		.map((value) => String(value || "").slice(0, 80)).filter((value, index, all) => value && all.indexOf(value) === index);
+	return Object.assign(normalizeCloudflareDirtyMarker_(source), {
+		step: ["discover", "events", "season-maps", "donations", "pointers"].includes(String(source.step || "")) ? String(source.step) : "discover",
+		seasonIndex: Math.max(0, toNonNegativeInt_(source.seasonIndex)),
+		eventIndex: Math.max(0, toNonNegativeInt_(source.eventIndex)),
+		donationIndex: Math.max(0, toNonNegativeInt_(source.donationIndex)),
+		seasonIds: Array.isArray(source.seasonIds) ? source.seasonIds.map((id) => String(id || "").trim()).filter(Boolean) : [],
+		eventIds: Array.isArray(source.eventIds) ? source.eventIds.map((id) => String(id || "").trim()).filter(Boolean) : [],
+		donationSeasonIds: Array.isArray(source.donationSeasonIds) ? source.donationSeasonIds.map((id) => String(id || "").trim()).filter(Boolean) : [],
+		reasons: reasons.length ? reasons : ["repair"],
+		scopes: scopes.length ? scopes : ["current", "previous"],
+		diagnostics: Array.isArray(source.diagnostics) ? source.diagnostics.slice(-100) : [],
+	});
+}
+
 function normalizeCloudflarePublishQueueState_(raw) {
 	const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
 	const activeRaw = source.active && typeof source.active === "object" ? source.active : {};
 	const dirtyRaw = source.dirty && typeof source.dirty === "object" ? source.dirty : {};
-	const retryRaw = source.retry && typeof source.retry === "object" ? source.retry : {};
+	const legacyRetryRaw = source.retry && typeof source.retry === "object" ? source.retry : {};
+	const infrastructureRaw = source.infrastructure && typeof source.infrastructure === "object" ? source.infrastructure : legacyRetryRaw;
 	const targetVersionId = normalizeActiveVersionId_(activeRaw.targetVersionId);
 	const committedVersionId = normalizeActiveVersionId_(activeRaw.committedVersionId);
 	const legacySchema = Math.max(0, toNonNegativeInt_(source.schemaVersion)) < 3;
-	const repairLegacy = dirtyRaw.repair || dirtyRaw.relevantSnapshot;
-	const repair = repairLegacy && typeof repairLegacy === "object" ? {
-		revision: Math.max(0, toNonNegativeInt_(repairLegacy.revision)),
-		step: ["discover", "events", "season-maps", "donations", "pointers"].includes(String(repairLegacy.step || "")) ? String(repairLegacy.step) : "discover",
-		seasonIndex: Math.max(0, toNonNegativeInt_(repairLegacy.seasonIndex)),
-		eventIndex: Math.max(0, toNonNegativeInt_(repairLegacy.eventIndex)),
-		donationIndex: Math.max(0, toNonNegativeInt_(repairLegacy.donationIndex)),
-		seasonIds: Array.isArray(repairLegacy.seasonIds) ? repairLegacy.seasonIds.map((id) => String(id || "").trim()).filter(Boolean) : [],
-		eventIds: Array.isArray(repairLegacy.eventIds) ? repairLegacy.eventIds.map((id) => String(id || "").trim()).filter(Boolean) : [],
-		donationSeasonIds: Array.isArray(repairLegacy.donationSeasonIds) ? repairLegacy.donationSeasonIds.map((id) => String(id || "").trim()).filter(Boolean) : [],
-		updatedAt: String(repairLegacy.updatedAt || ""),
-		reason: String(repairLegacy.reason || "repair").slice(0, 160),
-	} : null;
+	const repair = normalizeCloudflareRepairMarker_(dirtyRaw.repair || dirtyRaw.relevantSnapshot);
 	const rawPhase = String(activeRaw.phase || "idle").trim();
 	const republish = activeRaw.republish === true;
 	const hasUncommittedTarget = !!targetVersionId && (targetVersionId !== committedVersionId || republish || rawPhase !== "idle");
@@ -234,8 +302,11 @@ function normalizeCloudflarePublishQueueState_(raw) {
 		? 0
 		: Math.max(0, toNonNegativeInt_(activeRaw.cursor));
 	return {
-		schemaVersion: 3,
-		paused: source.paused === true,
+		schemaVersion: 4,
+		// Schema-v3 used paused for automatic size failures. During migration only
+		// a non-permanent legacy pause can be known to be administrative.
+		paused: source.paused === true && !(Math.max(0, toNonNegativeInt_(source.schemaVersion)) < 4 && legacyRetryRaw.permanent === true),
+		pauseReason: String(source.pauseReason || (source.paused === true && legacyRetryRaw.permanent !== true ? "admin" : "")),
 		nextRevision: Math.max(0, toNonNegativeInt_(source.nextRevision)),
 		nextDispatchGeneration: Math.max(0, toNonNegativeInt_(source.nextDispatchGeneration)),
 		active: {
@@ -244,27 +315,32 @@ function normalizeCloudflarePublishQueueState_(raw) {
 			phase: normalizedPhase,
 			cursor: normalizedCursor,
 			committedVersionId: committedVersionId,
+			committedGeneration: Math.max(0, toNonNegativeInt_(activeRaw.committedGeneration)),
 			dispatch: activeRaw.dispatch && typeof activeRaw.dispatch === "object" ? activeRaw.dispatch : null,
+			failure: normalizeCloudflareQueueFailure_(activeRaw.failure),
+			migration: activeRaw.migration && typeof activeRaw.migration === "object" ? activeRaw.migration : null,
 			activeBurst: Math.max(0, toNonNegativeInt_(activeRaw.activeBurst)),
 			republish: republish,
 			updatedAt: String(activeRaw.updatedAt || ""),
 		},
 		dirty: {
-			events: dirtyRaw.events && typeof dirtyRaw.events === "object" ? dirtyRaw.events : {},
-			cwlAggregates: dirtyRaw.cwlAggregates && typeof dirtyRaw.cwlAggregates === "object" ? dirtyRaw.cwlAggregates : {},
-			donationSeasons: dirtyRaw.donationSeasons && typeof dirtyRaw.donationSeasons === "object" ? dirtyRaw.donationSeasons : {},
-			cwlLeagueSignups: dirtyRaw.cwlLeagueSignups && typeof dirtyRaw.cwlLeagueSignups === "object" ? dirtyRaw.cwlLeagueSignups : null,
-			seasonPointers: dirtyRaw.seasonPointers && typeof dirtyRaw.seasonPointers === "object" ? dirtyRaw.seasonPointers : null,
+			events: normalizeCloudflareDirtyMap_(dirtyRaw.events),
+			cwlAggregates: normalizeCloudflareCwlAggregateMap_(dirtyRaw.cwlAggregates),
+			donationSeasons: normalizeCloudflareDirtyMap_(dirtyRaw.donationSeasons),
+			cwlLeagueSignups: dirtyRaw.cwlLeagueSignups && typeof dirtyRaw.cwlLeagueSignups === "object" ? normalizeCloudflareDirtyMarker_(dirtyRaw.cwlLeagueSignups) : null,
+			seasonPointers: dirtyRaw.seasonPointers && typeof dirtyRaw.seasonPointers === "object" ? normalizeCloudflareDirtyMarker_(dirtyRaw.seasonPointers) : null,
 			repair: repair,
-			bootstrap: dirtyRaw.bootstrap && typeof dirtyRaw.bootstrap === "object" ? dirtyRaw.bootstrap : null,
+			repairBurst: Math.max(0, toNonNegativeInt_(dirtyRaw.repairBurst)),
+			bootstrap: dirtyRaw.bootstrap && typeof dirtyRaw.bootstrap === "object" ? normalizeCloudflareDirtyMarker_(dirtyRaw.bootstrap) : null,
 		},
-		retry: {
-			attempt: Math.max(0, toNonNegativeInt_(retryRaw.attempt)),
-			nextAttemptAt: String(retryRaw.nextAttemptAt || ""),
-			lastError: String(retryRaw.lastError || "").slice(0, 2000),
-			lastFailureAt: String(retryRaw.lastFailureAt || ""),
-			permanent: retryRaw.permanent === true,
+		infrastructure: {
+			attempt: Math.max(0, toNonNegativeInt_(infrastructureRaw.attempt)),
+			nextAttemptAt: infrastructureRaw.permanent === true ? "" : String(infrastructureRaw.nextAttemptAt || ""),
+			lastError: String(infrastructureRaw.lastError || "").slice(0, 2000),
+			lastFailureAt: String(infrastructureRaw.lastFailureAt || ""),
 		},
+		deadLetters: source.deadLetters && typeof source.deadLetters === "object" ? source.deadLetters : {},
+		versionMigrations: source.versionMigrations && typeof source.versionMigrations === "object" ? source.versionMigrations : {},
 		lastSuccessAt: String(source.lastSuccessAt || ""),
 		lastBatch: source.lastBatch && typeof source.lastBatch === "object" ? source.lastBatch : null,
 		lastDriftRepairAt: String(source.lastDriftRepairAt || ""),
@@ -311,7 +387,8 @@ function mutateCloudflarePublishQueueState_(callback, ownerTokenRaw) {
 		if (ownerTokenRaw) assertCloudflarePublishQueueLeaseOwned_(ownerTokenRaw);
 		assertCloudflarePublishQueueDeadline_(30000, "queue-state CAS");
 		const current = firebaseRequestJsonWithEtag_(FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_STATE_PATH, "GET");
-		const state = normalizeCloudflarePublishQueueState_(current && current.value);
+		const decodedCurrent = current && current.value != null ? decodeFirebaseObjectKeysRecursive_(current.value) : null;
+		const state = normalizeCloudflarePublishQueueState_(decodedCurrent);
 		const result = callback(state);
 		if (ownerTokenRaw) assertCloudflarePublishQueueLeaseOwned_(ownerTokenRaw);
 		assertCloudflarePublishQueueDeadline_(30000, "queue-state CAS write");
@@ -328,7 +405,16 @@ function mutateCloudflarePublishQueueState_(callback, ownerTokenRaw) {
 }
 
 function nextCloudflarePublishRevision_(state) {
-	state.nextRevision = Math.max(0, toNonNegativeInt_(state.nextRevision)) + 1;
+	let maximum = Math.max(0, toNonNegativeInt_(state.nextRevision));
+	const include = function (marker) { maximum = Math.max(maximum, toNonNegativeInt_(marker && marker.revision)); };
+	Object.keys(state.dirty.events || {}).forEach(function (key) { include(state.dirty.events[key]); });
+	Object.keys(state.dirty.cwlAggregates || {}).forEach(function (key) { include(state.dirty.cwlAggregates[key].live); include(state.dirty.cwlAggregates[key].final); });
+	Object.keys(state.dirty.donationSeasons || {}).forEach(function (key) { include(state.dirty.donationSeasons[key]); });
+	include(state.dirty.cwlLeagueSignups);
+	include(state.dirty.seasonPointers);
+	include(state.dirty.repair);
+	include(state.dirty.bootstrap);
+	state.nextRevision = maximum + 1;
 	return state.nextRevision;
 }
 
@@ -337,16 +423,67 @@ function makeCloudflareDirtyRevision_(state, reasonRaw, extraRaw) {
 		revision: nextCloudflarePublishRevision_(state),
 		updatedAt: new Date().toISOString(),
 		reason: String(reasonRaw || "mutation").slice(0, 160),
+		failure: null,
 	}, extraRaw && typeof extraRaw === "object" ? extraRaw : {});
+}
+
+function clearSupersededCloudflareDeadLetters_(state, categoryRaw, keyRaw, kindRaw) {
+	const category = String(categoryRaw || "");
+	const key = String(keyRaw || "");
+	const kind = String(kindRaw || "");
+	Object.keys(state.deadLetters || {}).forEach(function (itemKey) {
+		const dead = state.deadLetters[itemKey] || {};
+		if (String(dead.category || "") === category && String(dead.key || "") === key && String(dead.kind || "") === kind) delete state.deadLetters[itemKey];
+	});
+}
+
+function isCloudflareQueueFailureDead_(failureRaw) {
+	const failure = normalizeCloudflareQueueFailure_(failureRaw);
+	return !!(failure && failure.deadLetter);
+}
+
+function isCloudflareQueueMarkerPending_(markerRaw) {
+	return !!markerRaw && !isCloudflareQueueFailureDead_(markerRaw.failure);
+}
+
+function isCloudflareQueueMarkerEligible_(markerRaw, nowRaw) {
+	if (!isCloudflareQueueMarkerPending_(markerRaw)) return false;
+	const failure = normalizeCloudflareQueueFailure_(markerRaw && markerRaw.failure);
+	return !failure || !failure.nextAttemptAt || parseIsoToMs_(failure.nextAttemptAt) <= Number(nowRaw || Date.now());
+}
+
+function collectCloudflareQueueNextAttemptMs_(stateRaw) {
+	const state = normalizeCloudflarePublishQueueState_(stateRaw);
+	const attempts = [];
+	const add = function (marker) {
+		const failure = normalizeCloudflareQueueFailure_(marker && marker.failure);
+		const at = failure && !failure.deadLetter ? parseIsoToMs_(failure.nextAttemptAt) : 0;
+		if (at > Date.now()) attempts.push(at);
+	};
+	add(state.active);
+	Object.keys(state.dirty.events).forEach((key) => add(state.dirty.events[key]));
+	Object.keys(state.dirty.cwlAggregates).forEach((key) => { add(state.dirty.cwlAggregates[key].live); add(state.dirty.cwlAggregates[key].final); });
+	Object.keys(state.dirty.donationSeasons).forEach((key) => add(state.dirty.donationSeasons[key]));
+	add(state.dirty.cwlLeagueSignups); add(state.dirty.seasonPointers); add(state.dirty.repair); add(state.dirty.bootstrap);
+	const infrastructureAt = parseIsoToMs_(state.infrastructure.nextAttemptAt);
+	if (infrastructureAt > Date.now()) attempts.push(infrastructureAt);
+	return attempts.length ? Math.min.apply(Math, attempts) : 0;
+}
+
+function cloudflareQueueNextAttemptIso_(stateRaw) {
+	const at = collectCloudflareQueueNextAttemptMs_(stateRaw);
+	return at ? new Date(at).toISOString() : "";
 }
 
 function hasPendingCloudflarePublishWork_(stateRaw) {
 	const state = normalizeCloudflarePublishQueueState_(stateRaw);
-	if (state.active.targetVersionId && (state.active.targetVersionId !== state.active.committedVersionId || state.active.republish || state.active.phase !== "idle")) return true;
+	if (state.active.targetVersionId && (state.active.targetVersionId !== state.active.committedVersionId || state.active.republish || state.active.phase !== "idle") && !isCloudflareQueueFailureDead_(state.active.failure)) return true;
 	const dirty = state.dirty;
-	return Object.keys(dirty.events).length > 0 || Object.keys(dirty.cwlAggregates).length > 0 ||
-		Object.keys(dirty.donationSeasons).length > 0 || !!dirty.cwlLeagueSignups || !!dirty.seasonPointers ||
-		!!dirty.repair || !!dirty.bootstrap;
+	if (Object.keys(dirty.events).some((key) => isCloudflareQueueMarkerPending_(dirty.events[key]))) return true;
+	if (Object.keys(dirty.cwlAggregates).some((key) => isCloudflareQueueMarkerPending_(dirty.cwlAggregates[key].live) || isCloudflareQueueMarkerPending_(dirty.cwlAggregates[key].final))) return true;
+	if (Object.keys(dirty.donationSeasons).some((key) => isCloudflareQueueMarkerPending_(dirty.donationSeasons[key]))) return true;
+	return isCloudflareQueueMarkerPending_(dirty.cwlLeagueSignups) || isCloudflareQueueMarkerPending_(dirty.seasonPointers) ||
+		isCloudflareQueueMarkerPending_(dirty.repair) || isCloudflareQueueMarkerPending_(dirty.bootstrap);
 }
 
 function getCloudflareTriggerId_(propertyNameRaw) {
@@ -365,8 +502,10 @@ function getCloudflareTriggerCandidates_(handlerNameRaw) {
 	});
 }
 
-function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, desiredAtMsRaw) {
+function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, desiredAtMsRaw, optionsRaw) {
 	if (typeof ScriptApp === "undefined" || !ScriptApp || typeof ScriptApp.newTrigger !== "function") return { scheduled: false, reason: "scriptapp-unavailable" };
+	assertCloudflarePublishQueueDeadline_(15000, "Cloudflare trigger reconciliation");
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const desiredAtMs = Math.max(Date.now() + 1000, Number(desiredAtMsRaw) || Date.now() + 1000);
 	const properties = PropertiesService.getScriptProperties();
 	const candidates = getCloudflareTriggerCandidates_(handlerNameRaw);
@@ -376,13 +515,16 @@ function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, 
 	const toleranceMs = typeof CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS !== "undefined"
 		? Math.max(0, Number(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS) || 0)
 		: 30000;
-	const earliestReusableAtMs = Date.now() - toleranceMs;
 	// The stored timestamp is the only schedule timestamp Apps Script exposes.
-	// Reuse only when the known trigger is no later than the requested time,
-	// allowing a small clock/scheduler tolerance, and has not already gone
-	// stale in the past. A later, stale, or metadata-invalid trigger is replaced
-	// and all duplicates are removed.
-	if (configuredTrigger && configuredAtMs >= earliestReusableAtMs && configuredAtMs <= desiredAtMs + toleranceMs) {
+	// A continuation that Apps Script delayed is still an installed recovery
+	// path and remains reusable when it was requested no later than needed. A
+	// recovery watchdog has the opposite lower-bound rule: it may never run
+	// before the current lease expiry plus its safety margin.
+	const recoveryNotBeforeMs = Math.max(0, Number(options.recoveryNotBeforeMs) || 0);
+	const reusable = configuredTrigger && configuredAtMs > 0 && (recoveryNotBeforeMs > 0
+		? configuredAtMs >= recoveryNotBeforeMs
+		: configuredAtMs <= desiredAtMs + toleranceMs);
+	if (reusable) {
 		for (let i = 0; i < candidates.length; i++) if (candidates[i] !== configuredTrigger) { try { ScriptApp.deleteTrigger(candidates[i]); } catch (err) {} }
 		const triggerId = getTriggerUniqueId_(configuredTrigger);
 		if (triggerId) properties.setProperty(idPropertyRaw, triggerId);
@@ -390,9 +532,15 @@ function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, 
 		return { scheduled: true, reused: true, triggerId: triggerId, scheduledAt: new Date(configuredAtMs).toISOString() };
 	}
 	const delay = Math.max(1000, desiredAtMs - Date.now());
+	// Create first. If Apps Script refuses creation, every previous trigger and
+	// its local identity remain intact as the only recovery path.
 	const created = ScriptApp.newTrigger(handlerNameRaw).timeBased().after(delay).create();
-	for (let i = 0; i < candidates.length; i++) { try { ScriptApp.deleteTrigger(candidates[i]); } catch (err) {} }
 	const triggerId = getTriggerUniqueId_(created);
+	if (!triggerId) {
+		try { ScriptApp.deleteTrigger(created); } catch (err) {}
+		return { scheduled: false, degraded: true, reason: "created-trigger-missing-identity", preservedTriggerId: configuredId || "" };
+	}
+	for (let i = 0; i < candidates.length; i++) { try { ScriptApp.deleteTrigger(candidates[i]); } catch (err) {} }
 	if (triggerId) properties.setProperty(idPropertyRaw, triggerId);
 	properties.setProperty(atPropertyRaw, String(Date.now() + delay));
 	return { scheduled: true, reused: false, triggerId: triggerId, scheduledAt: new Date(Date.now() + delay).toISOString() };
@@ -406,6 +554,7 @@ function scheduleCloudflarePublishWorker_(ownerTokenRaw, pendingKnownRaw, notBef
 	if (ownerTokenRaw) assertCloudflarePublishQueueLeaseOwned_(ownerTokenRaw);
 	const nextAttemptMs = typeof notBeforeRaw === "number" ? notBeforeRaw : parseIsoToMs_(notBeforeRaw);
 	const desiredAtMs = Math.max(Date.now() + CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS, nextAttemptMs || 0);
+	assertCloudflarePublishQueueDeadline_(15000, "Cloudflare continuation scheduling");
 	const lock = LockService.getScriptLock();
 	lock.waitLock(10000);
 	try {
@@ -413,8 +562,17 @@ function scheduleCloudflarePublishWorker_(ownerTokenRaw, pendingKnownRaw, notBef
 	} finally { lock.releaseLock(); }
 }
 
-function scheduleCloudflarePublishWorkerRecovery_(pendingKnownRaw) {
+function scheduleCloudflarePublishWorkerRecovery_(pendingKnownRaw, leaseRaw) {
 	if (pendingKnownRaw === false || typeof ScriptApp === "undefined" || !ScriptApp) return { scheduled: false, reason: pendingKnownRaw === false ? "empty" : "scriptapp-unavailable" };
+	const lease = leaseRaw && typeof leaseRaw === "object" ? leaseRaw : {};
+	const leaseExpiresAt = Math.max(Date.now(), Number(lease.expiresAt) || 0);
+	const safetyMs = 60 * 1000;
+	const recoveryNotBeforeMs = leaseExpiresAt + safetyMs;
+	const desiredAtMs = Math.max(
+		recoveryNotBeforeMs,
+		Date.now() + cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS", 9 * 60 * 1000),
+	);
+	assertCloudflarePublishQueueDeadline_(15000, "Cloudflare recovery scheduling");
 	const lock = LockService.getScriptLock();
 	lock.waitLock(10000);
 	try {
@@ -422,9 +580,36 @@ function scheduleCloudflarePublishWorkerRecovery_(pendingKnownRaw) {
 			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_HANDLER_NAME", "cloudflarePublishWorkerRecoveryTick"),
 			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"),
 			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"),
-			Date.now() + cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS", 9 * 60 * 1000),
+			desiredAtMs,
+			{ recoveryNotBeforeMs: recoveryNotBeforeMs },
 		);
 	} finally { lock.releaseLock(); }
+}
+
+function consumeCloudflareFiredTriggerIdentity_(eventRaw, idPropertyRaw, atPropertyRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const firedId = String(event.triggerUid || event.triggerId || "").trim();
+	if (!firedId) return false;
+	const properties = PropertiesService.getScriptProperties();
+	if (String(properties.getProperty(idPropertyRaw) || "").trim() !== firedId) return false;
+	properties.deleteProperty(idPropertyRaw);
+	properties.deleteProperty(atPropertyRaw);
+	return true;
+}
+
+function markCloudflarePublishSchedulerRepair_(reasonRaw, nextAttemptAtRaw) {
+	const payload = {
+		pending: true,
+		reason: String(reasonRaw || "dynamic-scheduling-failed").slice(0, 500),
+		updatedAt: new Date().toISOString(),
+		nextAttemptAt: String(nextAttemptAtRaw || ""),
+	};
+	PropertiesService.getScriptProperties().setProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_, JSON.stringify(payload));
+	return payload;
+}
+
+function clearCloudflarePublishSchedulerRepair_() {
+	PropertiesService.getScriptProperties().deleteProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_);
 }
 
 function removeCloudflarePublishWorkerTriggers_(pendingKnownRaw) {
@@ -451,29 +636,78 @@ function removeCloudflarePublishWorkerTriggers_(pendingKnownRaw) {
 
 function scheduleCloudflareAfterMutation_(resultRaw) {
 	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
-	try { return scheduleCloudflarePublishWorker_(undefined, result.pending !== false, result.nextAttemptAt || ""); } catch (err) {
+	try {
+		const scheduled = scheduleCloudflarePublishWorker_(undefined, result.pending !== false, result.nextAttemptAt || "");
+		if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_();
+		else if (result.pending !== false) markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), result.nextAttemptAt || "");
+		return scheduled;
+	} catch (err) {
 		Logger.log("Cloudflare continuation scheduling failed: %s", errorMessage_(err));
+		if (result.pending !== false) markCloudflarePublishSchedulerRepair_(errorMessage_(err), result.nextAttemptAt || "");
 		return { scheduled: false, error: errorMessage_(err) };
 	}
 }
 
+function finalizeCloudflareEnqueueResult_(resultRaw) {
+	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
+	const scheduling = scheduleCloudflareAfterMutation_(result);
+	return Object.assign({}, result, {
+		queued: result.pending !== false,
+		scheduled: !!(scheduling && scheduling.scheduled),
+		degradedScheduling: result.pending !== false && !(scheduling && scheduling.scheduled),
+		scheduling: scheduling,
+	});
+}
+
+function isCloudflareSafeActiveVersionId_(versionIdRaw) {
+	return typeof isSafeActiveVersionId_ === "function"
+		? isSafeActiveVersionId_(versionIdRaw)
+		: /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(String(versionIdRaw || "").trim());
+}
+
+function migrateUnsafeCloudflareActiveVersion_(legacyVersionIdRaw, reasonRaw) {
+	const legacyVersionId = String(legacyVersionIdRaw || "").trim();
+	if (!legacyVersionId || isCloudflareSafeActiveVersionId_(legacyVersionId)) return { migrated: false, versionId: legacyVersionId };
+	if (typeof readLegacyActiveRosterSnapshotFromRawVersion_ !== "function" || typeof writeActiveRosterVersionShards_ !== "function") throw new Error("Unsafe active version migration requires canonical snapshot helpers.");
+	const safeVersionId = typeof createMigratedActiveVersionId_ === "function"
+		? createMigratedActiveVersionId_(legacyVersionId, "legacy-migration")
+		: "legacy-migration-" + String(hashCloudflareText_(legacyVersionId)).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32);
+	const snapshot = readLegacyActiveRosterSnapshotFromRawVersion_(legacyVersionId);
+	if (!snapshot || !snapshot.rosterData) throw new Error("Unsafe legacy active version snapshot is incomplete: " + legacyVersionId + ".");
+	const written = writeActiveRosterVersionShards_(safeVersionId, snapshot.rosterData, {
+		source: "unsafe-active-version-migration",
+		publish: false,
+		sourceVersionId: legacyVersionId,
+	});
+	return { migrated: true, legacyVersionId: legacyVersionId, versionId: safeVersionId, manifest: written && written.manifest || null, reason: String(reasonRaw || "unsafe-version") };
+}
+
 function enqueueCloudflareActiveTarget_(versionIdRaw, reasonRaw) {
-	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const requestedVersionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+	let migration = null;
+	let versionId = normalizeActiveVersionId_(requestedVersionId);
+	if (requestedVersionId && !isCloudflareSafeActiveVersionId_(requestedVersionId)) {
+		migration = migrateUnsafeCloudflareActiveVersion_(requestedVersionId, reasonRaw);
+		versionId = migration.versionId;
+	}
 	if (!versionId || !isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: !versionId ? "missing-version" : "disabled" };
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
-			if (state.active.targetVersionId !== versionId) {
+			if (state.active.targetVersionId !== versionId || isCloudflareQueueFailureDead_(state.active.failure)) {
+				Object.keys(state.deadLetters || {}).forEach(function (itemKey) { if ((state.deadLetters[itemKey] || {}).category === "active") delete state.deadLetters[itemKey]; });
 				state.active.targetVersionId = versionId;
 				state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
 				state.active.phase = "public-manifest-rosters";
 				state.active.cursor = 0;
 				state.active.dispatch = null;
+				state.active.failure = null;
+				state.active.migration = migration && migration.migrated ? { kind: "unsafe-version", sourceVersionId: migration.legacyVersionId, targetVersionId: versionId } : null;
 			}
+			if (migration && migration.migrated) state.versionMigrations[migration.legacyVersionId] = { safeVersionId: versionId, migratedAt: new Date().toISOString(), reason: String(reasonRaw || "unsafe-version") };
 			state.active.updatedAt = new Date().toISOString();
-			return { ok: true, versionId: versionId, generation: state.active.targetGeneration, pending: true, nextAttemptAt: state.retry.nextAttemptAt };
+			return { ok: true, versionId: versionId, generation: state.active.targetGeneration, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
-		scheduleCloudflareAfterMutation_(result);
-		return result;
+		return Object.assign(finalizeCloudflareEnqueueResult_(result), { migration: migration });
 	} catch (err) {
 		Logger.log("Cloudflare active target enqueue failed versionId=%s error=%s", versionId, errorMessage_(err));
 		return { ok: false, error: errorMessage_(err), versionId: versionId };
@@ -486,37 +720,55 @@ function enqueueCloudflareSeasonEventPublication_(eventIdRaw, reasonRaw, options
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
+			clearSupersededCloudflareDeadLetters_(state, "event", eventId, "");
 			state.dirty.events[eventId] = makeCloudflareDirtyRevision_(state, reasonRaw || "event-mutation", { eventId: eventId, category: "event" });
 			if (options.cwlLive === true || options.cwlFinal === true) {
 				const kinds = state.dirty.cwlAggregates[eventId] && typeof state.dirty.cwlAggregates[eventId] === "object" ? state.dirty.cwlAggregates[eventId] : {};
-				if (options.cwlLive === true) kinds.live = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-live", { eventId: eventId, kind: "live", category: "cwlAggregate" });
-				if (options.cwlFinal === true) kinds.final = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-final", { eventId: eventId, kind: "final", category: "cwlAggregate" });
+				if (options.cwlLive === true) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "live"); kinds.live = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-live", { eventId: eventId, kind: "live", category: "cwlAggregate" }); }
+				if (options.cwlFinal === true) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "final"); kinds.final = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-final", { eventId: eventId, kind: "final", category: "cwlAggregate" }); }
 				state.dirty.cwlAggregates[eventId] = kinds;
 			}
-			if (options.pointers === true) state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "event-pointers", { category: "seasonPointers" });
-			return { ok: true, eventId: eventId, revision: state.dirty.events[eventId].revision, pending: true, nextAttemptAt: state.retry.nextAttemptAt };
+			if (options.pointers === true) { clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", ""); state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "event-pointers", { category: "seasonPointers" }); }
+			return { ok: true, eventId: eventId, revision: state.dirty.events[eventId].revision, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
-		scheduleCloudflareAfterMutation_(result);
-		return result;
+		return finalizeCloudflareEnqueueResult_(result);
 	} catch (err) {
 		Logger.log("Cloudflare event enqueue failed eventId=%s error=%s", eventId, errorMessage_(err));
 		return { ok: false, error: errorMessage_(err), eventId: eventId };
 	}
 }
 
-function enqueueCloudflareRelevantSeasonPublication_(reasonRaw) {
+function mergeCloudflareRepairRequest_(state, reasonRaw, scopesRaw) {
+	const reason = String(reasonRaw || "targeted-repair").slice(0, 160);
+	const scopes = (Array.isArray(scopesRaw) ? scopesRaw : ["current", "previous"])
+		.map((value) => String(value || "").slice(0, 80)).filter(Boolean);
+	if (!state.dirty.repair) {
+		state.dirty.repair = makeCloudflareDirtyRevision_(state, reason, {
+			category: "repair", step: "discover", seasonIndex: 0, eventIndex: 0, donationIndex: 0,
+			seasonIds: [], eventIds: [], donationSeasonIds: [], reasons: [reason], scopes: scopes,
+			diagnostics: [],
+		});
+		return state.dirty.repair;
+	}
+	const repair = state.dirty.repair;
+	const reasons = (Array.isArray(repair.reasons) ? repair.reasons : [repair.reason]).concat([reason]);
+	repair.reasons = reasons.filter((value, index, all) => value && all.indexOf(value) === index).slice(-20);
+	repair.scopes = (Array.isArray(repair.scopes) ? repair.scopes : []).concat(scopes)
+		.filter((value, index, all) => value && all.indexOf(value) === index).slice(-20);
+	repair.updatedAt = new Date().toISOString();
+	return repair;
+}
+
+function enqueueCloudflareRelevantSeasonPublication_(reasonRaw, optionsRaw) {
 	if (!isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: "disabled" };
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
-			state.dirty.repair = makeCloudflareDirtyRevision_(state, reasonRaw || "targeted-repair", {
-				category: "repair", step: "discover", seasonIndex: 0, eventIndex: 0, donationIndex: 0,
-				seasonIds: [], eventIds: [], donationSeasonIds: [],
-			});
+			const repair = mergeCloudflareRepairRequest_(state, reasonRaw || "targeted-repair", options.scopes);
 			state.lastDriftRepairAt = new Date().toISOString();
-			return { ok: true, category: "repair", pending: true, nextAttemptAt: state.retry.nextAttemptAt };
+			return { ok: true, category: "repair", revision: repair.revision, reasons: repair.reasons.slice(), scopes: repair.scopes.slice(), pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
-		scheduleCloudflareAfterMutation_(result);
-		return result;
+		return finalizeCloudflareEnqueueResult_(result);
 	} catch (err) {
 		Logger.log("Cloudflare targeted repair enqueue failed error=%s", errorMessage_(err));
 		return { ok: false, error: errorMessage_(err) };
@@ -528,11 +780,11 @@ function enqueueCloudflareDonationSeasonPublication_(seasonIdRaw, reasonRaw) {
 	if (!seasonId || !isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: !seasonId ? "missing-season" : "disabled" };
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
+			clearSupersededCloudflareDeadLetters_(state, "donationSeason", seasonId, "");
 			state.dirty.donationSeasons[seasonId] = makeCloudflareDirtyRevision_(state, reasonRaw || "donation-refresh", { seasonId: seasonId, category: "donationSeason" });
-			return { ok: true, seasonId: seasonId, revision: state.dirty.donationSeasons[seasonId].revision, pending: true, nextAttemptAt: state.retry.nextAttemptAt };
+			return { ok: true, seasonId: seasonId, revision: state.dirty.donationSeasons[seasonId].revision, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
-		scheduleCloudflareAfterMutation_(result);
-		return result;
+		return finalizeCloudflareEnqueueResult_(result);
 	} catch (err) {
 		Logger.log("Cloudflare donation enqueue failed seasonId=%s error=%s", seasonId, errorMessage_(err));
 		return { ok: false, error: errorMessage_(err), seasonId: seasonId };
@@ -543,11 +795,11 @@ function enqueueCloudflareCwlLeagueSignupsPublication_(reasonRaw) {
 	if (!isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: "disabled" };
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
+			clearSupersededCloudflareDeadLetters_(state, "cwlLeagueSignups", "", "");
 			state.dirty.cwlLeagueSignups = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-signups", { category: "cwlLeagueSignups" });
-			return { ok: true, revision: state.dirty.cwlLeagueSignups.revision, pending: true, nextAttemptAt: state.retry.nextAttemptAt };
+			return { ok: true, revision: state.dirty.cwlLeagueSignups.revision, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
-		scheduleCloudflareAfterMutation_(result);
-		return result;
+		return finalizeCloudflareEnqueueResult_(result);
 	} catch (err) {
 		Logger.log("Cloudflare CWL signup enqueue failed error=%s", errorMessage_(err));
 		return { ok: false, error: errorMessage_(err) };
@@ -709,7 +961,10 @@ function sendCloudflareQueuedV2Request_(requestRaw, labelRaw, ownerTokenRaw) {
 	try { parsed = text ? JSON.parse(text) : null; } catch (err) { parsed = null; }
 	if (statusCode < 200 || statusCode >= 300 || !parsed || parsed.ok !== true) {
 		const failure = parsed && parsed.failed ? " failed=" + String(parsed.failed.scope || "") + ":" + String(parsed.failed.path || "") : "";
-		throw new Error(String((parsed && parsed.error) || ("Cloudflare v2 publish failed with HTTP " + statusCode + ".")) + failure);
+		const error = new Error(String((parsed && parsed.error) || ("Cloudflare v2 publish failed with HTTP " + statusCode + ".")) + failure);
+		error.publishFailure = parsed && parsed.failed || null;
+		error.publishResponse = parsed || null;
+		throw error;
 	}
 	Logger.log("Cloudflare queued publish label=%s batch=%s objects=%s deletes=%s commits=%s bytes=%s httpMs=%s status=%s", String(labelRaw || ""), String(request.batchId || ""), (request.objects || []).length, (request.deletes || []).length, (request.commits || []).length, payloadBytes, Math.max(0, Date.now() - startedAt), statusCode);
 	return { ok: true, response: parsed, statusCode: statusCode, payloadBytes: payloadBytes, durationMs: Math.max(0, Date.now() - startedAt) };
@@ -782,6 +1037,11 @@ function addCloudflareMirroredQueueDelete_(deletes, pathRaw) {
 	deletes.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "bot" });
 }
 
+function addCloudflareMirroredQueueCommitDelete_(commits, pathRaw) {
+	commits.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "public", delete: true });
+	commits.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "bot", delete: true });
+}
+
 function readDecodedCloudflareQueueObject_(pathRaw) {
 	assertCloudflarePublishQueueDeadline_(15000, "Firebase publication read");
 	const encoded = firebaseRequestJson_(pathRaw, "GET");
@@ -847,16 +1107,34 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 		assertCloudflarePublishQueueDeadline_(90000, "active bot payload reconstruction");
 		const snapshot = readActiveRosterSnapshotFromVersion_(versionId);
 		if (!snapshot || !snapshot.rosterData) throw new Error("Active target version is incomplete: " + versionId + ".");
-		const payload = Object.assign({}, snapshot.rosterData, { activeVersionId: versionId });
-		return { label: "active-bot-versioned-active", request: { batchId: "active:" + versionId + ":bot-active", objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/active", payload, "bot")] } };
+		const activeMeta = Object.assign({}, snapshot.rosterData, { activeVersionId: versionId });
+		const rosters = Array.isArray(activeMeta.rosters) ? activeMeta.rosters : [];
+		delete activeMeta.rosters;
+		delete activeMeta.playerMetrics;
+		const descriptor = {
+			schemaVersion: 2,
+			activeVersionId: versionId,
+			shardedActive: true,
+			activeMeta: activeMeta,
+			rostersPath: "activeVersions/" + encodedVersionId + "/rosters",
+			playerMetricsMetaPath: "activeVersions/" + encodedVersionId + "/playerMetrics/meta",
+			playerMetricsByTagPath: "activeVersions/" + encodedVersionId + "/playerMetrics/byTag",
+		};
+		return { label: "active-bot-versioned-active", request: { batchId: "active:" + versionId + ":bot-active", objects: [
+			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/active", descriptor, "bot"),
+			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/rosters", rosters, "bot"),
+		] } };
 	}
 	if (phase === "bot-derived") {
 		assertCloudflarePublishQueueDeadline_(60000, "active bot derived data");
 		const metrics = readDecodedCloudflareQueueObject_(typeof buildActiveVersionPath_ === "function" ? buildActiveVersionPath_(versionId, "playerMetrics") : buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionId), "playerMetrics")) || {};
 		const byTag = metrics.byTag && typeof metrics.byTag === "object" ? metrics.byTag : {};
+		const metricsMeta = Object.assign({}, metrics);
+		delete metricsMeta.byTag;
 		const linked = buildCloudflareLinkedAccountIndexes_({ playerMetrics: metrics });
 		return { label: "active-bot-derived", request: { batchId: "active:" + versionId + ":bot-derived", objects: [
 			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics/byTag", byTag, "bot"),
+			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics/meta", metricsMeta, "bot"),
 			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordId", linked.byDiscordId, "bot"),
 			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordUsername", linked.byDiscordUsername, "bot"),
 		] } };
@@ -869,7 +1147,9 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 			{ scope: "public", path: "activeVersions/" + encodedVersionId + "/rosters" },
 			{ scope: "public", path: "activeVersions/" + encodedVersionId + "/playerMetrics" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/active" },
+			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/rosters" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/playerMetrics/byTag" },
+			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/playerMetrics/meta" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordId" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordUsername" },
 		];
@@ -877,23 +1157,55 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 		const bootstrap = buildCloudflareQueuedBootstrapCommit_(state, versionId, manifest);
 		const selector = buildCloudflareCommittedVersionSelector_(state, versionId);
 		return { label: "active-atomic-pointer-commit", request: { batchId: "active:" + versionId + ":commit", commits: [
-			// The selector is the authoritative cross-scope commit. Publish it
-			// first; legacy pointers follow only for rollout compatibility.
-			makeCloudflareQueueObject_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_SELECTOR_PATH, selector, "public"),
+			// Compatibility/supporting metadata is idempotent and is written first.
+			// The one authoritative cross-scope selector is the final operation.
 			makeCloudflareQueueObject_("activePublished/currentManifest", manifest, "public"),
 			bootstrap && makeCloudflareQueueObject_(bootstrap.path, bootstrap.payload, "public"),
 			makeCloudflareQueueObject_("activePublished/currentVersionId", versionId, "public"),
 			makeCloudflareQueueObject_("active/currentVersionId", versionId, "bot"),
+			makeCloudflareQueueObject_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_SELECTOR_PATH, selector, "public"),
 		], commitGuard: { kind: "active", generation: state.active.targetGeneration, targetVersionId: versionId } } };
 	}
 	throw new Error("Unknown active publication phase: " + phase);
 }
 
+// Read-only instrumentation used by the sanitized production-shaped audit.
+// It invokes the exact phase builders and Worker-envelope normalization without
+// sending a request or mutating queue/Cloudflare state.
+function measureCloudflareActivePhasePayloads_(versionIdRaw, optionsRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	if (!versionId) throw new Error("Active version id is required for phase measurement.");
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const state = createEmptyCloudflarePublishQueueState_();
+	state.active.targetVersionId = versionId;
+	state.active.targetGeneration = Math.max(1, toNonNegativeInt_(options.generation) || 1);
+	state.active.committedVersionId = normalizeActiveVersionId_(options.previousVersionId);
+	const phases = ["public-manifest-rosters", "public-player-metrics", "bot-active", "bot-derived", "commit"];
+	return phases.map(function (phase) {
+		state.active.phase = phase;
+		const built = buildCloudflareActivePhaseRequest_(state, { phase: phase, cursor: 0, targetVersionId: versionId, generation: state.active.targetGeneration });
+		const request = Object.assign({ requestId: "measure", publishedAt: "2026-01-01T00:00:00.000Z" }, built.request);
+		const defaultScope = normalizeCloudflareDataScope_(request.scope || "public");
+		const publishedAt = request.publishedAt;
+		const objectBytes = (request.objects || []).map(function (entry) {
+			const normalized = normalizeCloudflareQueuePublishObjectForSize_(entry, defaultScope, publishedAt);
+			return { scope: normalized.scope, path: normalized.path.replace(/\.json$/i, ""), bytes: cloudflareQueueTextBytes_(normalized.payloadText) };
+		});
+		const commitBytes = (request.commits || []).map(function (entry) {
+			const normalized = normalizeCloudflareQueueCommitForSize_(entry, defaultScope, publishedAt);
+			return { scope: normalized.scope, path: normalized.path.replace(/\.json$/i, ""), operation: normalized.operation, bytes: cloudflareQueueTextBytes_(normalized.payloadText || "") };
+		});
+		return { phase: phase, label: built.label, objectBytes: objectBytes, commitBytes: commitBytes, envelopeBytes: cloudflareQueueNormalizedEnvelopeBytes_(request) };
+	});
+}
+
 function firstCloudflareDirtyWork_(stateRaw) {
 	const state = normalizeCloudflarePublishQueueState_(stateRaw);
-	if (state.dirty.repair) {
+	const now = Date.now();
+	let repairWork = null;
+	if (isCloudflareQueueMarkerEligible_(state.dirty.repair, now)) {
 		const repair = state.dirty.repair;
-		return Object.assign({
+		repairWork = Object.assign({
 			category: "repair",
 			revision: repair.revision,
 			step: repair.step,
@@ -903,23 +1215,28 @@ function firstCloudflareDirtyWork_(stateRaw) {
 			seasonIds: repair.seasonIds,
 			eventIds: repair.eventIds,
 			donationSeasonIds: repair.donationSeasonIds,
+			diagnostics: repair.diagnostics,
+			reasons: repair.reasons,
+			scopes: repair.scopes,
 		}, { dispatchKey: cloudflareRepairDispatchKey_(repair) });
 	}
 	const eventIds = Object.keys(state.dirty.events).sort();
-	if (eventIds.length) return { category: "event", key: eventIds[0], revision: state.dirty.events[eventIds[0]].revision };
+	let liveWork = null;
+	for (let i = 0; i < eventIds.length && !liveWork; i++) if (isCloudflareQueueMarkerEligible_(state.dirty.events[eventIds[i]], now)) liveWork = { category: "event", key: eventIds[i], revision: state.dirty.events[eventIds[i]].revision };
 	const aggregateEventIds = Object.keys(state.dirty.cwlAggregates).sort();
-	for (let i = 0; i < aggregateEventIds.length; i++) {
+	for (let i = 0; i < aggregateEventIds.length && !liveWork; i++) {
 		const eventId = aggregateEventIds[i];
 		const kinds = state.dirty.cwlAggregates[eventId] || {};
-		if (kinds.live) return { category: "cwlAggregate", key: eventId, kind: "live", revision: kinds.live.revision };
-		if (kinds.final) return { category: "cwlAggregate", key: eventId, kind: "final", revision: kinds.final.revision };
+		if (isCloudflareQueueMarkerEligible_(kinds.live, now)) liveWork = { category: "cwlAggregate", key: eventId, kind: "live", revision: kinds.live.revision };
+		else if (isCloudflareQueueMarkerEligible_(kinds.final, now)) liveWork = { category: "cwlAggregate", key: eventId, kind: "final", revision: kinds.final.revision };
 	}
 	const donationIds = Object.keys(state.dirty.donationSeasons).sort();
-	if (donationIds.length) return { category: "donationSeason", key: donationIds[0], revision: state.dirty.donationSeasons[donationIds[0]].revision };
-	if (state.dirty.cwlLeagueSignups) return { category: "cwlLeagueSignups", revision: state.dirty.cwlLeagueSignups.revision };
-	if (state.dirty.seasonPointers) return { category: "seasonPointers", revision: state.dirty.seasonPointers.revision };
-	if (state.dirty.bootstrap) return { category: "bootstrap", revision: state.dirty.bootstrap.revision };
-	return null;
+	for (let i = 0; i < donationIds.length && !liveWork; i++) if (isCloudflareQueueMarkerEligible_(state.dirty.donationSeasons[donationIds[i]], now)) liveWork = { category: "donationSeason", key: donationIds[i], revision: state.dirty.donationSeasons[donationIds[i]].revision };
+	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.cwlLeagueSignups, now)) liveWork = { category: "cwlLeagueSignups", revision: state.dirty.cwlLeagueSignups.revision };
+	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.seasonPointers, now)) liveWork = { category: "seasonPointers", revision: state.dirty.seasonPointers.revision };
+	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.bootstrap, now)) liveWork = { category: "bootstrap", revision: state.dirty.bootstrap.revision };
+	if (repairWork && (!liveWork || state.dirty.repairBurst < CLOUDFLARE_QUEUE_REPAIR_BURST_LIMIT_)) return repairWork;
+	return liveWork || repairWork;
 }
 
 function cloudflareRepairDispatchKey_(repairRaw) {
@@ -979,7 +1296,9 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 			seasonIndex: Math.max(0, toNonNegativeInt_(work.seasonIndex)),
 			eventIndex: Math.max(0, toNonNegativeInt_(work.eventIndex)),
 			donationIndex: Math.max(0, toNonNegativeInt_(work.donationIndex)),
+			diagnostics: Array.isArray(work.diagnostics) ? work.diagnostics.slice(-100) : [],
 		};
+	if (!Array.isArray(discovered.diagnostics)) discovered.diagnostics = Array.isArray(work.diagnostics) ? work.diagnostics.slice(-100) : [];
 	const commits = [];
 	const objects = [];
 	const deletes = [];
@@ -998,12 +1317,17 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 	if (discovered.step === "events" && discovered.eventIndex < discovered.eventIds.length) {
 		const eventId = discovered.eventIds[discovered.eventIndex];
 		const event = readSeasonEventById_(eventId);
-		if (!event) { const error = new Error("Referenced season event is missing: " + eventId); error.resumable = true; throw error; }
-		addCloudflareMirroredQueueObject_(objects, buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodeFirebaseObjectKey_(eventId)), event);
-		if (normalizeSeasonEventType_(event.type) === "cwl" && typeof readCwlSeasonEventAggregate_ === "function") {
+		const eventPath = buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodeFirebaseObjectKey_(eventId));
+		if (!event) {
+			addCloudflareMirroredQueueDelete_(deletes, eventPath);
+			["live", "final"].forEach((kind) => addCloudflareMirroredQueueDelete_(deletes, buildCwlSeasonEventAggregatePath_(eventId, kind)));
+			discovered.diagnostics = discovered.diagnostics.concat([{ at: new Date().toISOString(), category: "missing-historical-event", eventId: eventId }]).slice(-100);
+		} else addCloudflareMirroredQueueObject_(objects, eventPath, event);
+		if (event && normalizeSeasonEventType_(event.type) === "cwl" && typeof readCwlSeasonEventAggregate_ === "function") {
 			["live", "final"].forEach((kind) => {
 				const aggregate = readCwlSeasonEventAggregate_(eventId, kind);
 				if (aggregate && aggregate.eventId) addCloudflareMirroredQueueObject_(objects, buildCwlSeasonEventAggregatePath_(eventId, kind), projectCloudflareCwlAggregateForEvent_(event, aggregate, kind));
+				else addCloudflareMirroredQueueDelete_(deletes, buildCwlSeasonEventAggregatePath_(eventId, kind));
 			});
 		}
 		repairAdvance = Object.assign({}, discovered, {
@@ -1014,8 +1338,10 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		const seasonId = discovered.seasonIds[discovered.seasonIndex];
 		const seasonPath = buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, encodeFirebaseObjectKey_(seasonId));
 		const seasonPointers = readDecodedCloudflareQueueObject_(seasonPath);
-		if (!seasonPointers) { const error = new Error("Referenced season pointer map is missing: " + seasonId); error.resumable = true; throw error; }
-		addCloudflareMirroredQueueObject_(objects, seasonPath, seasonPointers);
+		if (!seasonPointers) {
+			addCloudflareMirroredQueueDelete_(deletes, seasonPath);
+			discovered.diagnostics = discovered.diagnostics.concat([{ at: new Date().toISOString(), category: "missing-historical-season-map", seasonId: seasonId }]).slice(-100);
+		} else addCloudflareMirroredQueueObject_(objects, seasonPath, seasonPointers);
 		repairAdvance = Object.assign({}, discovered, {
 			seasonIndex: discovered.seasonIndex + 1,
 			step: discovered.seasonIndex + 1 >= discovered.seasonIds.length ? "donations" : "season-maps",
@@ -1113,7 +1439,7 @@ function clearCloudflareDirtyWorkIfRevisionMatches_(state, workRaw) {
 	else if (work.category === "repair") {
 		if (state.dirty.repair && toNonNegativeInt_(state.dirty.repair.revision) === revision) {
 			const advance = work.repairAdvance && typeof work.repairAdvance === "object" ? work.repairAdvance : null;
-			if (!advance || advance.step === "done") state.dirty.repair = null;
+			if (!advance || advance.step === "done") { state.dirty.repair = null; state.dirty.repairBurst = 0; }
 			else state.dirty.repair = Object.assign({}, state.dirty.repair, {
 				step: advance.step,
 				seasonIndex: Math.max(0, toNonNegativeInt_(advance.seasonIndex)),
@@ -1122,6 +1448,9 @@ function clearCloudflareDirtyWorkIfRevisionMatches_(state, workRaw) {
 				seasonIds: Array.isArray(advance.seasonIds) ? advance.seasonIds.slice() : [],
 				eventIds: Array.isArray(advance.eventIds) ? advance.eventIds.slice() : [],
 				donationSeasonIds: Array.isArray(advance.donationSeasonIds) ? advance.donationSeasonIds.slice() : [],
+				diagnostics: Array.isArray(advance.diagnostics) ? advance.diagnostics.slice(-100) : (state.dirty.repair.diagnostics || []),
+				failure: null,
+				dispatch: null,
 				updatedAt: new Date().toISOString(),
 			});
 		}
@@ -1129,25 +1458,96 @@ function clearCloudflareDirtyWorkIfRevisionMatches_(state, workRaw) {
 }
 
 function resetCloudflareQueueRetry_(state, batchRaw) {
-	state.retry = { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "", permanent: false };
+	state.infrastructure = { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "" };
 	state.lastSuccessAt = new Date().toISOString();
 	state.lastBatch = batchRaw && typeof batchRaw === "object" ? batchRaw : null;
 }
 
-function recordCloudflareQueueFailure_(messageRaw, batchRaw, ownerTokenRaw) {
+function cloudflareQueueClaimItemKey_(claimRaw) {
+	const claim = claimRaw && typeof claimRaw === "object" ? claimRaw : {};
+	if (claim.category === "active") return ["active", claim.targetVersionId, claim.generation, claim.phase, claim.cursor].join(":");
+	return [claim.category || "unknown", claim.key || "", claim.kind || "", claim.revision || 0, claim.dispatchKey || claim.cursor || 0].join(":");
+}
+
+function getCloudflareQueueClaimMarker_(state, claimRaw) {
+	const claim = claimRaw && typeof claimRaw === "object" ? claimRaw : {};
+	if (claim.category === "active") {
+		if (state.active.targetVersionId !== claim.targetVersionId || state.active.targetGeneration !== claim.generation || state.active.phase !== claim.phase || state.active.cursor !== claim.cursor) return null;
+		return state.active;
+	}
+	if (claim.category === "event") return state.dirty.events[claim.key] || null;
+	if (claim.category === "cwlAggregate") return state.dirty.cwlAggregates[claim.key] && state.dirty.cwlAggregates[claim.key][claim.kind] || null;
+	if (claim.category === "donationSeason") return state.dirty.donationSeasons[claim.key] || null;
+	if (claim.category === "cwlLeagueSignups") return state.dirty.cwlLeagueSignups;
+	if (claim.category === "seasonPointers") return state.dirty.seasonPointers;
+	if (claim.category === "repair") return state.dirty.repair;
+	if (claim.category === "bootstrap") return state.dirty.bootstrap;
+	return null;
+}
+
+function advanceCloudflareRepairPastDeadLetter_(repair) {
+	if (!repair) return;
+	if (repair.step === "events") repair.eventIndex = Math.max(0, toNonNegativeInt_(repair.eventIndex)) + 1;
+	else if (repair.step === "season-maps") repair.seasonIndex = Math.max(0, toNonNegativeInt_(repair.seasonIndex)) + 1;
+	else if (repair.step === "donations") repair.donationIndex = Math.max(0, toNonNegativeInt_(repair.donationIndex)) + 1;
+	else if (repair.step === "pointers") repair.step = "done";
+	if (repair.step === "events" && repair.eventIndex >= (repair.eventIds || []).length) repair.step = "season-maps";
+	if (repair.step === "season-maps" && repair.seasonIndex >= (repair.seasonIds || []).length) repair.step = "donations";
+	if (repair.step === "donations" && repair.donationIndex >= (repair.donationSeasonIds || []).length) repair.step = "pointers";
+	repair.failure = null;
+	repair.dispatch = null;
+	repair.updatedAt = new Date().toISOString();
+}
+
+function recordCloudflareQueueFailure_(messageRaw, batchRaw, ownerTokenRaw, claimRaw) {
 	const message = String(messageRaw || "Cloudflare publication failed.").slice(0, 2000);
-	const permanent = /cannot fit|hard limit|payload limit|roster count exceeds/i.test(message);
+	const claim = claimRaw && typeof claimRaw === "object" ? claimRaw : null;
+	if (!claim) return recordCloudflareInfrastructureFailure_(message, batchRaw, ownerTokenRaw);
+	const permanent = /cannot fit|hard limit|payload limit|roster count exceeds|invalid publish object|malformed|unsupported/i.test(message);
 	return mutateCloudflarePublishQueueState_(function (state) {
-		const attempt = Math.max(0, toNonNegativeInt_(state.retry.attempt)) + 1;
+		const marker = getCloudflareQueueClaimMarker_(state, claim);
+		if (!marker) return { stale: true, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+		if (claim.category !== "active" && toNonNegativeInt_(marker.revision) !== toNonNegativeInt_(claim.revision)) return { stale: true, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+		const previous = normalizeCloudflareQueueFailure_(marker.failure);
+		const itemKey = cloudflareQueueClaimItemKey_(claim);
+		const attempt = previous && previous.itemKey === itemKey ? previous.attempt + 1 : 1;
 		const delay = Math.min(CLOUDFLARE_PUBLISH_QUEUE_MAX_RETRY_MS, CLOUDFLARE_PUBLISH_QUEUE_BASE_RETRY_MS * Math.pow(2, Math.min(10, attempt - 1)));
-		state.retry.attempt = attempt;
-		state.retry.nextAttemptAt = permanent ? "" : new Date(Date.now() + delay).toISOString();
-		state.retry.lastError = message;
-		state.retry.lastFailureAt = new Date().toISOString();
-		state.retry.permanent = permanent;
-		if (permanent) state.paused = true;
+		const deadLetter = permanent || attempt >= CLOUDFLARE_QUEUE_ITEM_MAX_ATTEMPTS_;
+		const failed = batchRaw && batchRaw.failed && typeof batchRaw.failed === "object" ? batchRaw.failed : {};
+		marker.failure = {
+			revision: claim.category === "active" ? claim.generation : claim.revision,
+			itemKey: itemKey,
+			attempt: attempt,
+			nextAttemptAt: deadLetter ? "" : new Date(Date.now() + delay).toISOString(),
+			lastError: message,
+			lastFailureAt: new Date().toISOString(),
+			deadLetter: deadLetter,
+			permanent: permanent,
+			scope: String(failed.scope || ""),
+			path: String(failed.path || ""),
+		};
+		marker.dispatch = null;
+		if (deadLetter) {
+			state.deadLetters[itemKey] = Object.assign({}, marker.failure, { category: claim.category, key: claim.key || "", kind: claim.kind || "" });
+			if (claim.category === "repair") {
+				marker.diagnostics = (Array.isArray(marker.diagnostics) ? marker.diagnostics : []).concat([{ at: new Date().toISOString(), category: "repair-dead-letter", itemKey: itemKey, error: message }]).slice(-100);
+				advanceCloudflareRepairPastDeadLetter_(marker);
+				if (marker.step === "done") state.dirty.repair = null;
+			}
+		}
 		state.lastBatch = batchRaw && typeof batchRaw === "object" ? batchRaw : null;
-		return { attempt: attempt, nextAttemptAt: state.retry.nextAttemptAt, permanent: permanent, pending: !permanent || hasPendingCloudflarePublishWork_(state) };
+		return { attempt: attempt, nextAttemptAt: cloudflareQueueNextAttemptIso_(state), permanent: permanent, deadLetter: deadLetter, itemKey: itemKey, pending: hasPendingCloudflarePublishWork_(state) };
+	}, ownerTokenRaw);
+}
+
+function recordCloudflareInfrastructureFailure_(messageRaw, batchRaw, ownerTokenRaw) {
+	const message = String(messageRaw || "Cloudflare publication infrastructure failed.").slice(0, 2000);
+	return mutateCloudflarePublishQueueState_(function (state) {
+		const attempt = Math.max(0, toNonNegativeInt_(state.infrastructure.attempt)) + 1;
+		const delay = Math.min(CLOUDFLARE_PUBLISH_QUEUE_MAX_RETRY_MS, CLOUDFLARE_PUBLISH_QUEUE_BASE_RETRY_MS * Math.pow(2, Math.min(10, attempt - 1)));
+		state.infrastructure = { attempt: attempt, nextAttemptAt: new Date(Date.now() + delay).toISOString(), lastError: message, lastFailureAt: new Date().toISOString() };
+		state.lastBatch = batchRaw && typeof batchRaw === "object" ? batchRaw : null;
+		return { attempt: attempt, nextAttemptAt: state.infrastructure.nextAttemptAt, infrastructure: true, pending: hasPendingCloudflarePublishWork_(state) };
 	}, ownerTokenRaw);
 }
 
@@ -1157,6 +1557,7 @@ function allocateCloudflarePhaseClaim_(stateRaw, workRaw, ownerTokenRaw) {
 	return mutateCloudflarePublishQueueState_(function (latest) {
 		if (work && work.category === "active") {
 			if (latest.active.targetVersionId !== state.active.targetVersionId || latest.active.targetGeneration !== state.active.targetGeneration) return { stale: true };
+			if (!isCloudflareQueueMarkerEligible_(latest.active, Date.now())) return { deferred: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(latest) };
 			const phase = latest.active.phase;
 			const cursor = latest.active.cursor;
 			const existing = latest.active.dispatch;
@@ -1175,6 +1576,7 @@ function allocateCloudflarePhaseClaim_(stateRaw, workRaw, ownerTokenRaw) {
 				? marker && marker[work.key] && marker[work.key][work.kind]
 				: marker;
 		if (!currentMarker || toNonNegativeInt_(currentMarker.revision) !== toNonNegativeInt_(work.revision)) return { stale: true };
+		if (!isCloudflareQueueMarkerEligible_(currentMarker, Date.now())) return { deferred: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(latest) };
 		const dispatchKey = work.category === "repair" ? cloudflareRepairDispatchKey_(work) : String(work.cursor || 0);
 		if (currentMarker.dispatch && currentMarker.dispatch.revision === work.revision && currentMarker.dispatch.key === dispatchKey) return Object.assign({}, work, { dispatchGuard: currentMarker.dispatch.guard });
 		latest.nextDispatchGeneration = Math.max(Math.max(0, toNonNegativeInt_(latest.nextDispatchGeneration)) + 1, Date.now());
@@ -1185,25 +1587,43 @@ function allocateCloudflarePhaseClaim_(stateRaw, workRaw, ownerTokenRaw) {
 	}, ownerTokenRaw);
 }
 
+function reconcileCloudflareAcceptedCommit_(state, sentRaw) {
+	const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
+	const accepted = response.acceptedCommit && typeof response.acceptedCommit === "object" ? response.acceptedCommit : null;
+	if (!accepted) return null;
+	const generation = Math.max(0, toNonNegativeInt_(accepted.generation));
+	const versionId = normalizeActiveVersionId_(accepted.targetVersionId);
+	if (!generation || !versionId || generation < Math.max(0, toNonNegativeInt_(state.active.committedGeneration))) return null;
+	state.active.committedVersionId = versionId;
+	state.active.committedGeneration = generation;
+	return { generation: generation, targetVersionId: versionId, committedAt: String(accepted.committedAt || "") };
+}
+
 function completeCloudflareActivePhase_(claimRaw, sentRaw, ownerTokenRaw) {
 	const claim = claimRaw && typeof claimRaw === "object" ? claimRaw : {};
 	return mutateCloudflarePublishQueueState_(function (state) {
-		if (state.active.targetVersionId !== claim.targetVersionId || state.active.targetGeneration !== claim.generation || state.active.phase !== claim.phase || state.active.cursor !== claim.cursor) return { stale: true, pending: hasPendingCloudflarePublishWork_(state) };
+		const acceptedCommit = reconcileCloudflareAcceptedCommit_(state, sentRaw);
+		if (state.active.targetVersionId !== claim.targetVersionId || state.active.targetGeneration !== claim.generation || state.active.phase !== claim.phase || state.active.cursor !== claim.cursor) {
+			return { stale: true, acceptedCommit: acceptedCommit, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+		}
 		state.active.dispatch = null;
+		state.active.failure = null;
 		if (claim.phase === "public-manifest-rosters") state.active.phase = "public-player-metrics";
 		else if (claim.phase === "public-player-metrics") state.active.phase = "bot-active";
 		else if (claim.phase === "bot-active") state.active.phase = "bot-derived";
 		else if (claim.phase === "bot-derived") state.active.phase = "commit";
 		else if (claim.phase === "commit") {
 			state.active.committedVersionId = claim.targetVersionId;
+			state.active.committedGeneration = Math.max(state.active.committedGeneration, claim.generation);
 			state.active.phase = "idle";
 			state.active.cursor = 0;
 			state.active.republish = false;
+			state.active.migration = null;
 		}
 		state.active.updatedAt = new Date().toISOString();
 		state.active.activeBurst = Math.max(0, toNonNegativeInt_(state.active.activeBurst)) + 1;
 		resetCloudflareQueueRetry_(state, { category: "active", phase: claim.phase, targetVersionId: claim.targetVersionId, response: sentRaw && sentRaw.response });
-		return { ok: true, category: "active", phase: claim.phase, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: state.retry.nextAttemptAt };
+		return { ok: true, category: "active", phase: claim.phase, acceptedCommit: acceptedCommit, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 	}, ownerTokenRaw);
 }
 
@@ -1214,8 +1634,9 @@ function completeCloudflareDirtyPhase_(claimRaw, sentRaw, ownerTokenRaw) {
 		if (!current || current.category !== claim.category || toNonNegativeInt_(current.revision) !== toNonNegativeInt_(claim.revision) || (claim.category === "repair" && current.dispatchKey !== claim.dispatchKey)) return { stale: true, pending: hasPendingCloudflarePublishWork_(state) };
 		clearCloudflareDirtyWorkIfRevisionMatches_(state, claim);
 		state.active.activeBurst = 0;
+		state.dirty.repairBurst = claim.category === "repair" ? Math.max(0, toNonNegativeInt_(state.dirty.repairBurst)) + 1 : 0;
 		resetCloudflareQueueRetry_(state, { category: claim.category, revision: claim.revision, cursor: claim.cursor, response: sentRaw && sentRaw.response });
-		return { ok: true, category: claim.category, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: state.retry.nextAttemptAt };
+		return { ok: true, category: claim.category, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 	}, ownerTokenRaw);
 }
 
@@ -1246,16 +1667,26 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw) {
 	const state = normalizeCloudflarePublishQueueState_(stateRaw);
 	const claim = allocateCloudflarePhaseClaim_(state, { category: "active" }, ownerTokenRaw);
 	if (!claim || claim.stale) return { ok: true, skipped: true, reason: "superseded" };
-	const built = buildCloudflareActivePhaseRequest_(state, claim);
-	const request = Object.assign({}, built.request, { dispatchGuard: claim.dispatchGuard, revision: claim.generation });
-	request.batchId = claim.dispatchGuard.batchId;
-	if (claim.phase === "commit") request.commitGuard = { kind: "active", generation: claim.generation, targetVersionId: claim.targetVersionId };
-	if (claim.phase === "commit" && !isCloudflareActiveCommitClaimCurrent_(claim, ownerTokenRaw)) {
-		return { ok: true, skipped: true, reason: "superseded" };
+	if (claim.deferred) return { ok: true, skipped: true, reason: "backoff", nextAttemptAt: claim.nextAttemptAt };
+	cloudflarePublishQueueCurrentClaim_ = claim;
+	try {
+		const built = buildCloudflareActivePhaseRequest_(state, claim);
+		const request = Object.assign({}, built.request, { dispatchGuard: claim.dispatchGuard, revision: claim.generation });
+		request.batchId = claim.dispatchGuard.batchId;
+		if (claim.phase === "commit") request.commitGuard = { kind: "active", generation: claim.generation, targetVersionId: claim.targetVersionId };
+		if (claim.phase === "commit" && !isCloudflareActiveCommitClaimCurrent_(claim, ownerTokenRaw)) {
+			return { ok: true, skipped: true, reason: "superseded" };
+		}
+		if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+		const sent = sendCloudflareQueuedV2Request_(request, built.label, ownerTokenRaw);
+		return completeCloudflareActivePhase_(claim, sent, ownerTokenRaw);
+	} catch (err) {
+		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE")) throw err;
+		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: "active", phase: claim.phase, targetVersionId: claim.targetVersionId, failed: err && err.publishFailure || null }, ownerTokenRaw, claim);
+		return { ok: false, error: errorMessage_(err), failure: failure, claim: claim };
+	} finally {
+		cloudflarePublishQueueCurrentClaim_ = null;
 	}
-	if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
-	const sent = sendCloudflareQueuedV2Request_(request, built.label, ownerTokenRaw);
-	return completeCloudflareActivePhase_(claim, sent, ownerTokenRaw);
 }
 
 function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw) {
@@ -1264,46 +1695,56 @@ function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw) {
 	if (!work) return { ok: true, skipped: true, reason: "empty" };
 	const claim = allocateCloudflarePhaseClaim_(state, work, ownerTokenRaw);
 	if (!claim || claim.stale) return { ok: true, skipped: true, reason: "superseded" };
-	const built = buildCloudflareDirtyRequest_(state, claim);
-	const request = Object.assign({}, built, { dispatchGuard: claim.dispatchGuard, revision: claim.revision, batchId: claim.dispatchGuard.batchId });
-	if (claim.category === "repair") {
-		claim.repairAdvance = built.repairAdvance || null;
-		delete request.repairAdvance;
+	if (claim.deferred) return { ok: true, skipped: true, reason: "backoff", nextAttemptAt: claim.nextAttemptAt };
+	cloudflarePublishQueueCurrentClaim_ = claim;
+	try {
+		const built = buildCloudflareDirtyRequest_(state, claim);
+		const request = Object.assign({}, built, { dispatchGuard: claim.dispatchGuard, revision: claim.revision, batchId: claim.dispatchGuard.batchId });
+		if (claim.category === "repair") {
+			claim.repairAdvance = built.repairAdvance || null;
+			delete request.repairAdvance;
+		}
+		if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+		const sent = sendCloudflareQueuedV2Request_(request, built.label || claim.category, ownerTokenRaw);
+		return completeCloudflareDirtyPhase_(claim, sent, ownerTokenRaw);
+	} catch (err) {
+		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE")) throw err;
+		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: claim.category, revision: claim.revision, failed: err && err.publishFailure || null }, ownerTokenRaw, claim);
+		return { ok: false, error: errorMessage_(err), failure: failure, claim: claim };
+	} finally {
+		cloudflarePublishQueueCurrentClaim_ = null;
 	}
-	if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
-	const sent = sendCloudflareQueuedV2Request_(request, built.label || claim.category, ownerTokenRaw);
-	return completeCloudflareDirtyPhase_(claim, sent, ownerTokenRaw);
 }
 
-function markCloudflarePublishQueueReconstructionDirty_(state, reasonRaw, canonicalVersionIdRaw) {
-	const canonicalVersionId = normalizeActiveVersionId_(canonicalVersionIdRaw);
+function markCloudflarePublishQueueReconstructionDirty_(state, reasonRaw, canonicalVersionIdRaw, scopesRaw) {
+	const canonicalSourceVersionId = normalizeActiveVersionId_(canonicalVersionIdRaw);
+	const botRepairMigration = state.versionMigrations && state.versionMigrations["bot-repair:" + canonicalSourceVersionId];
+	const mappedVersionId = normalizeActiveVersionId_(botRepairMigration && botRepairMigration.safeVersionId);
+	const canonicalVersionId = mappedVersionId && state.active.committedVersionId === mappedVersionId ? mappedVersionId : canonicalSourceVersionId;
 	if (canonicalVersionId && state.active.targetVersionId !== canonicalVersionId && state.active.committedVersionId !== canonicalVersionId) {
 		state.active.targetVersionId = canonicalVersionId;
 		state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
 		state.active.phase = "public-manifest-rosters";
 		state.active.cursor = 0;
 		state.active.dispatch = null;
+		state.active.failure = null;
 	}
-	state.dirty.repair = makeCloudflareDirtyRevision_(state, reasonRaw || "drift-repair", {
-		category: "repair", step: "discover", seasonIndex: 0, eventIndex: 0, donationIndex: 0,
-		seasonIds: [], eventIds: [], donationSeasonIds: [],
-	});
-	state.dirty.cwlLeagueSignups = makeCloudflareDirtyRevision_(state, reasonRaw || "drift-repair", { category: "cwlLeagueSignups" });
+	const repair = mergeCloudflareRepairRequest_(state, reasonRaw || "drift-repair", scopesRaw || ["current", "previous"]);
+	if (!state.dirty.cwlLeagueSignups) state.dirty.cwlLeagueSignups = makeCloudflareDirtyRevision_(state, reasonRaw || "drift-repair", { category: "cwlLeagueSignups" });
 	state.lastDriftRepairAt = new Date().toISOString();
-	return { active: canonicalVersionId ? { ok: true, versionId: canonicalVersionId } : { ok: true, skipped: true, reason: "missing-canonical-version" }, repair: { ok: true, category: "repair" }, signups: { ok: true, category: "cwlLeagueSignups" } };
+	return { active: canonicalVersionId ? { ok: true, versionId: canonicalVersionId } : { ok: true, skipped: true, reason: "missing-canonical-version" }, repair: { ok: true, category: "repair", revision: repair.revision, reasons: repair.reasons }, signups: { ok: true, category: "cwlLeagueSignups" }, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 }
 
-function repairCloudflarePublishQueueDrift_(ownerTokenRaw, canonicalVersionOverrideRaw) {
+function repairCloudflarePublishQueueDrift_(ownerTokenRaw, canonicalVersionOverrideRaw, optionsRaw) {
 	if (!isCloudflareQueuedPublicationEnabled_()) return { ok: false, skipped: true, reason: "disabled" };
 	const canonicalVersionId = normalizeActiveVersionId_(canonicalVersionOverrideRaw) || readPublishedActiveVersionId_();
-	try {
-		const result = mutateCloudflarePublishQueueState_(function (state) { return markCloudflarePublishQueueReconstructionDirty_(state, "drift-repair", canonicalVersionId); }, ownerTokenRaw);
-		const scheduled = scheduleCloudflareAfterMutation_({ pending: true });
-		return { ok: true, active: result.active, repair: result.repair, signups: result.signups, scheduled: scheduled };
-	} catch (err) { return { ok: false, error: errorMessage_(err) }; }
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const reason = String(options.reason || "drift-repair");
+	const result = mutateCloudflarePublishQueueState_(function (state) { return markCloudflarePublishQueueReconstructionDirty_(state, reason, canonicalVersionId, options.scopes); }, ownerTokenRaw);
+	return { ok: true, active: result.active, repair: result.repair, signups: result.signups, pending: result.pending, nextAttemptAt: result.nextAttemptAt };
 }
 
-function cloudflarePublishWorkerTick() {
+function cloudflarePublishWorkerTick(eventRaw, triggerKindRaw) {
 	const startedAtMs = Date.now();
 	const lease = tryAcquireCloudflarePublishQueueLease_("cloudflare-publish-worker", 0);
 	// This branch is intentionally before every Firebase, Cloudflare, trigger,
@@ -1314,16 +1755,19 @@ function cloudflarePublishWorkerTick() {
 	let result = null;
 	try {
 		if (!isCloudflareQueuedPublicationEnabled_()) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, skipped: true, reason: "disabled" }; }
+		const triggerKind = String(triggerKindRaw || "continuation");
+		if (triggerKind === "recovery") consumeCloudflareFiredTriggerIdentity_(eventRaw, cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"), cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"));
+		else consumeCloudflareFiredTriggerIdentity_(eventRaw, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY);
 		// Recovery is installed from local trigger state before the first remote
 		// read. It protects a hard-killed owner without reading queue state.
-		scheduleCloudflarePublishWorkerRecovery_(true);
+		scheduleCloudflarePublishWorkerRecovery_(true, lease);
 		let state = readCloudflarePublishQueueState_();
 		if (state.paused) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, skipped: true, reason: "paused" }; }
-		if (state.retry.permanent) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: false, skipped: true, reason: "permanent-size-failure", error: state.retry.lastError }; }
-		if (parseIsoToMs_(state.retry.nextAttemptAt) > Date.now()) {
+		if (parseIsoToMs_(state.infrastructure.nextAttemptAt) > Date.now()) {
 			finalPendingKnown = hasPendingCloudflarePublishWork_(state);
-			scheduleCloudflarePublishWorker_(lease.token, finalPendingKnown, state.retry.nextAttemptAt);
-			return { ok: true, skipped: true, reason: "backoff", nextAttemptAt: state.retry.nextAttemptAt };
+			const scheduled = scheduleCloudflarePublishWorker_(lease.token, finalPendingKnown, state.infrastructure.nextAttemptAt);
+			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), state.infrastructure.nextAttemptAt);
+			return { ok: true, skipped: true, reason: "infrastructure-backoff", nextAttemptAt: state.infrastructure.nextAttemptAt };
 		}
 		if (!hasPendingCloudflarePublishWork_(state)) {
 			const driftAge = Date.now() - parseIsoToMs_(state.lastDriftRepairAt);
@@ -1333,26 +1777,35 @@ function cloudflarePublishWorkerTick() {
 			}
 		}
 		if (!hasPendingCloudflarePublishWork_(state)) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, pending: false, results: [] }; }
-		const activePending = state.active.targetVersionId && (state.active.targetVersionId !== state.active.committedVersionId || state.active.republish || state.active.phase !== "idle");
+		const activePending = state.active.targetVersionId && (state.active.targetVersionId !== state.active.committedVersionId || state.active.republish || state.active.phase !== "idle") && !isCloudflareQueueFailureDead_(state.active.failure);
+		const activeEligible = activePending && isCloudflareQueueMarkerEligible_(state.active, Date.now());
 		const dirty = firstCloudflareDirtyWork_(state);
-		const dirtyEligible = dirty && (!activePending || state.active.phase === "commit" || state.active.activeBurst >= cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY", 3));
+		const dirtyEligible = dirty && (!activeEligible || state.active.phase === "commit" || state.active.activeBurst >= cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY", 3));
 		if (dirtyEligible && state.active.phase !== "commit") result = processCloudflareDirtyQueueRequest_(state, lease.token);
-		else if (activePending) result = processCloudflareActiveQueueRequest_(state, lease.token);
-		else result = processCloudflareDirtyQueueRequest_(state, lease.token);
+		else if (activeEligible) result = processCloudflareActiveQueueRequest_(state, lease.token);
+		else if (dirty) result = processCloudflareDirtyQueueRequest_(state, lease.token);
+		else result = { ok: true, skipped: true, reason: "item-backoff", nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		state = readCloudflarePublishQueueState_();
 		finalPendingKnown = hasPendingCloudflarePublishWork_(state);
-		if (finalPendingKnown) scheduleCloudflarePublishWorker_(lease.token, true, state.retry.nextAttemptAt);
+		if (finalPendingKnown) {
+			const nextAttemptAt = cloudflareQueueNextAttemptIso_(state);
+			const scheduled = scheduleCloudflarePublishWorker_(lease.token, true, nextAttemptAt);
+			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), nextAttemptAt);
+		}
 		else removeCloudflarePublishWorkerTriggers_(false);
 		return { ok: !result || result.ok !== false, results: result ? [result] : [], pending: finalPendingKnown };
 	} catch (err) {
 		if (err && err.code === "CLOUDFLARE_QUEUE_LEASE_LOST") return { ok: false, skipped: true, reason: "lease-lost", error: errorMessage_(err) };
 		let retry = null;
-		try { retry = recordCloudflareQueueFailure_(errorMessage_(err), { error: errorMessage_(err) }, lease.token); } catch (recordErr) {
+		try { retry = recordCloudflareInfrastructureFailure_(errorMessage_(err), { error: errorMessage_(err) }, lease.token); } catch (recordErr) {
 			if (recordErr && recordErr.code === "CLOUDFLARE_QUEUE_LEASE_LOST") throw recordErr;
 			Logger.log("Cloudflare publish retry state could not be updated: %s", errorMessage_(recordErr));
 		}
 		finalPendingKnown = true;
-		try { scheduleCloudflarePublishWorker_(lease.token, true, retry && retry.nextAttemptAt); } catch (scheduleErr) { Logger.log("Cloudflare continuation scheduling failed: %s", errorMessage_(scheduleErr)); }
+		try {
+			const scheduled = scheduleCloudflarePublishWorker_(lease.token, true, retry && retry.nextAttemptAt);
+			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), retry && retry.nextAttemptAt);
+		} catch (scheduleErr) { markCloudflarePublishSchedulerRepair_(errorMessage_(scheduleErr), retry && retry.nextAttemptAt); Logger.log("Cloudflare continuation scheduling failed: %s", errorMessage_(scheduleErr)); }
 		return { ok: false, error: errorMessage_(err), retry: retry, pending: true, result: result };
 	} finally {
 		// No Firebase read, Cloudflare request, trigger enumeration, or watchdog
@@ -1380,7 +1833,7 @@ function getCloudflarePublishQueueDiagnostics_() {
 		activeTargetVersionId: state.active.targetVersionId, activeTargetGeneration: state.active.targetGeneration,
 		activePhase: state.active.phase, activeCursor: state.active.cursor,
 		pendingDirtyCounts: { events: Object.keys(dirty.events).length, cwlAggregateEvents: Object.keys(dirty.cwlAggregates).length, donationSeasons: Object.keys(dirty.donationSeasons).length, cwlLeagueSignups: dirty.cwlLeagueSignups ? 1 : 0, seasonPointers: dirty.seasonPointers ? 1 : 0, repair: dirty.repair ? 1 : 0, bootstrap: dirty.bootstrap ? 1 : 0 },
-		oldestPendingAt: oldest ? new Date(oldest).toISOString() : "", retryAttempt: state.retry.attempt, nextRetryAt: state.retry.nextAttemptAt, lastError: state.retry.lastError, permanentFailure: state.retry.permanent === true, lastSuccessAt: state.lastSuccessAt, lastBatch: state.lastBatch,
+		oldestPendingAt: oldest ? new Date(oldest).toISOString() : "", infrastructureRetryAttempt: state.infrastructure.attempt, nextRetryAt: cloudflareQueueNextAttemptIso_(state), lastError: state.infrastructure.lastError, deadLetterCount: Object.keys(state.deadLetters).length, deadLetters: state.deadLetters, lastSuccessAt: state.lastSuccessAt, lastBatch: state.lastBatch,
 		triggerId: getCloudflareTriggerId_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY), hasTrigger: !!getCloudflareTriggerId_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY), triggerAt: getCloudflareTriggerAtMs_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY) ? new Date(getCloudflareTriggerAtMs_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY)).toISOString() : "",
 		lease: lease ? { owner: lease.owner, expiresAt: new Date(lease.expiresAt).toISOString() } : null,
 	};
@@ -1388,20 +1841,44 @@ function getCloudflarePublishQueueDiagnostics_() {
 
 function initializeCloudflarePublishQueue_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	let committed = normalizeActiveVersionId_(options.committedVersionId);
-	const canonical = committed || readPublishedActiveVersionId_();
-	if (!committed && canonical && typeof verifyCloudflarePublicActiveVersionId_ === "function") {
-		const verified = verifyCloudflarePublicActiveVersionId_(canonical);
-		if (verified && verified.ok === true) committed = normalizeActiveVersionId_(verified.actualVersionId || canonical);
+	const requestedRaw = String(options.committedVersionId || "").trim();
+	const canonicalRaw = requestedRaw || (typeof readPublishedActiveVersionIdRaw_ === "function" ? readPublishedActiveVersionIdRaw_() : readPublishedActiveVersionId_());
+	let migration = null;
+	let canonical = normalizeActiveVersionId_(canonicalRaw);
+	if (canonicalRaw && !isCloudflareSafeActiveVersionId_(canonicalRaw)) {
+		migration = migrateUnsafeCloudflareActiveVersion_(canonicalRaw, "queue-initialization");
+		canonical = migration.versionId;
 	}
+	let committed = normalizeActiveVersionId_(requestedRaw);
+	let verified = null;
+	if (canonical && typeof verifyCloudflarePublicActiveVersionId_ === "function") verified = verifyCloudflarePublicActiveVersionId_(canonical);
+	if (!committed && verified && verified.ok === true) committed = normalizeActiveVersionId_(verified.actualVersionId || canonical);
+	if (migration && migration.migrated) committed = "";
+	const sharedSelectorPresent = options.sharedSelectorPresent === true || !!(verified && verified.sharedSelector && verified.sharedSelector.currentVersionId);
 	const result = mutateCloudflarePublishQueueState_(function (state) {
-		if (committed) state.active.committedVersionId = committed;
-		if (committed) markCloudflarePublishQueueReconstructionDirty_(state, "queue-initialization", canonical);
+		// Never replace a known committed selector during migration. Only an empty
+		// queue may be initialized from verified Cloudflare state.
+		if (!state.active.committedVersionId && committed) state.active.committedVersionId = committed;
+		if (migration && migration.migrated) {
+			state.versionMigrations[migration.legacyVersionId] = { safeVersionId: canonical, migratedAt: new Date().toISOString(), reason: "queue-initialization" };
+			if (!state.active.targetVersionId || state.active.targetVersionId === migration.legacyVersionId) {
+				state.active.targetVersionId = canonical;
+				state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
+				state.active.phase = "public-manifest-rosters"; state.active.cursor = 0; state.active.dispatch = null; state.active.failure = null;
+				state.active.migration = { kind: "unsafe-version", sourceVersionId: migration.legacyVersionId, targetVersionId: canonical };
+			}
+		} else if (committed && !sharedSelectorPresent && (!state.active.targetVersionId || state.active.phase === "idle")) {
+			state.active.targetVersionId = canonical;
+			state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
+			state.active.phase = "public-manifest-rosters"; state.active.cursor = 0; state.active.dispatch = null; state.active.failure = null; state.active.republish = true;
+			state.active.migration = { kind: "shared-selector", sourceVersionId: canonical, targetVersionId: canonical };
+		}
+		if (state.active.committedVersionId || canonical) markCloudflarePublishQueueReconstructionDirty_(state, "queue-initialization", canonical);
 		if (!state.initializedAt) state.initializedAt = new Date().toISOString();
-		return { pending: hasPendingCloudflarePublishWork_(state), committedVersionId: committed };
+		return { pending: hasPendingCloudflarePublishWork_(state), committedVersionId: state.active.committedVersionId, migration: migration, sharedSelectorPresent: sharedSelectorPresent, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 	});
-	if (isCloudflareQueuedPublicationEnabled_()) scheduleCloudflareAfterMutation_(result);
-	return { ok: true, committedVersionId: committed, diagnostics: getCloudflarePublishQueueDiagnostics_() };
+	const scheduled = isCloudflareQueuedPublicationEnabled_() ? finalizeCloudflareEnqueueResult_(result) : result;
+	return { ok: true, committedVersionId: result.committedVersionId, migration: migration, sharedSelectorPresent: sharedSelectorPresent, scheduling: scheduled.scheduling || null, diagnostics: getCloudflarePublishQueueDiagnostics_() };
 }
 
 function setCloudflarePublicationMode_(payloadRaw, secretOrPasswordRaw) {
@@ -1421,60 +1898,101 @@ function setCloudflarePublicationMode_(payloadRaw, secretOrPasswordRaw) {
 
 function retryCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const itemKey = String(payload.itemKey || "").trim();
 	const result = mutateCloudflarePublishQueueState_(function (state) {
-		state.retry.nextAttemptAt = ""; state.retry.lastError = ""; state.retry.permanent = false; state.paused = false;
-		return { pending: hasPendingCloudflarePublishWork_(state) };
+		if (!itemKey) state.infrastructure = { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "" };
+		else if (state.deadLetters[itemKey]) {
+			const dead = state.deadLetters[itemKey];
+			const claim = { category: dead.category, key: dead.key, kind: dead.kind, revision: dead.revision, generation: dead.revision };
+			const marker = getCloudflareQueueClaimMarker_(state, claim);
+			if (marker && marker.failure && marker.failure.itemKey === itemKey) marker.failure = null;
+			delete state.deadLetters[itemKey];
+		}
+		return { pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 	});
-	scheduleCloudflareAfterMutation_(result);
+	finalizeCloudflareEnqueueResult_(result);
 	return getCloudflarePublishQueueDiagnostics_();
 }
 
-// Explicit, idempotent migration entry point for a missing/corrupted
-// versioned bot generation. It only changes the remote queue state; the
-// normal worker regenerates and verifies immutable bot objects before the
-// shared selector can move. It never writes Cloudflare data directly.
+// Explicit, idempotent migration entry point for a missing/corrupted selected
+// bot generation. The selected immutable objects are never overwritten. A
+// fresh canonical Firebase version is created first, then the normal complete
+// public/bot phase sequence verifies it before selector-last commit.
 function repairCloudflareBotVersionObjects_(payloadRaw) {
 	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
-	const requestedVersion = normalizeActiveVersionId_(payload.versionId);
-	// Resolve this before entering the CAS mutation callback. Mutation callbacks
-	// must remain deterministic and side-effect free so a 412 retry can safely
-	// reapply them to the latest state without performing another remote read.
-	const fallbackVersion = requestedVersion || readPublishedActiveVersionId_();
+	const requestedVersion = String(payload.versionId || "").trim();
+	const before = readCloudflarePublishQueueState_();
+	if (before.active.migration && before.active.migration.kind === "bot-repair" && before.active.targetVersionId && before.active.phase !== "idle") {
+		return finalizeCloudflareEnqueueResult_({ ok: true, idempotent: true, sourceVersionId: before.active.migration.sourceVersionId, versionId: before.active.targetVersionId, generation: before.active.targetGeneration, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(before) });
+	}
+	const sourceVersionId = requestedVersion || before.active.committedVersionId || (typeof readPublishedActiveVersionIdRaw_ === "function" ? readPublishedActiveVersionIdRaw_() : readPublishedActiveVersionId_());
+	if (!sourceVersionId) throw new Error("A committed active version is required for bot-object repair.");
+	const otherUncommittedTarget = before.active.targetVersionId && before.active.targetVersionId !== before.active.committedVersionId;
+	if (otherUncommittedTarget) return { ok: false, skipped: true, reason: "newer-active-target-in-progress", targetVersionId: before.active.targetVersionId };
+	const snapshot = readActiveRosterSnapshotFromVersion_(sourceVersionId);
+	if (!snapshot || !snapshot.rosterData) throw new Error("The canonical active snapshot is incomplete for bot-object repair.");
+	const freshVersionId = createActiveVersionId_("bot-repair");
+	// This is a publication-only immutable copy. Keep Firebase's canonical
+	// pointer on the source snapshot; a concurrent real active-version B owns
+	// that pointer and must never be clobbered by repair.
+	const written = writeActiveRosterVersionShards_(freshVersionId, snapshot.rosterData, { source: "cloudflare-bot-repair", publish: false, sourceVersionId: sourceVersionId });
 	const result = mutateCloudflarePublishQueueState_(function (state) {
-		const versionId = requestedVersion || state.active.committedVersionId || fallbackVersion;
-		if (!versionId) throw new Error("A committed active version is required for bot-object repair.");
-		const otherUncommittedTarget = state.active.targetVersionId && state.active.targetVersionId !== state.active.committedVersionId && state.active.targetVersionId !== versionId;
-		if (otherUncommittedTarget) return { ok: false, skipped: true, reason: "newer-active-target-in-progress", targetVersionId: state.active.targetVersionId };
-		if (state.active.targetVersionId === versionId && state.active.republish && state.active.phase !== "idle") {
-			return { ok: true, idempotent: true, versionId: versionId, generation: state.active.targetGeneration, pending: true, nextAttemptAt: state.retry.nextAttemptAt };
-		}
-		state.active.targetVersionId = versionId;
+		const newerTarget = state.active.targetVersionId && state.active.targetVersionId !== state.active.committedVersionId;
+		if (newerTarget) return { ok: false, skipped: true, reason: "newer-active-target-in-progress", targetVersionId: state.active.targetVersionId, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+		state.active.targetVersionId = freshVersionId;
 		state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
-		state.active.phase = "bot-active";
+		state.active.phase = "public-manifest-rosters";
 		state.active.cursor = 0;
 		state.active.dispatch = null;
-		state.active.republish = true;
+		state.active.failure = null;
+		state.active.republish = false;
+		state.active.migration = { kind: "bot-repair", sourceVersionId: sourceVersionId, targetVersionId: freshVersionId, createdAt: new Date().toISOString() };
+		state.versionMigrations["bot-repair:" + sourceVersionId] = { safeVersionId: freshVersionId, migratedAt: new Date().toISOString(), reason: "corrupt-selected-bot-data" };
 		state.active.updatedAt = new Date().toISOString();
-		return { ok: true, idempotent: false, versionId: versionId, generation: state.active.targetGeneration, pending: true, nextAttemptAt: state.retry.nextAttemptAt };
+		return { ok: true, idempotent: false, sourceVersionId: sourceVersionId, versionId: freshVersionId, manifest: written && written.manifest || null, generation: state.active.targetGeneration, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 	});
-	if (result && result.pending) scheduleCloudflareAfterMutation_(result);
-	return result;
+	return result && result.pending ? finalizeCloudflareEnqueueResult_(result) : result;
 }
 
 function runCloudflarePublishWorkerTick(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return cloudflarePublishWorkerTick(); }
 
-function cloudflarePublishWorkerRecoveryTick() { return cloudflarePublishWorkerTick(); }
+function cloudflarePublishWorkerRecoveryTick(eventRaw) { return cloudflarePublishWorkerTick(eventRaw, "recovery"); }
 
 function pauseCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
 	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
 	const paused = payload.paused !== false;
-	const result = mutateCloudflarePublishQueueState_(function (state) { state.paused = paused; return { pending: !paused && hasPendingCloudflarePublishWork_(state) }; });
+	const result = mutateCloudflarePublishQueueState_(function (state) { state.paused = paused; state.pauseReason = paused ? "admin" : ""; return { pending: !paused && hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) }; });
 	if (paused) removeCloudflarePublishWorkerTriggers_(false); else scheduleCloudflareAfterMutation_(result);
 	return getCloudflarePublishQueueDiagnostics_();
 }
 
-function repairCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return repairCloudflarePublishQueueDrift_(); }
+function repairCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
+	assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw);
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const result = repairCloudflarePublishQueueDrift_(undefined, payload.versionId, { reason: payload.reason || "admin-drift-repair", scopes: payload.scopes });
+	return Object.assign({}, result, finalizeCloudflareEnqueueResult_(result));
+}
+
+// Called by the low-frequency permanent watchdog in publishAndTriggers.js.
+// Dynamic scheduling failures are represented locally so this recovery path
+// remains available even when the failed invocation could not persist remote
+// failure state before its deadline.
+function repairCloudflarePublishSchedulingFromPermanentWatchdog_() {
+	const properties = PropertiesService.getScriptProperties();
+	const markerRaw = String(properties.getProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_) || "").trim();
+	const state = readCloudflarePublishQueueState_();
+	const pending = hasPendingCloudflarePublishWork_(state);
+	if (!pending) { clearCloudflarePublishSchedulerRepair_(); return { ok: true, pending: false, repaired: !!markerRaw }; }
+	const nextAttemptAt = cloudflareQueueNextAttemptIso_(state);
+	const continuation = scheduleCloudflarePublishWorker_(undefined, true, nextAttemptAt);
+	const lease = parseCloudflarePublishQueueLockState_(properties.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+	const recovery = lease ? scheduleCloudflarePublishWorkerRecovery_(true, lease) : { scheduled: false, reason: "no-live-owner" };
+	if (continuation && continuation.scheduled) clearCloudflarePublishSchedulerRepair_();
+	else markCloudflarePublishSchedulerRepair_(continuation && (continuation.error || continuation.reason), nextAttemptAt);
+	return { ok: !!(continuation && continuation.scheduled), pending: true, repaired: !!(continuation && continuation.scheduled), continuation: continuation, recovery: recovery };
+}
 function repairCloudflareBotVersionObjects(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return repairCloudflareBotVersionObjects_(payloadRaw); }
 function inspectCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return getCloudflarePublishQueueDiagnostics_(); }
 function initializeCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return initializeCloudflarePublishQueue_(payloadRaw); }

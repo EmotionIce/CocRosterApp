@@ -1082,7 +1082,35 @@ const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathR
 const readVersionedBotObject = async (store, versionIdRaw, objectPathRaw) => {
   const versionedPath = buildVersionedBotObjectPath(versionIdRaw, objectPathRaw);
   if (!versionedPath) return null;
-  return getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
+  const object = await getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
+  const normalizedObjectPath = String(objectPathRaw || "").replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
+  if (!object || normalizedObjectPath !== "active") return object;
+  let descriptor;
+  try { descriptor = JSON.parse(await object.text()); } catch (err) { return null; }
+  if (!descriptor || descriptor.shardedActive !== true) return buildProjectedDataStoreObject(descriptor);
+  const versionId = String(versionIdRaw || "").trim();
+  const base = "activeVersions/" + encodeURIComponent(versionId);
+  const [rostersObject, metricsMetaObject, byTagObject] = await Promise.all([
+    getDataStoreObject(store, buildDataObjectKey("bot", base + "/rosters")),
+    getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/meta")),
+    getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/byTag")),
+  ]);
+  if (!rostersObject || !metricsMetaObject || !byTagObject) return null;
+  try {
+    const [rosters, metricsMeta, byTag] = await Promise.all([
+      rostersObject.text().then((text) => JSON.parse(text)),
+      metricsMetaObject.text().then((text) => JSON.parse(text)),
+      byTagObject.text().then((text) => JSON.parse(text)),
+    ]);
+    const activeMeta = isPlainJsonObject(descriptor.activeMeta) ? descriptor.activeMeta : {};
+    return buildProjectedDataStoreObject(Object.assign({}, activeMeta, {
+      activeVersionId: versionId,
+      rosters: Array.isArray(rosters) ? rosters : [],
+      playerMetrics: Object.assign({}, isPlainJsonObject(metricsMeta) ? metricsMeta : {}, { byTag: isPlainJsonObject(byTag) ? byTag : {} }),
+    }));
+  } catch (err) {
+    return null;
+  }
 };
 
 const resolveSharedBotVersion = async (store, selectorRaw, objectPathRaw) => {
@@ -1179,14 +1207,21 @@ const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
 
 const readDirectActiveBotVersionStatus = async (store, versionIdRaw) => {
   const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
-  const names = ["active", "playerMetrics/byTag", "indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
+  let names = ["active", "playerMetrics/byTag", "indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
   const status = { versionId, complete: false, missing: [] };
   if (!versionId) {
     status.missing = names.slice();
     return status;
   }
+  const activeObject = await getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/active"));
+  if (activeObject) {
+    try {
+      const descriptor = JSON.parse(await activeObject.text());
+      if (descriptor && descriptor.shardedActive === true) names = ["active", "rosters", "playerMetrics/meta", "playerMetrics/byTag", "indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
+    } catch (err) {}
+  }
   for (let i = 0; i < names.length; i++) {
-    const object = await getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/" + names[i]));
+    const object = names[i] === "active" && activeObject ? activeObject : await getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/" + names[i]));
     if (!object) status.missing.push(names[i]);
   }
   status.complete = status.missing.length === 0;
@@ -1487,6 +1522,8 @@ const handleDataVerifyV2 = async (request, env) => {
   const objects = Array.isArray(body && body.objects) ? body.objects : [];
   if (!objects.length || objects.length > 32) return jsonResponse(400, { ok: false, error: "Verification object list is required and bounded." }, publishCorsHeaders());
   const missing = [];
+  const invalid = [];
+  const expectedVersionId = String(body && body.versionId || "").trim();
   for (let i = 0; i < objects.length; i++) {
     const entry = objects[i] && typeof objects[i] === "object" ? objects[i] : {};
     let scope;
@@ -1498,9 +1535,21 @@ const handleDataVerifyV2 = async (request, env) => {
       return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid verification object." }, publishCorsHeaders());
     }
     const object = await getDataStoreObject(store, buildDataObjectKey(scope, path));
-    if (!object) missing.push({ scope, path: path.replace(/\.json$/i, "") });
+    const logicalPath = path.replace(/\.json$/i, "");
+    if (!object) { missing.push({ scope, path: logicalPath }); continue; }
+    try {
+      const payload = JSON.parse(await object.text());
+      if (logicalPath.endsWith("/manifest") && isPlainJsonObject(payload) && payload.versionId && String(payload.versionId) !== expectedVersionId) invalid.push({ scope, path: logicalPath, reason: "version-mismatch" });
+      if (scope === "bot" && logicalPath.endsWith("/active") && isPlainJsonObject(payload)) {
+        if (String(payload.activeVersionId || "") !== expectedVersionId) invalid.push({ scope, path: logicalPath, reason: "version-mismatch" });
+        if (payload.shardedActive === true && !isPlainJsonObject(payload.activeMeta)) invalid.push({ scope, path: logicalPath, reason: "invalid-shard-descriptor" });
+      }
+    } catch (err) {
+      invalid.push({ scope, path: logicalPath, reason: "invalid-json" });
+    }
   }
   if (missing.length) return jsonResponse(409, { ok: false, error: "Required Cloudflare objects are missing.", missing }, publishCorsHeaders());
+  if (invalid.length) return jsonResponse(409, { ok: false, error: "Required Cloudflare objects are corrupt.", invalid }, publishCorsHeaders());
   return jsonResponse(200, { ok: true, versionId: String(body && body.versionId || ""), verified: objects.length }, publishCorsHeaders());
 };
 
@@ -1892,6 +1941,17 @@ class CloudflarePublicationCoordinator {
       claimActiveCommitGuard: claimActiveCommitGuardDurably,
       recheckActiveCommitGuard: false,
     });
+    let acceptedCommit = await this.state.storage.get("acceptedActiveCommit");
+    if (result.status >= 200 && result.status < 300 && result.payload && result.payload.ok === true && body.commitGuard) {
+      acceptedCommit = {
+        schemaVersion: 1,
+        generation: body.commitGuard.generation,
+        targetVersionId: body.commitGuard.targetVersionId,
+        committedAt: String(body.publishedAt || new Date().toISOString()),
+      };
+      await this.state.storage.put("acceptedActiveCommit", acceptedCommit);
+    }
+    if (acceptedCommit && result.payload && typeof result.payload === "object") result.payload.acceptedCommit = acceptedCommit;
     return jsonResponse(result.status, result.payload);
   }
 }
@@ -1958,6 +2018,13 @@ const handleDataPublishV2 = async (request, env) => {
     commits = commitsRaw.map((entry) => normalizeCommitOperation(entry, defaultScope, publishedAt));
   } catch (err) {
     return jsonResponse(400, { ok: false, requestId, batchId, error: err && err.message ? err.message : "Invalid publish object." });
+  }
+  if (commitGuard) {
+    const selectorKey = buildDataObjectKey("public", PUBLIC_ACTIVE_SELECTOR_PATH);
+    const selectorIndexes = commits.map((item, index) => item.key === selectorKey ? index : -1).filter((index) => index >= 0);
+    if (selectorIndexes.length !== 1 || selectorIndexes[0] !== commits.length - 1 || commits[selectorIndexes[0]].operation !== "put") {
+      return jsonResponse(400, { ok: false, requestId, batchId, error: "An active commit must write the single shared selector last." });
+    }
   }
 
   const normalizedItems = objects.concat(commits);

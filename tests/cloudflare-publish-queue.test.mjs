@@ -31,6 +31,7 @@ const loadRealFirebaseCodec = () => {
   return {
     encode: context.encodeFirebaseObjectKeysRecursive_,
     decode: context.decodeFirebaseObjectKeysRecursive_,
+    isSafeVersionId: context.isSafeActiveVersionId_,
   };
 };
 
@@ -246,7 +247,7 @@ test("schema-v2 ordinary and commit states migrate to the first idempotent phase
       active: { targetVersionId: "target", targetGeneration: 4, phase, cursor: 9, committedVersionId: "committed" },
       dirty: { relevantSnapshot: { revision: 3, phase: "ordinary", cursor: 4 } },
     });
-    assert.equal(migrated.schemaVersion, 3);
+    assert.equal(migrated.schemaVersion, 4);
     assert.equal(migrated.active.phase, "public-manifest-rosters");
     assert.equal(migrated.active.committedVersionId, "committed");
     assert.equal(migrated.dirty.repair.revision, 3);
@@ -265,6 +266,19 @@ test("queue CAS retries a 412 and preserves a concurrent enqueue", () => {
   assert.equal(result.ok, true);
   assert.deepEqual(q.__getState().dirty.events, { "event-1": { revision: 1 } });
   assert.equal(q.__calls.filter((call) => call.method === "PUT").length, 2);
+});
+
+test("queue CAS decodes Firebase-safe keys before normalization", () => {
+  const q = loadQueue();
+  const codec = loadRealFirebaseCodec();
+  q.encodeFirebaseObjectKeysRecursive_ = codec.encode;
+  q.decodeFirebaseObjectKeysRecursive_ = codec.decode;
+  const raw = q.createEmptyCloudflarePublishQueueState_();
+  for (const key of ["event.one", "event#two", "event/three", "event[four]", "__FB64__literal"]) raw.dirty.events[key] = { revision: 1 };
+  installCasFirebase(q, codec.encode(raw));
+  q.mutateCloudflarePublishQueueState_((state) => ({ ok: true, keys: Object.keys(state.dirty.events).sort() }));
+  const decoded = codec.decode(q.__getState());
+  assert.deepEqual(Object.keys(decoded.dirty.events).sort(), Object.keys(raw.dirty.events).sort());
 });
 
 test("CAS exhaustion is resumable and does not discard the original queue state", () => {
@@ -323,8 +337,8 @@ test("Firebase timeout leaves phase and cursor unchanged, applies backoff, and l
   assert.equal(result.ok, false);
   assert.equal(after.active.phase, "public-manifest-rosters");
   assert.equal(after.active.cursor, 0);
-  assert.equal(after.retry.attempt, 1);
-  assert.ok(after.retry.nextAttemptAt);
+  assert.equal(after.infrastructure.attempt, 1);
+  assert.ok(after.infrastructure.nextAttemptAt);
   assert.equal(q.__triggers.length, 2);
   assert.deepEqual(q.__triggers.map((trigger) => trigger.handler).sort(), ["cloudflarePublishWorkerRecoveryTick", "cloudflarePublishWorkerTick"]);
 });
@@ -366,8 +380,8 @@ test("trigger reconciliation reuses earlier work and replaces later or invalid m
   q.__properties.set("TRIGGER", stale.id);
   q.__properties.set("TRIGGER_AT", String(Date.now() - 60000));
   const staleReplaced = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", desired);
-  assert.equal(staleReplaced.reused, false);
-  assert.equal(q.__triggerCalls.schedules, 2);
+  assert.equal(staleReplaced.reused, true);
+  assert.equal(q.__triggerCalls.schedules, 1);
   assert.equal(q.__triggers.filter((item) => item.handler === "cloudflarePublishWorkerTick").length, 1);
 });
 
@@ -404,8 +418,9 @@ test("commit phase verifies immutable objects and never rebuilds the complete sn
   q.verifyCloudflareActiveVersionObjects_ = (_version, required) => { verified = required; return { ok: true }; };
   q.buildCloudflarePublicBootstrapObject_ = (options) => ({ path: "bootstrap/current", payload: { schemaVersion: 2, activeVersionId: options.activeVersionIdOverride } });
   const built = q.buildCloudflareActivePhaseRequest_(activeState(q, "commit"), { phase: "commit", cursor: 0 });
-  assert.equal(built.request.commits[0].path, "activePublished/currentSelector");
-  assert.equal(verified.length, 7);
+  assert.equal(built.request.commits.at(-1).path, "activePublished/currentSelector");
+  assert.equal(built.request.commits.filter((item) => item.path === "activePublished/currentSelector").length, 1);
+  assert.equal(verified.length, 9);
   assert.equal(built.request.commits.some((item) => item.path.includes("rosters")), false);
   assert.equal(built.request.commits.some((item) => item.path.includes("playerMetrics")), false);
 });
@@ -452,6 +467,63 @@ test("fairness selects dirty work after the bounded active burst", () => {
   const dirty = q.firstCloudflareDirtyWork_(state);
   assert.equal(dirty.category, "event");
   assert.ok(state.active.phase !== "commit");
+});
+
+test("one permanently failed item is dead-lettered while unrelated work remains, and a newer revision supersedes it", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.events.bad = { revision: 1, category: "event" };
+  state.dirty.events.good = { revision: 2, category: "event" };
+  q.__setState(state);
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  const claim = { category: "event", key: "bad", kind: "", revision: 1, cursor: 0, dispatchKey: "event:bad:1" };
+  const failed = q.recordCloudflareQueueFailure_("malformed publish object", { failed: { scope: "public", path: "events/bad" } }, "", claim);
+  assert.equal(failed.deadLetter, true);
+  assert.ok(q.__getState().dirty.events.good);
+  assert.equal(q.hasPendingCloudflarePublishWork_(q.__getState()), true);
+
+  q.enqueueCloudflareSeasonEventPublication_("bad", "new-revision");
+  const next = q.__getState();
+  assert.ok(next.dirty.events.bad.revision > 1);
+  assert.equal(next.dirty.events.bad.failure, null);
+  assert.equal(Object.values(next.deadLetters).some((dead) => dead.category === "event" && dead.key === "bad"), false);
+});
+
+test("duplicate repair enqueue merges reasons and scopes without resetting its cursor", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.dirty.repair = { revision: 4, category: "repair", step: "events", eventIndex: 3, seasonIndex: 2, donationIndex: 1, reasons: ["first"], scopes: ["current"] };
+  q.__setState(state);
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  q.enqueueCloudflareRelevantSeasonPublication_("second", { scopes: ["previous", "current"] });
+  const repair = q.__getState().dirty.repair;
+  assert.deepEqual(repair.reasons, ["first", "second"]);
+  assert.deepEqual(repair.scopes, ["current", "previous"]);
+  assert.equal(repair.step, "events");
+  assert.equal(repair.eventIndex, 3);
+  assert.equal(repair.seasonIndex, 2);
+  assert.equal(repair.donationIndex, 1);
+});
+
+test("an accepted A commit is recorded while already-queued B remains the next target", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = activeState(q, "public-manifest-rosters");
+  state.active.targetVersionId = "version-B";
+  state.active.targetGeneration = 8;
+  state.active.committedVersionId = "version-old";
+  state.active.committedGeneration = 6;
+  q.__setState(state);
+  const result = q.completeCloudflareActivePhase_(
+    { category: "active", targetVersionId: "version-A", generation: 7, phase: "commit", cursor: 0 },
+    { response: { acceptedCommit: { targetVersionId: "version-A", generation: 7, committedAt: "2026-07-11T12:00:00.000Z" } } },
+  );
+  assert.equal(result.stale, true);
+  assert.equal(result.acceptedCommit.targetVersionId, "version-A");
+  assert.equal(q.__getState().active.committedVersionId, "version-A");
+  assert.equal(q.__getState().active.targetVersionId, "version-B");
+  assert.equal(q.__getState().active.phase, "public-manifest-rosters");
 });
 
 test("two consecutive active publications and an unchanged enqueue are idempotent", () => {
@@ -632,6 +704,61 @@ test("Apps Script size checks match Worker normalization at realistic boundaries
   assert.equal(rejectedEnvelope.status, 413);
 });
 
+test("every active commit operation is retryable and the shared selector remains last", async () => {
+  const worker = loadWorkerForBoundary();
+  const commits = [
+    { path: "activePublished/currentManifest", scope: "public", payload: { versionId: "version-A" } },
+    { path: "bootstrap/current", scope: "public", payload: { activeVersionId: "version-A" } },
+    { path: "activePublished/currentVersionId", scope: "public", payload: "version-A" },
+    { path: "active/currentVersionId", scope: "bot", payload: "version-A" },
+    { path: "activePublished/currentSelector", scope: "public", payload: { currentVersionId: "version-A", generation: 11 } },
+  ];
+  const keyFor = (entry) => `${entry.scope === "bot" ? "bot-data" : "public-data"}/${entry.path}.json`;
+
+  for (let failedIndex = 0; failedIndex < commits.length; failedIndex++) {
+    const values = new Map();
+    let rejectedKey = keyFor(commits[failedIndex]);
+    const store = {
+      async get(key) {
+        return values.has(key) ? values.get(key) : null;
+      },
+      async put(key, value) {
+        if (key === rejectedKey) throw new Error(`simulated commit failure ${failedIndex}`);
+        values.set(key, String(value));
+      },
+      async delete(key) {
+        values.delete(key);
+      },
+    };
+    const env = { ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret", ROSTER_DATA_KV: store };
+    const body = {
+      requestId: `commit-failure-${failedIndex}`,
+      batchId: `commit-failure-${failedIndex}`,
+      publishedAt: "2026-07-10T00:00:00.000Z",
+      commits,
+      commitGuard: { generation: 11, targetVersionId: "version-A" },
+    };
+    const request = () => new Request("https://worker.test/api/internal/public-data/publish-v2", {
+      method: "POST",
+      headers: { authorization: "Bearer secret", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const failed = await worker.fetch(request(), env, {});
+    const failedPayload = await failed.json();
+    assert.equal(failed.status, 502, `failure index ${failedIndex}`);
+    assert.equal(failedPayload.completedCommitCount, failedIndex);
+    assert.equal(values.has(keyFor(commits.at(-1))), false, `selector advertised at failure index ${failedIndex}`);
+
+    rejectedKey = "";
+    const retried = await worker.fetch(request(), env, {});
+    const retriedPayload = await retried.json();
+    assert.equal(retried.status, 200, `retry index ${failedIndex}`);
+    assert.equal(retriedPayload.completedCommitCount, commits.length);
+    assert.equal(JSON.parse(values.get(keyFor(commits.at(-1)))).currentVersionId, "version-A");
+  }
+});
+
 test("queued v2 source has no whole-plan or history enumeration path", () => {
   const source = fs.readFileSync(new URL("script/cloudflarePublishQueue.js", repoRoot), "utf8");
   assert.equal(source.includes("buildCloudflareQueuedActivePlan_"), false);
@@ -689,25 +816,37 @@ test("superseded active generation cannot publish or commit its selector", () =>
   assert.equal(q.__getState().active.targetVersionId, "generation-B");
 });
 
-test("bot-object repair migration is idempotent and preserves the committed version and dirty work", () => {
+test("bot-object repair creates a fresh immutable full publication and is idempotent", () => {
   const q = installCasFirebase(loadQueue());
   const state = q.createEmptyCloudflarePublishQueueState_();
   state.active.committedVersionId = "known-good";
   state.dirty.events["event-1"] = { revision: 12 };
   q.__setState(state);
   q.isCloudflareQueuedPublicationEnabled_ = () => true;
-  q.scheduleCloudflareAfterMutation_ = () => ({ scheduled: true });
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+  q.readActiveRosterSnapshotFromVersion_ = (versionId) => ({ versionId, rosterData: { schemaVersion: 1, rosters: [], playerMetrics: { byTag: {} } } });
+  q.createActiveVersionId_ = () => "bot-repair-fresh";
+  let writeOptions;
+  q.writeActiveRosterVersionShards_ = (versionId, rosterData, options) => {
+    assert.equal(versionId, "bot-repair-fresh");
+    assert.equal(rosterData.schemaVersion, 1);
+    writeOptions = options;
+    return { versionId, manifest: { versionId } };
+  };
   const first = q.repairCloudflareBotVersionObjects_({ versionId: "known-good" });
   assert.equal(first.ok, true);
   assert.equal(first.idempotent, false);
   assert.equal(q.__getState().active.committedVersionId, "known-good");
-  assert.equal(q.__getState().active.targetVersionId, "known-good");
-  assert.equal(q.__getState().active.phase, "bot-active");
-  assert.equal(q.__getState().active.republish, true);
+  assert.equal(q.__getState().active.targetVersionId, "bot-repair-fresh");
+  assert.equal(q.__getState().active.phase, "public-manifest-rosters");
+  assert.equal(q.__getState().active.republish, false);
+  assert.equal(writeOptions.publish, false);
   assert.ok(q.__getState().dirty.events["event-1"]);
   const second = q.repairCloudflareBotVersionObjects_({ versionId: "known-good" });
   assert.equal(second.idempotent, true);
   assert.equal(q.__getState().active.committedVersionId, "known-good");
+  assert.equal(second.versionId, "bot-repair-fresh");
 });
 
 test("bounded repair resumes through every event, CWL aggregate, season map, and donation overlay", () => {

@@ -901,9 +901,11 @@ test("season events model renders unavailable and empty states safely", () => {
   const { buildSeasonEventsPublicModel } = loadClientInternals();
   const empty = buildSeasonEventsPublicModel({});
 
-  assert.equal(empty.cards.length, 2);
+  assert.equal(empty.cards.length, 3);
   assert.equal(empty.cards[0].unavailable, true);
   assert.equal(empty.cards[0].rows.length, 0);
+  assert.equal(empty.cards[2].type, "cwl");
+  assert.equal(empty.cards[2].lifecycleDisplayState, "stale-unavailable");
 
   const data = {
     seasonEvents: {
@@ -944,6 +946,35 @@ test("season events model renders unavailable and empty states safely", () => {
   assert.equal(model.cards[0].unavailable, false);
   assert.equal(model.cards[0].activeParticipantCount, 0);
   assert.equal(model.cards[1].activeParticipantCount, 0);
+});
+
+test("current CWL pointer with a delayed event object is shown as unavailable, not as a previous result", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const model = buildSeasonEventsPublicModel({
+    seasonEvents: {
+      current: { cwl: { eventId: "cwl-current-propagating", type: "cwl" } },
+      latestCompletedCwl: { eventId: "cwl-previous", type: "cwl" },
+      byId: {
+        "cwl-previous": {
+          eventId: "cwl-previous",
+          type: "cwl",
+          cwlTrackingState: "completed",
+          participantsByDiscordId: {},
+        },
+      },
+      cwlAggregatesByEventId: {
+        "cwl-previous": { final: { eventId: "cwl-previous", kind: "final", byTag: {}, rankedTags: [] } },
+      },
+    },
+  });
+
+  const cwlCards = model.cards.filter((card) => card.type === "cwl");
+  const current = cwlCards.find((card) => !card.historical);
+  const previous = cwlCards.find((card) => card.historical);
+  assert.equal(current.event.eventId, "cwl-current-propagating");
+  assert.equal(current.unavailable, true);
+  assert.equal(current.lifecycleDisplayState, "stale-unavailable");
+  assert.equal(previous.event.eventId, "cwl-previous");
 });
 
 test("season events model includes an active CWL leaderboard card", () => {
@@ -1169,7 +1200,7 @@ test("season events model excludes dormant wrong-roster CWL accounts", () => {
   assert.equal(cwlCard.rows[0].displayName, "Target");
 });
 
-test("season events model shows latest completed CWL when the current CWL is waiting", () => {
+test("season events model keeps a waiting current CWL and shows previous results separately", () => {
   const { buildSeasonEventsPublicModel } = loadClientInternals();
   const data = {
     seasonEvents: {
@@ -1186,6 +1217,19 @@ test("season events model shows latest completed CWL when the current CWL is wai
           startsAt: "",
           endsAt: "",
           cwlTrackingState: "waiting",
+          cwl: {
+            target: {
+              resolved: true,
+              status: "resolved",
+              rosterId: "waiting-roster",
+              clanTag: "#WAITCLAN",
+              leagueName: "Champion I",
+              groupId: "group-waiting",
+              season: "2026-07",
+              observedAt: "2026-07-04T00:00:00.000Z",
+              eligibleAccountTags: ["#WAIT"],
+            },
+          },
           participantsByDiscordId: {
             "200": { discordDisplayName: "Waiting", status: "signed_up", accounts: [{ tag: "#WAIT", name: "Waiting" }] },
           },
@@ -1219,14 +1263,78 @@ test("season events model shows latest completed CWL when the current CWL is wai
   };
 
   const model = buildSeasonEventsPublicModel(data);
-  const cwlCard = model.cards.find((card) => card.type === "cwl");
+  const cwlCards = model.cards.filter((card) => card.type === "cwl");
+  const currentCard = cwlCards.find((card) => !card.historical);
+  const previousCard = cwlCards.find((card) => card.historical);
 
-  assert.ok(cwlCard);
-  assert.equal(cwlCard.event.eventId, "cwl-completed");
-  assert.equal(cwlCard.showingLatestCompleted, true);
-  assert.equal(cwlCard.rows.length, 1);
-  assert.equal(cwlCard.rows[0].tag, "#WIN");
-  assert.equal(cwlCard.rows[0].score, 21);
+  assert.equal(cwlCards.length, 2);
+  assert.ok(currentCard);
+  assert.equal(currentCard.event.eventId, "cwl-waiting");
+  assert.equal(currentCard.lifecycleDisplayState, "waiting-for-group");
+  assert.equal(currentCard.rows.length, 1);
+  assert.equal(currentCard.rows[0].tag, "#WAIT");
+  assert.ok(previousCard);
+  assert.equal(previousCard.event.eventId, "cwl-completed");
+  assert.equal(previousCard.lifecycleDisplayState, "completed");
+  assert.equal(previousCard.rows.length, 1);
+  assert.equal(previousCard.rows[0].tag, "#WIN");
+  assert.equal(previousCard.rows[0].score, 21);
+});
+
+test("completed CWL with delayed final data keeps the last consistent live view and reports propagation", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const data = {
+    seasonEvents: {
+      current: { cwl: { eventId: "cwl-propagating", type: "cwl" } },
+      byId: {
+        "cwl-propagating": {
+          eventId: "cwl-propagating",
+          type: "cwl",
+          status: "closed",
+          signupsOpen: false,
+          cwlTrackingState: "completed",
+          cwl: {
+            target: {
+              resolved: true,
+              status: "resolved",
+              rosterId: "main",
+              clanTag: "#CLAN",
+              leagueName: "Champion I",
+              groupId: "group-1",
+              season: "2026-07",
+              observedAt: "2026-07-11T00:00:00.000Z",
+              eligibleAccountTags: ["#AAA"],
+            },
+          },
+          participantsByDiscordId: {
+            "100": { status: "signed_up", accounts: [{ tag: "#AAA", name: "Alpha" }] },
+          },
+        },
+      },
+      cwlAggregatesByEventId: {
+        "cwl-propagating": {
+          live: {
+            eventId: "cwl-propagating",
+            kind: "live",
+            rankedTags: ["#AAA"],
+            byTag: { "#AAA": { starsTotal: 18, attacksMade: 6, defenseStarsConceded: 5 } },
+          },
+        },
+      },
+    },
+    playerMetrics: { byTag: {} },
+  };
+
+  const model = buildSeasonEventsPublicModel(data);
+  const card = model.cards.find((entry) => entry.type === "cwl" && !entry.historical);
+
+  assert.ok(card);
+  assert.equal(card.event.eventId, "cwl-propagating");
+  assert.equal(card.finalDataPending, true);
+  assert.equal(card.aggregateSource, "live");
+  assert.equal(card.lifecycleDisplayState, "stale-unavailable");
+  assert.equal(card.rows.length, 1);
+  assert.equal(card.rows[0].score, 18);
 });
 
 test("season event leaderboards include signed-up participants and exclude cancelled or removed", () => {

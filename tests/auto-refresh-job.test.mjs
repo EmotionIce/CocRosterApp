@@ -37,8 +37,10 @@ const loadBackend = () => {
   const triggers = [];
   const triggerRequests = [];
   let uuidCounter = 0;
+  let triggerCounter = 0;
+  let triggerCreateFailures = 0;
   const makeTrigger = (handler, requestedDelayMs = null) => ({
-    id: "trigger-" + (triggers.length + 1),
+    id: "trigger-" + (++triggerCounter),
     handler,
     requestedDelayMs,
     getUniqueId() { return this.id; },
@@ -77,8 +79,12 @@ const loadBackend = () => {
           timeBased() {
             let requestedDelayMs = null;
             const create = () => {
-              const trigger = makeTrigger(handler, requestedDelayMs);
               triggerRequests.push({ handler, delayMs: requestedDelayMs });
+              if (triggerCreateFailures > 0) {
+                triggerCreateFailures--;
+                throw new Error("simulated trigger creation failure");
+              }
+              const trigger = makeTrigger(handler, requestedDelayMs);
               triggers.push(trigger);
               return trigger;
             };
@@ -141,6 +147,7 @@ const loadBackend = () => {
   context.__properties = properties;
   context.__triggers = triggers;
   context.__triggerRequests = triggerRequests;
+  context.__failNextTriggerCreates = (count = 1) => { triggerCreateFailures = Math.max(0, Number(count) || 0); };
   vm.createContext(context);
   vm.runInContext(code, context);
   return context;
@@ -450,7 +457,7 @@ const buildMetricSourceMap = (backend, encodedKeys) => {
 const buildOneRoundCwlLeagueGroup = (options = {}) => ({
   state: options.state || "inWar",
   season: options.season || "2026-07",
-  clans: [{ tag: options.clanTag || "#CLAN" }, { tag: options.opponentTag || "#OPP" }],
+  clans: [{ tag: options.clanTag || "#CLAN", warLeague: { name: options.leagueName || "Champion I" } }, { tag: options.opponentTag || "#OPP" }],
   rounds: [{ warTags: [options.warTag || "#WAR1"] }],
 });
 
@@ -528,6 +535,8 @@ const installCwlFetch = (backend, getWarRaw, options = {}) => {
       if (entry.path.includes("/currentwar/leaguegroup")) {
         if (options.groupError) errorByKey[entry.key] = Object.assign(new Error("group failed"), { statusCode: 500 });
         else dataByKey[entry.key] = leaguegroup;
+      } else if (entry.path.includes("/clans/") && !entry.path.includes("/currentwar")) {
+        dataByKey[entry.key] = { tag: entry.key, warLeague: { name: entry.key === "#CLAN" ? "Champion I" : "Master I" } };
       } else if (entry.path.includes("/clanwarleagues/wars/")) {
         if (options.warError) errorByKey[entry.key] = Object.assign(new Error("war failed"), { statusCode: 500 });
         else dataByKey[entry.key] = getWar(entry.key);
@@ -570,7 +579,8 @@ test("queue worker drains several lightweight tasks in one invocation with diagn
   assert.equal(current.currentTaskIndex, 3);
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "completed");
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[2].taskId).status, "completed");
-  assert.equal(backend.__triggers.length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
+  assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
 });
 
 test("queue worker continues from a coordinator task into a roster task when budget permits", () => {
@@ -638,7 +648,7 @@ test("queue worker refuses the next task when its start reserve is unavailable",
   assert.equal(result.reason, "beforeTaskBudget");
   assert.equal(result.tasksCompleted, 0);
   assert.equal(result.exitReason, "beforeTaskBudget");
-  assert.equal(backend.__triggers.length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 1);
 });
 
 test("queue worker retains a roster task when its next phase reserve is unavailable", () => {
@@ -660,7 +670,7 @@ test("queue worker retains a roster task when its next phase reserve is unavaila
   assert.equal(current.currentTaskIndex, 1);
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[2].taskId).status, "pending");
-  assert.equal(backend.__triggers.length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
 });
 
 test("queue worker preserves continuation after a deferred task", () => {
@@ -686,7 +696,7 @@ test("queue worker preserves continuation after a deferred task", () => {
   assert.equal(current.currentTaskIndex, 1);
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[2].taskId).status, "pending");
-  assert.equal(backend.__triggers.length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
 });
 
 test("queue worker stops at a newly reached CWL boundary", () => {
@@ -803,11 +813,12 @@ test("queue worker startup uses a later watchdog than normal continuation", () =
   );
 
   const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
-  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000]);
+  assert.equal(workerRequests.length, 1);
+  assert.ok(workerRequests[0].delayMs <= 960000 && workerRequests[0].delayMs >= 959000);
   assert.equal(backend.__triggers.length, 0);
 });
 
-test("deferred queue work replaces the watchdog with normal continuation", () => {
+test("deferred queue work keeps independent watchdog and normal continuation paths", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { runId, tasks } = setupSyntheticQueueRun(backend, [{ type: "metricCopy" }]);
   disableQueueCwlPreflights(backend);
@@ -819,9 +830,12 @@ test("deferred queue work replaces the watchdog with normal continuation", () =>
 
   assert.equal(result.reason, "test-defer");
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
-  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000, 60000]);
-  assert.equal(workerTriggers.length, 1);
-  assert.equal(workerTriggers[0].requestedDelayMs, 60000);
+  assert.equal(workerRequests.length, 2);
+  assert.ok(workerRequests[0].delayMs <= 960000 && workerRequests[0].delayMs >= 959000);
+  assert.equal(workerRequests[1].delayMs, 60000);
+  assert.equal(workerTriggers.length, 2);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 60000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs <= 960000 && trigger.requestedDelayMs >= 959000), true);
 });
 
 test("terminal completion removes the delayed watchdog", () => {
@@ -847,11 +861,12 @@ test("terminal completion removes the delayed watchdog", () => {
 
   assert.equal(result.status, "completed");
   assert.deepEqual(calls, ["metricCopy", "finalize"]);
-  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000]);
+  assert.equal(workerRequests.length, 1);
+  assert.ok(workerRequests[0].delayMs <= 960000 && workerRequests[0].delayMs >= 959000);
   assert.equal(backend.__triggers.length, 0);
 });
 
-test("watchdog and continuation replacement keep one effective worker trigger", () => {
+test("watchdog and continuation scheduling keep one effective trigger of each kind", () => {
   const backend = loadBackend();
 
   backend.scheduleAutoRefreshJobWatchdog_();
@@ -861,9 +876,13 @@ test("watchdog and continuation replacement keep one effective worker trigger", 
   const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
   const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
 
-  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000, 60000, 300000]);
-  assert.equal(workerTriggers.length, 1);
-  assert.equal(workerTriggers[0].requestedDelayMs, 300000);
+  assert.equal(workerRequests.length, 2);
+  assert.ok(workerRequests[0].delayMs <= 960000 && workerRequests[0].delayMs >= 959000);
+  assert.equal(workerRequests[1].delayMs, 60000);
+  assert.equal(workerTriggers.length, 2);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 60000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs <= 960000 && trigger.requestedDelayMs >= 959000), true);
+  assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
 });
 
 test("final CWL coordinator and finalization can complete in one invocation", () => {
@@ -907,9 +926,10 @@ test("deferred finalization leaves the task pending with one normal continuation
 
   assert.equal(result.reason, "beforeFinalize");
   assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
-  assert.deepEqual(workerRequests.map((request) => request.delayMs), [300000, 60000]);
-  assert.equal(workerTriggers.length, 1);
-  assert.equal(workerTriggers[0].requestedDelayMs, 60000);
+  assert.deepEqual(workerRequests.map((request) => request.delayMs), [960000, 60000]);
+  assert.equal(workerTriggers.length, 2);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 60000), true);
+  assert.equal(workerTriggers.some((trigger) => trigger.requestedDelayMs === 960000), true);
 });
 
 const stageCompletedRosterOutputs = (backend, runId, dataRaw, rosterIdsRaw = ["main"]) => {
@@ -963,7 +983,7 @@ test("repairAutoRefreshScheduler recreates stale triggers and preserves a runnin
   assert.equal(result.currentRunId, runId);
   assert.equal(result.currentStatus, "running");
   assert.equal(result.removedAutoRefreshTriggers, 1);
-  assert.equal(result.removedResumeTriggers, 1);
+  assert.equal(result.removedResumeTriggers, 0);
   const autoTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshActiveRosterTick");
   const resumeTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
   assert.equal(autoTriggers.length, 1);
@@ -1154,7 +1174,7 @@ test("cooldown CWL refresh queues season events exactly once and updates active-
   assert.equal(first.cwlSeasonEventRefresh.status, "active");
   assert.equal(first.cwlSeasonEventCloudflarePublish.ok, true);
   assert.equal(publishLabels.length, 2);
-  assert.deepEqual(publishLabels.map((entry) => entry.label), ["auto-refresh-cooldown-cwl", "auto-refresh-cooldown-cwl"]);
+  assert.deepEqual(publishLabels.map((entry) => entry.label), ["cwl-lifecycle-active", "cwl-lifecycle-active"]);
   assert.equal(activeSnapshotReads, 0);
   assert.equal(firstTickGetPaths.some((path) => path.startsWith("activeVersions/source-1/playerMetrics")), false);
   assert.equal(firstLive.byTag["#PLAYER"].starsTotal, 2);
@@ -2349,7 +2369,7 @@ test("queue-mode Firebase batches defer instead of serial fallback", () => {
   assert.equal(fallbackCalls[0].payload["bad/one"].ok, true);
 });
 
-test("detached donation refresh writes season overlay without mutating active metrics", () => {
+test("detached donation refresh is atomic and preserves continuity across version changes and leave/rejoin", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());
   const seasonId = "ranked-legend-i-2026-05-18";
@@ -2399,15 +2419,24 @@ test("detached donation refresh writes season overlay without mutating active me
   backend.prefetchClanMembersSnapshotsByTag_ = (clanTags) => {
     assert.equal(JSON.stringify(clanTags.slice().sort()), JSON.stringify(["#CLAN", "#CLAN2"]));
     donationRefreshFetchCalls++;
-    const capturedAt = donationRefreshFetchCalls === 1
-      ? "2026-05-25T00:00:00.000Z"
-      : "2026-05-25T00:15:00.000Z";
+    const capturedAtByCall = [
+      "2026-05-25T00:00:00.000Z",
+      "2026-05-25T00:15:00.000Z",
+      "2026-05-25T00:30:00.000Z",
+      "2026-05-25T00:45:00.000Z",
+      "2026-05-25T01:00:00.000Z",
+    ];
+    const capturedAt = capturedAtByCall[Math.min(donationRefreshFetchCalls - 1, capturedAtByCall.length - 1)];
+    const playerDonations = donationRefreshFetchCalls >= 5 ? 170 : donationRefreshFetchCalls >= 3 ? 160 : 125;
+    const playerMembers = donationRefreshFetchCalls === 4
+      ? []
+      : [{ tag: "#PLAYER", name: "Player", trophies: 5000, donations: playerDonations, donationsReceived: 25 }];
     return {
       snapshotByClanTag: {
         "#CLAN": {
           clanTag: "#CLAN",
           capturedAt,
-          metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000, donations: 125, donationsReceived: 25 }],
+          metricsMembers: playerMembers,
         },
         "#CLAN2": {
           clanTag: "#CLAN2",
@@ -2472,7 +2501,89 @@ test("detached donation refresh writes season overlay without mutating active me
   assert.equal(secondResult.updatedPlayerCount, 0);
   assert.equal(secondPlayerOverlay.updatedAt, "2026-05-25T00:00:00.000Z");
   assert.equal(secondMeta.updatedAt, "2026-05-25T00:00:00.000Z");
-  assert.equal(activeBaseLedgerReadCount, 0);
+  assert.equal(activeBaseLedgerReadCount, 2);
+
+  const source2Data = clone(data);
+  source2Data.playerMetrics.byTag["#PLAYER"].donationCycles[seasonId] = {
+    seasonId,
+    startsAt: "2026-05-18T05:00:00.000Z",
+    endsAt: "2026-06-15T05:00:00.000Z",
+    rawDonationsLastSeen: 150,
+    rawDonationsReceivedLastSeen: 25,
+    cycleTotalDonations: 180,
+    cycleTotalDonationsReceived: 25,
+    firstSeenAt: "2026-05-20T00:00:00.000Z",
+    lastSeenAt: "2026-05-25T00:20:00.000Z",
+    lastClanTag: "#CLAN",
+    resetCount: 1,
+    receivedResetCount: 0,
+  };
+  const source2Manifest = backend.buildActiveVersionManifestFromValidatedData_("source-2", source2Data, {
+    publishedAt: "2026-05-25T00:20:00.000Z",
+  });
+  backend.firebaseRequestJson_("activeVersions/source-2/manifest", "PUT", backend.encodeFirebaseObjectKeysRecursive_(source2Manifest));
+  backend.firebaseRequestJson_("activeVersions/source-2/playerMetrics", "PUT", backend.encodeFirebaseObjectKeysRecursive_(source2Data.playerMetrics));
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-2");
+
+  const rebasedResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  const rebasedOverlay = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_(
+      "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"),
+      "GET",
+    ),
+  );
+  assert.equal(rebasedResult.sourceVersionId, "source-2");
+  assert.equal(rebasedOverlay.donationCycle.rawDonationsLastSeen, 160);
+  assert.equal(rebasedOverlay.donationCycle.cycleTotalDonations, 190);
+  assert.equal(rebasedOverlay.donationCycle.resetCount, 1);
+
+  const leaveResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  const leftOverlay = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_(
+      "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"),
+      "GET",
+    ),
+  );
+  assert.equal(leaveResult.status, "ok");
+  assert.equal(leftOverlay.donationCycle.cycleTotalDonations, 190);
+
+  const rejoinResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  const rejoinedOverlay = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_(
+      "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"),
+      "GET",
+    ),
+  );
+  assert.equal(rejoinResult.status, "ok");
+  assert.equal(rejoinedOverlay.donationCycle.rawDonationsLastSeen, 170);
+  assert.equal(rejoinedOverlay.donationCycle.cycleTotalDonations, 200);
+
+  const pointerBeforeAtomicFailure = backend.firebaseRequestJson_("donationRefresh/current", "GET");
+  const overlayBeforeAtomicFailure = backend.firebaseRequestJson_("donationRefresh/bySeason/" + seasonId, "GET");
+  const memoryRequest = backend.firebaseRequestJson_;
+  const unexpectedSerialWrites = [];
+  backend.firebaseRequestJson_ = (pathRaw, methodRaw = "GET", payloadRaw) => {
+    const method = String(methodRaw || "GET").toUpperCase();
+    if (method !== "GET") unexpectedSerialWrites.push({ path: String(pathRaw || ""), method });
+    return memoryRequest(pathRaw, methodRaw, payloadRaw);
+  };
+  backend.firebaseBatchPutJson_ = () => {
+    throw new Error("simulated atomic donation write failure");
+  };
+
+  assert.throws(
+    () => backend.runDonationRefreshCore_({ lockWaitMs: 0 }),
+    /simulated atomic donation write failure/,
+  );
+  assert.deepEqual(
+    backend.firebaseRequestJson_("donationRefresh/current", "GET"),
+    pointerBeforeAtomicFailure,
+  );
+  assert.deepEqual(
+    backend.firebaseRequestJson_("donationRefresh/bySeason/" + seasonId, "GET"),
+    overlayBeforeAtomicFailure,
+  );
+  assert.deepEqual(unexpectedSerialWrites, []);
 });
 
 test("queue worker treats existing roster result shards as an idempotent retry", () => {
@@ -3331,7 +3442,7 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   const leaguegroup = {
     state: "inWar",
     season: "2026-07",
-    clans: [{ tag: "#CLAN", name: "Main" }, { tag: "#OPP", name: "Opponent" }],
+    clans: [{ tag: "#CLAN", name: "Main", warLeague: { name: "Champion I" } }, { tag: "#OPP", name: "Opponent" }],
     rounds: [{ warTags: ["#WAR1"] }],
   };
   const war = {
@@ -3383,7 +3494,7 @@ test("queue finalization refreshes a waiting CWL season event from staged source
   const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
 
   assert.equal(result.status, "completed");
-  assert.equal(event.cwlTrackingState, "active");
+  assert.equal(event.cwlTrackingState, "active", JSON.stringify({ result, event, summary: backend.readAutoRefreshCwlCoordinatorSummary_(runId) }));
   assert.equal(event.startsAt, "2026-07-04T20:00:00.000Z");
   assert.equal(event.endsAt, "2026-07-05T20:00:00.000Z");
   assert.equal(JSON.stringify(event.cwl.target.eligibleAccountTags), JSON.stringify(["#PLAYER"]));
