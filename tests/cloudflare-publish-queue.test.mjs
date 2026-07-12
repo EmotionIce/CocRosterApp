@@ -1071,6 +1071,37 @@ test("Worker immutable retention fails closed before listing when the selector i
   assert.equal(deletes, 0);
 });
 
+test("Worker immutable retention rereads selector and deletes nothing across a selector race", async () => {
+  const worker = loadWorkerForBoundary();
+  const selectorKey = "public-data/activePublished/currentSelector.json";
+  const oldKey = "public-data/activeVersions/version-old/manifest.json";
+  const values = new Map([
+    [selectorKey, JSON.stringify({ currentVersionId: "version-current", previousVersionId: "version-previous" })],
+    ["public-data/activeVersions/version-current/manifest.json", "{}"],
+    ["public-data/activeVersions/version-previous/manifest.json", "{}"],
+    [oldKey, "{}"],
+  ]);
+  let deletes = 0;
+  const env = { ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret", ROSTER_DATA_KV: {
+    async get(key) { return values.has(key) ? values.get(key) : null; },
+    async list({ prefix }) {
+      const keys = Array.from(values.keys()).filter((key) => key.startsWith(prefix)).map((name) => ({ name }));
+      values.set(selectorKey, JSON.stringify({ currentVersionId: "version-old", previousVersionId: "version-current" }));
+      return { keys, list_complete: true, cursor: "" };
+    },
+    async delete(key) { deletes += 1; values.delete(key); },
+  } };
+  const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+    method: "POST",
+    headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify({ requestId: "retention-race", batchId: "retention-race", retention: { cursor: "", limit: 100 } }),
+  }), env, {});
+
+  assert.equal(response.status, 503);
+  assert.equal(deletes, 0);
+  assert.equal(values.has(oldKey), true);
+});
+
 test("Durable publication coordinator adds the accepted commit to retention protection", async () => {
   const worker = loadWorkerForBoundary();
   const values = new Map([

@@ -657,8 +657,8 @@ const encodeDataRetentionCursor = (stateRaw) => encodeURIComponent(JSON.stringif
 const executeImmutableVersionRetention = async (store, retentionRaw) => {
   const retention = normalizeDataRetentionRequest(retentionRaw);
   if (!retention) return null;
-  const selectorObject = await getDataStoreObject(store, buildDataObjectKey("public", PUBLIC_ACTIVE_SELECTOR_PATH));
-  const selector = await parseDataStorePlainJsonObject(selectorObject);
+  const readSelector = async () => parseDataStorePlainJsonObject(await getDataStoreObject(store, buildDataObjectKey("public", PUBLIC_ACTIVE_SELECTOR_PATH)));
+  const selector = await readSelector();
   const currentVersionId = String(selector && selector.currentVersionId || "").trim();
   if (!currentVersionId) throw new Error("Immutable retention requires a readable selected-version selector.");
   const preserve = new Set(retention.preserveVersionIds);
@@ -680,6 +680,13 @@ const executeImmutableVersionRetention = async (store, retentionRaw) => {
     if (!versionId || versionId.startsWith("__FB64__") || preserve.has(versionId)) continue;
     deleteKeys.push(key);
     deletedVersionIds.add(versionId);
+  }
+  const revalidatedSelector = await readSelector();
+  if (
+    String(revalidatedSelector && revalidatedSelector.currentVersionId || "").trim() !== currentVersionId ||
+    String(revalidatedSelector && revalidatedSelector.previousVersionId || "").trim() !== previousVersionId
+  ) {
+    throw new Error("Immutable retention selector changed before deletion; retry from the same cursor.");
   }
   const deleteResult = await runBoundedDataOperations(deleteKeys, DATA_PUBLISH_V2_CONCURRENCY, async (key) => {
     await deleteDataStoreObject(store, key);
