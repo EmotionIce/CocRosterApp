@@ -45,7 +45,7 @@ const loadWorkerForBoundary = () => {
   return context.workerDefault;
 };
 
-const loadQueue = () => {
+const loadQueue = (dateOverride = Date) => {
   const source = fs.readFileSync(new URL("script/cloudflarePublishQueue.js", repoRoot), "utf8");
   let uuid = 0;
   const properties = new Map([
@@ -57,7 +57,7 @@ const loadQueue = () => {
   const context = {
     console,
     Logger: { log() {} },
-    Date,
+    Date: dateOverride,
     Utilities: {
       getUuid: () => `uuid-${++uuid}`,
       sleep() {},
@@ -316,11 +316,28 @@ test("lifecycle descriptors dirty canonical event, exact aggregates, and pointer
 });
 
 test("lease prevents six-minute overlap and claimed-work recovery follows promptly", () => {
-  const q = loadQueue();
+  let nowMs = Date.parse("2026-07-12T00:00:00.000Z");
+  class VirtualDate extends Date {
+    constructor(...args) { super(args.length ? args[0] : nowMs); }
+    static now() { return nowMs; }
+  }
+  const q = loadQueue(VirtualDate);
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS > 360000);
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS <= 8 * 60 * 1000);
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS > q.CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS);
   assert.ok(q.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS <= 9 * 60 * 1000);
+  const original = q.tryAcquireCloudflarePublishQueueLease_("original", 0);
+  const recovery = q.scheduleCloudflarePublishWorkerRecovery_(true, original);
+  assert.equal(recovery.scheduled, true);
+  assert.equal(q.__triggers[0].delay, 8 * 60 * 1000);
+  nowMs += 6 * 60 * 1000;
+  assert.equal(q.tryAcquireCloudflarePublishQueueLease_("overlap-at-six-minutes", 0), null);
+  nowMs += 60 * 1000 - 1;
+  assert.equal(q.tryAcquireCloudflarePublishQueueLease_("overlap-before-expiry", 0), null);
+  nowMs += 60 * 1000 + 1;
+  const successor = q.tryAcquireCloudflarePublishQueueLease_("recovery", 0);
+  assert.ok(successor);
+  assert.equal(successor.owner, "recovery");
 });
 
 test("schema-v2 ordinary and commit states migrate to the first idempotent phase without changing the committed pointer", () => {
@@ -459,7 +476,68 @@ test("publication recovery is created only after a durable dispatch claim", () =
 
   assert.equal(result.ok, true);
   assert.equal(observedClaim, true);
-  assert.deepEqual(q.__triggers.map((trigger) => trigger.handler).sort(), ["cloudflarePublishWorkerRecoveryTick", "cloudflarePublishWorkerTick"]);
+  assert.ok(q.__triggerCalls.schedules >= 1);
+  assert.deepEqual(q.__triggers, []);
+});
+
+test("one worker checkpoints multiple independent items and persists full phase heartbeat coverage", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.nextRevision = 2;
+  state.dirty.events.alpha = { revision: 1, updatedAt: "2026-07-12T00:00:00.000Z", reasons: ["test"] };
+  state.dirty.events.beta = { revision: 2, updatedAt: "2026-07-12T00:00:01.000Z", reasons: ["test"] };
+  q.__setState(state);
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  q.getCloudflarePublicDataPublishV2Endpoint_ = () => "https://worker.test/api/internal/public-data/publish-v2";
+  q.getCloudflarePublicDataPublishSecret_ = () => "secret";
+  q.UrlFetchApp = { fetch: () => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: true }) }) };
+  q.buildCloudflareDirtyRequest_ = (_current, claim) => ({
+    label: `event-${claim.key}`,
+    objects: [{ path: `events/${claim.key}`, scope: "public", payload: { eventId: claim.key } }],
+    deletes: [],
+    commits: [],
+  });
+
+  const result = q.cloudflarePublishWorkerTick();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.pending, false);
+  assert.equal(result.results.length, 2);
+  assert.deepEqual(q.__getState().dirty.events, {});
+  const heartbeat = JSON.parse(q.__properties.get("CLOUDFLARE_PUBLISH_HEARTBEAT"));
+  assert.equal(heartbeat.processedItems, 2);
+  assert.ok(heartbeat.payloadBytes > 0);
+  assert.equal(heartbeat.lastEnteredPhase, "controlled-exit");
+  const phases = new Set(heartbeat.history.map((entry) => entry.phase));
+  for (const phase of ["start", "lease", "trigger-handling", "queue-read", "claim", "claim-durable", "firebase-build", "serialization", "http", "http-complete", "completion-cas", "checkpoint", "scheduling", "cleanup", "controlled-exit"]) {
+    assert.equal(phases.has(phase), true, `missing heartbeat phase ${phase}`);
+  }
+});
+
+test("one item failure is checkpointed while the same invocation completes independent work", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.nextRevision = 2;
+  state.dirty.events.alpha = { revision: 1, updatedAt: "2026-07-12T00:00:00.000Z", reasons: ["test"] };
+  state.dirty.events.beta = { revision: 2, updatedAt: "2026-07-12T00:00:01.000Z", reasons: ["test"] };
+  q.__setState(state);
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  q.buildCloudflareDirtyRequest_ = (_current, claim) => {
+    if (claim.key === "alpha") throw new Error("malformed publish object for alpha");
+    return { label: "beta", objects: [{ path: "events/beta", scope: "public", payload: { eventId: "beta" } }], deletes: [], commits: [] };
+  };
+  q.sendCloudflareQueuedV2Request_ = () => ({ ok: true, response: { ok: true }, payloadBytes: 100 });
+
+  const result = q.cloudflarePublishWorkerTick();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.pending, false);
+  assert.equal(result.results.length, 2);
+  assert.equal(result.results[0].ok, false);
+  assert.equal(result.results[1].ok, true);
+  assert.equal(q.__getState().dirty.events.beta, undefined);
+  assert.equal(q.__getState().dirty.events.alpha.failure.deadLetter, true);
+  assert.equal(Object.keys(q.__getState().deadLetters).length, 1);
 });
 
 test("recovery trigger creation failure checkpoints the claim without starting remote work", () => {
