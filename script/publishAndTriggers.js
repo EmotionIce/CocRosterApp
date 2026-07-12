@@ -4335,6 +4335,125 @@ function recoverIncompleteAlreadyPublishedAutoRefreshCanonical_(currentRaw, insp
 	return { repaired: false, status: "repair-required", versionId: runId, diagnostic: diagnostic };
 }
 
+function readCanonicalRepairMarker_(runIdRaw) {
+	const runId = normalizeActiveVersionId_(runIdRaw);
+	if (!runId) return null;
+	const encoded = firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH, encodeFirebaseObjectKey_(runId)), "GET");
+	return encoded && typeof encoded === "object" && !Array.isArray(encoded) ? decodeFirebaseObjectKeysRecursive_(encoded) : null;
+}
+
+function deleteCanonicalRepairMarker_(runIdRaw) {
+	const runId = normalizeActiveVersionId_(runIdRaw);
+	if (!runId) return false;
+	firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH, encodeFirebaseObjectKey_(runId)), "DELETE");
+	if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("canonical-roster-repair:" + runId);
+	return true;
+}
+
+function allocateCanonicalRepairVersionId_(runIdRaw) {
+	const runId = normalizeActiveVersionId_(runIdRaw);
+	if (!runId) throw new Error("Canonical repair run id is required.");
+	const path = buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH, encodeFirebaseObjectKey_(runId));
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const current = firebaseRequestJsonWithEtag_(path, "GET");
+		const marker = current && current.value && typeof current.value === "object" && !Array.isArray(current.value)
+			? decodeFirebaseObjectKeysRecursive_(current.value)
+			: null;
+		if (!marker) return null;
+		const existing = normalizeActiveVersionId_(marker.repairVersionId);
+		if (existing) return { marker: marker, versionId: existing };
+		if (String(marker.status || "") !== "repair-required") return { marker: marker, versionId: "" };
+		const versionId = createActiveVersionId_("canonical-repair");
+		const next = Object.assign({}, marker, {
+			status: "repairing",
+			repairVersionId: versionId,
+			repairStartedAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		});
+		try {
+			firebaseRequestJsonWithEtag_(path, "PUT", encodeFirebaseObjectKeysRecursive_(next), { ifMatch: current.etag });
+			return { marker: next, versionId: versionId };
+		} catch (err) {
+			if (err && err.code === "FIREBASE_ETAG_CONFLICT") continue;
+			throw err;
+		}
+	}
+	const conflict = new Error("Canonical repair marker compare-and-swap retries were exhausted.");
+	conflict.code = "FIREBASE_ETAG_CONFLICT";
+	throw conflict;
+}
+
+// Consume one proven-corruption marker through a fresh immutable version.
+// The selected version is never modified or rolled back. The fresh version is
+// fully written and validated before the Firebase selector changes, and
+// Cloudflare publication then follows its normal selector-last queue phases.
+function runCanonicalRepairMarker_(runIdRaw) {
+	const runId = normalizeActiveVersionId_(runIdRaw);
+	if (!runId) return { ok: true, skipped: true, reason: "missing-run-id" };
+	let marker = readCanonicalRepairMarker_(runId);
+	if (!marker) return { ok: true, skipped: true, reason: "missing-marker", runId: runId };
+	const selectedVersionId = readPublishedActiveVersionId_();
+	const repairVersionId = normalizeActiveVersionId_(marker.repairVersionId);
+	if (repairVersionId && selectedVersionId === repairVersionId) {
+		const repairInspection = inspectActiveVersionCanonicalContents_(repairVersionId, { requirePublishedManifest: true });
+		if (repairInspection.status === "indeterminate") return { ok: true, deferred: true, reason: "repair-inspection-indeterminate", runId: runId, versionId: repairVersionId };
+		if (repairInspection.status !== "complete") return { ok: false, blocked: true, reason: "selected-repair-version-incomplete", runId: runId, versionId: repairVersionId };
+		const queued = enqueueCloudflareActiveTarget_(repairVersionId, "canonical-repair-resume");
+		if (!queued || queued.ok === false) return { ok: false, deferred: true, reason: "cloudflare-enqueue-failed", runId: runId, versionId: repairVersionId, queueResult: queued || null };
+		deleteCanonicalRepairMarker_(runId);
+		return { ok: true, repaired: true, idempotent: true, runId: runId, versionId: repairVersionId, queueResult: queued };
+	}
+	if (selectedVersionId !== runId) {
+		deleteCanonicalRepairMarker_(runId);
+		return { ok: true, skipped: true, reason: "superseded", runId: runId, selectedVersionId: selectedVersionId };
+	}
+	const corruptInspection = inspectActiveVersionCanonicalContents_(runId, { requirePublishedManifest: true });
+	if (corruptInspection.status === "indeterminate") return { ok: true, deferred: true, reason: "canonical-inspection-indeterminate", runId: runId };
+	if (corruptInspection.status === "complete") {
+		deleteCanonicalRepairMarker_(runId);
+		return { ok: true, skipped: true, reason: "selected-version-complete", runId: runId };
+	}
+	const sourceVersionId = normalizeActiveVersionId_(marker.sourceVersionId);
+	if (!sourceVersionId || sourceVersionId === runId) return { ok: false, blocked: true, reason: "missing-known-good-source", runId: runId };
+	const sourceInspection = inspectActiveVersionCanonicalContents_(sourceVersionId, { requirePublishedManifest: false });
+	if (sourceInspection.status === "indeterminate") return { ok: true, deferred: true, reason: "source-inspection-indeterminate", runId: runId, sourceVersionId: sourceVersionId };
+	if (sourceInspection.status !== "complete") return { ok: false, blocked: true, reason: "source-version-incomplete", runId: runId, sourceVersionId: sourceVersionId };
+	const allocation = allocateCanonicalRepairVersionId_(runId);
+	if (!allocation || !allocation.versionId) return { ok: true, deferred: true, reason: "repair-allocation-unavailable", runId: runId };
+	marker = allocation.marker;
+	const freshVersionId = allocation.versionId;
+	const sourceSnapshot = readActiveRosterSnapshotFromVersion_(sourceVersionId);
+	const written = writeActiveRosterVersionShards_(freshVersionId, sourceSnapshot.rosterData, {
+		source: "canonical-repair",
+		sourceVersionId: sourceVersionId,
+		publishedAt: new Date().toISOString(),
+		publish: false,
+	});
+	const freshInspection = inspectActiveVersionCanonicalContents_(freshVersionId, { requirePublishedManifest: false });
+	if (freshInspection.status !== "complete") {
+		return freshInspection.status === "indeterminate"
+			? { ok: true, deferred: true, reason: "fresh-version-inspection-indeterminate", runId: runId, versionId: freshVersionId }
+			: { ok: false, blocked: true, reason: "fresh-version-incomplete", runId: runId, versionId: freshVersionId };
+	}
+	if (readPublishedActiveVersionId_() !== runId) return { ok: true, skipped: true, reason: "selector-superseded-before-commit", runId: runId, versionId: freshVersionId };
+	publishActiveRosterVersionPointer_(freshVersionId, written.manifest);
+	clearActiveRosterDataCache_();
+	marker = Object.assign({}, marker, { status: "selector-committed", selectorCommittedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+	firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH, encodeFirebaseObjectKey_(runId)), "PUT", encodeFirebaseObjectKeysRecursive_(marker));
+	const queued = enqueueCloudflareActiveTarget_(freshVersionId, "canonical-repair");
+	if (!queued || queued.ok === false) return { ok: false, deferred: true, reason: "cloudflare-enqueue-failed", runId: runId, versionId: freshVersionId, queueResult: queued || null };
+	deleteCanonicalRepairMarker_(runId);
+	return { ok: true, repaired: true, idempotent: false, runId: runId, sourceVersionId: sourceVersionId, versionId: freshVersionId, queueResult: queued };
+}
+
+function runOneCanonicalRepairMarker_() {
+	const keys = listFirebaseChildKeys_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH).slice().sort();
+	if (!keys.length) return { ok: true, skipped: true, reason: "no-canonical-repair-marker" };
+	let runId = String(keys[0] || "");
+	try { runId = decodeFirebaseObjectKey_(runId); } catch (err) {}
+	return runCanonicalRepairMarker_(runId);
+}
+
 // Execute finalization task: verify shards, guard source fingerprint, write final
 // manifest/playerMetrics shard, then publish the small version pointer.
 function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRaw) {
@@ -5699,7 +5818,16 @@ function permanentSchedulerWatchdogTickInternal_() {
 		donationRefresh: null,
 		cwlRecovery: null,
 		cloudflare: null,
+		canonicalRepair: null,
 	};
+	try {
+		result.canonicalRepair = runOneCanonicalRepairMarker_();
+		if (result.canonicalRepair && result.canonicalRepair.ok === false) result.ok = false;
+	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) return { ok: true, skipped: true, reason: "urlFetchQuota", cooldownUntil: new Date(getRuntimeUrlFetchQuotaCooldownUntilMs_()).toISOString() };
+		result.ok = false;
+		result.canonicalRepair = { ok: false, error: errorMessage_(err) };
+	}
 	try {
 		result.autoRefresh = repairAutoRefreshSchedulingFromPermanentWatchdog_();
 	} catch (err) {

@@ -1395,6 +1395,29 @@ test("manual link-created missing player survives refresh-all when absent from t
   assert.deepEqual(backend.firebaseRequestJson_("donationRefresh", "GET"), donationSentinel);
 });
 
+test("storage retention protects canonical repair source and staging versions", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildValidRosterData());
+  backend.writeActiveRosterVersionShards_("selected-corrupt", data, { publish: true, source: "test" });
+  backend.writeActiveRosterVersionShards_("known-good-source", data, { publish: false, source: "test" });
+  backend.writeActiveRosterVersionShards_("repair-staging", data, { publish: false, source: "test" });
+  backend.writeActiveRosterVersionShards_("unreferenced-old", data, { publish: false, source: "test" });
+  backend.firebaseRequestJson_("internal/autoRefresh/canonicalRepairs/selected-corrupt", "PUT", {
+    runId: "selected-corrupt",
+    sourceVersionId: "known-good-source",
+    repairVersionId: "repair-staging",
+    status: "repairing",
+  });
+
+  const result = backend.cleanupFirebaseStorageRetention_({ reason: "repair-retention-test" });
+
+  assert.ok(backend.firebaseRequestJson_("activeVersions/selected-corrupt", "GET"));
+  assert.ok(backend.firebaseRequestJson_("activeVersions/known-good-source", "GET"));
+  assert.ok(backend.firebaseRequestJson_("activeVersions/repair-staging", "GET"));
+  assert.equal(backend.firebaseRequestJson_("activeVersions/unreferenced-old", "GET"), null);
+  assert.equal(result.activeVersions.deletedCount, 1);
+});
+
 test("manual link rejects invalid tags and missing Clash players", () => {
   const backend = loadBackend();
   installActiveRosterWriteHarness(backend, buildManualDiscordLinkRosterData());

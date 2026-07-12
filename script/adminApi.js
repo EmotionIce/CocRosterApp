@@ -118,6 +118,9 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return repairCloudflarePublishQueue(args[0], args[1]);
 		case "repairCloudflareBotVersionObjects":
 			return repairCloudflareBotVersionObjects(args[0], args[1]);
+		case "runCanonicalRepairMarker":
+			assertAdminPassword_(args[1]);
+			return runCanonicalRepairMarker_(args[0] && args[0].runId);
 		case "pauseCloudflarePublishQueue":
 			return pauseCloudflarePublishQueue(args[0], args[1]);
 		default:

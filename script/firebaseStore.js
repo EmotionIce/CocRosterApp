@@ -2568,6 +2568,29 @@ function buildFirebaseStorageRetentionState_(optionsRaw) {
 		markFirebaseStorageRetentionId_(retainedActiveVersionIds, currentQueue.sourceVersionId);
 	}
 
+	// Canonical repair markers are durable references to immutable source and
+	// staging versions. Retention must protect all of them until the marker is
+	// consumed; otherwise terminal queue cleanup can erase the only known-good
+	// source before selector-last repair runs.
+	try {
+		const repairKeys = listFirebaseChildKeys_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH);
+		if (repairKeys.length > 100) throw new Error("Canonical repair marker retention bound exceeded.");
+		for (let i = 0; i < repairKeys.length; i++) {
+			const key = String(repairKeys[i] || "").trim();
+			if (!key) continue;
+			const encoded = firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_CANONICAL_REPAIRS_PATH, key), "GET");
+			const marker = encoded && typeof encoded === "object" && !Array.isArray(encoded)
+				? decodeFirebaseObjectKeysRecursive_(encoded)
+				: null;
+			if (!marker) continue;
+			markFirebaseStorageRetentionId_(retainedActiveVersionIds, marker.runId || normalizeFirebaseStorageChildIdForRetention_(key));
+			markFirebaseStorageRetentionId_(retainedActiveVersionIds, marker.sourceVersionId);
+			markFirebaseStorageRetentionId_(retainedActiveVersionIds, marker.repairVersionId);
+		}
+	} catch (err) {
+		errors.push("canonicalRepairs: " + errorMessage_(err));
+	}
+
 	return {
 		retainedActiveVersionIds: retainedActiveVersionIds,
 		retainedAutoRefreshRunIds: retainedAutoRefreshRunIds,
@@ -2625,6 +2648,15 @@ function cleanupFirebaseChildNodesExceptRetained_(parentPathRaw, retainedIdsRaw,
 // any in-progress queue source/staging version.
 function cleanupActiveVersionRetention_(stateRaw) {
 	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : buildFirebaseStorageRetentionState_();
+	if (state.errors && state.errors.length) {
+		return {
+			attempted: false,
+			deletedCount: 0,
+			skippedReason: "retention-state-indeterminate",
+			retainedVersionIds: Object.keys(state.retainedActiveVersionIds || {}).sort(),
+			retentionStateErrors: state.errors.slice(),
+		};
+	}
 	const result = cleanupFirebaseChildNodesExceptRetained_(FIREBASE_ACTIVE_VERSIONS_PATH, state.retainedActiveVersionIds, {
 		requireRetained: true,
 		keepNewestCount: FIREBASE_ACTIVE_VERSION_HISTORY_KEEP_COUNT,

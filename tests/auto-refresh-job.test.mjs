@@ -180,6 +180,7 @@ const installCloudflareMirrorSuccess = (backend) => {
 
 const installMemoryFirebase = (backend, initial = {}) => {
   let db = clone(initial);
+  let etagRevision = 1;
   const segmentsFor = (pathRaw) => String(pathRaw ?? "")
     .trim()
     .replace(/^\/+|\/+$/g, "")
@@ -245,6 +246,21 @@ const installMemoryFirebase = (backend, initial = {}) => {
       out[path] = backend.firebaseRequestJson_(path, "GET");
     }
     return out;
+  };
+  backend.firebaseRequestJsonWithEtag_ = (pathRaw, methodRaw = "GET", payloadRaw, optionsRaw = {}) => {
+    const method = String(methodRaw || "GET").toUpperCase();
+    if (method === "GET") return { value: backend.firebaseRequestJson_(pathRaw, "GET"), etag: `etag-${etagRevision}` };
+    if (method === "PUT") {
+      if (String(optionsRaw.ifMatch || "") !== `etag-${etagRevision}`) {
+        const conflict = new Error("Firebase ETag conflict");
+        conflict.code = "FIREBASE_ETAG_CONFLICT";
+        throw conflict;
+      }
+      const value = backend.firebaseRequestJson_(pathRaw, "PUT", payloadRaw);
+      etagRevision += 1;
+      return { value, etag: `etag-${etagRevision}` };
+    }
+    throw new Error(`Unsupported Firebase ETag method ${method}`);
   };
   backend.__getFirebaseDb = () => db;
   backend.fetchCurrentRegularWar_ = (clanTag) => backend.buildNoCurrentRegularWarResult_(clanTag);
@@ -3929,6 +3945,39 @@ test("positively incomplete selected version records repair without rolling back
   const repeated = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
   assert.equal(repeated.reason, "noRun");
   assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(enqueues, 0);
+
+  const repaired = backend.runCanonicalRepairMarker_(runId);
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.repaired, true);
+  assert.notEqual(repaired.versionId, runId);
+  assert.notEqual(repaired.versionId, "source-1");
+  assert.equal(backend.readPublishedActiveVersionId_(), repaired.versionId);
+  assert.equal(backend.inspectActiveVersionCanonicalContents_(repaired.versionId, { requirePublishedManifest: true }).status, "complete");
+  assert.equal(backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/main`, "GET"), null);
+  assert.equal(backend.firebaseRequestJson_(`internal/autoRefresh/canonicalRepairs/${runId}`, "GET"), null);
+  assert.equal(enqueues, 1);
+  const idempotent = backend.runCanonicalRepairMarker_(runId);
+  assert.equal(idempotent.reason, "missing-marker");
+  assert.equal(enqueues, 1);
+});
+
+test("canonical repair marker for a selected complete version is consumed without reopening it", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  backend.writeActiveRosterVersionShards_("complete-selected", data, { source: "test", publishedAt: "2026-07-12T00:00:00.000Z", publish: true });
+  backend.firebaseRequestJson_("internal/autoRefresh/canonicalRepairs/complete-selected", "PUT", {
+    runId: "complete-selected", status: "repair-required", sourceVersionId: "older-source", reason: "stale-marker",
+  });
+  let enqueues = 0;
+  backend.enqueueCloudflareActiveTarget_ = () => { enqueues += 1; return { ok: true }; };
+
+  const result = backend.runCanonicalRepairMarker_("complete-selected");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, "selected-version-complete");
+  assert.equal(backend.readPublishedActiveVersionId_(), "complete-selected");
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/canonicalRepairs/complete-selected", "GET"), null);
   assert.equal(enqueues, 0);
 });
 
