@@ -38,10 +38,11 @@ const loadRealFirebaseCodec = () => {
 const loadWorkerForBoundary = () => {
   const source = fs.readFileSync(new URL("cloudflarePages/worker-core.js", repoRoot), "utf8")
     .replace(/export\s+default\s+\{/, "globalThis.workerDefault = {")
-    .replace(/export\s+\{\s*CloudflarePublicationCoordinator\s*\};?/, "");
+    .replace(/export\s+\{\s*CloudflarePublicationCoordinator\s*\};?/, "globalThis.workerCoordinatorClass = CloudflarePublicationCoordinator;");
   const context = { URL, Request, Response, Headers, TextEncoder, Uint8Array, crypto: webcrypto, console };
   vm.createContext(context);
   vm.runInContext(source, context);
+  context.workerDefault.__Coordinator = context.workerCoordinatorClass;
   return context.workerDefault;
 };
 
@@ -269,7 +270,7 @@ test("permanent watchdog merges a failed active enqueue idempotently and never r
   assert.equal(q.__getState().active.targetVersionId, "version-B");
 });
 
-test("permanent watchdog clears a terminal matching active repair marker without changing generation", () => {
+test("permanent watchdog clears a terminal active repair marker and schedules retention without changing generation", () => {
   const q = installCasFirebase(loadQueue());
   const state = q.createEmptyCloudflarePublishQueueState_();
   state.active.targetVersionId = "version-B";
@@ -284,8 +285,8 @@ test("permanent watchdog clears a terminal matching active repair marker without
   const repeated = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
 
   assert.equal(first.ok, true);
-  assert.equal(first.alreadyCommitted, true);
-  assert.equal(first.pending, false);
+  assert.equal(first.pending, true);
+  assert.ok(q.__getState().dirty.retention);
   assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
   assert.equal(q.__getState().active.targetGeneration, 41);
   assert.equal(repeated.ok, true);
@@ -538,6 +539,54 @@ test("one item failure is checkpointed while the same invocation completes indep
   assert.equal(q.__getState().dirty.events.beta, undefined);
   assert.equal(q.__getState().dirty.events.alpha.failure.deadLetter, true);
   assert.equal(Object.keys(q.__getState().deadLetters).length, 1);
+});
+
+test("active commit enqueues cursor retention and resumes it until the Worker reports done", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = activeState(q, "commit");
+  q.__setState(state);
+  const claim = { category: "active", phase: "commit", cursor: 0, targetVersionId: "version-B", generation: 7 };
+  const completed = q.completeCloudflareActivePhase_(claim, { response: { ok: true } });
+  assert.equal(completed.ok, true);
+  assert.ok(q.__getState().dirty.retention);
+  assert.equal(q.__getState().active.committedVersionId, "version-B");
+
+  const cursors = [];
+  let sends = 0;
+  q.sendCloudflareQueuedV2Request_ = (request) => {
+    cursors.push(request.retention.cursor);
+    assert.equal(JSON.stringify(request.retention.preserveVersionIds), JSON.stringify(["version-B"]));
+    sends += 1;
+    return { ok: true, payloadBytes: 100, response: { ok: true, retention: sends === 1 ? { done: false, cursor: "next-page" } : { done: true, cursor: "" } } };
+  };
+
+  const firstRetentionResult = q.processCloudflareDirtyQueueRequest_(q.__getState());
+  assert.equal(firstRetentionResult.ok, true, JSON.stringify(firstRetentionResult));
+  assert.equal(firstRetentionResult.stale, undefined);
+  assert.equal(sends, 1);
+  assert.equal(q.__getState().dirty.retention.cursor, "next-page");
+  q.processCloudflareDirtyQueueRequest_(q.__getState());
+  assert.equal(q.__getState().dirty.retention, null);
+  assert.equal(q.__getState().lastRetentionVersionId, "version-B");
+  assert.deepEqual(cursors, ["", "next-page"]);
+});
+
+test("permanent watchdog seeds retention once for a committed pre-rollout version", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.active.targetVersionId = "version-existing";
+  state.active.committedVersionId = "version-existing";
+  state.active.phase = "idle";
+  q.__setState(state);
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+
+  const result = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+
+  assert.equal(result.pending, true);
+  assert.ok(q.__getState().dirty.retention);
+  const revision = q.__getState().dirty.retention.revision;
+  q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+  assert.equal(q.__getState().dirty.retention.revision, revision);
 });
 
 test("recovery trigger creation failure checkpoints the claim without starting remote work", () => {
@@ -934,6 +983,119 @@ test("Apps Script size checks match Worker normalization at realistic boundaries
     body: JSON.stringify(Object.assign({}, envelopeTooLarge, { dryRun: true })),
   }), env, {});
   assert.equal(rejectedEnvelope.status, 413);
+});
+
+test("Worker immutable retention deletes only unreferenced versions through a bounded cursor", async () => {
+  const worker = loadWorkerForBoundary();
+  const selectorKey = "public-data/activePublished/currentSelector.json";
+  const values = new Map([
+    [selectorKey, JSON.stringify({ currentVersionId: "version-current", previousVersionId: "version-previous", generation: 9 })],
+  ]);
+  const versions = ["version-current", "version-previous", "version-inflight", "version-old", "version-abandoned"];
+  for (const scope of ["public-data", "bot-data"]) {
+    for (const versionId of versions) {
+      values.set(`${scope}/activeVersions/${versionId}/manifest.json`, JSON.stringify({ versionId }));
+      if (versionId !== "version-abandoned") values.set(`${scope}/activeVersions/${versionId}/rosters.json`, JSON.stringify({}));
+    }
+  }
+  values.set("public-data/activeVersions/__FB64__legacy/manifest.json", JSON.stringify({ versionId: "legacy" }));
+  const deleted = [];
+  const store = {
+    async get(key) { return values.has(key) ? values.get(key) : null; },
+    async list({ prefix }) {
+      const keys = Array.from(values.keys()).filter((key) => key.startsWith(prefix)).sort().map((name) => ({ name }));
+      return { keys, list_complete: true, cursor: "" };
+    },
+    async delete(key) { deleted.push(key); values.delete(key); },
+    async put(key, value) { values.set(key, String(value)); },
+  };
+  const env = { ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret", ROSTER_DATA_KV: store };
+  const request = async (cursor) => {
+    const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+      method: "POST",
+      headers: { authorization: "Bearer secret", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: `retention-${cursor || "start"}`, batchId: `retention-${cursor || "start"}`, retention: { cursor, limit: 100, preserveVersionIds: ["version-inflight"] } }),
+    }), env, {});
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+
+  const publicPage = await request("");
+  assert.equal(publicPage.retention.done, false);
+  assert.equal(publicPage.retention.scope, "public");
+  const botPage = await request(publicPage.retention.cursor);
+  assert.equal(botPage.retention.done, true);
+  assert.equal(botPage.retention.scope, "bot");
+
+  for (const scope of ["public-data", "bot-data"]) {
+    for (const versionId of ["version-current", "version-previous", "version-inflight"]) {
+      assert.equal(values.has(`${scope}/activeVersions/${versionId}/manifest.json`), true);
+    }
+    assert.equal(Array.from(values.keys()).some((key) => key.startsWith(`${scope}/activeVersions/version-old/`)), false);
+    assert.equal(Array.from(values.keys()).some((key) => key.startsWith(`${scope}/activeVersions/version-abandoned/`)), false);
+  }
+  assert.equal(values.has("public-data/activeVersions/__FB64__legacy/manifest.json"), true);
+  assert.ok(deleted.length > 0);
+  assert.deepEqual(publicPage.retention.preserveVersionIds, ["version-current", "version-inflight", "version-previous"]);
+});
+
+test("Worker immutable retention fails closed before listing when the selector is unavailable", async () => {
+  const worker = loadWorkerForBoundary();
+  let lists = 0;
+  let deletes = 0;
+  const env = {
+    ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret",
+    ROSTER_DATA_KV: {
+      async get() { return null; },
+      async list() { lists += 1; return { keys: [], list_complete: true, cursor: "" }; },
+      async delete() { deletes += 1; },
+    },
+  };
+  const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+    method: "POST",
+    headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify({ requestId: "retention-no-selector", batchId: "retention-no-selector", retention: { cursor: "", limit: 100, preserveVersionIds: [] } }),
+  }), env, {});
+
+  assert.equal(response.status, 503);
+  assert.equal(lists, 0);
+  assert.equal(deletes, 0);
+});
+
+test("Durable publication coordinator adds the accepted commit to retention protection", async () => {
+  const worker = loadWorkerForBoundary();
+  const values = new Map([
+    ["public-data/activePublished/currentSelector.json", JSON.stringify({ currentVersionId: "version-current", previousVersionId: "version-previous" })],
+    ["public-data/activeVersions/version-current/manifest.json", "{}"],
+    ["public-data/activeVersions/version-previous/manifest.json", "{}"],
+    ["public-data/activeVersions/version-accepted/manifest.json", "{}"],
+    ["public-data/activeVersions/version-old/manifest.json", "{}"],
+  ]);
+  const store = {
+    async get(key) { return values.has(key) ? values.get(key) : null; },
+    async list({ prefix }) { return { keys: Array.from(values.keys()).filter((key) => key.startsWith(prefix)).map((name) => ({ name })), list_complete: true, cursor: "" }; },
+    async delete(key) { values.delete(key); },
+    async put(key, value) { values.set(key, String(value)); },
+  };
+  const durableValues = new Map([["acceptedActiveCommit", { generation: 10, targetVersionId: "version-accepted" }]]);
+  const durableState = { storage: {
+    async get(key) { return durableValues.get(key); },
+    async put(key, value) { durableValues.set(key, value); },
+  } };
+  const coordinator = new worker.__Coordinator(durableState, { ROSTER_DATA_KV: store });
+  const response = await coordinator.processBatch({
+    requestId: "retention-accepted",
+    batchId: "retention-accepted",
+    publishedAt: "2026-07-12T00:00:00.000Z",
+    dispatchGuard: { generation: 11, batchId: "retention-accepted" },
+    retention: { cursor: "", limit: 100, preserveVersionIds: [] },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(values.has("public-data/activeVersions/version-accepted/manifest.json"), true);
+  assert.equal(values.has("public-data/activeVersions/version-old/manifest.json"), false);
+  assert.ok(payload.retention.preserveVersionIds.includes("version-accepted"));
 });
 
 test("every active commit operation is retryable and the shared selector remains last", async () => {

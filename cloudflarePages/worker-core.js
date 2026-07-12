@@ -12,6 +12,7 @@ const DATA_PUBLISH_V2_CONCURRENCY = 4;
 const DATA_PUBLISH_V2_MAX_BODY_BYTES = 12 * 1024 * 1024;
 const DATA_PUBLISH_V2_MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
 const DATA_PUBLISH_V2_MAX_OBJECT_BYTES = 8 * 1024 * 1024;
+const DATA_RETENTION_MAX_KEYS_PER_PAGE = 100;
 const PUBLIC_DATA_STORE_PREFIX = "public-data";
 const BOT_DATA_STORE_PREFIX = "bot-data";
 const PUBLIC_BOOTSTRAP_DATA_PATH = "bootstrap/current.json";
@@ -612,6 +613,94 @@ const deleteDataStoreObject = async (store, key) => {
     throw new Error("Roster data store is not configured.");
   }
   return store.binding.delete(key);
+};
+
+const listDataStoreKeys = async (store, prefix, cursorRaw, limitRaw) => {
+  if (!store || !store.binding || typeof store.binding.list !== "function") throw new Error("Roster data store does not support bounded listing.");
+  const limit = Math.max(1, Math.min(DATA_RETENTION_MAX_KEYS_PER_PAGE, Math.floor(Number(limitRaw) || DATA_RETENTION_MAX_KEYS_PER_PAGE)));
+  const cursor = String(cursorRaw || "");
+  const result = await store.binding.list({ prefix, cursor: cursor || undefined, limit });
+  const entries = store.kind === "r2" ? (Array.isArray(result && result.objects) ? result.objects : []) : (Array.isArray(result && result.keys) ? result.keys : []);
+  return {
+    keys: entries.map((entry) => String(entry && (entry.name || entry.key) || "")).filter(Boolean),
+    cursor: String(result && result.cursor || ""),
+    complete: store.kind === "r2" ? !(result && result.truncated) : !!(result && result.list_complete),
+  };
+};
+
+const normalizeDataRetentionRequest = (raw) => {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  if (!source) return null;
+  const preserveVersionIds = Array.from(new Set((Array.isArray(source.preserveVersionIds) ? source.preserveVersionIds : [])
+    .map((value) => String(value || "").trim()).filter((value) => /^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(value)))).slice(0, 32);
+  return {
+    cursor: String(source.cursor || "").slice(0, 2000),
+    limit: Math.max(1, Math.min(DATA_RETENTION_MAX_KEYS_PER_PAGE, Math.floor(Number(source.limit) || DATA_RETENTION_MAX_KEYS_PER_PAGE))),
+    preserveVersionIds,
+  };
+};
+
+const decodeDataRetentionCursor = (cursorRaw) => {
+  const text = String(cursorRaw || "");
+  if (!text) return { scopeIndex: 0, cursor: "" };
+  try {
+    const parsed = JSON.parse(decodeURIComponent(text));
+    const scopeIndex = Math.max(0, Math.min(1, Math.floor(Number(parsed && parsed.scopeIndex) || 0)));
+    return { scopeIndex, cursor: String(parsed && parsed.cursor || "").slice(0, 1500) };
+  } catch (err) {
+    throw new Error("Invalid immutable-retention cursor.");
+  }
+};
+
+const encodeDataRetentionCursor = (stateRaw) => encodeURIComponent(JSON.stringify(stateRaw));
+
+const executeImmutableVersionRetention = async (store, retentionRaw) => {
+  const retention = normalizeDataRetentionRequest(retentionRaw);
+  if (!retention) return null;
+  const selectorObject = await getDataStoreObject(store, buildDataObjectKey("public", PUBLIC_ACTIVE_SELECTOR_PATH));
+  const selector = await parseDataStorePlainJsonObject(selectorObject);
+  const currentVersionId = String(selector && selector.currentVersionId || "").trim();
+  if (!currentVersionId) throw new Error("Immutable retention requires a readable selected-version selector.");
+  const preserve = new Set(retention.preserveVersionIds);
+  preserve.add(currentVersionId);
+  const previousVersionId = String(selector.previousVersionId || "").trim();
+  if (previousVersionId) preserve.add(previousVersionId);
+  const cursorState = decodeDataRetentionCursor(retention.cursor);
+  const prefixes = [PUBLIC_DATA_STORE_PREFIX + "/activeVersions/", BOT_DATA_STORE_PREFIX + "/activeVersions/"];
+  const prefix = prefixes[cursorState.scopeIndex];
+  const listed = await listDataStoreKeys(store, prefix, cursorState.cursor, retention.limit);
+  if (!listed.complete && !listed.cursor) throw new Error("Immutable retention listing did not return a continuation cursor.");
+  const deletedVersionIds = new Set();
+  const deleteKeys = [];
+  for (const key of listed.keys) {
+    if (!key.startsWith(prefix)) continue;
+    const versionId = key.slice(prefix.length).split("/")[0];
+    // Legacy encoded ids cannot be compared safely with selector ids. Retain
+    // them until an explicit migration maps them to the safe id alphabet.
+    if (!versionId || versionId.startsWith("__FB64__") || preserve.has(versionId)) continue;
+    deleteKeys.push(key);
+    deletedVersionIds.add(versionId);
+  }
+  const deleteResult = await runBoundedDataOperations(deleteKeys, DATA_PUBLISH_V2_CONCURRENCY, async (key) => {
+    await deleteDataStoreObject(store, key);
+  }, "retention-delete");
+  if (!deleteResult.ok) throw new Error("Immutable retention delete failed for " + String(deleteResult.failure && deleteResult.failure.path || "unknown key") + ".");
+  let nextScopeIndex = cursorState.scopeIndex;
+  let nextStoreCursor = listed.cursor;
+  if (listed.complete) {
+    nextScopeIndex += 1;
+    nextStoreCursor = "";
+  }
+  const done = nextScopeIndex >= prefixes.length;
+  return {
+    done,
+    cursor: done ? "" : encodeDataRetentionCursor({ scopeIndex: nextScopeIndex, cursor: nextStoreCursor }),
+    listedCount: listed.keys.length,
+    deletedCount: deleteResult.completed,
+    deletedVersionIds: Array.from(deletedVersionIds).sort(),
+    preserveVersionIds: Array.from(preserve).sort(),
+    scope: cursorState.scopeIndex === 0 ? "public" : "bot",
+  };
 };
 
 // Decode a slash path safely.
@@ -1752,6 +1841,7 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
   const deletes = Array.isArray(batch.deletes) ? batch.deletes : [];
   const commits = Array.isArray(batch.commits) ? batch.commits : [];
   const commitGuard = batch.commitGuard || null;
+  const retention = normalizeDataRetentionRequest(batch.retention);
   const baseCounts = {
     objectCount: objects.length,
     deleteCount: deletes.length,
@@ -1763,6 +1853,21 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
       status: 503,
       payload: Object.assign({ ok: false, requestId, batchId, error: "Roster data store is not configured." }, baseCounts),
     };
+  }
+
+  let retentionResult = null;
+  if (retention) {
+    try {
+      retentionResult = await executeImmutableVersionRetention(store, retention);
+    } catch (err) {
+      return {
+        status: 503,
+        payload: Object.assign({
+          ok: false, requestId, batchId, error: err && err.message ? err.message : String(err),
+          failed: { phase: "retention", scope: "internal", path: "activeVersions", error: err && err.message ? err.message : String(err) },
+        }, baseCounts),
+      };
+    }
   }
 
   const writeStartedAt = Date.now();
@@ -1871,6 +1976,7 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
       commitGuard: commitGuard || null,
       writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
       scopes: Array.from(new Set(objects.concat(deletes, commits).map((item) => item.scope))).sort(),
+      retention: retentionResult,
     }, baseCounts),
   };
 };
@@ -1949,11 +2055,16 @@ class CloudflarePublicationCoordinator {
       return { ok: true, current: claimed };
     };
 
+    let acceptedCommit = await this.state.storage.get("acceptedActiveCommit");
+    if (body.retention && typeof body.retention === "object" && acceptedCommit && acceptedCommit.targetVersionId) {
+      body.retention = Object.assign({}, body.retention, {
+        preserveVersionIds: Array.from(new Set((Array.isArray(body.retention.preserveVersionIds) ? body.retention.preserveVersionIds : []).concat([acceptedCommit.targetVersionId]))),
+      });
+    }
     const result = await executeNormalizedDataPublishV2Batch(body, this.env, {
       claimActiveCommitGuard: claimActiveCommitGuardDurably,
       recheckActiveCommitGuard: false,
     });
-    let acceptedCommit = await this.state.storage.get("acceptedActiveCommit");
     if (result.status >= 200 && result.status < 300 && result.payload && result.payload.ok === true && body.commitGuard) {
       acceptedCommit = {
         schemaVersion: 1,
@@ -2004,18 +2115,20 @@ const handleDataPublishV2 = async (request, env) => {
   const objectsRaw = Array.isArray(body.objects) ? body.objects : [];
   const deletesRaw = Array.isArray(body.deletePaths) ? body.deletePaths : Array.isArray(body.deletes) ? body.deletes : [];
   const commitsRaw = Array.isArray(body.commits) ? body.commits : Array.isArray(body.commitObjects) ? body.commitObjects : [];
+  let retention = null;
   let commitGuard = null;
   let dispatchGuard = null;
   try {
     commitGuard = normalizeActiveCommitGuard(body.commitGuard);
     dispatchGuard = normalizePublicationDispatchGuard(body.dispatchGuard, batchId);
+    retention = normalizeDataRetentionRequest(body.retention);
   } catch (err) {
     return jsonResponse(400, { ok: false, requestId, batchId, error: err && err.message ? err.message : "Invalid publication guard." });
   }
   const payloadBytes = new TextEncoder().encode(JSON.stringify(body)).byteLength;
 
-  if (!objectsRaw.length && !deletesRaw.length && !commitsRaw.length) {
-    return jsonResponse(400, { ok: false, requestId, batchId, error: "At least one object, delete path, or commit is required." });
+  if (!objectsRaw.length && !deletesRaw.length && !commitsRaw.length && !retention) {
+    return jsonResponse(400, { ok: false, requestId, batchId, error: "At least one object, delete path, commit, or retention cursor is required." });
   }
   if (objectsRaw.length > 500 || deletesRaw.length > 500 || commitsRaw.length > 50) {
     return jsonResponse(413, { ok: false, requestId, batchId, error: "Publish batch is too large." });
@@ -2052,7 +2165,7 @@ const handleDataPublishV2 = async (request, env) => {
       }, publishCorsHeaders());
     }
   }
-  const normalizedEnvelopeBytes = new TextEncoder().encode(JSON.stringify({ requestId, batchId, publishedAt, objects, deletes, commits, commitGuard, dispatchGuard })).byteLength;
+  const normalizedEnvelopeBytes = new TextEncoder().encode(JSON.stringify({ requestId, batchId, publishedAt, objects, deletes, commits, commitGuard, dispatchGuard, retention })).byteLength;
   if (normalizedEnvelopeBytes > DATA_PUBLISH_V2_MAX_PAYLOAD_BYTES) {
     return jsonResponse(413, { ok: false, requestId, batchId, error: `Cloudflare request exceeds payload limit bytes=${normalizedEnvelopeBytes}.` }, publishCorsHeaders());
   }
@@ -2061,7 +2174,7 @@ const handleDataPublishV2 = async (request, env) => {
     return jsonResponse(200, {
       ok: true, dryRun: true, requestId, batchId, publishedAt, payloadBytes,
       objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length,
-      commitGuard: commitGuard || null, dispatchGuard: dispatchGuard || null,
+      commitGuard: commitGuard || null, dispatchGuard: dispatchGuard || null, retention: retention || null,
       writeDurationMs: 0, commitDurationMs: 0,
     });
   }
@@ -2076,6 +2189,7 @@ const handleDataPublishV2 = async (request, env) => {
     commits,
     commitGuard,
     dispatchGuard,
+    retention,
   };
 
   if (dispatchGuard) {
