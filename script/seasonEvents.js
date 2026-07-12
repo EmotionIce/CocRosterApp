@@ -359,15 +359,21 @@ function buildCwlLifecyclePublicationDescriptor_(eventIdRaw, lifecycleStateRaw, 
 	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
 	const lifecycleState = normalizeCwlTrackingState_(lifecycleStateRaw) || "waiting";
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const normalizeAction = function (valueRaw, fallback) {
+		const value = String(valueRaw || "").trim().toLowerCase();
+		return value === "put" || value === "delete" || value === "none" ? value : fallback;
+	};
+	const defaultLiveAction = lifecycleState === "completed" ? "delete" : lifecycleState === "active" || lifecycleState === "finalizing" ? "put" : "delete";
+	const defaultFinalAction = lifecycleState === "completed" ? "put" : "delete";
 	return {
 		schemaVersion: 1,
 		category: "cwl-lifecycle",
 		eventId: eventId,
 		lifecycleState: lifecycleState,
 		eventAction: "put",
-		liveAggregateAction: lifecycleState === "completed" ? "delete" : lifecycleState === "active" || lifecycleState === "finalizing" ? "put" : "delete",
-		finalAggregateAction: lifecycleState === "completed" ? "put" : "delete",
-		pointerAction: "put",
+		liveAggregateAction: normalizeAction(options.liveAggregateAction, defaultLiveAction),
+		finalAggregateAction: normalizeAction(options.finalAggregateAction, defaultFinalAction),
+		pointerAction: normalizeAction(options.pointerAction, "put"),
 		objectBeforePointers: true,
 		reason: sanitizeSeasonEventText_(options.reason, 160) || "cwl-lifecycle-transition",
 	};
@@ -2587,7 +2593,7 @@ function updateSeasonEvent(payloadRaw, secretOrPassword) {
 			changedFields: patchKeys,
 		},
 	});
-	if (event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, updated.cwlTrackingState, { reason: "api-update-season-event" }));
+	if (event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, updated.cwlTrackingState, { reason: "api-update-season-event", liveAggregateAction: "none", finalAggregateAction: "none", pointerAction: "none" }));
 	else publishCloudflareSeasonEventsAfterMutation_("api-update-season-event", eventId, { pointers: true });
 	return {
 		ok: true,
@@ -3025,7 +3031,7 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 		});
 	});
 	if (response && response.status === "signed-up") {
-		if (response.event && response.event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, response.event.cwlTrackingState, { reason: "discord-season-event-signup" }));
+		if (response.event && response.event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, response.event.cwlTrackingState, { reason: "discord-season-event-signup", finalAggregateAction: "none", pointerAction: "none" }));
 		else publishCloudflareSeasonEventsAfterMutation_("discord-season-event-signup", eventId);
 	}
 	return response;
@@ -3116,7 +3122,7 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 		});
 	});
 	if (response && response.status === "updated") {
-		if (response.event && response.event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, response.event.cwlTrackingState, { reason: "discord-season-event-account-update" }));
+		if (response.event && response.event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, response.event.cwlTrackingState, { reason: "discord-season-event-account-update", finalAggregateAction: "none", pointerAction: "none" }));
 		else publishCloudflareSeasonEventsAfterMutation_("discord-season-event-account-update", eventId);
 	}
 	return response;
@@ -3172,7 +3178,7 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 		});
 	});
 	if (response && (response.status === "cancelled" || response.status === "already-cancelled")) {
-		if (response.event && response.event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, response.event.cwlTrackingState, { reason: "discord-season-event-cancel" }));
+		if (response.event && response.event.type === "cwl") publishCwlLifecycleDescriptor_(buildCwlLifecyclePublicationDescriptor_(eventId, response.event.cwlTrackingState, { reason: "discord-season-event-cancel", finalAggregateAction: "none", pointerAction: "none" }));
 		else publishCloudflareSeasonEventsAfterMutation_("discord-season-event-cancel", eventId);
 	}
 	return response;

@@ -2244,8 +2244,8 @@ test("CWL participant mutations enqueue the participant-projected aggregate imme
   assert.equal(cancel.status, "cancelled");
   assert.equal(calls.length, 3);
   assert.deepEqual(calls.map(call => call.options.cwlLifecycle.liveAggregateAction), ["put", "put", "put"]);
-  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.finalAggregateAction), ["delete", "delete", "delete"]);
-  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.pointerAction), ["put", "put", "put"]);
+  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.finalAggregateAction), ["none", "none", "none"]);
+  assert.deepEqual(calls.map(call => call.options.cwlLifecycle.pointerAction), ["none", "none", "none"]);
 });
 
 test("Cloudflare enqueue failure cannot block a canonical Discord mutation", () => {

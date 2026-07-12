@@ -314,6 +314,15 @@ test("lifecycle descriptors dirty canonical event, exact aggregates, and pointer
   assert.ok(state.dirty.cwlAggregates["cwl-1"].final);
   assert.ok(state.dirty.seasonPointers);
   assert.equal(JSON.stringify(state).includes("forged"), false);
+
+  state = q.createEmptyCloudflarePublishQueueState_();
+  q.enqueueCloudflareSeasonEventPublication_("cwl-2", "signup", {
+    cwlLifecycle: { eventId: "cwl-2", lifecycleState: "active", eventAction: "put", liveAggregateAction: "put", finalAggregateAction: "none", pointerAction: "none" },
+  });
+  assert.ok(state.dirty.events["cwl-2"]);
+  assert.ok(state.dirty.cwlAggregates["cwl-2"].live);
+  assert.equal(state.dirty.cwlAggregates["cwl-2"].final, undefined);
+  assert.equal(state.dirty.seasonPointers, null);
 });
 
 test("lease prevents six-minute overlap and claimed-work recovery follows promptly", () => {
