@@ -336,17 +336,21 @@ function writeSeasonEventFirebasePayload_(pathRaw, methodRaw, payloadRaw) {
 }
 
 // Commit a set of lifecycle paths with one Firebase multi-location write.
-function writeSeasonEventAtomicPayloads_(entriesRaw) {
+function writeSeasonEventAtomicPayloads_(entriesRaw, optionsRaw) {
 	const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const writes = [];
+	let includesRuntime = false;
 	for (let i = 0; i < entries.length; i++) {
 		const entry = entries[i] && typeof entries[i] === "object" ? entries[i] : {};
 		const path = sanitizeSeasonEventText_(entry.path, 500);
 		if (!path || entry.payload === undefined) continue;
+		if (path === SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH) includesRuntime = true;
 		writes.push({ path: path, payload: entry.payload === null ? null : encodeFirebaseObjectKeysRecursive_(entry.payload) });
 	}
 	if (!writes.length) return null;
 	if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(12000, "CWL lifecycle atomic checkpoint");
+	if (includesRuntime) return writeCwlRuntimeAtomicPayloadsWithCas_(writes, options);
 	return firebaseBatchPutJson_(writes, { disableFallback: true });
 }
 
@@ -2282,7 +2286,7 @@ function recoverFalseCompletedCwlSeasonEvent_(payloadRaw) {
 			{ path: buildSeasonEventCurrentPointerPath_("cwl"), payload: buildSeasonEventPointerPayload_(nextEvent, nextEvent) },
 		];
 		if (sanitizeSeasonEventText_(latest && latest.eventId, 180) === event.eventId) writes.push({ path: SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, payload: null });
-		writeSeasonEventAtomicPayloads_(writes);
+		writeSeasonEventAtomicPayloads_(writes, { allowRuntimeFinalizationReset: true });
 		writeSeasonEventAuditEntry_(event.eventId, { action: "false-completion-recovered", createdAt: nowIso, source: payload.source || { type: "cwl-integrity-recovery" }, details: audit });
 		return { ok: true, status: "recovered", recovered: true, eventId: event.eventId, event: summarizeSeasonEvent_(nextEvent) };
 	});
@@ -4191,31 +4195,182 @@ function sanitizeCwlRuntime_(runtimeRaw, eventIdRaw, nowIsoRaw) {
 	return out;
 }
 
-function readCwlRuntime_(eventIdRaw) {
-	try {
-		const raw = decodeSeasonEventFirebasePayload_(firebaseRequestJson_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "GET"));
-		const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
-		const runtimeEventId = sanitizeSeasonEventText_(raw && raw.eventId, 180);
-		if (eventId && runtimeEventId && runtimeEventId !== eventId) return createEmptyCwlRuntime_(eventId);
-		return sanitizeCwlRuntime_(raw, eventId);
-	} catch (err) {
-		Logger.log("Unable to read CWL runtime: %s", errorMessage_(err));
-		return createEmptyCwlRuntime_(eventIdRaw);
+function laterCwlRuntimeTimestamp_(leftRaw, rightRaw) {
+	const left = sanitizeSeasonEventTimestampOrEmpty_(leftRaw);
+	const right = sanitizeSeasonEventTimestampOrEmpty_(rightRaw);
+	return parseIsoToMs_(right) > parseIsoToMs_(left) ? right : left;
+}
+
+function earlierCwlRuntimeTimestamp_(leftRaw, rightRaw) {
+	const left = sanitizeSeasonEventTimestampOrEmpty_(leftRaw);
+	const right = sanitizeSeasonEventTimestampOrEmpty_(rightRaw);
+	if (!left) return right;
+	if (!right) return left;
+	return parseIsoToMs_(right) < parseIsoToMs_(left) ? right : left;
+}
+
+function mergeCwlRuntimeTags_(leftRaw, rightRaw, keepZeroRaw) {
+	return dedupeCwlRuntimeTags_((Array.isArray(leftRaw) ? leftRaw : []).concat(Array.isArray(rightRaw) ? rightRaw : []), keepZeroRaw);
+}
+
+function mergeCwlRuntimeGroup_(baseRaw, incomingRaw) {
+	const base = sanitizeCwlRuntimeGroup_(baseRaw);
+	const incoming = sanitizeCwlRuntimeGroup_(incomingRaw);
+	const stateRank = { "": 0, notinwar: 1, preparation: 2, inwar: 3, warended: 4 };
+	const baseStateRank = stateRank[String(base.state || "").toLowerCase()] || 0;
+	const incomingStateRank = stateRank[String(incoming.state || "").toLowerCase()] || 0;
+	const out = Object.assign({}, incomingStateRank > baseStateRank ? incoming : base);
+	out.groupId = base.groupId || incoming.groupId;
+	out.season = base.season || incoming.season;
+	out.expectedRounds = Math.max(base.expectedRounds, incoming.expectedRounds);
+	out.observedRoundCount = Math.max(base.observedRoundCount, incoming.observedRoundCount);
+	out.observationSucceeded = base.observationSucceeded || incoming.observationSucceeded;
+	out.observationTopologyComplete = base.observationTopologyComplete || incoming.observationTopologyComplete;
+	out.observedAt = laterCwlRuntimeTimestamp_(base.observedAt, incoming.observedAt);
+	out.updatedAt = laterCwlRuntimeTimestamp_(base.updatedAt, incoming.updatedAt);
+	out.firstWarStartTime = earlierCwlRuntimeTimestamp_(base.firstWarStartTime, incoming.firstWarStartTime);
+	out.lastWarEndTime = laterCwlRuntimeTimestamp_(base.lastWarEndTime, incoming.lastWarEndTime);
+	out.projectedLastWarEndTime = laterCwlRuntimeTimestamp_(base.projectedLastWarEndTime, incoming.projectedLastWarEndTime);
+	out.clanTags = mergeCwlRuntimeTags_(base.clanTags, incoming.clanTags);
+	out.candidateClanTags = mergeCwlRuntimeTags_(base.candidateClanTags, incoming.candidateClanTags);
+	out.relevantWarTags = mergeCwlRuntimeTags_(base.relevantWarTags, incoming.relevantWarTags);
+	out.materializedRoundIndexes = Array.from(new Set(base.materializedRoundIndexes.concat(incoming.materializedRoundIndexes))).sort(function (left, right) { return left - right; });
+	out.roundWarTagsByIndex = {};
+	const roundIndexes = Object.keys(Object.assign({}, base.roundWarTagsByIndex, incoming.roundWarTagsByIndex));
+	for (let i = 0; i < roundIndexes.length; i++) {
+		const key = String(toNonNegativeInt_(roundIndexes[i]));
+		out.roundWarTagsByIndex[key] = mergeCwlRuntimeTags_(base.roundWarTagsByIndex[key], incoming.roundWarTagsByIndex[key], true);
 	}
+	return sanitizeCwlRuntimeGroup_(out);
+}
+
+function mergeCwlRuntimeWarRecord_(baseRaw, incomingRaw) {
+	const base = sanitizeCwlRuntimeWarRecord_(baseRaw);
+	const incoming = sanitizeCwlRuntimeWarRecord_(incomingRaw);
+	const statusRank = { "": 0, failed: 1, active: 2, confirming: 3, ignored: 3, settled: 4 };
+	const baseRank = statusRank[base.status] || 0;
+	const incomingRank = statusRank[incoming.status] || 0;
+	const incomingNewer = parseIsoToMs_(incoming.lastFetchedAt) > parseIsoToMs_(base.lastFetchedAt);
+	const preferred = incomingRank > baseRank || (incomingRank === baseRank && incomingNewer) ? incoming : base;
+	const other = preferred === incoming ? base : incoming;
+	const out = Object.assign({}, preferred);
+	out.warTag = preferred.warTag || other.warTag;
+	out.clanTag = preferred.clanTag || other.clanTag;
+	out.groupId = preferred.groupId || other.groupId;
+	out.opponentTag = preferred.opponentTag || other.opponentTag;
+	out.lastFetchedAt = laterCwlRuntimeTimestamp_(base.lastFetchedAt, incoming.lastFetchedAt);
+	out.lastErrorAt = laterCwlRuntimeTimestamp_(base.lastErrorAt, incoming.lastErrorAt);
+	out.settledAt = laterCwlRuntimeTimestamp_(base.settledAt, incoming.settledAt);
+	out.auditedAt = laterCwlRuntimeTimestamp_(base.auditedAt, incoming.auditedAt);
+	out.auditFailureCount = Math.max(base.auditFailureCount, incoming.auditFailureCount);
+	const auditRank = { "": 0, "fetch-failed": 1, mismatch: 2, matched: 3 };
+	if ((auditRank[other.auditStatus] || 0) > (auditRank[out.auditStatus] || 0)) out.auditStatus = other.auditStatus;
+	if (!out.lastValidContribution && other.lastValidContribution) out.lastValidContribution = other.lastValidContribution;
+	return sanitizeCwlRuntimeWarRecord_(out);
+}
+
+// Merge a fetched runtime into the latest stored runtime without allowing late,
+// partial work to shrink topology, reopen settled wars, erase audits, or remove
+// finalization/roster acknowledgements.
+function mergeCwlRuntimeMonotonic_(baseRaw, incomingRaw) {
+	const base = sanitizeCwlRuntime_(baseRaw, baseRaw && baseRaw.eventId);
+	const incoming = sanitizeCwlRuntime_(incomingRaw, incomingRaw && incomingRaw.eventId);
+	if (!base.eventId || !incoming.eventId || base.eventId !== incoming.eventId) {
+		const failure = new Error("CWL runtime merge owner mismatch.");
+		failure.code = "CWL_RUNTIME_OTHER_EVENT";
+		throw failure;
+	}
+	const out = sanitizeCwlRuntime_(base, base.eventId);
+	out.season = base.season || incoming.season;
+	out.createdAt = earlierCwlRuntimeTimestamp_(base.createdAt, incoming.createdAt);
+	out.updatedAt = laterCwlRuntimeTimestamp_(base.updatedAt, incoming.updatedAt);
+	out.lastAttemptedRefreshAt = laterCwlRuntimeTimestamp_(base.lastAttemptedRefreshAt, incoming.lastAttemptedRefreshAt);
+	out.lastDiscoveryAttemptedAt = laterCwlRuntimeTimestamp_(base.lastDiscoveryAttemptedAt, incoming.lastDiscoveryAttemptedAt);
+	out.lastDataSuccessAt = laterCwlRuntimeTimestamp_(base.lastDataSuccessAt, incoming.lastDataSuccessAt);
+	out.lastCompleteRefreshAt = laterCwlRuntimeTimestamp_(base.lastCompleteRefreshAt, incoming.lastCompleteRefreshAt);
+	out.bootstrapCompletedAt = laterCwlRuntimeTimestamp_(base.bootstrapCompletedAt, incoming.bootstrapCompletedAt);
+	out.finalizedAt = laterCwlRuntimeTimestamp_(base.finalizedAt, incoming.finalizedAt);
+	out.discoveryIncomplete = base.discoveryIncomplete && incoming.discoveryIncomplete;
+	out.bootstrapRequired = base.bootstrapRequired || incoming.bootstrapRequired;
+	out.finalEventBoundClanTags = mergeCwlRuntimeTags_(base.finalEventBoundClanTags, incoming.finalEventBoundClanTags);
+	const ackTags = Object.keys(Object.assign({}, base.rosterAckByClanTag, incoming.rosterAckByClanTag));
+	for (let i = 0; i < ackTags.length; i++) {
+		const tag = normalizeTag_(ackTags[i]);
+		if (tag) out.rosterAckByClanTag[tag] = laterCwlRuntimeTimestamp_(base.rosterAckByClanTag[tag], incoming.rosterAckByClanTag[tag]);
+	}
+	const groupIds = Object.keys(Object.assign({}, base.groups, incoming.groups));
+	for (let i = 0; i < groupIds.length; i++) {
+		const groupId = groupIds[i];
+		out.groups[groupId] = base.groups[groupId] && incoming.groups[groupId]
+			? mergeCwlRuntimeGroup_(base.groups[groupId], incoming.groups[groupId])
+			: sanitizeCwlRuntimeGroup_(base.groups[groupId] || incoming.groups[groupId]);
+	}
+	const clanTags = Object.keys(Object.assign({}, base.roundsByClanTag, incoming.roundsByClanTag));
+	for (let i = 0; i < clanTags.length; i++) {
+		const clanTag = normalizeTag_(clanTags[i]);
+		if (!out.roundsByClanTag[clanTag]) out.roundsByClanTag[clanTag] = {};
+		const baseRounds = base.roundsByClanTag[clanTag] || {};
+		const incomingRounds = incoming.roundsByClanTag[clanTag] || {};
+		const roundIndexes = Object.keys(Object.assign({}, baseRounds, incomingRounds));
+		for (let j = 0; j < roundIndexes.length; j++) {
+			const key = String(toNonNegativeInt_(roundIndexes[j]));
+			const left = baseRounds[key];
+			const right = incomingRounds[key];
+			if (!left || !right) out.roundsByClanTag[clanTag][key] = sanitizeCwlRuntimeRound_(left || right);
+			else {
+				const preferred = parseIsoToMs_(right.updatedAt) > parseIsoToMs_(left.updatedAt) ? right : left;
+				const other = preferred === right ? left : right;
+				out.roundsByClanTag[clanTag][key] = sanitizeCwlRuntimeRound_(Object.assign({}, preferred, {
+					warTag: preferred.warTag || other.warTag,
+					opponentTag: preferred.opponentTag || other.opponentTag,
+					groupId: preferred.groupId || other.groupId,
+					updatedAt: laterCwlRuntimeTimestamp_(left.updatedAt, right.updatedAt),
+				}));
+			}
+		}
+	}
+	const recordKeys = Object.keys(Object.assign({}, base.warRecords, incoming.warRecords));
+	for (let i = 0; i < recordKeys.length; i++) {
+		const key = recordKeys[i];
+		out.warRecords[key] = base.warRecords[key] && incoming.warRecords[key]
+			? mergeCwlRuntimeWarRecord_(base.warRecords[key], incoming.warRecords[key])
+			: sanitizeCwlRuntimeWarRecord_(base.warRecords[key] || incoming.warRecords[key]);
+	}
+	out.ignoredMarkers = Object.assign({}, incoming.ignoredMarkers, base.ignoredMarkers);
+	const diagnosticByKey = {};
+	const diagnostics = base.diagnostics.concat(incoming.diagnostics);
+	for (let i = 0; i < diagnostics.length; i++) diagnosticByKey[JSON.stringify(diagnostics[i])] = diagnostics[i];
+	out.diagnostics = Object.keys(diagnosticByKey).map(function (key) { return diagnosticByKey[key]; }).sort(function (left, right) { return parseIsoToMs_(left.at) - parseIsoToMs_(right.at); }).slice(-CWL_RUNTIME_DIAGNOSTIC_LIMIT);
+	out.counts = {};
+	const countKeys = Object.keys(Object.assign({}, base.counts, incoming.counts));
+	for (let i = 0; i < countKeys.length; i++) out.counts[countKeys[i]] = Math.max(toNonNegativeInt_(base.counts[countKeys[i]]), toNonNegativeInt_(incoming.counts[countKeys[i]]));
+	return sanitizeCwlRuntime_(out, out.eventId);
+}
+
+function readCwlRuntime_(eventIdRaw) {
+	const read = readCwlRuntimeStrict_(eventIdRaw);
+	if (read.status === "other-event") {
+		const failure = new Error("CWL runtime belongs to another event.");
+		failure.code = "CWL_RUNTIME_OTHER_EVENT";
+		failure.runtimeEventId = read.runtimeEventId;
+		throw failure;
+	}
+	return read.runtime;
 }
 
 function readCwlRuntimeStrict_(eventIdRaw) {
 	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
-	let encoded;
+	let etagRead;
 	try {
-		encoded = firebaseRequestJson_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "GET");
+		etagRead = firebaseRequestJsonWithEtag_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "GET");
 	} catch (err) {
 		const failure = new Error("Unable to read CWL runtime for mutation: " + errorMessage_(err));
 		failure.code = "CWL_RUNTIME_READ_FAILED";
 		failure.cause = err;
 		throw failure;
 	}
-	if (encoded == null) return { status: "absent", eventId: eventId, runtime: createEmptyCwlRuntime_(eventId) };
+	const encoded = etagRead ? etagRead.value : null;
+	if (encoded == null) return { status: "absent", eventId: eventId, runtime: createEmptyCwlRuntime_(eventId), etag: etagRead && etagRead.etag };
 	let raw;
 	try { raw = decodeSeasonEventFirebasePayload_(encoded); } catch (err) {
 		const failure = new Error("Unable to decode CWL runtime for mutation: " + errorMessage_(err));
@@ -4229,10 +4384,26 @@ function readCwlRuntimeStrict_(eventIdRaw) {
 		throw failure;
 	}
 	const runtimeEventId = sanitizeSeasonEventText_(raw.eventId, 180);
-	if (runtimeEventId && runtimeEventId !== eventId) {
-		return { status: "other-event", eventId: eventId, runtimeEventId: runtimeEventId, runtime: sanitizeCwlRuntime_(raw, runtimeEventId) };
+	if (!runtimeEventId) {
+		const failure = new Error("CWL runtime is missing its raw owner; mutation was deferred.");
+		failure.code = "CWL_RUNTIME_DECODE_FAILED";
+		throw failure;
 	}
-	return { status: "matching", eventId: eventId || runtimeEventId, runtimeEventId: runtimeEventId, runtime: sanitizeCwlRuntime_(raw, eventId || runtimeEventId) };
+	if (runtimeEventId && runtimeEventId !== eventId) {
+		return { status: "other-event", eventId: eventId, runtimeEventId: runtimeEventId, runtime: attachCwlRuntimeEtag_(sanitizeCwlRuntime_(raw, runtimeEventId), etagRead.etag), etag: etagRead.etag };
+	}
+	return { status: "matching", eventId: eventId || runtimeEventId, runtimeEventId: runtimeEventId, runtime: attachCwlRuntimeEtag_(sanitizeCwlRuntime_(raw, eventId || runtimeEventId), etagRead.etag), etag: etagRead.etag };
+}
+
+function attachCwlRuntimeEtag_(runtimeRaw, etagRaw) {
+	const runtime = runtimeRaw && typeof runtimeRaw === "object" ? runtimeRaw : null;
+	if (!runtime) return runtime;
+	try {
+		Object.defineProperty(runtime, "__firebaseEtag", { value: String(etagRaw || ""), enumerable: false, configurable: true });
+	} catch (err) {
+		runtime.__firebaseEtag = String(etagRaw || "");
+	}
+	return runtime;
 }
 
 function requireCwlRuntimeForMutation_(eventIdRaw) {
@@ -4246,25 +4417,130 @@ function requireCwlRuntimeForMutation_(eventIdRaw) {
 	return read.runtime;
 }
 
+function assertCwlRuntimeOwnerStillCurrent_(eventIdRaw) {
+	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
+	const event = eventId ? readSeasonEventById_(eventId) : null;
+	const state = event ? normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting" : "";
+	const primary = readSeasonEventPointer_(SEASON_EVENTS_CURRENT_CWL_PATH);
+	const generic = readSeasonEventPointer_(buildSeasonEventCurrentPointerPath_("cwl"));
+	const primaryId = sanitizeSeasonEventText_(primary && primary.eventId, 180);
+	const genericId = sanitizeSeasonEventText_(generic && generic.eventId, 180);
+	if (!event || state === "completed" || (primaryId && primaryId !== eventId) || (genericId && genericId !== eventId) || (!primaryId && !genericId)) {
+		const failure = new Error("CWL runtime owner is no longer the current refreshable event; mutation was deferred.");
+		failure.code = "CWL_RUNTIME_STALE_EVENT";
+		throw failure;
+	}
+	return event;
+}
+
 function writeCwlRuntime_(runtimeRaw) {
-	const runtime = sanitizeCwlRuntime_(runtimeRaw, runtimeRaw && runtimeRaw.eventId);
-	runtime.updatedAt = new Date().toISOString();
-	writeSeasonEventFirebasePayload_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "PUT", runtime);
-	return runtime;
+	const expectedEtag = String(runtimeRaw && runtimeRaw.__firebaseEtag || "");
+	const incoming = sanitizeCwlRuntime_(runtimeRaw, runtimeRaw && runtimeRaw.eventId);
+	if (!incoming.eventId) throw new Error("CWL runtime owner is required.");
+	if (expectedEtag) {
+		try {
+			firebaseRequestJsonWithEtag_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "PUT", encodeFirebaseObjectKeysRecursive_(incoming), { ifMatch: expectedEtag });
+			return incoming;
+		} catch (err) {
+			if (!err || err.code !== "FIREBASE_ETAG_CONFLICT") throw err;
+		}
+	}
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const read = readCwlRuntimeStrict_(incoming.eventId);
+		if (read.status === "other-event") {
+			const failure = new Error("CWL runtime belongs to another event; write was deferred.");
+			failure.code = "CWL_RUNTIME_OTHER_EVENT";
+			failure.runtimeEventId = read.runtimeEventId;
+			throw failure;
+		}
+		if (read.status === "matching" && read.runtime.finalizedAt && !incoming.finalizedAt) return read.runtime;
+		if (read.status === "absent") assertCwlRuntimeOwnerStillCurrent_(incoming.eventId);
+		const next = read.status === "matching" ? mergeCwlRuntimeMonotonic_(read.runtime, incoming) : incoming;
+		next.updatedAt = laterCwlRuntimeTimestamp_(next.updatedAt, new Date().toISOString());
+		try {
+			firebaseRequestJsonWithEtag_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "PUT", encodeFirebaseObjectKeysRecursive_(next), { ifMatch: read.etag });
+			return next;
+		} catch (err) {
+			if (err && err.code === "FIREBASE_ETAG_CONFLICT") continue;
+			throw err;
+		}
+	}
+	const conflict = new Error("CWL runtime compare-and-swap retries were exhausted.");
+	conflict.code = "FIREBASE_ETAG_CONFLICT";
+	throw conflict;
 }
 
 function clearCwlRuntimeForEvent_(eventIdRaw) {
 	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
-	try {
-		const current = sanitizeCwlRuntime_(decodeSeasonEventFirebasePayload_(firebaseRequestJson_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "GET")), eventId);
-		if (!eventId || !current.eventId || current.eventId === eventId) {
-			firebaseRequestJson_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "DELETE");
+	if (!eventId) return false;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const read = readCwlRuntimeStrict_(eventId);
+		if (read.status === "absent") return true;
+		if (read.status === "other-event") return false;
+		try {
+			firebaseRequestJsonWithEtag_(SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH, "DELETE", undefined, { ifMatch: read.etag });
 			return true;
+		} catch (err) {
+			if (err && err.code === "FIREBASE_ETAG_CONFLICT") continue;
+			throw err;
 		}
-	} catch (err) {
-		Logger.log("Unable to clear CWL runtime for event %s: %s", eventId, errorMessage_(err));
 	}
 	return false;
+}
+
+function writeCwlRuntimeAtomicPayloadsWithCas_(writesRaw, optionsRaw) {
+	const writes = Array.isArray(writesRaw) ? writesRaw : [];
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	let runtimeWrite = null;
+	let expectedEventId = "";
+	for (let i = 0; i < writes.length; i++) {
+		const entry = writes[i] && typeof writes[i] === "object" ? writes[i] : {};
+		if (entry.path === SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH) runtimeWrite = entry;
+		if (!expectedEventId && entry.payload && typeof entry.payload === "object") {
+			const decoded = decodeSeasonEventFirebasePayload_(entry.payload);
+			expectedEventId = sanitizeSeasonEventText_(decoded && decoded.eventId, 180);
+		}
+	}
+	if (!runtimeWrite || !expectedEventId) throw new Error("CWL runtime atomic write is missing its expected owner.");
+	const basePrefix = SEASON_EVENTS_BASE_PATH + "/";
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const rootRead = firebaseRequestJsonWithEtag_(SEASON_EVENTS_BASE_PATH, "GET");
+		const decodedRoot = decodeSeasonEventFirebasePayload_(rootRead && rootRead.value) || {};
+		const rawRuntime = decodedRoot.privateCwlRuntime && typeof decodedRoot.privateCwlRuntime === "object"
+			? decodedRoot.privateCwlRuntime.current
+			: null;
+		const rawOwner = sanitizeSeasonEventText_(rawRuntime && rawRuntime.eventId, 180);
+		if (rawRuntime && !rawOwner) {
+			const failure = new Error("CWL runtime is missing its raw owner; atomic mutation was deferred.");
+			failure.code = "CWL_RUNTIME_DECODE_FAILED";
+			throw failure;
+		}
+		if (rawOwner && rawOwner !== expectedEventId) {
+			const failure = new Error("CWL runtime belongs to another event; atomic mutation was deferred.");
+			failure.code = "CWL_RUNTIME_OTHER_EVENT";
+			failure.runtimeEventId = rawOwner;
+			throw failure;
+		}
+		const patch = {};
+		for (let i = 0; i < writes.length; i++) {
+			const entry = writes[i];
+			if (entry.path.indexOf(basePrefix) !== 0) throw new Error("CWL lifecycle atomic path is outside the season-event root.");
+			patch[entry.path.slice(basePrefix.length)] = entry.payload;
+		}
+		if (runtimeWrite.payload && rawRuntime && options.allowRuntimeFinalizationReset !== true) {
+			const incoming = decodeSeasonEventFirebasePayload_(runtimeWrite.payload);
+			patch[SEASON_EVENTS_CWL_RUNTIME_CURRENT_PATH.slice(basePrefix.length)] = encodeFirebaseObjectKeysRecursive_(mergeCwlRuntimeMonotonic_(rawRuntime, incoming));
+		}
+		try {
+			return firebaseRequestJsonWithEtag_(SEASON_EVENTS_BASE_PATH, "PATCH", patch, { ifMatch: rootRead.etag });
+		} catch (err) {
+			if (err && err.code === "FIREBASE_ETAG_CONFLICT") continue;
+			throw err;
+		}
+	}
+	const conflict = new Error("CWL lifecycle atomic compare-and-swap retries were exhausted.");
+	conflict.code = "FIREBASE_ETAG_CONFLICT";
+	throw conflict;
 }
 
 function cwlRuntimeRosterAcksComplete_(runtimeRaw) {
@@ -5440,7 +5716,7 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 		viewClanCount: Object.keys(viewsByClanTag).length,
 	};
 	runtime.updatedAt = nowIso;
-	if (options.persistRuntime !== false) runtime = writeCwlRuntime_(runtime);
+	if (options.persistRuntime !== false && runtime.eventId) runtime = writeCwlRuntime_(runtime);
 	const observationId = buildSeasonEventStableHash_({
 		capturedAt: nowIso,
 		eventId: eventId,

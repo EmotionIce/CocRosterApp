@@ -119,6 +119,7 @@ const installActiveRosterWriteHarness = (backend, activeDataRaw) => {
 
 const installMemoryFirebase = (backend, initial = {}) => {
   let db = clone(initial);
+  let etagRevision = 1;
   const segmentsFor = (pathRaw) => String(pathRaw ?? "")
     .trim()
     .replace(/^\/+|\/+$/g, "")
@@ -175,6 +176,29 @@ const installMemoryFirebase = (backend, initial = {}) => {
       return null;
     }
     throw new Error(`Unsupported Firebase method ${method}`);
+  };
+  backend.firebaseRequestJsonWithEtag_ = (pathRaw, methodRaw = "GET", payloadRaw, optionsRaw = {}) => {
+    const method = String(methodRaw || "GET").toUpperCase();
+    if (method === "GET") {
+      return { value: backend.firebaseRequestJson_(pathRaw, "GET"), etag: `etag-${etagRevision}` };
+    }
+    if (String(optionsRaw.ifMatch || "") !== `etag-${etagRevision}`) {
+      const conflict = new Error("Firebase ETag conflict");
+      conflict.code = "FIREBASE_ETAG_CONFLICT";
+      throw conflict;
+    }
+    if (method === "PATCH") {
+      const base = String(pathRaw || "").replace(/^\/+|\/+$/g, "");
+      for (const [relativePath, value] of Object.entries(payloadRaw || {})) {
+        const path = [base, relativePath].filter(Boolean).join("/");
+        backend.firebaseRequestJson_(path, "PUT", value);
+      }
+      etagRevision += 1;
+      return { value: null, etag: `etag-${etagRevision}` };
+    }
+    const value = backend.firebaseRequestJson_(pathRaw, method, payloadRaw);
+    etagRevision += 1;
+    return { value, etag: `etag-${etagRevision}` };
   };
   backend.firebaseBatchGetJson_ = (pathsRaw) => {
     const paths = Array.isArray(pathsRaw) ? pathsRaw : [];
@@ -5049,7 +5073,11 @@ test("atomic legacy target reset failure preserves event, aggregates, runtime, a
   backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_(event.eventId, "live"), "PUT", { eventId: event.eventId, kind: "live", byTag: {} });
   backend.readActiveRosterSnapshot_ = () => ({ rosterData });
   const before = clone(backend.__getFirebaseDb());
-  backend.firebaseBatchPutJson_ = () => { throw new Error("injected atomic write failure"); };
+  const originalEtagRequest = backend.firebaseRequestJsonWithEtag_;
+  backend.firebaseRequestJsonWithEtag_ = (path, method = "GET", payload, options = {}) => {
+    if (String(path) === "events/seasonEvents" && String(method).toUpperCase() === "PATCH") throw new Error("injected atomic write failure");
+    return originalEtagRequest(path, method, payload, options);
+  };
   assert.throws(() => backend.repairLegacyCwlSeasonEventBinding_({ eventId: event.eventId, nowIso, freshEvidence: evidence }), /atomic write failure/);
   assert.deepEqual(backend.__getFirebaseDb(), before);
 });
@@ -5170,6 +5198,109 @@ test("strict CWL runtime failures abort coordinator, finalization, repair, and r
     assert.throws(call, /runtime for mutation/);
     assert.deepEqual(backend.__getFirebaseDb(), before);
   }
+});
+
+test("CWL runtime delete rereads after CAS conflict and never deletes a newer owner", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: { seasonEvents: {
+      currentCwl: { eventId: "cwl-old" },
+      current: { cwl: { eventId: "cwl-old" } },
+      byId: { "cwl-old": { eventId: "cwl-old", type: "cwl", status: "open", cwlTrackingState: "active", cwl: {} } },
+    } },
+  });
+  backend.writeCwlRuntime_(backend.createEmptyCwlRuntime_("cwl-old", "2026-07-11T12:00:00.000Z"));
+  const originalEtagRequest = backend.firebaseRequestJsonWithEtag_;
+  let replaced = false;
+  backend.firebaseRequestJsonWithEtag_ = (path, method = "GET", payload, options = {}) => {
+    if (!replaced && String(path) === "events/seasonEvents/privateCwlRuntime/current" && String(method).toUpperCase() === "DELETE") {
+      replaced = true;
+      backend.firebaseRequestJson_(path, "PUT", backend.encodeFirebaseObjectKeysRecursive_(backend.createEmptyCwlRuntime_("cwl-new", "2026-07-11T12:01:00.000Z")));
+      const conflict = new Error("simulated owner replacement");
+      conflict.code = "FIREBASE_ETAG_CONFLICT";
+      throw conflict;
+    }
+    return originalEtagRequest(path, method, payload, options);
+  };
+
+  assert.equal(backend.clearCwlRuntimeForEvent_("cwl-old"), false);
+  const stored = backend.decodeSeasonEventFirebasePayload_(backend.firebaseRequestJson_("events/seasonEvents/privateCwlRuntime/current", "GET"));
+  assert.equal(stored.eventId, "cwl-new");
+});
+
+test("CWL runtime CAS conflict preserves seven-round topology against a late partial writer", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: { seasonEvents: {
+      currentCwl: { eventId: "cwl-seven" },
+      current: { cwl: { eventId: "cwl-seven" } },
+      byId: { "cwl-seven": { eventId: "cwl-seven", type: "cwl", status: "open", cwlTrackingState: "active", cwl: {} } },
+    } },
+  });
+  const initial = backend.createEmptyCwlRuntime_("cwl-seven", "2026-07-11T12:00:00.000Z");
+  initial.groups.group = {
+    groupId: "group", season: "2026-07", expectedRounds: 1, state: "inWar", observedAt: "2026-07-11T12:00:00.000Z",
+    observationSucceeded: true, observedRoundCount: 1, observationTopologyComplete: false,
+    roundWarTagsByIndex: { 0: ["#WAR0"] }, clanTags: ["#CLAN"], candidateClanTags: ["#CLAN"], relevantWarTags: ["#WAR0"], materializedRoundIndexes: [0],
+  };
+  initial.roundsByClanTag["#CLAN"] = { 0: { groupId: "group", roundIndex: 0, warTag: "#WAR0", status: "settled", state: "warEnded", updatedAt: "2026-07-11T12:00:00.000Z" } };
+  initial.warRecords["#WAR0|#CLAN"] = { warTag: "#WAR0", clanTag: "#CLAN", groupId: "group", roundIndex: 0, status: "settled", state: "warEnded", contributionHash: "hash-0", settledAt: "2026-07-11T12:00:00.000Z", auditedAt: "2026-07-11T12:00:00.000Z", auditStatus: "matched", lastValidContribution: { warTag: "#WAR0", clanTag: "#CLAN", roundIndex: 0, state: "warEnded", hash: "hash-0", aggregateByTag: {}, historyStatsByTag: {} } };
+  backend.writeCwlRuntime_(initial);
+
+  const staleRead = backend.readCwlRuntimeStrict_("cwl-seven");
+  const latePartial = staleRead.runtime;
+  const complete = clone(staleRead.runtime);
+  complete.__firebaseEtag = staleRead.etag;
+  complete.groups.group.expectedRounds = 7;
+  complete.groups.group.observedRoundCount = 7;
+  complete.groups.group.observationTopologyComplete = true;
+  complete.groups.group.materializedRoundIndexes = [];
+  complete.groups.group.relevantWarTags = [];
+  complete.groups.group.roundWarTagsByIndex = {};
+  complete.rosterAckByClanTag["#CLAN"] = "2026-07-11T12:07:00.000Z";
+  for (let round = 0; round < 7; round++) {
+    const warTag = `#WAR${round}`;
+    complete.groups.group.materializedRoundIndexes.push(round);
+    complete.groups.group.relevantWarTags.push(warTag);
+    complete.groups.group.roundWarTagsByIndex[round] = [warTag];
+    complete.roundsByClanTag["#CLAN"][round] = { groupId: "group", roundIndex: round, warTag, status: "settled", state: "warEnded", updatedAt: `2026-07-11T12:0${round}:00.000Z` };
+    complete.warRecords[`${warTag}|#CLAN`] = { warTag, clanTag: "#CLAN", groupId: "group", roundIndex: round, status: "settled", state: "warEnded", contributionHash: `hash-${round}`, settledAt: `2026-07-11T12:0${round}:00.000Z`, auditedAt: `2026-07-11T12:0${round}:00.000Z`, auditStatus: "matched", lastValidContribution: { warTag, clanTag: "#CLAN", roundIndex: round, state: "warEnded", hash: `hash-${round}`, aggregateByTag: {}, historyStatsByTag: {} } };
+  }
+  backend.writeCwlRuntime_(complete);
+  backend.writeCwlRuntime_(latePartial);
+
+  const stored = backend.readCwlRuntime_("cwl-seven");
+  assert.equal(stored.groups.group.expectedRounds, 7);
+  assert.equal(stored.groups.group.observationTopologyComplete, true);
+  assert.equal(Object.keys(stored.roundsByClanTag["#CLAN"]).length, 7);
+  assert.equal(Object.keys(stored.warRecords).length, 7);
+  assert.equal(stored.warRecords["#WAR6|#CLAN"].status, "settled");
+  assert.equal(stored.warRecords["#WAR6|#CLAN"].auditStatus, "matched");
+  assert.equal(stored.rosterAckByClanTag["#CLAN"], "2026-07-11T12:07:00.000Z");
+});
+
+test("late CWL runtime response after finalization cannot recreate cleared runtime or live data", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: { seasonEvents: {
+      currentCwl: { eventId: "cwl-final" },
+      current: { cwl: { eventId: "cwl-final" } },
+      byId: { "cwl-final": { eventId: "cwl-final", type: "cwl", status: "open", cwlTrackingState: "active", cwl: {} } },
+    } },
+  });
+  backend.writeSeasonEventFirebasePayload_(backend.buildCwlSeasonEventAggregatePath_("cwl-final", "final"), "PUT", { eventId: "cwl-final", kind: "final", byTag: {} });
+  backend.writeCwlRuntime_(backend.createEmptyCwlRuntime_("cwl-final", "2026-07-11T12:00:00.000Z"));
+  const stale = backend.readCwlRuntimeStrict_("cwl-final").runtime;
+  const finalRead = backend.readCwlRuntimeStrict_("cwl-final");
+  finalRead.runtime.finalizedAt = "2026-07-11T12:10:00.000Z";
+  backend.writeCwlRuntime_(finalRead.runtime);
+  assert.equal(backend.clearCwlRuntimeForEvent_("cwl-final"), true);
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_("cwl-final"), "PATCH", { status: "closed", cwlTrackingState: "completed" });
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", null);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/current/cwl", "PUT", null);
+
+  const error = captureError(() => backend.writeCwlRuntime_(stale));
+  assert.equal(error.code, "CWL_RUNTIME_STALE_EVENT");
+  assert.equal(backend.firebaseRequestJson_("events/seasonEvents/privateCwlRuntime/current", "GET"), null);
+  assert.equal(backend.readCwlSeasonEventAggregate_("cwl-final", "live"), null);
+  assert.equal(backend.readCwlSeasonEventAggregate_("cwl-final", "final").eventId, "cwl-final");
 });
 
 test("legacy repair removes same-event wrong-target runtime atomically and refuses historical completed events", () => {
