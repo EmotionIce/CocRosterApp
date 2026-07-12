@@ -40,6 +40,7 @@ const loadClientInternals = (overrides = {}) => {
     btoa: (value) => Buffer.from(String(value), "binary").toString("base64"),
     TextEncoder,
     TextDecoder,
+    setTimeout,
   };
   Object.assign(context, overrides.context || {});
   Object.assign(context.window, overrides.window || {});
@@ -584,6 +585,46 @@ test("current shard propagation failure retries one whole version then loads eve
     assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + currentVersionId + "/" + child + ".json"), 2);
     assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + previousVersionId + "/" + child + ".json"), 1);
   }
+});
+
+test("immutable version retry honors Retry-After before retrying the whole version", async () => {
+  const base = "https://public-data.test/api/public-data/";
+  const urls = {
+    manifest: base + "activeVersions/version-retry/manifest.json",
+    rosters: base + "activeVersions/version-retry/rosters.json",
+    metrics: base + "activeVersions/version-retry/playerMetrics.json",
+  };
+  const counts = new Map();
+  const payloads = new Map([
+    [urls.manifest, { versionId: "version-retry", schemaVersion: 1, pageTitle: "Retry", rosterIds: ["main"], rosterOrder: ["main"] }],
+    [urls.rosters, { main: { id: "main", main: [], subs: [], missing: [] } }],
+    [urls.metrics, { schemaVersion: 1, byTag: {} }],
+  ]);
+  const { loadPublishedActiveVersionViaCloudflarePublic } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: { fetch: async (url) => {
+      const count = (counts.get(url) || 0) + 1;
+      counts.set(url, count);
+      if (count === 1) {
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: (name) => String(name).toLowerCase() === "retry-after" ? "0.05" : null },
+          text: async () => "",
+        };
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(payloads.get(url)) };
+    } },
+  });
+
+  const startedAt = Date.now();
+  const loaded = await loadPublishedActiveVersionViaCloudflarePublic("version-retry", { retryCount: 1 });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(loaded.activeVersionId, "version-retry");
+  assert.ok(elapsedMs >= 40, `Retry-After delay should be real, received ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 500, `Retry-After delay should stay capped for boot, received ${elapsedMs}ms`);
+  assert.deepEqual(Object.fromEntries(counts), { [urls.manifest]: 2, [urls.rosters]: 2, [urls.metrics]: 2 });
 });
 
 test("roster shards and independent event metadata load concurrently under simulated latency", async () => {

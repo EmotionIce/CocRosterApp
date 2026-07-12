@@ -25,6 +25,8 @@
     const SEASON_EVENT_COLLAPSED_ROW_COUNT = 3;
     const CLOUDFLARE_PUBLIC_SOURCE = "cloudflare-public";
     const PUBLIC_DATA_BASE_FALLBACK_URL = "/api/public-data";
+    const PUBLIC_DATA_IMMUTABLE_RETRY_DELAY_CAP_MS = 1250;
+    const PUBLIC_DATA_BOOT_RETRY_BUDGET_MS = 2500;
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
     const ROSTER_SNAPSHOT_IDB_DB_NAME = "roster-public-cache";
@@ -8705,13 +8707,25 @@
             credentials: "same-origin",
         });
         if (!response || !response.ok) {
-            throw new Error(
+            const error = new Error(
                 "Cloudflare public data fetch failed for " +
                 pathLabel +
                 " (" +
                 (response ? response.status : "unknown") +
                 ")."
             );
+            error.status = response ? Number(response.status) || 0 : 0;
+            const retryAfterRaw = response && response.headers && typeof response.headers.get === "function"
+                ? toStr(response.headers.get("retry-after")).trim()
+                : "";
+            if (retryAfterRaw) {
+                const seconds = Number(retryAfterRaw);
+                const retryAtMs = Number.isFinite(seconds)
+                    ? Date.now() + Math.max(0, seconds * 1000)
+                    : Date.parse(retryAfterRaw);
+                if (Number.isFinite(retryAtMs) && retryAtMs > Date.now()) error.retryAfterMs = retryAtMs - Date.now();
+            }
+            throw error;
         }
         const responseText = await response.text();
         return parseJsonTextStrict(responseText, "Cloudflare public data fetch for " + pathLabel);
@@ -8848,6 +8862,21 @@
         };
     };
 
+    const waitForImmutablePublicRetry = async (errorRaw, deadlineMsRaw) => {
+        const error = errorRaw && typeof errorRaw === "object" ? errorRaw : {};
+        const deadlineMs = Math.max(0, Number(deadlineMsRaw) || 0);
+        const remainingMs = deadlineMs ? Math.max(0, deadlineMs - Date.now()) : PUBLIC_DATA_BOOT_RETRY_BUDGET_MS;
+        if (remainingMs <= 0) return false;
+        const requestedMs = Math.max(0, Number(error.retryAfterMs) || 100);
+        const delayMs = Math.max(1, Math.min(PUBLIC_DATA_IMMUTABLE_RETRY_DELAY_CAP_MS, requestedMs, remainingMs));
+        if (typeof setTimeout !== "function") {
+            await Promise.resolve();
+            return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        return true;
+    };
+
     // Load roster data from one published active version. A failed immutable
     // generation is retried as a whole so no response can mix shard versions.
     const loadPublishedActiveVersionViaCloudflarePublic = async (versionIdRaw, optionsRaw) => {
@@ -8856,6 +8885,7 @@
         if (!versionId) throw new Error("Missing active published version pointer.");
         const versionLabel = "Cloudflare public data /activeVersions/" + versionId;
         const retryCount = Math.max(0, Math.min(2, Number(options.retryCount) || 0));
+        const retryDeadlineMs = Math.max(Date.now(), Number(options.retryDeadlineMs) || (Date.now() + PUBLIC_DATA_BOOT_RETRY_BUDGET_MS));
         let shards = null;
         let lastError = null;
         for (let attempt = 0; attempt <= retryCount; attempt++) {
@@ -8864,7 +8894,7 @@
                 break;
             } catch (err) {
                 lastError = err;
-                if (attempt < retryCount) await Promise.resolve();
+                if (attempt < retryCount && !(await waitForImmutablePublicRetry(err, retryDeadlineMs))) break;
             }
         }
         if (!shards) throw lastError || new Error("Immutable version shards are unavailable at " + versionLabel + ".");
@@ -9310,15 +9340,16 @@
         }
 
         const previousVersionId = toStr(bootstrap && bootstrap.previousVersionId).trim();
+        const immutableRetryDeadlineMs = Date.now() + PUBLIC_DATA_BOOT_RETRY_BUDGET_MS;
         const activeLoadPromise = (async () => {
             try {
-                return await loadPublishedActiveVersionViaCloudflarePublic(activeVersionId, { retryCount: 1 });
+                return await loadPublishedActiveVersionViaCloudflarePublic(activeVersionId, { retryCount: 1, retryDeadlineMs: immutableRetryDeadlineMs });
             } catch (currentError) {
                 if (!previousVersionId || previousVersionId === activeVersionId) throw currentError;
                 if (typeof console !== "undefined" && console && typeof console.warn === "function") {
                     console.warn("[RosterBoot] Current immutable version is temporarily unavailable; loading the complete previous version.", currentError);
                 }
-                return loadPublishedActiveVersionViaCloudflarePublic(previousVersionId, { retryCount: 0 });
+                return loadPublishedActiveVersionViaCloudflarePublic(previousVersionId, { retryCount: 0, retryDeadlineMs: immutableRetryDeadlineMs });
             }
         })();
         const eventLoadPromise = hasCloudflareBootstrapPublicModel(bootstrap)
