@@ -4217,7 +4217,10 @@ function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRa
 function inspectActiveVersionCanonicalContents_(versionIdRaw, optionsRaw) {
 	const versionId = normalizeActiveVersionId_(versionIdRaw);
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	if (!versionId) return { complete: false, reason: "missing-version-id" };
+	const complete = function (details) { return Object.assign({ status: "complete", complete: true, positivelyIncomplete: false, indeterminate: false }, details || {}); };
+	const incomplete = function (details) { return Object.assign({ status: "positively-incomplete", complete: false, positivelyIncomplete: true, indeterminate: false }, details || {}); };
+	const indeterminate = function (details) { return Object.assign({ status: "indeterminate", complete: false, positivelyIncomplete: false, indeterminate: true }, details || {}); };
+	if (!versionId) return incomplete({ reason: "missing-version-id" });
 	try {
 		const paths = [
 			buildActiveVersionPath_(versionId, "manifest"),
@@ -4232,31 +4235,31 @@ function inspectActiveVersionCanonicalContents_(versionIdRaw, optionsRaw) {
 			? decodeFirebaseObjectKeysRecursive_(encodedManifest)
 			: null;
 		if (!manifest || normalizeActiveVersionId_(manifest.versionId) !== versionId) {
-			return { complete: false, reason: "missing-or-mismatched-manifest", versionId: versionId };
+			return incomplete({ reason: "missing-or-mismatched-manifest", versionId: versionId });
 		}
 		const rosterIdsRaw = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : [];
 		const rosterIds = [];
 		const rosterSeen = {};
 		for (let i = 0; i < rosterIdsRaw.length; i++) {
 			const rosterId = String(rosterIdsRaw[i] == null ? "" : rosterIdsRaw[i]).trim();
-			if (!rosterId || rosterSeen[rosterId]) return { complete: false, reason: "invalid-manifest-roster-ids", versionId: versionId, manifest: manifest };
+			if (!rosterId || rosterSeen[rosterId]) return incomplete({ reason: "invalid-manifest-roster-ids", versionId: versionId, manifest: manifest });
 			rosterSeen[rosterId] = true;
 			rosterIds.push(rosterId);
 		}
 		if (!rosterIds.length || !Array.isArray(manifest.rosterOrder) || !String(manifest.publishedAt || "").trim()) {
-			return { complete: false, reason: "incomplete-supporting-manifest", versionId: versionId, manifest: manifest };
+			return incomplete({ reason: "incomplete-supporting-manifest", versionId: versionId, manifest: manifest });
 		}
 		if (values[paths[1]] == null || !String(values[paths[2]] || "").trim()) {
-			return { complete: false, reason: "missing-player-metrics-metadata", versionId: versionId, manifest: manifest };
+			return incomplete({ reason: "missing-player-metrics-metadata", versionId: versionId, manifest: manifest });
 		}
 		const metricByTag = values[paths[3]];
 		const expectedMetricCount = Math.max(0, toNonNegativeInt_(manifest.playerMetricEntryCount));
 		const actualMetricCount = metricByTag && typeof metricByTag === "object" && !Array.isArray(metricByTag) ? Object.keys(metricByTag).length : 0;
 		if (expectedMetricCount > 0 && (!metricByTag || typeof metricByTag !== "object" || Array.isArray(metricByTag))) {
-			return { complete: false, reason: "missing-player-metrics-shards", versionId: versionId, manifest: manifest };
+			return incomplete({ reason: "missing-player-metrics-shards", versionId: versionId, manifest: manifest });
 		}
 		if (actualMetricCount !== expectedMetricCount || toNonNegativeInt_(manifest.playerMetricsSchemaVersion) !== toNonNegativeInt_(values[paths[1]]) || manifest.layoutVersion == null) {
-			return { complete: false, reason: "inconsistent-player-metrics-or-layout-metadata", versionId: versionId, manifest: manifest };
+			return incomplete({ reason: "inconsistent-player-metrics-or-layout-metadata", versionId: versionId, manifest: manifest });
 		}
 		if (options.requirePublishedManifest === true) {
 			const encodedPublishedManifest = values[paths[4]];
@@ -4264,32 +4267,36 @@ function inspectActiveVersionCanonicalContents_(versionIdRaw, optionsRaw) {
 				? decodeFirebaseObjectKeysRecursive_(encodedPublishedManifest)
 				: null;
 			if (!publishedManifest || normalizeActiveVersionId_(publishedManifest.versionId) !== versionId) {
-				return { complete: false, reason: "missing-published-manifest", versionId: versionId, manifest: manifest };
+				return incomplete({ reason: "missing-published-manifest", versionId: versionId, manifest: manifest });
 			}
 			if (JSON.stringify(publishedManifest.rosterIds || []) !== JSON.stringify(manifest.rosterIds || []) || String(publishedManifest.publishedAt || "") !== String(manifest.publishedAt || "")) {
-				return { complete: false, reason: "mismatched-published-manifest", versionId: versionId, manifest: manifest };
+				return incomplete({ reason: "mismatched-published-manifest", versionId: versionId, manifest: manifest });
 			}
 		}
 		const rosterShards = readActiveVersionRosterShards_(versionId, manifest);
 		for (let i = 0; i < rosterIds.length; i++) {
 			const roster = rosterShards.rosterMap[rosterIds[i]];
 			if (!roster || String(roster.id || "").trim() !== rosterIds[i]) {
-				return { complete: false, reason: "missing-or-mismatched-roster-shard", versionId: versionId, rosterId: rosterIds[i], manifest: manifest };
+				return incomplete({ reason: "missing-or-mismatched-roster-shard", versionId: versionId, rosterId: rosterIds[i], manifest: manifest });
 			}
 		}
 		// This final reconstruction applies the production schema validator to the
 		// immutable roster and metric shards, without consulting queue diagnostics.
 		readActiveRosterSnapshotFromVersion_(versionId);
-		return { complete: true, reason: "canonical-version-complete", versionId: versionId, manifest: manifest };
+		return complete({ reason: "canonical-version-complete", versionId: versionId, manifest: manifest });
 	} catch (err) {
-		return { complete: false, reason: "canonical-content-read-failed", versionId: versionId, error: errorMessage_(err) };
+		const message = errorMessage_(err);
+		const transientOrDecode = /Firebase|UrlFetch|quota|timed?\s*out|deadline|transport|response.*JSON|base64|decod|key encoding|token request|network|service unavailable|temporar/i.test(message);
+		return transientOrDecode
+			? indeterminate({ reason: "canonical-content-read-indeterminate", versionId: versionId, error: message })
+			: incomplete({ reason: "canonical-content-validation-failed", versionId: versionId, error: message });
 	}
 }
 
 function inspectAlreadyPublishedAutoRefreshCanonicalCompletion_(currentRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const runId = current && current.runId;
-	if (!runId || readPublishedActiveVersionId_() !== runId) return { complete: false, reason: "active-version-mismatch" };
+	if (!runId || readPublishedActiveVersionId_() !== runId) return { status: "positively-incomplete", complete: false, positivelyIncomplete: true, indeterminate: false, reason: "active-version-mismatch" };
 	const inspection = inspectActiveVersionCanonicalContents_(runId, { requirePublishedManifest: true });
 	try { inspection.sourceMeta = readAutoRefreshRunShard_(runId, "source/meta"); } catch (err) { inspection.sourceMeta = null; }
 	return inspection;
@@ -4322,23 +4329,8 @@ function recoverIncompleteAlreadyPublishedAutoRefreshCanonical_(currentRaw, insp
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const inspection = inspectionRaw && typeof inspectionRaw === "object" ? inspectionRaw : {};
 	const runId = current && current.runId;
-	const sourceVersionId = normalizeActiveVersionId_(current && current.sourceVersionId);
-	let sourceInspection = null;
-	if (runId && sourceVersionId && sourceVersionId !== runId) {
-		sourceInspection = inspectActiveVersionCanonicalContents_(sourceVersionId, { requirePublishedManifest: false });
-	}
-	if (sourceInspection && sourceInspection.complete === true && readPublishedActiveVersionId_() === runId) {
-		publishActiveRosterVersionPointer_(sourceVersionId, sourceInspection.manifest);
-		clearActiveRosterDataCache_();
-		const diagnostic = recordAlreadyPublishedCanonicalRepairDiagnostic_(current, inspection, "rolled-back-to-known-good", {
-			recoveredVersionId: sourceVersionId,
-			repairedAt: new Date().toISOString(),
-		});
-		if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("canonical-roster-repair:" + runId);
-		return { repaired: true, status: "rolled-back-to-known-good", versionId: sourceVersionId, diagnostic: diagnostic };
-	}
 	const diagnostic = recordAlreadyPublishedCanonicalRepairDiagnostic_(current, inspection, "repair-required", {
-		sourceInspection: sourceInspection ? { complete: sourceInspection.complete === true, reason: String(sourceInspection.reason || "") } : null,
+		repairMode: "fresh-immutable-selector-last",
 	});
 	return { repaired: false, status: "repair-required", versionId: runId, diagnostic: diagnostic };
 }
@@ -4374,7 +4366,23 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			);
 			canonicalInspection = { complete: false, reason: "canonical-inspection-failed", error: errorMessage_(err) };
 		}
-		if (!canonicalInspection || canonicalInspection.complete !== true) {
+		if (canonicalInspection && canonicalInspection.status === "indeterminate") {
+			Logger.log(
+				"autoRefresh canonical inspection deferred runId=%s status=indeterminate reason=%s error=%s",
+				runId,
+				String(canonicalInspection.reason || ""),
+				String(canonicalInspection.error || ""),
+			);
+			return {
+				ok: true,
+				deferred: true,
+				reason: "canonical-inspection-indeterminate",
+				error: String(canonicalInspection.error || canonicalInspection.reason || ""),
+				runId: runId,
+				skipPostTickMirrorRepair: true,
+			};
+		}
+		if (!canonicalInspection || canonicalInspection.status === "positively-incomplete" || canonicalInspection.complete !== true) {
 			const repair = recoverIncompleteAlreadyPublishedAutoRefreshCanonical_(current, canonicalInspection);
 			const repairedVersionId = normalizeActiveVersionId_(repair && repair.versionId);
 			let cloudflareRepair = null;
@@ -4383,10 +4391,8 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 					cloudflareRepair = { ok: false, repairPending: true, error: errorMessage_(err) };
 				}
 			}
-			const summary = repair && repair.repaired === true
-				? "The selected auto-refresh version was incomplete; the Firebase selector was restored to the last verified canonical version."
-				: "The selected auto-refresh version is incomplete and requires guarded canonical repair; the old queue was terminalized without mutating the selected immutable version.";
-			current.status = repair && repair.repaired === true ? "repaired" : "failed";
+			const summary = "The selected auto-refresh version is positively incomplete and requires fresh immutable canonical repair; the old queue was terminalized without changing the selector.";
+			current.status = "failed";
 			current.phase = "terminal-canonical-repair";
 			current.completedAt = new Date().toISOString();
 			current.error = String((canonicalInspection && (canonicalInspection.reason || canonicalInspection.error)) || "canonical-version-incomplete");

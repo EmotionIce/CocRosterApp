@@ -3900,7 +3900,7 @@ test("continuation and watchdog replacement failures preserve the previously own
   assert.equal(backend.__triggers.some((trigger) => trigger.getUniqueId() === watchdogId), true);
 });
 
-test("already-published recovery never resumes writes into an incomplete selected immutable version", () => {
+test("positively incomplete selected version records repair without rolling back the selector", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildRosterData());
   backend.writeActiveRosterVersionShards_("source-1", data, { source: "test-source", publishedAt: "2026-07-10T00:00:00.000Z", publish: true });
@@ -3919,16 +3919,39 @@ test("already-published recovery never resumes writes into an incomplete selecte
 
   const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
   assert.equal(result.terminal, true);
-  assert.equal(result.status, "repaired");
-  assert.equal(result.canonicalRepair.status, "rolled-back-to-known-good");
-  assert.equal(backend.readPublishedActiveVersionId_(), "source-1");
+  assert.equal(result.status, "failed");
+  assert.equal(result.canonicalRepair.status, "repair-required");
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/main`, "GET"), null);
-  assert.equal(enqueues, 1);
+  assert.equal(enqueues, 0);
+  assert.equal(backend.firebaseRequestJson_(`internal/autoRefresh/canonicalRepairs/${runId}`, "GET").status, "repair-required");
   const repeated = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
   assert.equal(repeated.reason, "noRun");
-  assert.equal(backend.readPublishedActiveVersionId_(), "source-1");
-  assert.equal(enqueues, 1);
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(enqueues, 0);
+});
+
+test("transient canonical inspection is indeterminate and never changes selector or writes repair", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = backend.validateRosterData_(buildRosterData());
+  const { runId, current, tasks } = setupQueueRun(backend, data, {
+    rosterIds: ["main"], currentTaskIndex: 3, processedTasks: 3, processedRosters: 1, sourceVersionId: "source-1", status: "finalizing",
+  });
+  backend.writeActiveRosterVersionShards_(runId, data, { source: "test", runId, publish: true });
+  const originalBatchGet = backend.firebaseBatchGetJson_;
+  backend.firebaseBatchGetJson_ = () => { throw new Error("Firebase Realtime Database request failed (503): temporary"); };
+
+  const inspection = backend.inspectAlreadyPublishedAutoRefreshCanonicalCompletion_(current);
+  assert.equal(inspection.status, "indeterminate");
+  const result = backend.executeAutoRefreshFinalizeTask_(current, tasks.find((task) => task.type === "finalize"), Date.now());
+
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, "canonical-inspection-indeterminate");
+  assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(backend.firebaseRequestJson_(`internal/autoRefresh/canonicalRepairs/${runId}`, "GET"), null);
+  assert.ok(backend.readAutoRefreshQueueCurrent_());
+  backend.firebaseBatchGetJson_ = originalBatchGet;
 });
 
 test("terminal cleanup preserves a newer run and its owned dynamic triggers", () => {
