@@ -6905,8 +6905,13 @@
             && !(regularWarLiveUnavailable && regularWarAggregateStatusLevel !== "warning");
 
         const card = el("div", "card roster-card");
-        const head = el("div", "roster-head");
+        const head = el("div", "roster-head roster-head--" + (trackingMode === "regularWar" ? "war" : "cwl"));
+        const headTop = el("div", "roster-head__top");
         const identity = el("div", "roster-head__identity");
+        const eyebrowText = trackingMode === "regularWar"
+            ? "Regular war roster"
+            : (prepActive ? "CWL preparation roster" : "CWL roster");
+        identity.appendChild(el("div", "roster-head__eyebrow", eyebrowText));
         const h2 = document.createElement("h2");
         const titleText = toStr(roster.title);
 
@@ -6920,38 +6925,50 @@
             h2.textContent = titleText;
         }
 
-        const bMain = el("span", "badge", (trackingMode === "regularWar" ? "In war: " : "Main: ") + toStr(roster.badges && roster.badges.main));
-        const bSubs = el("span", "badge", (trackingMode === "regularWar" ? "Out of war: " : "Subs: ") + toStr(roster.badges && roster.badges.subs));
+        const buildHeadMetric = (label, value, tone) => {
+            const metric = el("span", "roster-head-metric" + (tone ? (" roster-head-metric--" + tone) : ""));
+            metric.appendChild(el("span", "roster-head-metric__label", label));
+            metric.appendChild(el("strong", "roster-head-metric__value", toStr(value)));
+            return metric;
+        };
         const meta = el("div", "roster-meta roster-command-row");
-        meta.appendChild(bMain);
-        meta.appendChild(bSubs);
+        meta.appendChild(buildHeadMetric(
+            trackingMode === "regularWar" ? "In war" : "Main lineup",
+            roster.badges && roster.badges.main,
+            "primary"
+        ));
+        meta.appendChild(buildHeadMetric(
+            trackingMode === "regularWar" ? "Out of war" : "Substitutes",
+            roster.badges && roster.badges.subs,
+            "secondary"
+        ));
         if (prepActive) {
-            meta.appendChild(el("span", "badge roster-prep-public-badge", "Showing planned CWL Rosters"));
+            meta.appendChild(el("span", "badge roster-prep-public-badge roster-head-status", "Showing planned CWL Rosters"));
         }
         if (trackingMode === "regularWar") {
-            meta.appendChild(el("span", "badge", "Missing: " + toStr(roster.badges && roster.badges.missing)));
             const regularWarCountdown = getRegularWarCountdownDescriptor(regularWarCurrentMeta);
             if (regularWarCountdown && regularWarCountdown.targetAt) {
-                const countdownBadge = el("span", "badge roster-war-countdown");
+                const countdownBadge = el("span", "badge roster-war-countdown roster-head-status");
                 countdownBadge.dataset.warCountdownKind = regularWarCountdown.kind;
                 countdownBadge.dataset.warCountdownTargetAt = regularWarCountdown.targetAt;
                 renderWarCountdownNode(countdownBadge);
                 meta.appendChild(countdownBadge);
             }
             if (regularWarLiveUnavailable) {
-                meta.appendChild(el("span", "badge", "Live war refresh unavailable"));
+                meta.appendChild(el("span", "badge roster-head-status roster-head-status--warning", "Live war refresh unavailable"));
             }
             if (regularWarAggregateShowWithLiveWarning) {
-                meta.appendChild(el("span", "badge", "Aggregate status warning"));
+                meta.appendChild(el("span", "badge roster-head-status roster-head-status--warning", "Aggregate status warning"));
             }
         }
 
+        const headActions = el("div", "roster-head__actions");
         if (clanProfileUrl) {
             const openClanBtn = document.createElement("a");
-            openClanBtn.className = "roster-open-clan";
+            openClanBtn.className = "roster-open-clan roster-head__clan-link";
             openClanBtn.href = clanProfileUrl;
             openClanBtn.textContent = "Open clan in-game";
-            meta.appendChild(openClanBtn);
+            headActions.appendChild(openClanBtn);
         }
 
         const buildRosterActions = getRosterActionBuilder();
@@ -6968,7 +6985,9 @@
         }
 
         identity.appendChild(h2);
-        head.appendChild(identity);
+        headTop.appendChild(identity);
+        if (headActions.childNodes.length) headTop.appendChild(headActions);
+        head.appendChild(headTop);
         head.appendChild(meta);
         card.appendChild(head);
         if (trackingMode === "regularWar" && regularWarLiveUnavailable) {

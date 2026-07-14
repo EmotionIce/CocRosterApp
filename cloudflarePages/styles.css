@@ -7489,3 +7489,262 @@ body.admin-shell-page .admin-shell-container{
     margin-inline:-14px;
   }
 }
+
+/* Public roster hero: carry Home's editorial accents into each live clan card. */
+body:not(.admin-shell-page) .roster-head{
+  position:relative;
+  isolation:isolate;
+  overflow:hidden;
+  gap:clamp(20px, 3vw, 30px);
+  margin:0 0 18px;
+  padding:clamp(20px, 3.2vw, 32px);
+  border:1px solid transparent;
+  border-radius:8px;
+  background:
+    linear-gradient(118deg, rgba(18,20,25,.985) 0%, rgba(11,14,18,.985) 58%, rgba(6,10,14,.99) 100%) padding-box,
+    linear-gradient(112deg, rgba(212,194,127,.64), rgba(110,214,198,.54) 58%, rgba(255,121,214,.30)) border-box;
+  box-shadow:
+    inset 0 1px 0 rgba(255,247,214,.035),
+    0 18px 42px rgba(0,0,0,.30);
+}
+
+body:not(.admin-shell-page) .roster-head::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  z-index:-1;
+  pointer-events:none;
+  background:
+    radial-gradient(460px 190px at 92% 0%, rgba(110,214,198,.095), transparent 66%),
+    repeating-linear-gradient(112deg, rgba(214,247,109,.045) 0 1px, transparent 1px 34px);
+  mask-image:linear-gradient(90deg, transparent 0%, rgba(0,0,0,.32) 38%, #000 100%);
+}
+
+body:not(.admin-shell-page) .roster-head::after{
+  content:"";
+  position:absolute;
+  left:clamp(20px, 3.2vw, 32px);
+  bottom:0;
+  width:min(280px, 42%);
+  height:2px;
+  pointer-events:none;
+  background:linear-gradient(90deg, var(--turtle-lime), var(--turtle-teal), rgba(255,121,214,.72));
+  box-shadow:0 0 18px rgba(110,214,198,.18);
+}
+
+body:not(.admin-shell-page) .roster-head__top{
+  position:relative;
+  z-index:1;
+  display:flex;
+  align-items:flex-end;
+  justify-content:space-between;
+  gap:20px;
+}
+
+body:not(.admin-shell-page) .roster-head__identity{
+  gap:7px;
+}
+
+body:not(.admin-shell-page) .roster-head__eyebrow{
+  display:flex;
+  align-items:center;
+  gap:9px;
+  color:var(--turtle-lime);
+  font-size:10px;
+  font-weight:840;
+  line-height:1.2;
+  letter-spacing:.22em;
+  text-transform:uppercase;
+}
+
+body:not(.admin-shell-page) .roster-head__eyebrow::before{
+  content:"";
+  width:22px;
+  height:1px;
+  flex:0 0 auto;
+  background:linear-gradient(90deg, var(--turtle-lime), var(--turtle-teal));
+}
+
+body:not(.admin-shell-page) .roster-head h2{
+  max-width:18ch;
+  font-size:clamp(30px, 5vw, 46px);
+  line-height:.98;
+  letter-spacing:-.035em;
+  text-wrap:balance;
+  text-shadow:0 2px 24px rgba(0,0,0,.34);
+}
+
+body:not(.admin-shell-page) .roster-title-link{
+  border:0;
+  transition:color .16s ease;
+}
+
+body:not(.admin-shell-page) .roster-title-link:hover{
+  border:0;
+  color:#ffffff;
+}
+
+body:not(.admin-shell-page) .roster-title-link:focus-visible{
+  outline:2px solid var(--turtle-lime);
+  outline-offset:5px;
+}
+
+body:not(.admin-shell-page) .roster-head__actions{
+  flex:0 0 auto;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link{
+  min-height:44px;
+  margin:0;
+  padding:0 18px;
+  border:1px solid rgba(212,194,127,.62) !important;
+  border-radius:0 !important;
+  clip-path:polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  background:rgba(8,12,15,.78) !important;
+  color:#fff4c5 !important;
+  font-size:11px;
+  font-weight:820;
+  letter-spacing:.075em;
+  text-transform:uppercase;
+  transition:transform .16s ease, background-color .16s ease, border-color .16s ease;
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link::after{
+  content:"↗";
+  margin-left:9px;
+  color:var(--turtle-lime);
+  font-size:14px;
+  line-height:1;
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link:hover{
+  border-color:rgba(214,247,109,.70) !important;
+  background:rgba(214,247,109,.08) !important;
+  color:#ffffff !important;
+  transform:translateY(-2px);
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link:focus-visible{
+  outline:2px solid var(--turtle-lime);
+  outline-offset:3px;
+}
+
+body:not(.admin-shell-page) .roster-command-row{
+  position:relative;
+  z-index:1;
+  display:flex;
+  align-items:stretch;
+  gap:8px;
+  width:100%;
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+}
+
+body:not(.admin-shell-page) .roster-head-metric{
+  min-width:clamp(126px, 16vw, 176px);
+  min-height:56px;
+  display:grid;
+  grid-template-columns:1fr auto;
+  align-items:center;
+  gap:16px;
+  padding:10px 14px;
+  border:1px solid rgba(246,232,185,.13);
+  border-left:2px solid rgba(110,214,198,.72);
+  border-radius:3px;
+  background:linear-gradient(100deg, rgba(246,232,185,.055), rgba(7,10,14,.52));
+}
+
+body:not(.admin-shell-page) .roster-head-metric--primary{
+  border-left-color:var(--turtle-lime);
+}
+
+body:not(.admin-shell-page) .roster-head-metric--secondary{
+  border-left-color:var(--turtle-teal);
+}
+
+body:not(.admin-shell-page) .roster-head-metric__label{
+  color:#b9bdaf;
+  font-size:10px;
+  font-weight:780;
+  line-height:1.25;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+}
+
+body:not(.admin-shell-page) .roster-head-metric__value{
+  color:var(--turtle-cream);
+  font-size:clamp(22px, 3vw, 28px);
+  font-weight:850;
+  line-height:1;
+  letter-spacing:-.04em;
+}
+
+body:not(.admin-shell-page) .roster-head-status{
+  min-height:56px;
+  display:inline-flex;
+  align-items:center;
+  padding:10px 14px !important;
+  border-color:rgba(212,194,127,.28) !important;
+  background:rgba(8,11,15,.58) !important;
+  color:#e9dfbf !important;
+  font-size:11px;
+  font-weight:760;
+  letter-spacing:.035em;
+}
+
+body:not(.admin-shell-page) .roster-head-status--warning{
+  border-color:rgba(255,121,214,.30) !important;
+  color:#ffd7f2 !important;
+}
+
+@media (max-width: 680px){
+  body:not(.admin-shell-page) .roster-head{
+    gap:18px;
+    padding:18px;
+  }
+
+  body:not(.admin-shell-page) .roster-head::after{
+    left:18px;
+  }
+
+  body:not(.admin-shell-page) .roster-head__top{
+    align-items:flex-start;
+    flex-direction:column;
+    gap:16px;
+  }
+
+  body:not(.admin-shell-page) .roster-head__actions,
+  body:not(.admin-shell-page) .roster-head__clan-link{
+    width:100%;
+  }
+
+  body:not(.admin-shell-page) .roster-command-row{
+    flex-wrap:wrap;
+  }
+
+  body:not(.admin-shell-page) .roster-head-metric{
+    flex:1 1 calc(50% - 4px);
+    min-width:0;
+  }
+
+  body:not(.admin-shell-page) .roster-head-status{
+    flex:1 1 100%;
+    min-height:44px;
+  }
+}
+
+@media (max-width: 420px){
+  body:not(.admin-shell-page) .roster-head h2{
+    font-size:clamp(27px, 10vw, 36px);
+  }
+
+  body:not(.admin-shell-page) .roster-head-metric{
+    grid-template-columns:1fr;
+    gap:5px;
+  }
+}
