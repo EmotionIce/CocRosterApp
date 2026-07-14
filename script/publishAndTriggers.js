@@ -1982,6 +1982,11 @@ function writeAutoRefreshPreparedRosterInput_(runIdRaw, rosterIdRaw, inputRaw) {
 	const payload = {
 		rosterId: rosterId,
 		sourceMeta: input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : {},
+		// Firebase Realtime Database elides empty objects and arrays. Persist
+		// explicit completion evidence instead of inferring phase durability from
+		// optional empty snapshot maps after a round trip.
+		primarySnapshotCaptured: input.primarySnapshotCaptured === true,
+		snapshotPlanBuilt: input.snapshotPlanBuilt === true,
 		sourceRoster: null,
 		sourceOwnership: {},
 		clanSnapshot: input.clanSnapshot && typeof input.clanSnapshot === "object" ? input.clanSnapshot : null,
@@ -2037,10 +2042,17 @@ function normalizeAutoRefreshRosterPhase_(phaseRaw) {
 
 function hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInputRaw) {
 	const preparedInput = preparedInputRaw && typeof preparedInputRaw === "object" ? preparedInputRaw : null;
-	if (!preparedInput) return false;
-	return (
-		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarByClanTag") &&
-		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarErrorByClanTag") &&
+	if (!preparedInput || !preparedInput.sourceMeta || typeof preparedInput.sourceMeta !== "object") return false;
+	if (preparedInput.snapshotPlanBuilt === true) return true;
+	// Backward-compatible evidence for in-flight plans created before the
+	// explicit marker rollout. Do not require optional empty war maps: RTDB
+	// legitimately omits them, while the processing phase already defaults them
+	// to empty objects.
+	const hasLegacyPrimaryEvidence = preparedInput.primarySnapshotCaptured === true ||
+		Object.prototype.hasOwnProperty.call(preparedInput, "clanSnapshot") ||
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarByClanTag") ||
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarErrorByClanTag");
+	return hasLegacyPrimaryEvidence && (
 		Array.isArray(preparedInput.metricReadTags) &&
 		Array.isArray(preparedInput.seedReadTags) &&
 		preparedInput.targetSeedByTag &&
@@ -2051,11 +2063,14 @@ function hasAutoRefreshPreparedRosterSnapshotPlan_(preparedInputRaw) {
 function hasAutoRefreshPreparedPrimarySnapshot_(preparedInputRaw) {
 	const preparedInput = preparedInputRaw && typeof preparedInputRaw === "object" ? preparedInputRaw : null;
 	if (!preparedInput || !preparedInput.sourceMeta || typeof preparedInput.sourceMeta !== "object") return false;
-	return (
-		Object.prototype.hasOwnProperty.call(preparedInput, "clanSnapshot") &&
+	if (preparedInput.primarySnapshotCaptured === true) return true;
+	// Preserve the conservative migration rule for genuinely old partial inputs.
+	// Only an explicit marker or the complete legacy field set proves that the
+	// primary phase finished; the broader legacy inference is limited to plans
+	// that also contain their completed metric/seed read descriptors.
+	return Object.prototype.hasOwnProperty.call(preparedInput, "clanSnapshot") &&
 		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarByClanTag") &&
-		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarErrorByClanTag")
-	);
+		Object.prototype.hasOwnProperty.call(preparedInput, "currentRegularWarErrorByClanTag");
 }
 
 function buildInitialAutoRefreshRosterPhaseState_(runIdRaw, taskRaw, preparedInputRaw) {
@@ -2651,6 +2666,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				currentWar: clanTag ? 1 : 0,
 			});
 			persistInput({
+				primarySnapshotCaptured: true,
 				clanSnapshot: clanSnapshot,
 				currentRegularWarByClanTag: currentRegularWarByClanTag,
 				currentRegularWarErrorByClanTag: currentRegularWarErrorByClanTag,
@@ -2796,6 +2812,8 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				seedReadTags = plan.seedReadTags;
 				targetSeedByTag = plan.targetSeedByTag;
 				persistInput({
+					primarySnapshotCaptured: true,
+					snapshotPlanBuilt: true,
 					metricTags: metricTags,
 					metricReadTags: metricReadTags,
 					seedReadTags: seedReadTags,
@@ -2852,6 +2870,8 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				if (tag && !sourceSeedByTag[tag]) sourceSeedByTag[tag] = targetSeedByTag[targetSeedTags[i]];
 			}
 			persistInput({
+				primarySnapshotCaptured: true,
+				snapshotPlanBuilt: true,
 				metricTags: metricTags,
 				metricReadTags: metricReadTags,
 				seedReadTags: seedReadTags,

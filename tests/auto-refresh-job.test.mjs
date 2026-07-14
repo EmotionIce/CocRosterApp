@@ -3270,6 +3270,129 @@ test("roster queue resumes metric planning from captured primary snapshot withou
   assert.equal(prepared.metricReadTags.join(","), "#PLAYER");
 });
 
+test("roster queue resumes a complete RTDB plan when empty optional snapshot maps were elided", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const rosterTask = firstRosterTask(tasks);
+  rosterTask.phase = "processSnapshot";
+  backend.writeAutoRefreshTask_(runId, rosterTask);
+  const metricEntry = sourceData.playerMetrics.byTag["#PLAYER"];
+  backend.writeAutoRefreshRunShard_(runId, "rosterInputs/main", {
+    rosterId: "main",
+    sourceMeta: backend.readAutoRefreshRunShard_(runId, "source/meta"),
+    clanSnapshot: {
+      clanTag: "#CLAN",
+      members: [{ tag: "#PLAYER", name: "Player", townHallLevel: 16 }],
+      metricsMembers: [{ tag: "#PLAYER", name: "Player", trophies: 5000 }],
+    },
+    metricTags: ["#PLAYER"],
+    metricReadTags: ["#PLAYER"],
+    seedReadTags: ["#PLAYER"],
+    targetSeedByTag: { "#PLAYER": { tag: "#PLAYER", name: "Player" } },
+    sourceMetricByTag: { "#PLAYER": metricEntry },
+    sourceSeedByTag: { "#PLAYER": { tag: "#PLAYER", name: "Player" } },
+    // Firebase omits currentRegularWarByClanTag and
+    // currentRegularWarErrorByClanTag when those maps are empty.
+  }, "PUT");
+  let clanFetchCalls = 0;
+  backend.fetchClanMembersSnapshot_ = () => {
+    clanFetchCalls++;
+    throw new Error("a complete persisted snapshot plan must not be recollected");
+  };
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    assert.equal(options.autoRefreshSnapshotMode, true);
+    assert.equal(Object.keys(options.prefetchedCurrentRegularWarByClanTag).length, 0);
+    assert.equal(Object.keys(options.prefetchedRegularWarErrorByClanTag).length, 0);
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return { rosterData, pipelineResult: { memberTracking: { capturedPlayers: 1 } } };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, rosterTask, Date.now());
+  const state = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+
+  assert.equal(result.rosterId, "main");
+  assert.equal(clanFetchCalls, 0);
+  assert.equal(state.phase, "completed");
+});
+
+test("persisted snapshot markers survive RTDB elision when every optional collection is empty", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  sourceData.rosterOrder = ["main"];
+  sourceData.rosters = [Object.assign({}, sourceData.rosters[0], {
+    connectedClanTag: "",
+    trackingMode: "none",
+    main: [],
+    subs: [],
+    missing: [],
+  })];
+  sourceData.playerMetrics.byTag = {};
+  const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  const rosterTask = firstRosterTask(tasks);
+  rosterTask.phase = "processSnapshot";
+  backend.writeAutoRefreshTask_(runId, rosterTask);
+
+  const written = backend.writeAutoRefreshPreparedRosterInput_(runId, "main", {
+    sourceMeta: backend.readAutoRefreshRunShard_(runId, "source/meta"),
+    primarySnapshotCaptured: true,
+    snapshotPlanBuilt: true,
+    clanSnapshot: null,
+    currentRegularWarByClanTag: {},
+    currentRegularWarErrorByClanTag: {},
+    regularWarLogByClanTag: {},
+    regularWarLogErrorByClanTag: {},
+    metricTags: [],
+    metricReadTags: [],
+    seedReadTags: [],
+    targetSeedByTag: {},
+    sourceMetricByTag: {},
+    sourceSeedByTag: {},
+  });
+  assert.equal(written.primarySnapshotCaptured, true);
+  assert.equal(written.snapshotPlanBuilt, true);
+
+  // Model Firebase's round trip: empty arrays/maps disappear, while the
+  // explicit scalar completion evidence remains.
+  const elideEmptyCollections = (value) => {
+    if (Array.isArray(value)) {
+      const entries = value.map(elideEmptyCollections).filter((entry) => entry !== undefined);
+      return entries.length ? entries : undefined;
+    }
+    if (!value || typeof value !== "object") return value;
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      const normalized = elideEmptyCollections(child);
+      if (normalized !== undefined) out[key] = normalized;
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
+  const elided = elideEmptyCollections(written);
+  backend.writeAutoRefreshRunShard_(runId, "rosterInputs/main", elided, "PUT");
+  const persisted = backend.readAutoRefreshPreparedRosterInput_(runId, "main");
+  assert.equal(persisted.primarySnapshotCaptured, true);
+  assert.equal(persisted.snapshotPlanBuilt, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(persisted, "metricReadTags"), false);
+
+  let processCalls = 0;
+  backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
+    processCalls++;
+    assert.equal(options.autoRefreshSnapshotMode, true);
+    accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
+    return { rosterData, pipelineResult: { memberTracking: { capturedPlayers: 0 } } };
+  };
+
+  const result = backend.executeAutoRefreshRosterTask_(current, rosterTask, Date.now());
+  const finalState = backend.readAutoRefreshRosterPhaseState_(runId, "main");
+  assert.equal(result.rosterId, "main");
+  assert.equal(processCalls, 1);
+  assert.equal(finalState.phase, "completed");
+  assert.equal(finalState.attemptByPhase.primarySnapshot || 0, 0);
+  assert.equal(finalState.attemptByPhase.warInputs || 0, 0);
+  assert.equal(finalState.attemptByPhase.metricSeedInputs || 0, 0);
+  assert.equal(finalState.attemptByPhase.processSnapshot, 1);
+});
+
 test("roster queue processing is snapshot-only and defers forbidden live fetches", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { runId, current, tasks } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
