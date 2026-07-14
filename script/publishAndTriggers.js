@@ -5805,10 +5805,158 @@ function repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_() {
 	return { ok: !!(scheduled && scheduled.scheduled), pending: true, scheduled: !!(scheduled && scheduled.scheduled), detail: scheduled };
 }
 
+function readFullAppsScriptAuthorizationStatus_() {
+	try {
+		const authInfo = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL);
+		const statusRaw = authInfo.getAuthorizationStatus();
+		const status = String(statusRaw || "UNKNOWN");
+		const notRequired = ScriptApp.AuthorizationStatus && ScriptApp.AuthorizationStatus.NOT_REQUIRED;
+		return {
+			mode: "FULL",
+			status: status,
+			authorized: statusRaw === notRequired || status === String(notRequired || "NOT_REQUIRED") || status === "NOT_REQUIRED",
+		};
+	} catch (err) {
+		return { mode: "FULL", status: "ERROR", authorized: false, error: errorMessage_(err) };
+	}
+}
+
+function buildProductionTriggerAuthorizationDiagnostics_() {
+	const props = PropertiesService.getScriptProperties();
+	const authorization = readFullAppsScriptAuthorizationStatus_();
+	let allTriggers = [];
+	let triggerReadError = "";
+	try { allTriggers = ScriptApp.getProjectTriggers(); }
+	catch (err) { triggerReadError = errorMessage_(err); }
+	const describe = function (name, handler, idProperty, atProperty) {
+		const configuredId = String(props.getProperty(idProperty) || "").trim();
+		const configuredAtMs = atProperty ? Math.max(0, Number(props.getProperty(atProperty) || 0)) : 0;
+		const matching = allTriggers.filter(function (trigger) {
+			try { return String(trigger.getHandlerFunction() || "") === handler; } catch (err) { return false; }
+		});
+		return {
+			name: name,
+			handler: handler,
+			configuredId: configuredId,
+			configuredAt: configuredAtMs ? new Date(configuredAtMs).toISOString() : "",
+			configuredAtMs: configuredAtMs,
+			configuredPresent: !!configuredId && matching.some(function (trigger) { return getTriggerUniqueId_(trigger) === configuredId; }),
+			actualCount: matching.length,
+			actualIds: matching.map(function (trigger) { return getTriggerUniqueId_(trigger); }).filter(Boolean),
+		};
+	};
+	const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+	let cloudflareTriggers = null;
+	if (typeof getCloudflareDynamicTriggerDiagnostics_ === "function") {
+		try { cloudflareTriggers = getCloudflareDynamicTriggerDiagnostics_(); }
+		catch (err) { cloudflareTriggers = { unavailable: true, error: errorMessage_(err) }; }
+	}
+	let autoSchedulerRepair = null;
+	try {
+		const raw = String(props.getProperty(AUTO_REFRESH_SCHEDULER_REPAIR_MARKER_PROPERTY) || "").trim();
+		autoSchedulerRepair = raw ? JSON.parse(raw) : null;
+	} catch (err) { autoSchedulerRepair = { malformed: true }; }
+	return {
+		checkedAt: new Date().toISOString(),
+		authorization: authorization,
+		triggerRead: { available: !triggerReadError, error: triggerReadError },
+		triggers: {
+			permanent: describe("permanent", PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME, PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY, ""),
+			autoRefresh: describe("autoRefresh", AUTO_REFRESH_HANDLER_NAME, AUTO_REFRESH_TRIGGER_ID_PROPERTY, ""),
+			autoRefreshContinuation: describe("autoRefreshContinuation", AUTO_REFRESH_JOB_HANDLER_NAME, AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY, AUTO_REFRESH_JOB_TRIGGER_AT_PROPERTY),
+			autoRefreshWatchdog: describe("autoRefreshWatchdog", AUTO_REFRESH_JOB_HANDLER_NAME, AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY, AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT_PROPERTY),
+			donationRefresh: describe("donationRefresh", DONATION_REFRESH_HANDLER_NAME, DONATION_REFRESH_TRIGGER_ID_PROPERTY, ""),
+			cwlRecovery: describe("cwlRecovery", CWL_RECOVERY_HANDLER_NAME, CWL_RECOVERY_TRIGGER_ID_PROPERTY, CWL_RECOVERY_TRIGGER_AT_PROPERTY),
+			cloudflare: cloudflareTriggers,
+		},
+		cooldown: {
+			active: cooldownUntilMs > Date.now(),
+			until: cooldownUntilMs ? new Date(cooldownUntilMs).toISOString() : "",
+			untilMs: cooldownUntilMs,
+		},
+		repairMarkers: {
+			runtime: readRuntimeRecoveryMarker_(),
+			autoRefreshScheduler: autoSchedulerRepair,
+			cloudflareScheduler: typeof readCloudflarePublishSchedulerRepair_ === "function" ? readCloudflarePublishSchedulerRepair_() : null,
+		},
+	};
+}
+
+function repairProductionTriggerSchedulingAfterAuthorization_() {
+	const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
+	const result = { ok: true, permanent: null, autoRefresh: null, donationRefresh: null, cwlRecovery: null, cloudflare: null };
+	const capture = function (key, callback) {
+		try {
+			result[key] = callback();
+			if (result[key] && (result[key].ok === false || result[key].scheduled === false && result[key].degraded === true)) result.ok = false;
+		} catch (err) { result.ok = false; result[key] = { ok: false, error: errorMessage_(err) }; }
+	};
+	capture("permanent", function () { return ensurePermanentSchedulerWatchdogTrigger_(); });
+	capture("autoRefresh", function () {
+		return cooldownUntilMs > Date.now() ? reconcileAutoRefreshTriggerState_() : repairAutoRefreshSchedulingFromPermanentWatchdog_();
+	});
+	capture("donationRefresh", function () { return reconcileDonationRefreshTriggerState_(); });
+	capture("cwlRecovery", function () { return repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_(); });
+	if (typeof repairCloudflarePublishSchedulingFromPermanentWatchdog_ === "function") {
+		capture("cloudflare", function () {
+			return cooldownUntilMs > Date.now()
+				? repairCloudflarePublishSchedulingFromPermanentWatchdog_({ localOnly: true, notBeforeMs: cooldownUntilMs })
+				: repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+		});
+	}
+	result.diagnostics = buildProductionTriggerAuthorizationDiagnostics_();
+	return result;
+}
+
+// Run this function manually from the Apps Script editor. When scopes are
+// missing, Google presents interactive consent and stops this invocation. Run
+// it again after consent; only then are all production trigger families
+// reconciled. No authorization URL is returned or exposed through the web app.
+function authorizeAndRepairProductionTriggers() {
+	ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+	return repairProductionTriggerSchedulingAfterAuthorization_();
+}
+
+function reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(cooldownUntilMsRaw, reasonRaw) {
+	const cooldownUntilMs = Math.max(Date.now(), Number(cooldownUntilMsRaw) || 0);
+	const result = {
+		ok: true,
+		skippedRemote: true,
+		reason: String(reasonRaw || "urlFetchQuotaCooldown"),
+		cooldownUntil: new Date(cooldownUntilMs).toISOString(),
+		permanent: null,
+		autoRefresh: null,
+		donationRefresh: null,
+		cwlRecovery: null,
+		cloudflare: null,
+		canonicalRepair: { ok: true, skipped: true, reason: "urlfetch-cooldown-local-only" },
+	};
+	try { result.permanent = ensurePermanentSchedulerWatchdogTrigger_(); }
+	catch (err) { result.ok = false; result.permanent = { ok: false, error: errorMessage_(err) }; }
+	// Periodic trigger reconciliation is ScriptApp/Properties-only. Queue-state
+	// discovery and canonical repair are intentionally deferred until UrlFetch is
+	// available again.
+	try { result.autoRefresh = reconcileAutoRefreshTriggerState_(); }
+	catch (err) { result.ok = false; result.autoRefresh = { ok: false, error: errorMessage_(err) }; }
+	try { result.donationRefresh = reconcileDonationRefreshTriggerState_(); }
+	catch (err) { result.ok = false; result.donationRefresh = { ok: false, error: errorMessage_(err) }; }
+	try {
+		result.cwlRecovery = repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_();
+		if (result.cwlRecovery && result.cwlRecovery.ok === false) result.ok = false;
+	} catch (err) { result.ok = false; result.cwlRecovery = { ok: false, error: errorMessage_(err) }; }
+	if (typeof repairCloudflarePublishSchedulingFromPermanentWatchdog_ === "function") {
+		try {
+			result.cloudflare = repairCloudflarePublishSchedulingFromPermanentWatchdog_({ localOnly: true, notBeforeMs: cooldownUntilMs });
+			if (result.cloudflare && result.cloudflare.ok === false) result.ok = false;
+		} catch (err) { result.ok = false; result.cloudflare = { ok: false, error: errorMessage_(err) }; }
+	}
+	return result;
+}
+
 function permanentSchedulerWatchdogTickInternal_() {
 	const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
 	if (cooldownUntilMs > Date.now()) {
-		return { ok: true, skipped: true, reason: "urlFetchQuotaCooldown", cooldownUntil: new Date(cooldownUntilMs).toISOString() };
+		return reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(cooldownUntilMs, "urlFetchQuotaCooldown");
 	}
 	clearExpiredRuntimeUrlFetchQuotaCooldown_();
 	const result = {
@@ -5824,14 +5972,14 @@ function permanentSchedulerWatchdogTickInternal_() {
 		result.canonicalRepair = runOneCanonicalRepairMarker_();
 		if (result.canonicalRepair && result.canonicalRepair.ok === false) result.ok = false;
 	} catch (err) {
-		if (isFirebaseDailyUrlFetchQuotaError_(err)) return { ok: true, skipped: true, reason: "urlFetchQuota", cooldownUntil: new Date(getRuntimeUrlFetchQuotaCooldownUntilMs_()).toISOString() };
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) return reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(getRuntimeUrlFetchQuotaCooldownUntilMs_(), "urlFetchQuota");
 		result.ok = false;
 		result.canonicalRepair = { ok: false, error: errorMessage_(err) };
 	}
 	try {
 		result.autoRefresh = repairAutoRefreshSchedulingFromPermanentWatchdog_();
 	} catch (err) {
-		if (isFirebaseDailyUrlFetchQuotaError_(err)) return { ok: true, skipped: true, reason: "urlFetchQuota", cooldownUntil: new Date(getRuntimeUrlFetchQuotaCooldownUntilMs_()).toISOString() };
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) return reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(getRuntimeUrlFetchQuotaCooldownUntilMs_(), "urlFetchQuota");
 		result.ok = false;
 		result.autoRefresh = { ok: false, error: errorMessage_(err) };
 		markAutoRefreshSchedulerRepairNeeded_("continuation", "permanent-repair-failed:" + errorMessage_(err), 0);
@@ -5853,7 +6001,7 @@ function permanentSchedulerWatchdogTickInternal_() {
 		try {
 			result.cloudflare = repairCloudflarePublishSchedulingFromPermanentWatchdog_();
 		} catch (err) {
-			if (isFirebaseDailyUrlFetchQuotaError_(err)) return { ok: true, skipped: true, reason: "urlFetchQuota", cooldownUntil: new Date(getRuntimeUrlFetchQuotaCooldownUntilMs_()).toISOString() };
+			if (isFirebaseDailyUrlFetchQuotaError_(err)) return reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(getRuntimeUrlFetchQuotaCooldownUntilMs_(), "urlFetchQuota");
 			result.ok = false;
 			result.cloudflare = { ok: false, error: errorMessage_(err) };
 		}

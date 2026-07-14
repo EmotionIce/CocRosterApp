@@ -67,6 +67,7 @@ const loadQueue = (dateOverride = Date) => {
     PropertiesService: { getScriptProperties: () => ({
       getProperty: (key) => properties.has(key) ? properties.get(key) : null,
       setProperty: (key, value) => properties.set(key, String(value)),
+      setProperties: (values) => Object.entries(values || {}).forEach(([key, value]) => properties.set(key, String(value))),
       deleteProperty: (key) => properties.delete(key),
     }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, waitLock() {}, releaseLock() {} }) },
@@ -95,6 +96,9 @@ const loadQueue = (dateOverride = Date) => {
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS: 7 * 60 * 1000,
     CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS: 1,
     CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS: 1000,
+    CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS: 30000,
+    CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS: 10 * 60 * 1000,
+    CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS: 10 * 60 * 1000,
     CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS: 240000,
     CLOUDFLARE_PUBLISH_QUEUE_REQUEST_TIMEOUT_SECONDS: 20,
     CLOUDFLARE_PUBLISH_QUEUE_MAX_OBJECTS_PER_REQUEST: 24,
@@ -137,6 +141,11 @@ const loadQueue = (dateOverride = Date) => {
     encodeFirebaseObjectKey_: (value) => String(value),
     errorMessage_: (err) => String(err?.message || err),
     getTriggerUniqueId_: (trigger) => trigger && trigger.getUniqueId ? trigger.getUniqueId() : trigger && trigger.id,
+    getRuntimeUrlFetchQuotaCooldownUntilMs_: () => Number(properties.get("COOLDOWN_UNTIL") || 0),
+    clearExpiredRuntimeUrlFetchQuotaCooldown_: () => {
+      const until = Number(properties.get("COOLDOWN_UNTIL") || 0);
+      if (until && until <= dateOverride.now()) properties.delete("COOLDOWN_UNTIL");
+    },
   };
   vm.createContext(context);
   vm.runInContext(source, context);
@@ -234,7 +243,267 @@ test("lease-busy performs zero external, enumeration, or scheduling work", () =>
   assert.equal(q.__triggerCalls.schedules, 0);
 });
 
-test("failed active enqueue persists a durable local repair target", () => {
+test("every pending enqueue installs one continuation and one independent recovery path", () => {
+  const q = installCasFirebase(loadQueue());
+  const first = q.enqueueCloudflareDonationSeasonPublication_("season-1", "first");
+  const second = q.enqueueCloudflareDonationSeasonPublication_("season-1", "repeat");
+  assert.equal(first.scheduled, true);
+  assert.equal(second.scheduled, true);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+  assert.equal(q.__properties.has("TRIGGER"), true);
+  assert.equal(q.__properties.has("RECOVERY_TRIGGER"), true);
+});
+
+test("healthy trigger reconciliation never erases an unmerged active-target repair", () => {
+  const q = installCasFirebase(loadQueue());
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-B", activeReason: "canonical-write" }));
+  q.enqueueCloudflareDonationSeasonPublication_("season-1", "unrelated");
+  const marker = JSON.parse(q.__properties.get("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"));
+  assert.equal(marker.activeVersionId, "version-B");
+});
+
+test("fired recovery during a live continuation lease performs no remote work and restores both paths", () => {
+  const q = loadQueue();
+  const leaseExpiresAt = Date.now() + 7 * 60 * 1000;
+  q.__properties.set("LOCK", JSON.stringify({ token: "continuation-owner", owner: "worker", expiresAt: leaseExpiresAt }));
+  const fired = { id: "recovery-fired", handler: "cloudflarePublishWorkerRecoveryTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(fired);
+  q.__properties.set("RECOVERY_TRIGGER", fired.id);
+  q.__properties.set("RECOVERY_TRIGGER_AT", String(Date.now()));
+  let remoteCalls = 0;
+  q.firebaseRequestJson_ = () => { remoteCalls += 1; throw new Error("no Firebase on overlap"); };
+  q.UrlFetchApp = { fetch() { remoteCalls += 1; throw new Error("no Cloudflare on overlap"); } };
+
+  const result = q.cloudflarePublishWorkerTick({ triggerUid: fired.id }, "recovery");
+
+  assert.equal(result.reason, "lease-busy");
+  assert.equal(remoteCalls, 0);
+  assert.equal(JSON.parse(q.__properties.get("LOCK")).token, "continuation-owner");
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+  assert.ok(Number(q.__properties.get("TRIGGER_AT")) >= leaseExpiresAt);
+});
+
+test("active UrlFetch cooldown consumes the fired trigger, makes zero remote calls, and schedules both paths after cooldown", () => {
+  const q = loadQueue();
+  const cooldownUntil = Date.now() + 60 * 60 * 1000;
+  q.__properties.set("COOLDOWN_UNTIL", String(cooldownUntil));
+  const fired = { id: "continuation-fired", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(fired);
+  q.__properties.set("TRIGGER", fired.id);
+  q.__properties.set("TRIGGER_AT", String(Date.now()));
+  let firebaseCalls = 0;
+  let cloudflareCalls = 0;
+  q.firebaseRequestJson_ = () => { firebaseCalls += 1; throw new Error("cooldown must not read Firebase"); };
+  q.firebaseRequestJsonWithEtag_ = () => { firebaseCalls += 1; throw new Error("cooldown must not CAS Firebase"); };
+  q.UrlFetchApp = { fetch() { cloudflareCalls += 1; throw new Error("cooldown must not call Cloudflare"); } };
+
+  const result = q.cloudflarePublishWorkerTick({ triggerUid: fired.id });
+
+  assert.equal(result.reason, "urlFetchQuotaCooldown");
+  assert.equal(firebaseCalls, 0);
+  assert.equal(cloudflareCalls, 0);
+  assert.equal(q.__properties.has("LOCK"), false);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+  assert.ok(Number(q.__properties.get("TRIGGER_AT")) >= cooldownUntil);
+  assert.ok(Number(q.__properties.get("RECOVERY_TRIGGER_AT")) >= cooldownUntil + q.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS);
+});
+
+test("post-cooldown continuation merges a marked canonical target into an idle queue without another roster refresh", () => {
+  const q = installCasFirebase(loadQueue());
+  q.readPublishedActiveVersionId_ = () => "version-B";
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({
+    pending: true,
+    activeVersionId: "version-B",
+    activeReason: "canonical-write-urlfetch-exhausted",
+  }));
+  q.scheduleCloudflareAfterMutation_({ pending: true });
+  const firstContinuationId = q.__properties.get("TRIGGER");
+  q.__properties.set("COOLDOWN_UNTIL", String(Date.now() + 60 * 60 * 1000));
+
+  const cooled = q.cloudflarePublishWorkerTick({ triggerUid: firstContinuationId });
+  assert.equal(cooled.reason, "urlFetchQuotaCooldown");
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), true);
+
+  q.__properties.delete("COOLDOWN_UNTIL");
+  let processedTargets = 0;
+  q.processCloudflareActiveQueueRequest_ = (state, ownerToken) => {
+    processedTargets++;
+    assert.equal(state.active.targetVersionId, "version-B");
+    return q.mutateCloudflarePublishQueueState_((latest) => {
+      latest.active.committedVersionId = "version-B";
+      latest.active.phase = "idle";
+      latest.active.cursor = 0;
+      latest.active.dispatch = null;
+      return { ok: true, category: "active", pending: false };
+    }, ownerToken);
+  };
+  const resumedContinuationId = q.__properties.get("TRIGGER");
+  const resumed = q.cloudflarePublishWorkerTick({ triggerUid: resumedContinuationId });
+
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.activeSchedulerRepair.repaired, true);
+  assert.equal(processedTargets, 1);
+  assert.equal(q.__getState().active.committedVersionId, "version-B");
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
+});
+
+test("active repair recovery restores a concurrently enqueued newer canonical target before returning", () => {
+  const q = installCasFirebase(loadQueue());
+  let canonicalVersionId = "version-A";
+  q.readPublishedActiveVersionId_ = () => canonicalVersionId;
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({
+    pending: true,
+    activeVersionId: "version-A",
+    activeReason: "older-repair",
+  }));
+  const mutate = q.mutateCloudflarePublishQueueState_;
+  let mutationCalls = 0;
+  q.mutateCloudflarePublishQueueState_ = (callback, ownerToken) => {
+    mutationCalls++;
+    if (mutationCalls === 1) {
+      canonicalVersionId = "version-B";
+      const concurrent = q.createEmptyCloudflarePublishQueueState_();
+      concurrent.active.targetVersionId = "version-B";
+      concurrent.active.targetGeneration = 50;
+      concurrent.active.phase = "public-manifest-rosters";
+      q.__setState(concurrent);
+    }
+    return mutate(callback, ownerToken);
+  };
+
+  const result = q.recoverCloudflareActiveSchedulerRepairForWorker_();
+
+  assert.equal(result.canonicalVersionId, "version-B");
+  assert.equal(result.attempt, 2);
+  assert.equal(q.__getState().active.targetVersionId, "version-B");
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
+});
+
+test("active repair recovery preserves a newer failed-enqueue marker until its target CAS is durable", () => {
+  const q = installCasFirebase(loadQueue());
+  let canonicalVersionId = "version-A";
+  q.readPublishedActiveVersionId_ = () => canonicalVersionId;
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({
+    pending: true,
+    activeVersionId: "version-A",
+    activeReason: "older-repair",
+  }));
+  const mutate = q.mutateCloudflarePublishQueueState_;
+  let mutationCalls = 0;
+  let newerMarkerPresentAtSecondCas = false;
+  q.mutateCloudflarePublishQueueState_ = (callback, ownerToken) => {
+    mutationCalls++;
+    if (mutationCalls === 1) {
+      canonicalVersionId = "version-B";
+      q.markCloudflarePublishSchedulerRepair_("newer-enqueue-failed", "", {
+        activeVersionId: "version-B",
+        activeReason: "newer-canonical-write",
+      });
+    } else if (mutationCalls === 2) {
+      newerMarkerPresentAtSecondCas = q.readCloudflarePublishSchedulerRepair_().activeVersionId === "version-B";
+    }
+    return mutate(callback, ownerToken);
+  };
+
+  const result = q.recoverCloudflareActiveSchedulerRepairForWorker_();
+
+  assert.equal(result.canonicalVersionId, "version-B");
+  assert.equal(newerMarkerPresentAtSecondCas, true);
+  assert.equal(q.__getState().active.targetVersionId, "version-B");
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
+});
+
+test("recovery drains pending work when the continuation never fires", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.nextRevision = 1;
+  state.dirty.events.alpha = { revision: 1, updatedAt: new Date().toISOString(), reasons: ["recovery-test"] };
+  q.__setState(state);
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  q.buildCloudflareDirtyRequest_ = (_current, claim) => ({
+    label: claim.key,
+    objects: [{ path: `events/${claim.key}`, scope: "public", payload: { eventId: claim.key } }],
+    deletes: [],
+    commits: [],
+  });
+  q.sendCloudflareQueuedV2Request_ = () => ({ ok: true, payloadBytes: 100, response: { ok: true } });
+  q.scheduleCloudflareAfterMutation_({ pending: true });
+  const recoveryId = q.__properties.get("RECOVERY_TRIGGER");
+
+  const result = q.cloudflarePublishWorkerTick({ triggerUid: recoveryId }, "recovery");
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(q.__getState().dirty.events, {});
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+});
+
+test("stale terminal observation never deletes trigger paths installed by a concurrent enqueue", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = q.createEmptyCloudflarePublishQueueState_();
+  state.nextRevision = 1;
+  state.dirty.events.alpha = { revision: 1, updatedAt: new Date().toISOString(), reasons: ["terminal-race"] };
+  q.__setState(state);
+  q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
+  q.buildCloudflareDirtyRequest_ = (_current, claim) => ({
+    label: claim.key,
+    objects: [{ path: `events/${claim.key}`, scope: "public", payload: { eventId: claim.key } }],
+    deletes: [],
+    commits: [],
+  });
+  q.sendCloudflareQueuedV2Request_ = () => ({ ok: true, payloadBytes: 100, response: { ok: true } });
+  q.scheduleCloudflareAfterMutation_({ pending: true });
+  const firedContinuationId = q.__properties.get("TRIGGER");
+
+  const completeDirty = q.completeCloudflareDirtyPhase_;
+  let completedFirstItem = false;
+  q.completeCloudflareDirtyPhase_ = (...args) => {
+    const result = completeDirty(...args);
+    completedFirstItem = true;
+    return result;
+  };
+  const hasPending = q.hasPendingCloudflarePublishWork_;
+  let idleChecksAfterCompletion = 0;
+  let injected = false;
+  q.hasPendingCloudflarePublishWork_ = (candidate) => {
+    const pending = hasPending(candidate);
+    if (!pending && completedFirstItem) {
+      idleChecksAfterCompletion++;
+      if (idleChecksAfterCompletion === 2 && !injected) {
+        injected = true;
+        const enqueue = q.enqueueCloudflareDonationSeasonPublication_("season-concurrent", "terminal-interleaving");
+        assert.equal(enqueue.scheduled, true);
+      }
+    }
+    return pending;
+  };
+
+  const result = q.cloudflarePublishWorkerTick({ triggerUid: firedContinuationId });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.pending, false, "the worker intentionally retains its stale terminal observation");
+  assert.equal(injected, true);
+  assert.ok(q.__getState().dirty.donationSeasons["season-concurrent"]);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+});
+
+test("permanent watchdog leaves terminal one-shots for exact-identity cleanup instead of racing a new enqueue", () => {
+  const q = installCasFirebase(loadQueue());
+  q.scheduleCloudflareAfterMutation_({ pending: true });
+
+  const result = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+
+  assert.equal(result.pending, false);
+  assert.equal(result.exactIdentityCleanup, true);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+});
+
+test("failed active enqueue persists its target and immediately seeds both local recovery paths", () => {
   const q = loadQueue();
   q.isCloudflareQueuedPublicationEnabled_ = () => true;
   q.mutateCloudflarePublishQueueState_ = () => { throw new Error("Firebase unavailable"); };
@@ -244,8 +513,26 @@ test("failed active enqueue persists a durable local repair target", () => {
 
   assert.equal(result.ok, false);
   assert.equal(result.repairPending, true);
+  assert.equal(result.scheduled, true);
   assert.equal(marker.activeVersionId, "version-B");
   assert.equal(marker.activeReason, "auto-refresh-finalize");
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+});
+
+test("failed active enqueue schedules both recovery paths beyond an active UrlFetch cooldown", () => {
+  const q = loadQueue();
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  q.mutateCloudflarePublishQueueState_ = () => { throw new Error("Firebase quota exhausted"); };
+  const cooldownUntil = Date.now() + 30 * 60 * 1000;
+  q.__properties.set("COOLDOWN_UNTIL", String(cooldownUntil));
+
+  const result = q.enqueueCloudflareActiveTarget_("version-B", "auto-refresh-finalize");
+
+  assert.equal(result.scheduled, true);
+  assert.ok(Number(q.__properties.get("TRIGGER_AT")) >= cooldownUntil);
+  assert.ok(Number(q.__properties.get("RECOVERY_TRIGGER_AT")) >= cooldownUntil + 8 * 60 * 1000);
+  assert.equal(JSON.parse(q.__properties.get("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR")).activeVersionId, "version-B");
 });
 
 test("permanent watchdog merges a failed active enqueue idempotently and never restores a superseded target", () => {
@@ -268,6 +555,55 @@ test("permanent watchdog merges a failed active enqueue idempotently and never r
   q.readPublishedActiveVersionId_ = () => "version-B";
   q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
   assert.equal(q.__getState().active.targetVersionId, "version-B");
+});
+
+test("permanent watchdog consumes a concurrently installed newer active marker before returning", () => {
+  const q = installCasFirebase(loadQueue());
+  q.isCloudflareQueuedPublicationEnabled_ = () => true;
+  let canonicalVersionId = "version-A";
+  q.readPublishedActiveVersionId_ = () => canonicalVersionId;
+  q.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-A", activeReason: "first" }));
+  const mutate = q.mutateCloudflarePublishQueueState_;
+  let mutations = 0;
+  q.mutateCloudflarePublishQueueState_ = (...args) => {
+    const result = mutate(...args);
+    mutations += 1;
+    if (mutations === 1) {
+      canonicalVersionId = "version-B";
+      q.markCloudflarePublishSchedulerRepair_("newer-active", "", { activeVersionId: "version-B", activeReason: "second" });
+    }
+    if (mutations === 2) {
+      assert.equal(JSON.parse(q.__properties.get("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR")).activeVersionId, "version-B");
+    }
+    return result;
+  };
+
+  const result = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+
+  assert.equal(result.pending, true);
+  assert.equal(q.__getState().active.targetVersionId, "version-B");
+  assert.equal(mutations, 2);
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
+});
+
+test("permanent watchdog schedules a generic repair marker installed after its terminal queue read", () => {
+  const q = installCasFirebase(loadQueue());
+  const readState = q.readCloudflarePublishQueueState_;
+  let reads = 0;
+  q.readCloudflarePublishQueueState_ = (...args) => {
+    const state = readState(...args);
+    reads += 1;
+    if (reads === 1) q.markCloudflarePublishSchedulerRepair_("concurrent-donation-trigger-failure", "", {});
+    return state;
+  };
+
+  const result = q.repairCloudflarePublishSchedulingFromPermanentWatchdog_();
+
+  assert.equal(result.pending, true);
+  assert.equal(result.markerOnly, true);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+  assert.equal(q.__properties.has("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR"), false);
 });
 
 test("permanent watchdog clears a terminal active repair marker and schedules retention without changing generation", () => {
@@ -348,6 +684,30 @@ test("lease prevents six-minute overlap and claimed-work recovery follows prompt
   const successor = q.tryAcquireCloudflarePublishQueueLease_("recovery", 0);
   assert.ok(successor);
   assert.equal(successor.owner, "recovery");
+});
+
+test("worker lease checkpoints keep the original hard-kill horizon and recovery schedule", () => {
+  let nowMs = Date.parse("2026-07-12T00:00:00.000Z");
+  class VirtualDate extends Date {
+    constructor(...args) { super(args.length ? args[0] : nowMs); }
+    static now() { return nowMs; }
+  }
+  const q = loadQueue(VirtualDate);
+  const lease = q.tryAcquireCloudflarePublishQueueLease_("worker", 0);
+  q.cloudflarePublishQueueDeadlineMs_ = nowMs + 240000;
+  q.beginCloudflarePublishQueueExecution_(lease.token, nowMs);
+  const firstRecovery = q.scheduleCloudflarePublishWorkerRecovery_(true, lease);
+  const originalLeaseExpiry = lease.expiresAt;
+  const originalRecoveryAt = Number(q.__properties.get("RECOVERY_TRIGGER_AT"));
+
+  nowMs += 3 * 60 * 1000;
+  q.renewCloudflarePublishQueueLeaseWithRecoveryOrThrow_(lease.token, { category: "event", key: "alpha", revision: 1 });
+  const renewedLease = JSON.parse(q.__properties.get("LOCK"));
+
+  assert.equal(firstRecovery.scheduled, true);
+  assert.equal(renewedLease.expiresAt, originalLeaseExpiry);
+  assert.equal(Number(q.__properties.get("RECOVERY_TRIGGER_AT")), originalRecoveryAt);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
 });
 
 test("schema-v2 ordinary and commit states migrate to the first idempotent phase without changing the committed pointer", () => {
@@ -437,7 +797,7 @@ test("no Firebase transport runs while ScriptLock is held", () => {
   q.mutateCloudflarePublishQueueState_((current) => { current.dirty.events.e = { revision: 1 }; });
 });
 
-test("pre-claim Firebase timeout leaves phase unchanged and schedules no recovery trigger", () => {
+test("pre-claim Firebase timeout leaves phase unchanged with both pending trigger paths", () => {
   const q = installCasFirebase(loadQueue(), activeState(loadQueue()));
   q.__setState(activeState(q));
   q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
@@ -450,8 +810,8 @@ test("pre-claim Firebase timeout leaves phase unchanged and schedules no recover
   assert.equal(after.active.cursor, 0);
   assert.equal(after.infrastructure.attempt, 1);
   assert.ok(after.infrastructure.nextAttemptAt);
-  assert.equal(q.__triggers.length, 1);
-  assert.deepEqual(q.__triggers.map((trigger) => trigger.handler), ["cloudflarePublishWorkerTick"]);
+  assert.equal(q.__triggers.length, 2);
+  assert.deepEqual(q.__triggers.map((trigger) => trigger.handler).sort(), ["cloudflarePublishWorkerRecoveryTick", "cloudflarePublishWorkerTick"]);
 });
 
 test("empty publication worker reads queue once and performs no drift or trigger work", () => {
@@ -470,7 +830,7 @@ test("empty publication worker reads queue once and performs no drift or trigger
   assert.equal(q.__triggerCalls.deletes, 0);
 });
 
-test("publication recovery is created only after a durable dispatch claim", () => {
+test("pending publication installs recovery before claim and revalidates it after durable claim", () => {
   const q = installCasFirebase(loadQueue());
   q.__setState(activeState(q));
   q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
@@ -487,7 +847,8 @@ test("publication recovery is created only after a durable dispatch claim", () =
   assert.equal(result.ok, true);
   assert.equal(observedClaim, true);
   assert.ok(q.__triggerCalls.schedules >= 1);
-  assert.deepEqual(q.__triggers, []);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(q.__triggers.filter((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
 });
 
 test("one worker checkpoints multiple independent items and persists full phase heartbeat coverage", () => {
@@ -598,7 +959,7 @@ test("permanent watchdog seeds retention once for a committed pre-rollout versio
   assert.equal(q.__getState().dirty.retention.revision, revision);
 });
 
-test("recovery trigger creation failure checkpoints the claim without starting remote work", () => {
+test("recovery trigger creation failure prevents a claim and remote work", () => {
   const q = installCasFirebase(loadQueue());
   q.__setState(activeState(q));
   q.readCloudflarePublishQueueState_ = () => clone(q.__getState());
@@ -616,9 +977,9 @@ test("recovery trigger creation failure checkpoints the claim without starting r
 
   assert.equal(result.ok, false);
   assert.equal(builds, 0);
-  assert.ok(state.active.dispatch && state.active.dispatch.guard);
-  assert.equal(state.active.failure, null);
-  assert.equal(state.infrastructure.attempt, 1);
+  assert.equal(state.active.dispatch, null);
+  assert.equal(state.active.failure == null, true);
+  assert.equal(state.infrastructure.attempt, 0);
   assert.deepEqual(q.__triggers.map((trigger) => trigger.handler), ["cloudflarePublishWorkerTick"]);
 });
 
@@ -633,7 +994,7 @@ test("transport descriptors carry explicit bounded timeouts", () => {
   assert.equal(requestOptions.timeoutSeconds, 20);
 });
 
-test("trigger reconciliation reuses earlier work and replaces later or invalid metadata", () => {
+test("trigger reconciliation reuses healthy bounded intent and replaces invalid or overdue continuation", () => {
   const q = loadQueue();
   const desired = Date.now() + 120000;
   const earlier = { id: "earlier", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
@@ -657,11 +1018,80 @@ test("trigger reconciliation reuses earlier work and replaces later or invalid m
 
   const stale = q.__triggers[0];
   q.__properties.set("TRIGGER", stale.id);
-  q.__properties.set("TRIGGER_AT", String(Date.now() - 60000));
+  q.__properties.set("TRIGGER_AT", String(Date.now() - q.CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS - 1000));
   const staleReplaced = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", desired);
-  assert.equal(staleReplaced.reused, true);
-  assert.equal(q.__triggerCalls.schedules, 1);
+  assert.equal(staleReplaced.reused, false);
+  assert.equal(q.__triggerCalls.schedules, 2);
   assert.equal(q.__triggers.filter((item) => item.handler === "cloudflarePublishWorkerTick").length, 1);
+});
+
+test("recovery reconciliation reuses a healthy trigger and replaces one beyond its overdue bound", () => {
+  const q = loadQueue();
+  const first = q.scheduleCloudflarePublishWorkerRecovery_(true, {});
+  const second = q.scheduleCloudflarePublishWorkerRecovery_(true, {});
+  assert.equal(first.scheduled, true);
+  assert.equal(second.reused, true);
+  assert.equal(q.__triggerCalls.schedules, 1);
+
+  q.__properties.set("RECOVERY_TRIGGER_AT", String(Date.now() - q.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS - 1));
+  const replaced = q.scheduleCloudflarePublishWorkerRecovery_(true, {});
+  assert.equal(replaced.reused, false);
+  assert.equal(q.__triggerCalls.schedules, 2);
+  assert.equal(q.__triggers.filter((item) => item.handler === "cloudflarePublishWorkerRecoveryTick").length, 1);
+});
+
+test("failed overdue replacement preserves the previous trigger identity and path", () => {
+  const q = loadQueue();
+  const old = { id: "old-path", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(old);
+  q.__properties.set("TRIGGER", old.id);
+  q.__properties.set("TRIGGER_AT", String(Date.now() - q.CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS - 1));
+  q.ScriptApp.newTrigger = () => ({ timeBased: () => ({ after: () => ({ create: () => { throw new Error("trigger quota"); } }) }) });
+
+  const result = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", Date.now() + 60000, {
+    maxOverdueMs: q.CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS,
+  });
+
+  assert.equal(result.scheduled, false);
+  assert.equal(result.reason, "create-failed");
+  assert.equal(q.__properties.get("TRIGGER"), "old-path");
+  assert.equal(q.__triggers.includes(old), true);
+});
+
+test("replacement identity is published before the prior trigger is deleted", () => {
+  const q = loadQueue();
+  const old = { id: "old-path", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(old);
+  q.__properties.set("TRIGGER", old.id);
+  q.__properties.set("TRIGGER_AT", "invalid");
+  const originalDelete = q.ScriptApp.deleteTrigger;
+  q.ScriptApp.deleteTrigger = (trigger) => {
+    if (trigger === old) assert.notEqual(q.__properties.get("TRIGGER"), "old-path");
+    return originalDelete(trigger);
+  };
+  const result = q.ensureCloudflareTrigger_("cloudflarePublishWorkerTick", "TRIGGER", "TRIGGER_AT", Date.now() + 60000);
+  assert.equal(result.scheduled, true);
+  assert.equal(result.reused, false);
+});
+
+test("fired-trigger cleanup deletes only the exact UID and never clears newer intent", () => {
+  const q = loadQueue();
+  const old = { id: "fired-old", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  const newer = { id: "newer", handler: "cloudflarePublishWorkerTick", getUniqueId() { return this.id; }, getHandlerFunction() { return this.handler; } };
+  q.__triggers.push(old, newer);
+  q.__properties.set("TRIGGER", newer.id);
+  q.__properties.set("TRIGGER_AT", String(Date.now() + 60000));
+
+  const oldResult = q.consumeCloudflareFiredTriggerIdentity_({ triggerUid: old.id }, "TRIGGER", "TRIGGER_AT", "cloudflarePublishWorkerTick");
+  assert.equal(oldResult.deleted, true);
+  assert.equal(oldResult.clearedCurrent, false);
+  assert.deepEqual(q.__triggers.map((trigger) => trigger.id), ["newer"]);
+  assert.equal(q.__properties.get("TRIGGER"), "newer");
+
+  const newResult = q.consumeCloudflareFiredTriggerIdentity_({ triggerUid: newer.id }, "TRIGGER", "TRIGGER_AT", "cloudflarePublishWorkerTick");
+  assert.equal(newResult.clearedCurrent, true);
+  assert.equal(q.__properties.has("TRIGGER"), false);
+  assert.equal(q.__properties.has("TRIGGER_AT"), false);
 });
 
 test("active public manifest/roster phase reads no metrics", () => {

@@ -1020,6 +1020,93 @@ test("repairAutoRefreshScheduler rejects invalid credentials", () => {
   );
 });
 
+test("authorization diagnostics are authenticated and manual bootstrap requires FULL scopes before trigger repair", () => {
+  const backend = loadBackend();
+  backend.__properties.set("ADMIN_PW", "secret");
+  backend.ScriptApp.AuthMode = { FULL: "FULL" };
+  backend.ScriptApp.AuthorizationStatus = { REQUIRED: "REQUIRED", NOT_REQUIRED: "NOT_REQUIRED" };
+  let authorizationStatus = backend.ScriptApp.AuthorizationStatus.REQUIRED;
+  let requiredMode = "";
+  backend.ScriptApp.getAuthorizationInfo = (mode) => {
+    assert.equal(mode, backend.ScriptApp.AuthMode.FULL);
+    return { getAuthorizationStatus: () => authorizationStatus };
+  };
+  backend.ScriptApp.requireAllScopes = (mode) => {
+    requiredMode = mode;
+    authorizationStatus = backend.ScriptApp.AuthorizationStatus.NOT_REQUIRED;
+  };
+
+  const getProjectTriggers = backend.ScriptApp.getProjectTriggers;
+  backend.ScriptApp.getProjectTriggers = () => { throw new Error("Authorization required"); };
+  const missing = backend.runAdminApiMethod_("getProductionTriggerAuthorizationDiagnostics", ["secret"]);
+  assert.equal(missing.authorization.mode, "FULL");
+  assert.equal(missing.authorization.status, "REQUIRED");
+  assert.equal(missing.authorization.authorized, false);
+  assert.equal(missing.triggerRead.available, false);
+  assert.match(missing.triggerRead.error, /Authorization required/);
+  assert.equal(missing.triggers.cloudflare.unavailable, true);
+  assert.equal(JSON.stringify(missing).toLowerCase().includes("authorizationurl"), false);
+  backend.ScriptApp.getProjectTriggers = getProjectTriggers;
+  assert.throws(
+    () => backend.runAdminApiMethod_("getProductionTriggerAuthorizationDiagnostics", ["wrong"]),
+    /Authentication failed/,
+  );
+  assert.throws(
+    () => backend.runAdminApiMethod_("authorizeAndRepairProductionTriggers", []),
+    /Unsupported admin method/,
+  );
+
+  const repaired = [];
+  backend.ensurePermanentSchedulerWatchdogTrigger_ = () => { repaired.push("permanent"); return { scheduled: true }; };
+  backend.repairAutoRefreshSchedulingFromPermanentWatchdog_ = () => { repaired.push("auto"); return { ok: true }; };
+  backend.reconcileDonationRefreshTriggerState_ = () => { repaired.push("donation"); return { enabled: true, hasTrigger: true }; };
+  backend.repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_ = () => { repaired.push("cwl"); return { ok: true, pending: false }; };
+  backend.repairCloudflarePublishSchedulingFromPermanentWatchdog_ = () => { repaired.push("cloudflare"); return { ok: true, pending: false }; };
+  backend.getCloudflareDynamicTriggerDiagnostics_ = () => ({ continuation: { health: "missing" }, recovery: { health: "missing" } });
+
+  const result = backend.authorizeAndRepairProductionTriggers();
+  assert.equal(requiredMode, backend.ScriptApp.AuthMode.FULL);
+  assert.deepEqual(repaired, ["permanent", "auto", "donation", "cwl", "cloudflare"]);
+  assert.equal(result.diagnostics.authorization.authorized, true);
+});
+
+test("permanent watchdog performs local trigger repair with zero remote calls during UrlFetch cooldown", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const cooldownUntil = Date.now() + 60 * 60 * 1000;
+  backend.__properties.set("RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL", String(cooldownUntil));
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.__properties.set("DONATION_REFRESH_ENABLED", "1");
+  backend.__properties.set("CLOUDFLARE_PUBLICATION_MODE", "queued-v2");
+  backend.__properties.set("CLOUDFLARE_PUBLIC_DATA_ENABLED", "true");
+  backend.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-pending", nextAttemptAt: "" }));
+  backend.markRuntimeRecoveryNeeded_("cwl-refresh:event-1", "test-cooldown", { eventId: "event-1" });
+
+  const oldContinuation = backend.ScriptApp.newTrigger("cloudflarePublishWorkerTick").timeBased().after(1000).create();
+  const oldRecovery = backend.ScriptApp.newTrigger("cloudflarePublishWorkerRecoveryTick").timeBased().after(1000).create();
+  backend.__properties.set("CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID", oldContinuation.getUniqueId());
+  backend.__properties.set("CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT", String(Date.now() - backend.CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS - 1));
+  backend.__properties.set("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID", oldRecovery.getUniqueId());
+  backend.__properties.set("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT", String(Date.now() - backend.CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS - 1));
+
+  let remoteCalls = 0;
+  backend.firebaseRequestJson_ = () => { remoteCalls++; throw new Error("watchdog cooldown must not call Firebase"); };
+  backend.firebaseRequestJsonWithEtag_ = () => { remoteCalls++; throw new Error("watchdog cooldown must not CAS Firebase"); };
+  backend.UrlFetchApp = { fetch() { remoteCalls++; throw new Error("watchdog cooldown must not call UrlFetch"); } };
+
+  const result = backend.permanentSchedulerWatchdogTickInternal_();
+
+  assert.equal(result.skippedRemote, true);
+  assert.equal(remoteCalls, 0);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "permanentSchedulerWatchdogTick").length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshActiveRosterTick").length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "donationRefreshTick").length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick").length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cloudflarePublishWorkerTick").length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cloudflarePublishWorkerRecoveryTick").length, 1);
+  assert.ok(Number(backend.__properties.get("CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT")) >= cooldownUntil);
+  assert.equal(JSON.parse(backend.__properties.get("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR")).activeVersionId, "version-pending");
+});
+
 test("admin diagnostics exposes current auto-refresh queue state without roster payloads", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.__properties.set("ADMIN_PW", "secret");
@@ -2432,22 +2519,32 @@ test("detached donation refresh is atomic and preserves continuity across versio
     for (const entry of entries) backend.firebaseRequestJson_(entry.path, "PUT", entry.payload);
     return null;
   };
+  const successfulBatchPut = backend.firebaseBatchPutJson_;
+  const originalListChildKeys = backend.listFirebaseChildKeys_;
+  let retentionEnumerations = 0;
+  backend.listFirebaseChildKeys_ = (...args) => {
+    retentionEnumerations++;
+    return originalListChildKeys(...args);
+  };
+  const donationEnqueues = [];
+  let failDonationEnqueue = false;
+  backend.enqueueCloudflareDonationSeasonPublication_ = (seasonIdRaw, reasonRaw) => {
+    donationEnqueues.push({ seasonId: String(seasonIdRaw), reason: String(reasonRaw), failed: failDonationEnqueue });
+    return failDonationEnqueue
+      ? { ok: false, queued: false, error: "simulated enqueue failure" }
+      : { ok: true, queued: true, scheduled: true, seasonId: String(seasonIdRaw) };
+  };
   let donationRefreshFetchCalls = 0;
+  let currentCapturedAt = "2026-05-25T00:00:00.000Z";
+  let currentPlayerDonations = 125;
+  let includePlayer = true;
   backend.prefetchClanMembersSnapshotsByTag_ = (clanTags) => {
     assert.equal(JSON.stringify(clanTags.slice().sort()), JSON.stringify(["#CLAN", "#CLAN2"]));
     donationRefreshFetchCalls++;
-    const capturedAtByCall = [
-      "2026-05-25T00:00:00.000Z",
-      "2026-05-25T00:15:00.000Z",
-      "2026-05-25T00:30:00.000Z",
-      "2026-05-25T00:45:00.000Z",
-      "2026-05-25T01:00:00.000Z",
-    ];
-    const capturedAt = capturedAtByCall[Math.min(donationRefreshFetchCalls - 1, capturedAtByCall.length - 1)];
-    const playerDonations = donationRefreshFetchCalls >= 5 ? 170 : donationRefreshFetchCalls >= 3 ? 160 : 125;
-    const playerMembers = donationRefreshFetchCalls === 4
-      ? []
-      : [{ tag: "#PLAYER", name: "Player", trophies: 5000, donations: playerDonations, donationsReceived: 25 }];
+    const capturedAt = currentCapturedAt;
+    const playerMembers = includePlayer
+      ? [{ tag: "#PLAYER", name: "Player", trophies: 5000, donations: currentPlayerDonations, donationsReceived: 25 }]
+      : [];
     return {
       snapshotByClanTag: {
         "#CLAN": {
@@ -2494,15 +2591,18 @@ test("detached donation refresh is atomic and preserves continuity across versio
   assert.equal(firstMeta.updatedAt, "2026-05-25T00:00:00.000Z");
   assert.equal(activeLedger.cycleTotalDonations, 100);
   assert.equal(backend.__properties.has("ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT"), false);
+  assert.equal(donationEnqueues.length, 1);
+  assert.equal(retentionEnumerations, 1);
 
   const originalBatchGet = backend.firebaseBatchGetJson_;
-  let activeBaseLedgerReadCount = 0;
-  backend.firebaseBatchGetJson_ = (pathsRaw) => {
+  let activeBaseLedgerPaths = [];
+  backend.firebaseBatchGetJson_ = (pathsRaw, optionsRaw) => {
     const paths = Array.isArray(pathsRaw) ? pathsRaw : [];
-    activeBaseLedgerReadCount += paths.filter((path) => String(path || "").includes("activeVersions/source-1/playerMetrics/byTag")).length;
-    return originalBatchGet(pathsRaw);
+    activeBaseLedgerPaths.push(...paths.filter((path) => String(path || "").includes("/playerMetrics/byTag/")));
+    return originalBatchGet(pathsRaw, optionsRaw);
   };
 
+  currentCapturedAt = "2026-05-25T00:15:00.000Z";
   const secondResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
   const secondPlayerOverlay = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_(
@@ -2518,7 +2618,44 @@ test("detached donation refresh is atomic and preserves continuity across versio
   assert.equal(secondResult.updatedPlayerCount, 0);
   assert.equal(secondPlayerOverlay.updatedAt, "2026-05-25T00:00:00.000Z");
   assert.equal(secondMeta.updatedAt, "2026-05-25T00:00:00.000Z");
-  assert.equal(activeBaseLedgerReadCount, 2);
+  assert.equal(activeBaseLedgerPaths.length, 0);
+  assert.equal(secondResult.canonicalLedgerReadCount, 0);
+  assert.equal(secondResult.canonicalWriteCount, 0);
+  assert.equal(batchWrites.length, 1);
+  assert.equal(donationEnqueues.length, 1);
+  assert.equal(retentionEnumerations, 1);
+
+  backend.markDonationPublicationRecovery_(seasonId, "test-retry");
+  failDonationEnqueue = true;
+  currentCapturedAt = "2026-05-25T00:20:00.000Z";
+  const failedEnqueueRetry = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  assert.equal(failedEnqueueRetry.canonicalWriteCount, 0);
+  assert.equal(donationEnqueues.length, 2);
+  assert.equal(JSON.stringify(backend.listDonationPublicationRecoverySeasonIds_()), JSON.stringify([seasonId]));
+  failDonationEnqueue = false;
+  currentCapturedAt = "2026-05-25T00:25:00.000Z";
+  const successfulEnqueueRetry = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  assert.equal(successfulEnqueueRetry.canonicalWriteCount, 0);
+  assert.equal(donationEnqueues.length, 3);
+  assert.equal(JSON.stringify(backend.listDonationPublicationRecoverySeasonIds_()), "[]");
+  assert.equal(batchWrites.length, 1);
+  assert.equal(retentionEnumerations, 1);
+
+  const playerOverlayPath = "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER");
+  const secondOverlayPath = "donationRefresh/bySeason/" + seasonId + "/byTag/" + backend.encodeFirebaseObjectKey_("#SECOND");
+  const stalePlayerOverlay = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_(playerOverlayPath, "GET"));
+  stalePlayerOverlay.sourceVersionId = "stale-source";
+  backend.firebaseRequestJson_(playerOverlayPath, "PUT", backend.encodeFirebaseObjectKeysRecursive_(stalePlayerOverlay));
+  backend.firebaseRequestJson_(secondOverlayPath, "DELETE");
+  activeBaseLedgerPaths = [];
+  currentCapturedAt = "2026-05-25T00:27:00.000Z";
+  const repairedEntries = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  assert.equal(repairedEntries.canonicalLedgerReadCount, 2);
+  assert.equal(activeBaseLedgerPaths.length, 2);
+  assert.equal(activeBaseLedgerPaths.every((path) => path.includes("activeVersions/source-1/playerMetrics/byTag/")), true);
+  assert.equal(repairedEntries.updatedPlayerCount, 2);
+  assert.equal(batchWrites.length, 2);
+  assert.equal(donationEnqueues.length, 4);
 
   const source2Data = clone(data);
   source2Data.playerMetrics.byTag["#PLAYER"].donationCycles[seasonId] = {
@@ -2542,6 +2679,9 @@ test("detached donation refresh is atomic and preserves continuity across versio
   backend.firebaseRequestJson_("activeVersions/source-2/playerMetrics", "PUT", backend.encodeFirebaseObjectKeysRecursive_(source2Data.playerMetrics));
   backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-2");
 
+  activeBaseLedgerPaths = [];
+  currentCapturedAt = "2026-05-25T00:30:00.000Z";
+  currentPlayerDonations = 160;
   const rebasedResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
   const rebasedOverlay = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_(
@@ -2553,7 +2693,13 @@ test("detached donation refresh is atomic and preserves continuity across versio
   assert.equal(rebasedOverlay.donationCycle.rawDonationsLastSeen, 160);
   assert.equal(rebasedOverlay.donationCycle.cycleTotalDonations, 190);
   assert.equal(rebasedOverlay.donationCycle.resetCount, 1);
+  assert.equal(rebasedResult.canonicalLedgerReadCount, 2);
+  assert.equal(activeBaseLedgerPaths.length, 2);
+  assert.equal(activeBaseLedgerPaths.every((path) => path.includes("activeVersions/source-2/playerMetrics/byTag/")), true);
+  assert.equal(donationEnqueues.length, 5);
 
+  includePlayer = false;
+  currentCapturedAt = "2026-05-25T00:45:00.000Z";
   const leaveResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
   const leftOverlay = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_(
@@ -2563,7 +2709,11 @@ test("detached donation refresh is atomic and preserves continuity across versio
   );
   assert.equal(leaveResult.status, "ok");
   assert.equal(leftOverlay.donationCycle.cycleTotalDonations, 190);
+  assert.equal(donationEnqueues.length, 6);
 
+  includePlayer = true;
+  currentCapturedAt = "2026-05-25T01:00:00.000Z";
+  currentPlayerDonations = 170;
   const rejoinResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
   const rejoinedOverlay = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_(
@@ -2574,7 +2724,19 @@ test("detached donation refresh is atomic and preserves continuity across versio
   assert.equal(rejoinResult.status, "ok");
   assert.equal(rejoinedOverlay.donationCycle.rawDonationsLastSeen, 170);
   assert.equal(rejoinedOverlay.donationCycle.cycleTotalDonations, 200);
+  assert.equal(donationEnqueues.length, 7);
 
+  currentCapturedAt = "2026-05-25T01:10:00.000Z";
+  currentPlayerDonations = 10;
+  const resetResult = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  const resetOverlay = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_(playerOverlayPath, "GET"));
+  assert.equal(resetResult.updatedPlayerCount, 1);
+  assert.equal(resetOverlay.donationCycle.cycleTotalDonations, 210);
+  assert.equal(resetOverlay.donationCycle.resetCount, 2);
+  assert.equal(donationEnqueues.length, 8);
+
+  currentCapturedAt = "2026-05-25T01:15:00.000Z";
+  currentPlayerDonations = 20;
   const pointerBeforeAtomicFailure = backend.firebaseRequestJson_("donationRefresh/current", "GET");
   const overlayBeforeAtomicFailure = backend.firebaseRequestJson_("donationRefresh/bySeason/" + seasonId, "GET");
   const memoryRequest = backend.firebaseRequestJson_;
@@ -2601,6 +2763,35 @@ test("detached donation refresh is atomic and preserves continuity across versio
     overlayBeforeAtomicFailure,
   );
   assert.deepEqual(unexpectedSerialWrites, []);
+  assert.equal(JSON.stringify(backend.listDonationPublicationRecoverySeasonIds_()), JSON.stringify([seasonId]));
+  assert.equal(donationEnqueues.length, 8);
+
+  backend.firebaseRequestJson_ = memoryRequest;
+  backend.firebaseBatchPutJson_ = successfulBatchPut;
+  const recoveredAfterAtomicFailure = backend.runDonationRefreshCore_({ lockWaitMs: 0 });
+  assert.equal(recoveredAfterAtomicFailure.updatedPlayerCount, 1);
+  assert.equal(donationEnqueues.length, 9);
+  assert.equal(JSON.stringify(backend.listDonationPublicationRecoverySeasonIds_()), "[]");
+
+  const beforeSourceRace = backend.firebaseRequestJson_("donationRefresh/bySeason/" + seasonId, "GET");
+  const writesBeforeSourceRace = batchWrites.length;
+  const enqueuesBeforeSourceRace = donationEnqueues.length;
+  currentCapturedAt = "2026-05-25T01:30:00.000Z";
+  currentPlayerDonations = 30;
+  const realReadPublishedVersion = backend.readPublishedActiveVersionId_;
+  let selectorReads = 0;
+  backend.readPublishedActiveVersionId_ = () => (++selectorReads === 1 ? "source-2" : "source-raced");
+  assert.throws(
+    () => backend.runDonationRefreshCore_({ lockWaitMs: 0 }),
+    (err) => err && err.code === "DONATION_REFRESH_SOURCE_CHANGED",
+  );
+  backend.readPublishedActiveVersionId_ = realReadPublishedVersion;
+  assert.equal(selectorReads, 2);
+  assert.equal(batchWrites.length, writesBeforeSourceRace);
+  assert.equal(donationEnqueues.length, enqueuesBeforeSourceRace);
+  assert.deepEqual(backend.firebaseRequestJson_("donationRefresh/bySeason/" + seasonId, "GET"), beforeSourceRace);
+  assert.equal(JSON.stringify(backend.listDonationPublicationRecoverySeasonIds_()), JSON.stringify([seasonId]));
+  backend.clearDonationPublicationRecoverySeason_(seasonId);
 });
 
 test("queue worker treats existing roster result shards as an idempotent retry", () => {

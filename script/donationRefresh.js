@@ -229,6 +229,47 @@ function readDonationRefreshOverlayBySeason_(seasonIdRaw) {
 	};
 }
 
+function sanitizeDonationRefreshMeta_(metaRaw, seasonIdRaw) {
+	const meta = metaRaw && typeof metaRaw === "object" ? metaRaw : {};
+	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw || meta.seasonId);
+	if (!seasonId) return null;
+	const normalizeIso = function (valueRaw) {
+		const ms = parseIsoToMs_(valueRaw);
+		return ms > 0 ? new Date(ms).toISOString() : "";
+	};
+	const errorsRaw = Array.isArray(meta.errors) ? meta.errors : [];
+	const errors = [];
+	for (let i = 0; i < errorsRaw.length && errors.length < 10; i++) {
+		const clanTag = normalizeTag_(errorsRaw[i] && errorsRaw[i].clanTag);
+		const message = String(errorsRaw[i] && errorsRaw[i].message || "").trim().slice(0, 500);
+		if (clanTag || message) errors.push({ clanTag: clanTag, message: message });
+	}
+	return {
+		seasonId: seasonId,
+		startsAt: normalizeIso(meta.startsAt),
+		endsAt: normalizeIso(meta.endsAt),
+		updatedAt: normalizeIso(meta.updatedAt),
+		sourceVersionId: normalizeActiveVersionId_(meta.sourceVersionId),
+		clanCount: toNonNegativeInt_(meta.clanCount),
+		capturedClanCount: toNonNegativeInt_(meta.capturedClanCount),
+		playerCount: toNonNegativeInt_(meta.playerCount),
+		updatedPlayerCount: toNonNegativeInt_(meta.updatedPlayerCount),
+		requestCount: toNonNegativeInt_(meta.requestCount),
+		errorCount: toNonNegativeInt_(meta.errorCount),
+		errors: errors,
+	};
+}
+
+function areDonationRefreshEntriesEqual_(leftRaw, rightRaw, seasonIdRaw, tagRaw) {
+	const left = sanitizeDonationRefreshEntry_(leftRaw, seasonIdRaw, tagRaw);
+	const right = sanitizeDonationRefreshEntry_(rightRaw, seasonIdRaw, tagRaw);
+	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function areDonationRefreshMetaEqual_(leftRaw, rightRaw, seasonIdRaw) {
+	return JSON.stringify(sanitizeDonationRefreshMeta_(leftRaw, seasonIdRaw)) === JSON.stringify(sanitizeDonationRefreshMeta_(rightRaw, seasonIdRaw));
+}
+
 function mergeDonationRefreshOverlayIntoPlayerMetricsByTag_(playerMetricsByTagRaw, overlayByTagRaw, seasonIdRaw) {
 	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw);
 	const baseByTag = playerMetricsByTagRaw && typeof playerMetricsByTagRaw === "object" ? playerMetricsByTagRaw : {};
@@ -314,7 +355,7 @@ function buildDonationRefreshEntryForSnapshot_(snapshotRaw, clanTagRaw, seasonId
 	if (initialLedger) entry.donationCycles[seasonId] = initialLedger;
 	const captureCtx = buildMetricsCaptureContext_(snapshot.capturedAt);
 	captureCtx.clanTag = clanTag;
-	const changed = updateDonationCycleLedgerForSnapshot_(entry, Object.assign({}, snapshot, { clanTag: clanTag }), captureCtx);
+	updateDonationCycleLedgerForSnapshot_(entry, Object.assign({}, snapshot, { clanTag: clanTag }), captureCtx);
 	const ledger = sanitizeMetricsDonationCycleLedger_(entry.donationCycles && entry.donationCycles[seasonId], seasonId);
 	if (!ledger) return null;
 	const sourceVersionId = normalizeActiveVersionId_(sourceVersionIdRaw);
@@ -332,20 +373,20 @@ function buildDonationRefreshEntryForSnapshot_(snapshotRaw, clanTagRaw, seasonId
 		snapshot.tag,
 	);
 	if (!out) return null;
-	out.changed = changed || JSON.stringify(out.donationCycle) !== JSON.stringify(overlayEntry && overlayEntry.donationCycle);
 	return out;
 }
 
-function cleanupDonationRefreshSeasonRetentionWrites_() {
+function cleanupDonationRefreshSeasonRetentionWrites_(currentSeasonIdRaw) {
 	const keepCount = Math.max(1, toNonNegativeInt_(FIREBASE_DONATION_REFRESH_SEASON_KEEP_COUNT) || 16);
 	let keys = [];
 	try {
 		keys = listFirebaseChildKeys_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason"));
 	} catch (err) {
 		Logger.log("Donation refresh retention key read failed: %s", errorMessage_(err));
-		return [];
+		return { ok: false, writes: [], error: errorMessage_(err) };
 	}
 	const seasons = [];
+	const seenSeasonIds = {};
 	for (let i = 0; i < keys.length; i++) {
 		let decoded = keys[i];
 		try {
@@ -355,7 +396,12 @@ function cleanupDonationRefreshSeasonRetentionWrites_() {
 		}
 		const seasonId = sanitizeDonationCycleKey_(decoded);
 		if (!seasonId) continue;
+		seenSeasonIds[seasonId] = true;
 		seasons.push({ key: keys[i], seasonId: seasonId, sort: getDonationCycleSortValue_({ seasonId: seasonId }, seasonId) });
+	}
+	const currentSeasonId = sanitizeDonationCycleKey_(currentSeasonIdRaw);
+	if (currentSeasonId && !seenSeasonIds[currentSeasonId]) {
+		seasons.push({ key: encodeFirebaseObjectKey_(currentSeasonId), seasonId: currentSeasonId, sort: getDonationCycleSortValue_({ seasonId: currentSeasonId }, currentSeasonId) });
 	}
 	seasons.sort((left, right) => left.sort - right.sort || (left.seasonId < right.seasonId ? -1 : left.seasonId > right.seasonId ? 1 : 0));
 	const writes = [];
@@ -365,7 +411,61 @@ function cleanupDonationRefreshSeasonRetentionWrites_() {
 			payload: null,
 		});
 	}
-	return writes;
+	return { ok: true, writes: writes };
+}
+
+function shouldRunDonationRefreshRetentionMaintenance_(seasonIdRaw, overlayMetaRaw) {
+	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw);
+	if (!overlayMetaRaw || typeof overlayMetaRaw !== "object") return true;
+	const overlayMeta = sanitizeDonationRefreshMeta_(overlayMetaRaw, seasonId);
+	if (!overlayMeta || overlayMeta.seasonId !== seasonId) return true;
+	const lastAtMs = Math.max(0, Number(PropertiesService.getScriptProperties().getProperty(DONATION_REFRESH_RETENTION_LAST_MAINTENANCE_AT_PROPERTY) || 0));
+	return !lastAtMs || Date.now() - lastAtMs >= DONATION_REFRESH_RETENTION_MAINTENANCE_INTERVAL_MS;
+}
+
+function listDonationPublicationRecoverySeasonIds_() {
+	const marker = typeof readRuntimeRecoveryMarker_ === "function" ? readRuntimeRecoveryMarker_() : { scopes: {} };
+	const scope = marker.scopes && marker.scopes.donationPublication && typeof marker.scopes.donationPublication === "object"
+		? marker.scopes.donationPublication
+		: {};
+	const values = (Array.isArray(scope.seasonIds) ? scope.seasonIds : []).concat([scope.seasonId]);
+	const seen = {};
+	const out = [];
+	for (let i = 0; i < values.length; i++) {
+		const seasonId = sanitizeDonationCycleKey_(values[i]);
+		if (!seasonId || seen[seasonId]) continue;
+		seen[seasonId] = true;
+		out.push(seasonId);
+	}
+	return out;
+}
+
+function markDonationPublicationRecovery_(seasonIdRaw, reasonRaw, extraRaw) {
+	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw);
+	if (!seasonId || typeof markRuntimeRecoveryNeeded_ !== "function") return null;
+	const seasonIds = listDonationPublicationRecoverySeasonIds_();
+	if (seasonIds.indexOf(seasonId) < 0) seasonIds.push(seasonId);
+	return markRuntimeRecoveryNeeded_("donationPublication", reasonRaw || "enqueue-required", Object.assign({
+		seasonId: seasonId,
+		seasonIds: seasonIds,
+	}, extraRaw && typeof extraRaw === "object" ? extraRaw : {}));
+}
+
+function clearDonationPublicationRecoverySeason_(seasonIdRaw) {
+	const seasonId = sanitizeDonationCycleKey_(seasonIdRaw);
+	if (!seasonId || typeof readRuntimeRecoveryMarker_ !== "function") return false;
+	const marker = readRuntimeRecoveryMarker_();
+	const scope = marker.scopes && marker.scopes.donationPublication && typeof marker.scopes.donationPublication === "object"
+		? marker.scopes.donationPublication
+		: null;
+	if (!scope) return false;
+	const remaining = listDonationPublicationRecoverySeasonIds_().filter(function (value) { return value !== seasonId; });
+	if (!remaining.length) return typeof clearRuntimeRecoveryNeeded_ === "function" ? clearRuntimeRecoveryNeeded_("donationPublication") : false;
+	scope.seasonIds = remaining;
+	scope.seasonId = remaining[0];
+	scope.updatedAt = new Date().toISOString();
+	PropertiesService.getScriptProperties().setProperty(RUNTIME_RECOVERY_MARKER_PROPERTY, JSON.stringify(marker));
+	return true;
 }
 
 function setDonationRefreshRunResult_(statusRaw, summaryRaw, errorRaw, startedAtRaw, finishedAtRaw, extraRaw) {
@@ -451,14 +551,18 @@ function runDonationRefreshCore_(optionsRaw) {
 		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation overlay read");
 		const overlay = readDonationRefreshOverlayBySeason_(seasonId);
 		const overlayEntries = overlay && overlay.byTag && typeof overlay.byTag === "object" ? overlay.byTag : {};
-		const overlayMeta = overlay && overlay.meta && typeof overlay.meta === "object" ? overlay.meta : {};
-		let latestDataUpdatedAtMs = parseIsoToMs_(overlayMeta.updatedAt);
+		const overlayMetaRaw = overlay && overlay.meta && typeof overlay.meta === "object" ? overlay.meta : null;
+		const overlayMeta = overlayMetaRaw ? sanitizeDonationRefreshMeta_(overlayMetaRaw, seasonId) : null;
+		let latestDataUpdatedAtMs = parseIsoToMs_(overlayMeta && overlayMeta.updatedAt);
 		const baseReadTags = [];
+		const overlaySourceVersionId = normalizeActiveVersionId_(overlayMeta && overlayMeta.sourceVersionId);
+		const sourceChanged = overlaySourceVersionId !== source.versionId;
 		for (let i = 0; i < touchedTags.length; i++) {
 			const tag = normalizeTag_(touchedTags[i]);
-			if (tag) baseReadTags.push(tag);
+			const overlayEntry = sanitizeDonationRefreshEntry_(overlayEntries[tag], seasonId, tag);
+			if (tag && (sourceChanged || !overlayEntry || normalizeActiveVersionId_(overlayEntry.sourceVersionId) !== source.versionId)) baseReadTags.push(tag);
 		}
-		const baseLedgers = readActiveDonationLedgersForTags_(source.versionId, seasonId, baseReadTags);
+		const baseLedgers = baseReadTags.length ? readActiveDonationLedgersForTags_(source.versionId, seasonId, baseReadTags) : {};
 		const writes = [];
 		let updatedPlayers = 0;
 		for (let i = 0; i < snapshots.length; i++) {
@@ -473,19 +577,21 @@ function runDonationRefreshCore_(optionsRaw) {
 				overlayEntries[tag],
 			);
 			if (!entry) continue;
-			if (entry.changed) updatedPlayers++;
+			const entryChanged = !areDonationRefreshEntriesEqual_(entry, overlayEntries[tag], seasonId, tag);
+			if (entryChanged) updatedPlayers++;
 			const entryUpdatedAtMs = parseIsoToMs_(entry.updatedAt);
-			if (entry.changed && entryUpdatedAtMs > latestDataUpdatedAtMs) latestDataUpdatedAtMs = entryUpdatedAtMs;
-			delete entry.changed;
-			writes.push({
-				path: buildDonationRefreshSeasonTagPath_(seasonId, tag),
-				payload: encodeFirebaseObjectKeysRecursive_(entry),
-			});
+			if (entryChanged && entryUpdatedAtMs > latestDataUpdatedAtMs) latestDataUpdatedAtMs = entryUpdatedAtMs;
+			if (entryChanged) {
+				writes.push({
+					path: buildDonationRefreshSeasonTagPath_(seasonId, tag),
+					payload: encodeFirebaseObjectKeysRecursive_(entry),
+				});
+			}
 		}
 		const finishedAt = new Date().toISOString();
 		const dataUpdatedAt = latestDataUpdatedAtMs > 0 ? new Date(latestDataUpdatedAtMs).toISOString() : finishedAt;
 		const errorKeys = Object.keys(errorByClanTag);
-		const meta = {
+		let meta = sanitizeDonationRefreshMeta_({
 			seasonId: seasonId,
 			startsAt: cycle.startsAt,
 			endsAt: cycle.endsAt,
@@ -501,27 +607,44 @@ function runDonationRefreshCore_(optionsRaw) {
 				clanTag: clanTag,
 				message: errorMessage_(errorByClanTag[clanTag]),
 			})),
-		};
-		writes.push({ path: buildDonationRefreshSeasonPath_(seasonId, "meta"), payload: encodeFirebaseObjectKeysRecursive_(meta) });
-		writes.push({ path: buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), payload: encodeFirebaseObjectKeysRecursive_(meta) });
+		}, seasonId);
+		// Persisted meta describes the last content-changing observation. An
+		// otherwise identical run must not flip updatedPlayerCount back to zero and
+		// dirty the public overlay/pointer solely for operational bookkeeping.
+		if (updatedPlayers === 0 && overlayMeta) meta.updatedPlayerCount = overlayMeta.updatedPlayerCount;
+		const metaChanged = !areDonationRefreshMetaEqual_(meta, overlayMeta, seasonId);
+		if (metaChanged) {
+			writes.push({ path: buildDonationRefreshSeasonPath_(seasonId, "meta"), payload: encodeFirebaseObjectKeysRecursive_(meta) });
+			writes.push({ path: buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"), payload: encodeFirebaseObjectKeysRecursive_(meta) });
+		}
+		const publicDonationPayloadChanged = updatedPlayers > 0 || metaChanged;
+		// Write-ahead intent closes the hard-stop window between a successful
+		// canonical PATCH and asynchronous queue enqueue. A false-positive marker
+		// after a failed PATCH is safe and idempotent.
+		if (publicDonationPayloadChanged) markDonationPublicationRecovery_(seasonId, "canonical-write-pending-enqueue", { sourceVersionId: source.versionId });
 		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation retention and atomic write");
-		const cleanupWrites = cleanupDonationRefreshSeasonRetentionWrites_();
+		const retentionDue = shouldRunDonationRefreshRetentionMaintenance_(seasonId, overlayMetaRaw);
+		const retention = retentionDue ? cleanupDonationRefreshSeasonRetentionWrites_(seasonId) : { ok: true, writes: [], skipped: true };
+		const cleanupWrites = retention && Array.isArray(retention.writes) ? retention.writes : [];
 		for (let i = 0; i < cleanupWrites.length; i++) writes.push(cleanupWrites[i]);
-		if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation source revalidation");
-		const currentSourceVersionId = readPublishedActiveVersionId_();
-		if (currentSourceVersionId !== source.versionId) {
-			const changed = new Error("Donation refresh source version changed before commit; retrying from the new canonical version.");
-			changed.code = "DONATION_REFRESH_SOURCE_CHANGED";
-			changed.autoRefreshDefer = true;
-			changed.reason = "donationSourceChanged";
-			throw changed;
+		if (writes.length) {
+			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(20000, "donation source revalidation");
+			const currentSourceVersionId = readPublishedActiveVersionId_();
+			if (currentSourceVersionId !== source.versionId) {
+				const changed = new Error("Donation refresh source version changed before commit; retrying from the new canonical version.");
+				changed.code = "DONATION_REFRESH_SOURCE_CHANGED";
+				changed.autoRefreshDefer = true;
+				changed.reason = "donationSourceChanged";
+				throw changed;
+			}
+			try {
+				firebaseBatchPutJson_(writes, { disableFallback: true });
+			} catch (err) {
+				if (typeof markRuntimeRecoveryNeeded_ === "function") markRuntimeRecoveryNeeded_("donationRefresh", "atomic-write-failed", { error: errorMessage_(err).slice(0, 500) });
+				throw err;
+			}
 		}
-		try {
-			firebaseBatchPutJson_(writes, { disableFallback: true });
-		} catch (err) {
-			if (typeof markRuntimeRecoveryNeeded_ === "function") markRuntimeRecoveryNeeded_("donationRefresh", "atomic-write-failed", { error: errorMessage_(err).slice(0, 500) });
-			throw err;
-		}
+		if (retentionDue && retention && retention.ok === true) PropertiesService.getScriptProperties().setProperty(DONATION_REFRESH_RETENTION_LAST_MAINTENANCE_AT_PROPERTY, String(Date.now()));
 		if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("donationRefresh");
 		const cloudflareDonationPublish = { ok: true, skipped: true, reason: "queued-after-lock" };
 		const cloudflareActiveMirrorRepair = { ok: true, skipped: true, reason: "not-run-for-donation-refresh" };
@@ -534,29 +657,40 @@ function runDonationRefreshCore_(optionsRaw) {
 			capturedClanCount: capturedClans,
 			playerCount: touchedTags.length,
 			updatedPlayerCount: updatedPlayers,
+			canonicalLedgerReadCount: baseReadTags.length,
+			canonicalWriteCount: writes.length,
+			publicDonationPayloadChanged: publicDonationPayloadChanged,
 			errorCount: errorKeys.length,
-			writtenAt: finishedAt,
+			writtenAt: writes.length ? finishedAt : "",
 			cloudflareDonationPublish: cloudflareDonationPublish,
 			cloudflareActiveMirrorRepair: cloudflareActiveMirrorRepair,
 		};
 	});
-	if (refreshResult && refreshResult.seasonId && typeof enqueueCloudflareDonationSeasonPublication_ === "function") {
-		try {
-			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "donation Cloudflare enqueue");
-			refreshResult.cloudflareDonationPublish = enqueueCloudflareDonationSeasonPublication_(refreshResult.seasonId, "donation-refresh-write");
-		} catch (err) {
-			Logger.log("Donation refresh Cloudflare enqueue failed after canonical write: %s", errorMessage_(err));
-			refreshResult.cloudflareDonationPublish = { ok: false, error: errorMessage_(err), queued: false };
-			if (typeof markRuntimeRecoveryNeeded_ === "function") markRuntimeRecoveryNeeded_("donationPublication", "enqueue-failed", { seasonId: refreshResult.seasonId });
+	const publicationSeasonIds = listDonationPublicationRecoverySeasonIds_();
+	if (refreshResult && refreshResult.publicDonationPayloadChanged && refreshResult.seasonId && publicationSeasonIds.indexOf(refreshResult.seasonId) < 0) publicationSeasonIds.push(refreshResult.seasonId);
+	if (publicationSeasonIds.length && typeof enqueueCloudflareDonationSeasonPublication_ === "function") {
+		const publicationResults = [];
+		for (let i = 0; i < publicationSeasonIds.length; i++) {
+			const seasonId = publicationSeasonIds[i];
+			let enqueued;
+			try {
+				if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "donation Cloudflare enqueue");
+				enqueued = enqueueCloudflareDonationSeasonPublication_(seasonId, refreshResult && refreshResult.publicDonationPayloadChanged && seasonId === refreshResult.seasonId ? "donation-refresh-write" : "donation-publication-recovery");
+			} catch (err) {
+				enqueued = { ok: false, error: errorMessage_(err), queued: false, seasonId: seasonId };
+			}
+			publicationResults.push({ seasonId: seasonId, result: enqueued });
+			if (enqueued && enqueued.ok === true) clearDonationPublicationRecoverySeason_(seasonId);
+			else {
+				Logger.log("Donation refresh Cloudflare enqueue failed seasonId=%s error=%s", seasonId, errorMessage_(enqueued && (enqueued.error || enqueued.reason) || "enqueue failed"));
+				markDonationPublicationRecovery_(seasonId, "enqueue-failed", { error: String(enqueued && (enqueued.error || enqueued.reason) || "enqueue failed").slice(0, 500) });
+			}
 		}
-	} else if (refreshResult && refreshResult.skipped && typeof enqueueCloudflareRelevantSeasonPublication_ === "function") {
-		try {
-			if (typeof assertExecutionBudget_ === "function") assertExecutionBudget_(5000, "donation current-pointer repair enqueue");
-			refreshResult.cloudflareDonationPublish = enqueueCloudflareRelevantSeasonPublication_("donation-refresh-current-repair");
-		} catch (err) {
-			Logger.log("Donation refresh current-pointer repair enqueue failed: %s", errorMessage_(err));
-			refreshResult.cloudflareDonationPublish = { ok: false, error: errorMessage_(err), queued: false };
-		}
+		refreshResult.cloudflareDonationPublish = publicationResults.length === 1
+			? Object.assign({ seasonId: publicationResults[0].seasonId }, publicationResults[0].result)
+			: { ok: publicationResults.every(function (item) { return item.result && item.result.ok === true; }), results: publicationResults };
+	} else if (refreshResult) {
+		refreshResult.cloudflareDonationPublish = { ok: true, skipped: true, reason: "unchanged-no-recovery" };
 	}
 	return refreshResult;
 }

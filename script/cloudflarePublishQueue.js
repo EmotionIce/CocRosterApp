@@ -24,6 +24,8 @@ function cloudflareQueueConstant_(nameRaw, fallbackRaw) {
 	if (name === "CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS" && typeof CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS;
 	if (name === "CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS" && typeof CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_LOCK_POLL_MS;
 	if (name === "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS" && typeof CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS;
+	if (name === "CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS" && typeof CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS;
+	if (name === "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS" && typeof CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS;
 	if (name === "CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS" && typeof CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS;
 	if (name === "CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_ROSTERS_PER_PHASE" && typeof CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_ROSTERS_PER_PHASE !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_ROSTERS_PER_PHASE;
 	if (name === "CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY" && typeof CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY !== "undefined") return CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_BURST_BEFORE_DIRTY;
@@ -214,8 +216,20 @@ function renewCloudflarePublishQueueLease_(tokenRaw) {
 	try {
 		const current = parseCloudflarePublishQueueLockState_(props.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
 		if (!current || current.token !== token || current.expiresAt <= Date.now()) return false;
-		current.expiresAt = Date.now() + cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS", 8 * 60 * 1000);
-		props.setProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY, JSON.stringify(current));
+		const leaseMs = cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_LOCK_LEASE_MS", 8 * 60 * 1000);
+		// A queue invocation already owns a lease that extends beyond the Apps
+		// Script hard-runtime horizon. Keep that fixed horizon instead of sliding
+		// it on every checkpoint, which could postpone hard-kill recovery long
+		// after the original owner is gone. Direct owner-scoped calls without an
+		// execution heartbeat retain the legacy rolling lease behavior.
+		const execution = cloudflarePublishQueueExecution_;
+		const requiredExpiresAt = execution && execution.startedAtMs
+			? execution.startedAtMs + leaseMs
+			: Date.now() + leaseMs;
+		if (current.expiresAt < requiredExpiresAt) {
+			current.expiresAt = requiredExpiresAt;
+			props.setProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY, JSON.stringify(current));
+		}
 		return true;
 	} finally { lock.releaseLock(); }
 }
@@ -591,7 +605,8 @@ function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, 
 	if (typeof ScriptApp === "undefined" || !ScriptApp || typeof ScriptApp.newTrigger !== "function") return { scheduled: false, reason: "scriptapp-unavailable" };
 	assertCloudflarePublishQueueDeadline_(15000, "Cloudflare trigger reconciliation");
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const desiredAtMs = Math.max(Date.now() + 1000, Number(desiredAtMsRaw) || Date.now() + 1000);
+	const nowMs = Date.now();
+	const desiredAtMs = Math.max(nowMs + 1000, Number(desiredAtMsRaw) || nowMs + 1000);
 	const properties = PropertiesService.getScriptProperties();
 	const candidates = getCloudflareTriggerCandidates_(handlerNameRaw);
 	const configuredId = getCloudflareTriggerId_(idPropertyRaw);
@@ -600,35 +615,69 @@ function ensureCloudflareTrigger_(handlerNameRaw, idPropertyRaw, atPropertyRaw, 
 	const toleranceMs = typeof CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS !== "undefined"
 		? Math.max(0, Number(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_REUSE_TOLERANCE_MS) || 0)
 		: 30000;
-	// The stored timestamp is the only schedule timestamp Apps Script exposes.
-	// A continuation that Apps Script delayed is still an installed recovery
-	// path and remains reusable when it was requested no later than needed. A
-	// recovery watchdog has the opposite lower-bound rule: it may never run
-	// before the current lease expiry plus its safety margin.
+	const maxOverdueMs = Math.max(1000, Number(options.maxOverdueMs) || cloudflareQueueConstant_(
+		options.recoveryNotBeforeMs ? "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS" : "CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS",
+		10 * 60 * 1000,
+	));
+	// Apps Script exposes the requested timestamp, not a guaranteed delivery
+	// time. Reuse bounded delayed intent, but replace an installed one-shot once
+	// its requested time is too far overdue or violates a durable lower bound.
 	const recoveryNotBeforeMs = Math.max(0, Number(options.recoveryNotBeforeMs) || 0);
-	const reusable = configuredTrigger && configuredAtMs > 0 && (recoveryNotBeforeMs > 0
-		? configuredAtMs >= recoveryNotBeforeMs
-		: configuredAtMs <= desiredAtMs + toleranceMs);
+	const notBeforeMs = Math.max(recoveryNotBeforeMs, Number(options.notBeforeMs) || 0);
+	const overdueAgeMs = configuredAtMs > 0 ? Math.max(0, nowMs - configuredAtMs) : 0;
+	const reusable = !!(
+		configuredTrigger &&
+		configuredAtMs > 0 &&
+		overdueAgeMs <= maxOverdueMs &&
+		(!notBeforeMs || configuredAtMs + toleranceMs >= notBeforeMs) &&
+		configuredAtMs <= desiredAtMs + toleranceMs
+	);
 	if (reusable) {
 		for (let i = 0; i < candidates.length; i++) if (candidates[i] !== configuredTrigger) { try { ScriptApp.deleteTrigger(candidates[i]); } catch (err) {} }
 		const triggerId = getTriggerUniqueId_(configuredTrigger);
 		if (triggerId) properties.setProperty(idPropertyRaw, triggerId);
 		properties.setProperty(atPropertyRaw, String(configuredAtMs));
-		return { scheduled: true, reused: true, triggerId: triggerId, scheduledAt: new Date(configuredAtMs).toISOString() };
+		return { scheduled: true, reused: true, healthy: true, triggerId: triggerId, scheduledAt: new Date(configuredAtMs).toISOString(), overdueAgeMs: overdueAgeMs };
 	}
-	const delay = Math.max(1000, desiredAtMs - Date.now());
+	const delay = Math.max(1000, desiredAtMs - nowMs);
 	// Create first. If Apps Script refuses creation, every previous trigger and
 	// its local identity remain intact as the only recovery path.
-	const created = ScriptApp.newTrigger(handlerNameRaw).timeBased().after(delay).create();
+	let created = null;
+	try {
+		created = ScriptApp.newTrigger(handlerNameRaw).timeBased().after(delay).create();
+	} catch (err) {
+		return {
+			scheduled: false,
+			degraded: true,
+			reason: "create-failed",
+			error: errorMessage_(err),
+			preservedTriggerId: configuredId || (candidates[0] && getTriggerUniqueId_(candidates[0])) || "",
+			overdueAgeMs: overdueAgeMs,
+		};
+	}
 	const triggerId = getTriggerUniqueId_(created);
 	if (!triggerId) {
 		try { ScriptApp.deleteTrigger(created); } catch (err) {}
 		return { scheduled: false, degraded: true, reason: "created-trigger-missing-identity", preservedTriggerId: configuredId || "" };
 	}
+	const scheduledAtMs = nowMs + delay;
+	try {
+		const values = {};
+		values[idPropertyRaw] = triggerId;
+		values[atPropertyRaw] = String(scheduledAtMs);
+		if (typeof properties.setProperties === "function") properties.setProperties(values, false);
+		else {
+			properties.setProperty(idPropertyRaw, triggerId);
+			properties.setProperty(atPropertyRaw, String(scheduledAtMs));
+		}
+	} catch (err) {
+		try { ScriptApp.deleteTrigger(created); } catch (deleteErr) {}
+		return { scheduled: false, degraded: true, reason: "identity-publish-failed", error: errorMessage_(err), preservedTriggerId: configuredId || "" };
+	}
+	// Publish the replacement identity before retiring the prior path. A crash or
+	// create failure therefore cannot leave the queue with no known trigger.
 	for (let i = 0; i < candidates.length; i++) { try { ScriptApp.deleteTrigger(candidates[i]); } catch (err) {} }
-	if (triggerId) properties.setProperty(idPropertyRaw, triggerId);
-	properties.setProperty(atPropertyRaw, String(Date.now() + delay));
-	return { scheduled: true, reused: false, triggerId: triggerId, scheduledAt: new Date(Date.now() + delay).toISOString() };
+	return { scheduled: true, reused: false, healthy: true, triggerId: triggerId, scheduledAt: new Date(scheduledAtMs).toISOString(), overdueAgeMs: overdueAgeMs };
 }
 
 // Scheduling consumes already-known state from the preceding CAS. It never
@@ -643,19 +692,28 @@ function scheduleCloudflarePublishWorker_(ownerTokenRaw, pendingKnownRaw, notBef
 	const lock = LockService.getScriptLock();
 	lock.waitLock(10000);
 	try {
-		return ensureCloudflareTrigger_(CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY, desiredAtMs);
+		return ensureCloudflareTrigger_(CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY, desiredAtMs, {
+			notBeforeMs: nextAttemptMs || 0,
+			maxOverdueMs: cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS", 10 * 60 * 1000),
+		});
 	} finally { lock.releaseLock(); }
 }
 
-function scheduleCloudflarePublishWorkerRecovery_(pendingKnownRaw, leaseRaw) {
+function scheduleCloudflarePublishWorkerRecovery_(pendingKnownRaw, leaseRaw, notBeforeRaw) {
 	if (pendingKnownRaw === false || typeof ScriptApp === "undefined" || !ScriptApp) return { scheduled: false, reason: pendingKnownRaw === false ? "empty" : "scriptapp-unavailable" };
 	const lease = leaseRaw && typeof leaseRaw === "object" ? leaseRaw : {};
-	const leaseExpiresAt = Math.max(Date.now(), Number(lease.expiresAt) || 0);
+	const nowMs = Date.now();
+	const leaseExpiresAt = Math.max(nowMs, Number(lease.expiresAt) || 0);
 	const safetyMs = 60 * 1000;
-	const recoveryNotBeforeMs = leaseExpiresAt + safetyMs;
+	const recoveryDelayMs = cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS", 9 * 60 * 1000);
+	const explicitNotBeforeMs = typeof notBeforeRaw === "number" ? Math.max(0, notBeforeRaw) : parseIsoToMs_(notBeforeRaw);
+	const recoveryNotBeforeMs = Math.max(
+		Number(lease.expiresAt) > 0 ? leaseExpiresAt + safetyMs : 0,
+		explicitNotBeforeMs > 0 ? explicitNotBeforeMs + recoveryDelayMs : 0,
+	);
 	const desiredAtMs = Math.max(
 		recoveryNotBeforeMs,
-		Date.now() + cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_DELAY_MS", 9 * 60 * 1000),
+		nowMs + recoveryDelayMs,
 	);
 	assertCloudflarePublishQueueDeadline_(15000, "Cloudflare recovery scheduling");
 	const lock = LockService.getScriptLock();
@@ -666,41 +724,142 @@ function scheduleCloudflarePublishWorkerRecovery_(pendingKnownRaw, leaseRaw) {
 			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"),
 			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"),
 			desiredAtMs,
-			{ recoveryNotBeforeMs: recoveryNotBeforeMs },
+			{
+				recoveryNotBeforeMs: recoveryNotBeforeMs,
+				maxOverdueMs: cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS", 10 * 60 * 1000),
+			},
 		);
 	} finally { lock.releaseLock(); }
 }
 
-function consumeCloudflareFiredTriggerIdentity_(eventRaw, idPropertyRaw, atPropertyRaw) {
+function ensureCloudflarePendingTriggerPaths_(ownerTokenRaw, pendingKnownRaw, notBeforeRaw, leaseRaw, optionsRaw) {
+	if (pendingKnownRaw === false) return { scheduled: false, reason: "empty", continuation: { scheduled: false, reason: "empty" }, recovery: { scheduled: false, reason: "empty" } };
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	let continuation;
+	let recovery;
+	try { continuation = scheduleCloudflarePublishWorker_(ownerTokenRaw, true, notBeforeRaw); }
+	catch (err) { continuation = { scheduled: false, degraded: true, error: errorMessage_(err), reason: "continuation-failed" }; }
+	let lease = leaseRaw && typeof leaseRaw === "object" ? leaseRaw : null;
+	if (!lease && ownerTokenRaw) lease = parseCloudflarePublishQueueLockState_(PropertiesService.getScriptProperties().getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+	const recoveryNotBefore = Object.prototype.hasOwnProperty.call(options, "recoveryNotBefore") ? options.recoveryNotBefore : notBeforeRaw;
+	try { recovery = scheduleCloudflarePublishWorkerRecovery_(true, lease || {}, recoveryNotBefore); }
+	catch (err) { recovery = { scheduled: false, degraded: true, error: errorMessage_(err), reason: "recovery-failed" }; }
+	return {
+		scheduled: !!(continuation && continuation.scheduled && recovery && recovery.scheduled),
+		continuation: continuation,
+		recovery: recovery,
+	};
+}
+
+function consumeCloudflareFiredTriggerIdentity_(eventRaw, idPropertyRaw, atPropertyRaw, handlerNameRaw) {
 	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
 	const firedId = String(event.triggerUid || event.triggerId || "").trim();
-	if (!firedId) return false;
-	const properties = PropertiesService.getScriptProperties();
-	if (String(properties.getProperty(idPropertyRaw) || "").trim() !== firedId) return false;
-	properties.deleteProperty(idPropertyRaw);
-	properties.deleteProperty(atPropertyRaw);
-	return true;
+	if (!firedId) return { consumed: false, firedId: "", clearedCurrent: false, deleted: false };
+	const lock = LockService.getScriptLock();
+	lock.waitLock(10000);
+	try {
+		const properties = PropertiesService.getScriptProperties();
+		const handlerName = String(handlerNameRaw || "");
+		const candidates = handlerName ? getCloudflareTriggerCandidates_(handlerName) : [];
+		const firedTrigger = candidates.find(function (trigger) { return getTriggerUniqueId_(trigger) === firedId; }) || null;
+		let deleted = false;
+		if (firedTrigger) {
+			try { ScriptApp.deleteTrigger(firedTrigger); deleted = true; } catch (err) {}
+		}
+		const isCurrent = String(properties.getProperty(idPropertyRaw) || "").trim() === firedId;
+		if (isCurrent) {
+			properties.deleteProperty(idPropertyRaw);
+			properties.deleteProperty(atPropertyRaw);
+		}
+		return { consumed: true, firedId: firedId, clearedCurrent: isCurrent, deleted: deleted };
+	} finally { lock.releaseLock(); }
+}
+
+function getCloudflareDynamicTriggerDiagnostics_() {
+	const nowMs = Date.now();
+	const inspect = function (handlerName, idProperty, atProperty, maxOverdueMs) {
+		const configuredId = getCloudflareTriggerId_(idProperty);
+		const scheduledAtMs = getCloudflareTriggerAtMs_(atProperty);
+		const candidates = getCloudflareTriggerCandidates_(handlerName);
+		const configuredPresent = !!configuredId && candidates.some(function (trigger) { return getTriggerUniqueId_(trigger) === configuredId; });
+		const overdueAgeMs = scheduledAtMs > 0 ? Math.max(0, nowMs - scheduledAtMs) : 0;
+		let health = "healthy";
+		if (!configuredId || !configuredPresent) health = "missing";
+		else if (!scheduledAtMs) health = "invalid-time";
+		else if (overdueAgeMs > maxOverdueMs) health = "overdue";
+		return {
+			handler: handlerName,
+			configuredId: configuredId,
+			scheduledAt: scheduledAtMs ? new Date(scheduledAtMs).toISOString() : "",
+			scheduledAtMs: scheduledAtMs,
+			overdueAgeMs: overdueAgeMs,
+			maxOverdueMs: maxOverdueMs,
+			health: health,
+			healthy: health === "healthy",
+			configuredPresent: configuredPresent,
+			actualCount: candidates.length,
+			actualIds: candidates.map(function (trigger) { return getTriggerUniqueId_(trigger); }).filter(Boolean),
+		};
+	};
+	return {
+		continuation: inspect(
+			CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME,
+			CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY,
+			CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY,
+			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_CONTINUATION_MAX_OVERDUE_MS", 10 * 60 * 1000),
+		),
+		recovery: inspect(
+			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_HANDLER_NAME", "cloudflarePublishWorkerRecoveryTick"),
+			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"),
+			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"),
+			cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_MAX_OVERDUE_MS", 10 * 60 * 1000),
+		),
+	};
 }
 
 function markCloudflarePublishSchedulerRepair_(reasonRaw, nextAttemptAtRaw, detailsRaw) {
 	const properties = PropertiesService.getScriptProperties();
-	let existing = {};
+	const lock = LockService.getScriptLock();
+	lock.waitLock(10000);
 	try {
-		const raw = String(properties.getProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_) || "").trim();
-		existing = raw ? JSON.parse(raw) : {};
-	} catch (err) {}
-	const payload = Object.assign({}, existing && typeof existing === "object" ? existing : {}, {
-		pending: true,
-		reason: String(reasonRaw || "dynamic-scheduling-failed").slice(0, 500),
-		updatedAt: new Date().toISOString(),
-		nextAttemptAt: String(nextAttemptAtRaw || ""),
-	}, detailsRaw && typeof detailsRaw === "object" ? detailsRaw : {});
-	properties.setProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_, JSON.stringify(payload));
-	return payload;
+		const snapshot = readCloudflarePublishSchedulerRepairSnapshot_();
+		const existing = snapshot.marker;
+		const payload = Object.assign({}, existing && typeof existing === "object" ? existing : {}, {
+			pending: true,
+			reason: String(reasonRaw || "dynamic-scheduling-failed").slice(0, 500),
+			updatedAt: new Date().toISOString(),
+			nextAttemptAt: String(nextAttemptAtRaw || ""),
+		}, detailsRaw && typeof detailsRaw === "object" ? detailsRaw : {});
+		properties.setProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_, JSON.stringify(payload));
+		return payload;
+	} finally { lock.releaseLock(); }
 }
 
-function clearCloudflarePublishSchedulerRepair_() {
-	PropertiesService.getScriptProperties().deleteProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_);
+function readCloudflarePublishSchedulerRepairSnapshot_() {
+	try {
+		const raw = String(PropertiesService.getScriptProperties().getProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_) || "").trim();
+		const parsed = raw ? JSON.parse(raw) : {};
+		return { raw: raw, marker: parsed && typeof parsed === "object" ? parsed : {} };
+	} catch (err) { return { raw: "", marker: {} }; }
+}
+
+function readCloudflarePublishSchedulerRepair_() {
+	return readCloudflarePublishSchedulerRepairSnapshot_().marker;
+}
+
+function clearCloudflarePublishSchedulerRepair_(forceRaw, expectedRawSnapshot) {
+	const lock = LockService.getScriptLock();
+	lock.waitLock(10000);
+	try {
+		const snapshot = readCloudflarePublishSchedulerRepairSnapshot_();
+		if (expectedRawSnapshot !== undefined && snapshot.raw !== String(expectedRawSnapshot || "")) return false;
+		// A failed canonical target enqueue and a trigger-scheduling failure share
+		// this durable local marker. Healthy trigger reconciliation must never erase
+		// an active target that the permanent watchdog has not yet merged/superseded.
+		if (forceRaw !== true && normalizeActiveVersionId_(snapshot.marker.activeVersionId)) return false;
+		PropertiesService.getScriptProperties().deleteProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_);
+		return true;
+	} finally { lock.releaseLock(); }
 }
 
 function removeCloudflarePublishWorkerTriggers_(pendingKnownRaw) {
@@ -728,15 +887,34 @@ function removeCloudflarePublishWorkerTriggers_(pendingKnownRaw) {
 function scheduleCloudflareAfterMutation_(resultRaw) {
 	const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
 	try {
-		const scheduled = scheduleCloudflarePublishWorker_(undefined, result.pending !== false, result.nextAttemptAt || "");
+		const scheduled = ensureCloudflarePendingTriggerPaths_(undefined, result.pending !== false, result.nextAttemptAt || "", null);
 		if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_();
-		else if (result.pending !== false) markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), result.nextAttemptAt || "");
+		else if (result.pending !== false) markCloudflarePublishSchedulerRepair_(
+			String(scheduled && scheduled.continuation && (scheduled.continuation.error || scheduled.continuation.reason) || "") + " " +
+			String(scheduled && scheduled.recovery && (scheduled.recovery.error || scheduled.recovery.reason) || ""),
+			result.nextAttemptAt || "",
+		);
 		return scheduled;
 	} catch (err) {
-		Logger.log("Cloudflare continuation scheduling failed: %s", errorMessage_(err));
+		Logger.log("Cloudflare pending trigger scheduling failed: %s", errorMessage_(err));
 		if (result.pending !== false) markCloudflarePublishSchedulerRepair_(errorMessage_(err), result.nextAttemptAt || "");
 		return { scheduled: false, error: errorMessage_(err) };
 	}
+}
+
+function recordCloudflarePendingTriggerPaths_(pathsRaw, nextAttemptAtRaw, detailsRaw) {
+	const paths = pathsRaw && typeof pathsRaw === "object" ? pathsRaw : {};
+	if (paths.scheduled === true) clearCloudflarePublishSchedulerRepair_();
+	else {
+		const continuationReason = paths.continuation && (paths.continuation.error || paths.continuation.reason);
+		const recoveryReason = paths.recovery && (paths.recovery.error || paths.recovery.reason);
+		markCloudflarePublishSchedulerRepair_(
+			[continuationReason, recoveryReason].filter(Boolean).join("; ") || "dynamic-trigger-path-unavailable",
+			nextAttemptAtRaw || "",
+			detailsRaw,
+		);
+	}
+	return paths;
 }
 
 function finalizeCloudflareEnqueueResult_(resultRaw) {
@@ -773,6 +951,26 @@ function migrateUnsafeCloudflareActiveVersion_(legacyVersionIdRaw, reasonRaw) {
 	return { migrated: true, legacyVersionId: legacyVersionId, versionId: safeVersionId, manifest: written && written.manifest || null, reason: String(reasonRaw || "unsafe-version") };
 }
 
+function mergeCloudflareActiveTargetIntoQueueState_(stateRaw, versionIdRaw, reasonRaw, migrationRaw) {
+	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : createEmptyCloudflarePublishQueueState_();
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const migration = migrationRaw && typeof migrationRaw === "object" ? migrationRaw : null;
+	if (!versionId) throw new Error("A valid Cloudflare active target version is required.");
+	if (state.active.targetVersionId !== versionId || isCloudflareQueueFailureDead_(state.active.failure)) {
+		Object.keys(state.deadLetters || {}).forEach(function (itemKey) { if ((state.deadLetters[itemKey] || {}).category === "active") delete state.deadLetters[itemKey]; });
+		state.active.targetVersionId = versionId;
+		state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
+		state.active.phase = "public-manifest-rosters";
+		state.active.cursor = 0;
+		state.active.dispatch = null;
+		state.active.failure = null;
+		state.active.migration = migration && migration.migrated ? { kind: "unsafe-version", sourceVersionId: migration.legacyVersionId, targetVersionId: versionId } : null;
+	}
+	if (migration && migration.migrated) state.versionMigrations[migration.legacyVersionId] = { safeVersionId: versionId, migratedAt: new Date().toISOString(), reason: String(reasonRaw || "unsafe-version") };
+	state.active.updatedAt = new Date().toISOString();
+	return { ok: true, versionId: versionId, generation: state.active.targetGeneration, pending: hasPendingCloudflarePublishWork_(state), nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+}
+
 function enqueueCloudflareActiveTarget_(versionIdRaw, reasonRaw) {
 	const requestedVersionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
 	let migration = null;
@@ -788,26 +986,80 @@ function enqueueCloudflareActiveTarget_(versionIdRaw, reasonRaw) {
 	}
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
-			if (state.active.targetVersionId !== versionId || isCloudflareQueueFailureDead_(state.active.failure)) {
-				Object.keys(state.deadLetters || {}).forEach(function (itemKey) { if ((state.deadLetters[itemKey] || {}).category === "active") delete state.deadLetters[itemKey]; });
-				state.active.targetVersionId = versionId;
-				state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
-				state.active.phase = "public-manifest-rosters";
-				state.active.cursor = 0;
-				state.active.dispatch = null;
-				state.active.failure = null;
-				state.active.migration = migration && migration.migrated ? { kind: "unsafe-version", sourceVersionId: migration.legacyVersionId, targetVersionId: versionId } : null;
-			}
-			if (migration && migration.migrated) state.versionMigrations[migration.legacyVersionId] = { safeVersionId: versionId, migratedAt: new Date().toISOString(), reason: String(reasonRaw || "unsafe-version") };
-			state.active.updatedAt = new Date().toISOString();
-			return { ok: true, versionId: versionId, generation: state.active.targetGeneration, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
+			return mergeCloudflareActiveTargetIntoQueueState_(state, versionId, reasonRaw, migration);
 		});
 		return Object.assign(finalizeCloudflareEnqueueResult_(result), { migration: migration });
 	} catch (err) {
 		Logger.log("Cloudflare active target enqueue failed versionId=%s error=%s", versionId, errorMessage_(err));
-		markCloudflarePublishSchedulerRepair_("active-target-enqueue-failed:" + errorMessage_(err), "", { activeVersionId: versionId, activeReason: String(reasonRaw || "") });
-		return { ok: false, error: errorMessage_(err), versionId: versionId, repairPending: true };
+		const cooldownUntilMs = typeof getRuntimeUrlFetchQuotaCooldownUntilMs_ === "function" ? getRuntimeUrlFetchQuotaCooldownUntilMs_() : 0;
+		const nextAttemptAt = cooldownUntilMs > Date.now() ? new Date(cooldownUntilMs).toISOString() : "";
+		const repairDetails = { activeVersionId: versionId, activeReason: String(reasonRaw || "") };
+		markCloudflarePublishSchedulerRepair_("active-target-enqueue-failed:" + errorMessage_(err), nextAttemptAt, repairDetails);
+		let scheduling;
+		try {
+			scheduling = recordCloudflarePendingTriggerPaths_(
+				ensureCloudflarePendingTriggerPaths_(undefined, true, nextAttemptAt, null),
+				nextAttemptAt,
+				repairDetails,
+			);
+		} catch (scheduleErr) {
+			markCloudflarePublishSchedulerRepair_("active-target-recovery-scheduling-failed:" + errorMessage_(scheduleErr), nextAttemptAt, repairDetails);
+			scheduling = { scheduled: false, error: errorMessage_(scheduleErr) };
+		}
+		return {
+			ok: false,
+			error: errorMessage_(err),
+			versionId: versionId,
+			repairPending: true,
+			scheduled: !!(scheduling && scheduling.scheduled),
+			scheduling: scheduling,
+		};
 	}
+}
+
+function recoverCloudflareActiveSchedulerRepairForWorker_(ownerTokenRaw) {
+	let lastResult = null;
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		const markerSnapshot = readCloudflarePublishSchedulerRepairSnapshot_();
+		const marker = markerSnapshot.marker;
+		const markedVersionId = normalizeActiveVersionId_(marker.activeVersionId);
+		if (!markedVersionId) return lastResult || { ok: true, skipped: true, reason: "no-active-target-repair" };
+		const canonicalBefore = normalizeActiveVersionId_(readPublishedActiveVersionId_());
+		if (!canonicalBefore) {
+			const missing = new Error("Canonical active version is unavailable while recovering Cloudflare publication scheduling.");
+			missing.code = "CLOUDFLARE_ACTIVE_REPAIR_CANONICAL_UNAVAILABLE";
+			missing.resumable = true;
+			throw missing;
+		}
+		// The marker is wake-up intent, while Firebase's selector is authoritative.
+		// A newer canonical publication may have replaced the marked target between
+		// trigger creation and this recovery execution.
+		const result = mutateCloudflarePublishQueueState_(function (state) {
+			return mergeCloudflareActiveTargetIntoQueueState_(state, canonicalBefore, marker.activeReason || "dynamic-trigger-active-repair", null);
+		}, ownerTokenRaw);
+		const canonicalAfter = normalizeActiveVersionId_(readPublishedActiveVersionId_());
+		if (!canonicalAfter) {
+			const missingAfter = new Error("Canonical active version disappeared while recovering Cloudflare publication scheduling.");
+			missingAfter.code = "CLOUDFLARE_ACTIVE_REPAIR_CANONICAL_UNAVAILABLE";
+			missingAfter.resumable = true;
+			throw missingAfter;
+		}
+		lastResult = Object.assign({
+			repaired: true,
+			attempt: attempt,
+			markedVersionId: markedVersionId,
+			canonicalVersionId: canonicalAfter,
+		}, result);
+		if (canonicalAfter !== canonicalBefore) continue;
+		// Marker writers and this exact compare-and-clear share ScriptLock. A
+		// concurrently installed newer-version marker can therefore never be erased
+		// after the queue CAS for an older candidate.
+		if (clearCloudflarePublishSchedulerRepair_(true, markerSnapshot.raw)) return Object.assign(lastResult, { markerCleared: true });
+	}
+	const unstable = new Error("Canonical Cloudflare repair target changed repeatedly during bounded recovery.");
+	unstable.code = "CLOUDFLARE_ACTIVE_REPAIR_SUPERSEDED";
+	unstable.resumable = true;
+	throw unstable;
 }
 
 function enqueueCloudflareSeasonEventPublication_(eventIdRaw, reasonRaw, optionsRaw) {
@@ -1828,8 +2080,9 @@ function cloudflareActiveClaimMatchesState_(stateRaw, claimRaw) {
 		dispatch.guard && dispatch.guard.batchId === claim.dispatchGuard.batchId;
 }
 
-// Install hard-kill recovery only after the queue CAS has persisted a dispatch
-// claim. Empty, paused, disabled, and backoff-only workers never create it.
+// Revalidate hard-kill recovery after a durable dispatch claim. Enqueue and
+// pending-worker reconciliation install the independent recovery path earlier;
+// this owner check prevents claimed remote work if that path later disappears.
 function ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claimRaw) {
 	const ownerToken = String(ownerTokenRaw || "").trim();
 	if (!ownerToken) return { scheduled: false, skipped: true, reason: "ownerless-direct-call" };
@@ -1866,14 +2119,19 @@ function ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claimRaw) {
 	return scheduled;
 }
 
+function renewCloudflarePublishQueueLeaseWithRecoveryOrThrow_(ownerTokenRaw, claimRaw) {
+	renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+	return ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claimRaw);
+}
+
 // The final active request is allowed to publish only after a fresh
 // owner-checked canonical read. Enqueueing a newer target clears the dispatch
 // claim, so a superseded request becomes resumable before it reaches Worker.
 function isCloudflareActiveCommitClaimCurrent_(claimRaw, ownerTokenRaw) {
-	if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+	if (ownerTokenRaw) renewCloudflarePublishQueueLeaseWithRecoveryOrThrow_(ownerTokenRaw, claimRaw);
 	const latest = readCloudflarePublishQueueState_();
 	if (!cloudflareActiveClaimMatchesState_(latest, claimRaw)) return false;
-	if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+	if (ownerTokenRaw) renewCloudflarePublishQueueLeaseWithRecoveryOrThrow_(ownerTokenRaw, claimRaw);
 	return true;
 }
 
@@ -1896,7 +2154,7 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw) {
 		if (claim.phase === "commit" && !isCloudflareActiveCommitClaimCurrent_(claim, ownerTokenRaw)) {
 			return { ok: true, skipped: true, reason: "superseded" };
 		}
-		if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+		if (ownerTokenRaw) renewCloudflarePublishQueueLeaseWithRecoveryOrThrow_(ownerTokenRaw, claim);
 		const sent = sendCloudflareQueuedV2Request_(request, built.label, ownerTokenRaw);
 		recordCloudflarePublishQueueHeartbeat_("completion-cas", { claim: claim, payloadBytes: sent && sent.payloadBytes });
 		return completeCloudflareActivePhase_(claim, sent, ownerTokenRaw);
@@ -1929,7 +2187,7 @@ function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw) {
 			claim.repairAdvance = built.repairAdvance || null;
 			delete request.repairAdvance;
 		}
-		if (ownerTokenRaw) renewCloudflarePublishQueueLeaseOrThrow_(ownerTokenRaw);
+		if (ownerTokenRaw) renewCloudflarePublishQueueLeaseWithRecoveryOrThrow_(ownerTokenRaw, claim);
 		const sent = sendCloudflareQueuedV2Request_(request, built.label || claim.category, ownerTokenRaw);
 		if (claim.category === "retention") claim.retentionAdvance = sent && sent.response && sent.response.retention || null;
 		recordCloudflarePublishQueueHeartbeat_("completion-cas", { claim: claim, payloadBytes: sent && sent.payloadBytes });
@@ -1973,32 +2231,73 @@ function repairCloudflarePublishQueueDrift_(ownerTokenRaw, canonicalVersionOverr
 
 function cloudflarePublishWorkerTick(eventRaw, triggerKindRaw) {
 	const startedAtMs = Date.now();
+	const triggerKind = String(triggerKindRaw || "continuation");
+	const recoveryHandler = cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_HANDLER_NAME", "cloudflarePublishWorkerRecoveryTick");
+	const fired = triggerKind === "recovery"
+		? consumeCloudflareFiredTriggerIdentity_(eventRaw, cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"), cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"), recoveryHandler)
+		: consumeCloudflareFiredTriggerIdentity_(eventRaw, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_HANDLER_NAME);
 	const lease = tryAcquireCloudflarePublishQueueLease_("cloudflare-publish-worker", 0);
-	// This branch is intentionally before every Firebase, Cloudflare, trigger,
-	// and scheduling operation.
-	if (!lease) return { skipped: true, reason: "lease-busy" };
+	if (!lease) {
+		let scheduling = null;
+		// A fired one-shot has been consumed even when another invocation owns the
+		// queue. Reinstall both local paths beyond that owner's lease without any
+		// Firebase or Cloudflare request. Direct/admin overlap without a trigger UID
+		// remains an immediate no-op.
+		if (fired && fired.consumed && isCloudflareQueuedPublicationEnabled_()) {
+			const heldLease = parseCloudflarePublishQueueLockState_(PropertiesService.getScriptProperties().getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+			const cooldownUntilMs = typeof getRuntimeUrlFetchQuotaCooldownUntilMs_ === "function" ? getRuntimeUrlFetchQuotaCooldownUntilMs_() : 0;
+			const continuationNotBeforeMs = Math.max(cooldownUntilMs, heldLease && heldLease.expiresAt ? heldLease.expiresAt + 1000 : startedAtMs + CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_DELAY_MS);
+			scheduling = ensureCloudflarePendingTriggerPaths_(undefined, true, continuationNotBeforeMs, heldLease || {}, {
+				recoveryNotBefore: cooldownUntilMs > startedAtMs ? cooldownUntilMs : 0,
+			});
+			recordCloudflarePendingTriggerPaths_(scheduling, continuationNotBeforeMs, { overlap: true, firedTriggerId: fired.firedId });
+		}
+		return { skipped: true, reason: "lease-busy", scheduling: scheduling };
+	}
 	cloudflarePublishQueueDeadlineMs_ = startedAtMs + cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_EXECUTION_BUDGET_MS", 240000);
 	beginCloudflarePublishQueueExecution_(lease.token, startedAtMs);
 	recordCloudflarePublishQueueHeartbeat_("lease", { status: "acquired" });
 	let finalPendingKnown = true;
 	let result = null;
 	const results = [];
+	let activeSchedulerRepair = null;
 	try {
-		if (!isCloudflareQueuedPublicationEnabled_()) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, skipped: true, reason: "disabled" }; }
-		const triggerKind = String(triggerKindRaw || "continuation");
-		recordCloudflarePublishQueueHeartbeat_("trigger-handling", { status: triggerKind });
-		if (triggerKind === "recovery") consumeCloudflareFiredTriggerIdentity_(eventRaw, cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_ID"), cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT_PROPERTY", "CLOUDFLARE_PUBLISH_QUEUE_RECOVERY_TRIGGER_AT"));
-		else consumeCloudflareFiredTriggerIdentity_(eventRaw, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY, CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY);
+		if (!isCloudflareQueuedPublicationEnabled_()) { finalPendingKnown = false; return { ok: true, skipped: true, reason: "disabled" }; }
+		recordCloudflarePublishQueueHeartbeat_("trigger-handling", { status: triggerKind + (fired && fired.consumed ? ":consumed" : ":direct") });
+		const cooldownUntilMs = typeof getRuntimeUrlFetchQuotaCooldownUntilMs_ === "function" ? getRuntimeUrlFetchQuotaCooldownUntilMs_() : 0;
+		if (cooldownUntilMs > Date.now()) {
+			const scheduling = recordCloudflarePendingTriggerPaths_(
+				ensureCloudflarePendingTriggerPaths_(lease.token, true, cooldownUntilMs, lease),
+				cooldownUntilMs,
+				{ cooldown: true },
+			);
+			recordCloudflarePublishQueueHeartbeat_("scheduling", { status: "urlfetch-cooldown" });
+			return {
+				ok: true,
+				skipped: true,
+				reason: "urlFetchQuotaCooldown",
+				cooldownUntil: new Date(cooldownUntilMs).toISOString(),
+				scheduling: scheduling,
+			};
+		}
+		if (typeof clearExpiredRuntimeUrlFetchQuotaCooldown_ === "function") clearExpiredRuntimeUrlFetchQuotaCooldown_();
+		const schedulerMarker = readCloudflarePublishSchedulerRepair_();
+		if (normalizeActiveVersionId_(schedulerMarker.activeVersionId)) {
+			recordCloudflarePublishQueueHeartbeat_("queue-read", { status: "active-scheduler-repair" });
+			activeSchedulerRepair = recoverCloudflareActiveSchedulerRepairForWorker_(lease.token);
+		}
 		recordCloudflarePublishQueueHeartbeat_("queue-read");
 		let state = readCloudflarePublishQueueState_();
-		if (state.paused) { finalPendingKnown = false; removeCloudflarePublishWorkerTriggers_(false); return { ok: true, skipped: true, reason: "paused" }; }
+		if (state.paused) { finalPendingKnown = false; return { ok: true, skipped: true, reason: "paused", activeSchedulerRepair: activeSchedulerRepair }; }
 		if (parseIsoToMs_(state.infrastructure.nextAttemptAt) > Date.now()) {
 			finalPendingKnown = hasPendingCloudflarePublishWork_(state);
-			const scheduled = scheduleCloudflarePublishWorker_(lease.token, finalPendingKnown, state.infrastructure.nextAttemptAt);
-			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), state.infrastructure.nextAttemptAt);
-			return { ok: true, skipped: true, reason: "infrastructure-backoff", nextAttemptAt: state.infrastructure.nextAttemptAt };
+			const scheduling = recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(lease.token, finalPendingKnown, state.infrastructure.nextAttemptAt, lease), state.infrastructure.nextAttemptAt);
+			return { ok: true, skipped: true, reason: "infrastructure-backoff", nextAttemptAt: state.infrastructure.nextAttemptAt, scheduling: scheduling };
 		}
-		if (!hasPendingCloudflarePublishWork_(state)) { finalPendingKnown = false; return { ok: true, pending: false, results: [] }; }
+		if (!hasPendingCloudflarePublishWork_(state)) { finalPendingKnown = false; return { ok: true, pending: false, results: [], activeSchedulerRepair: activeSchedulerRepair }; }
+		const initialNextAttemptAt = cloudflareQueueNextAttemptIso_(state);
+		const initialScheduling = recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(lease.token, true, initialNextAttemptAt, lease), initialNextAttemptAt);
+		if (!initialScheduling.scheduled) return { ok: false, skipped: true, reason: "trigger-path-unavailable", pending: true, scheduling: initialScheduling };
 		const maxItems = Math.max(1, Math.min(20, toNonNegativeInt_(cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_MAX_ITEMS_PER_INVOCATION", 8)) || 8));
 		while (results.length < maxItems && canAdmitAnotherCloudflareQueueItem_()) {
 			const activePending = state.active.targetVersionId && (state.active.targetVersionId !== state.active.committedVersionId || state.active.republish || state.active.phase !== "idle") && !isCloudflareQueueFailureDead_(state.active.failure);
@@ -2022,14 +2321,22 @@ function cloudflarePublishWorkerTick(eventRaw, triggerKindRaw) {
 		finalPendingKnown = hasPendingCloudflarePublishWork_(state);
 		if (finalPendingKnown) {
 			const nextAttemptAt = cloudflareQueueNextAttemptIso_(state);
-			recordCloudflarePublishQueueHeartbeat_("scheduling", { status: "continuation" });
-			const scheduled = scheduleCloudflarePublishWorker_(lease.token, true, nextAttemptAt);
-			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), nextAttemptAt);
+			recordCloudflarePublishQueueHeartbeat_("scheduling", { status: "continuation-and-recovery" });
+			recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(lease.token, true, nextAttemptAt, lease), nextAttemptAt);
 		}
-		else removeCloudflarePublishWorkerTriggers_(false);
-		return { ok: results.every(function (item) { return !item || item.ok !== false; }), results: results, pending: finalPendingKnown };
+		// When the observed state is terminal, do not broadly enumerate/delete
+		// dynamic triggers here. A concurrent enqueue may have committed immediately
+		// after this Firebase read and reused those same identities. Each installed
+		// one-shot instead consumes only its own UID and exits immediately on empty.
+		return { ok: results.every(function (item) { return !item || item.ok !== false; }), results: results, pending: finalPendingKnown, activeSchedulerRepair: activeSchedulerRepair };
 	} catch (err) {
 		if (err && err.code === "CLOUDFLARE_QUEUE_LEASE_LOST") return { ok: false, skipped: true, reason: "lease-lost", error: errorMessage_(err) };
+		const cooldownUntilMs = typeof getRuntimeUrlFetchQuotaCooldownUntilMs_ === "function" ? getRuntimeUrlFetchQuotaCooldownUntilMs_() : 0;
+		if (cooldownUntilMs > Date.now()) {
+			finalPendingKnown = true;
+			const scheduling = recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(lease.token, true, cooldownUntilMs, lease), cooldownUntilMs, { cooldown: true, afterFailure: true });
+			return { ok: false, skipped: true, reason: "urlFetchQuotaCooldown", error: errorMessage_(err), cooldownUntil: new Date(cooldownUntilMs).toISOString(), pending: true, scheduling: scheduling };
+		}
 		let retry = null;
 		try { retry = recordCloudflareInfrastructureFailure_(errorMessage_(err), { error: errorMessage_(err) }, lease.token); } catch (recordErr) {
 			if (recordErr && recordErr.code === "CLOUDFLARE_QUEUE_LEASE_LOST") throw recordErr;
@@ -2038,9 +2345,8 @@ function cloudflarePublishWorkerTick(eventRaw, triggerKindRaw) {
 		finalPendingKnown = true;
 		try {
 			recordCloudflarePublishQueueHeartbeat_("scheduling", { status: "retry" });
-			const scheduled = scheduleCloudflarePublishWorker_(lease.token, true, retry && retry.nextAttemptAt);
-			if (scheduled && scheduled.scheduled) clearCloudflarePublishSchedulerRepair_(); else markCloudflarePublishSchedulerRepair_(scheduled && (scheduled.error || scheduled.reason), retry && retry.nextAttemptAt);
-		} catch (scheduleErr) { markCloudflarePublishSchedulerRepair_(errorMessage_(scheduleErr), retry && retry.nextAttemptAt); Logger.log("Cloudflare continuation scheduling failed: %s", errorMessage_(scheduleErr)); }
+			recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(lease.token, true, retry && retry.nextAttemptAt, lease), retry && retry.nextAttemptAt);
+		} catch (scheduleErr) { markCloudflarePublishSchedulerRepair_(errorMessage_(scheduleErr), retry && retry.nextAttemptAt); Logger.log("Cloudflare pending trigger scheduling failed: %s", errorMessage_(scheduleErr)); }
 		return { ok: false, error: errorMessage_(err), retry: retry, pending: true, result: result };
 	} finally {
 		// No Firebase read, Cloudflare request, trigger enumeration, or watchdog
@@ -2065,6 +2371,7 @@ function getCloudflarePublishQueueDiagnostics_() {
 	const oldest = ages.length ? Math.min.apply(Math, ages) : 0;
 	const props = PropertiesService.getScriptProperties();
 	const lease = parseCloudflarePublishQueueLockState_(props.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+	const cooldownUntilMs = typeof getRuntimeUrlFetchQuotaCooldownUntilMs_ === "function" ? getRuntimeUrlFetchQuotaCooldownUntilMs_() : 0;
 	return {
 		mode: getCloudflarePublicationMode_(), paused: state.paused,
 		canonicalActiveVersionId: readPublishedActiveVersionId_(), committedActiveVersionId: state.active.committedVersionId,
@@ -2073,6 +2380,9 @@ function getCloudflarePublishQueueDiagnostics_() {
 		pendingDirtyCounts: { events: Object.keys(dirty.events).length, cwlAggregateEvents: Object.keys(dirty.cwlAggregates).length, donationSeasons: Object.keys(dirty.donationSeasons).length, cwlLeagueSignups: dirty.cwlLeagueSignups ? 1 : 0, seasonPointers: dirty.seasonPointers ? 1 : 0, repair: dirty.repair ? 1 : 0, bootstrap: dirty.bootstrap ? 1 : 0, retention: dirty.retention ? 1 : 0 },
 		oldestPendingAt: oldest ? new Date(oldest).toISOString() : "", infrastructureRetryAttempt: state.infrastructure.attempt, nextRetryAt: cloudflareQueueNextAttemptIso_(state), lastError: state.infrastructure.lastError, deadLetterCount: Object.keys(state.deadLetters).length, deadLetters: state.deadLetters, lastSuccessAt: state.lastSuccessAt, lastBatch: state.lastBatch,
 		triggerId: getCloudflareTriggerId_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY), hasTrigger: !!getCloudflareTriggerId_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_ID_PROPERTY), triggerAt: getCloudflareTriggerAtMs_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY) ? new Date(getCloudflareTriggerAtMs_(CLOUDFLARE_PUBLISH_QUEUE_TRIGGER_AT_PROPERTY)).toISOString() : "",
+		dynamicTriggers: getCloudflareDynamicTriggerDiagnostics_(),
+		schedulerRepair: readCloudflarePublishSchedulerRepair_(),
+		urlFetchCooldown: { active: cooldownUntilMs > Date.now(), until: cooldownUntilMs ? new Date(cooldownUntilMs).toISOString() : "", untilMs: cooldownUntilMs },
 		lease: lease ? { owner: lease.owner, expiresAt: new Date(lease.expiresAt).toISOString() } : null,
 		heartbeat: readCloudflarePublishQueueHeartbeat_(),
 	};
@@ -2125,12 +2435,16 @@ function setCloudflarePublicationMode_(payloadRaw, secretOrPasswordRaw) {
 	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
 	const mode = String(payload.mode || "").trim().toLowerCase();
 	if (![CLOUDFLARE_PUBLICATION_MODE_QUEUED_V2, CLOUDFLARE_PUBLICATION_MODE_DISABLED, CLOUDFLARE_PUBLICATION_MODE_LEGACY_MANUAL].includes(mode)) throw new Error("Invalid Cloudflare publication mode. Use queued-v2, disabled, or legacy-manual.");
+	let queueState = null;
 	if (mode === CLOUDFLARE_PUBLICATION_MODE_QUEUED_V2) {
-		const state = readCloudflarePublishQueueState_();
-		if (!state.active.committedVersionId) throw new Error("Initialize the Cloudflare queue with a committed active version before enabling queued-v2.");
+		queueState = readCloudflarePublishQueueState_();
+		if (!queueState.active.committedVersionId) throw new Error("Initialize the Cloudflare queue with a committed active version before enabling queued-v2.");
 	}
 	PropertiesService.getScriptProperties().setProperty(CLOUDFLARE_PUBLICATION_MODE_PROPERTY, mode);
-	if (mode === CLOUDFLARE_PUBLICATION_MODE_QUEUED_V2) scheduleCloudflarePublishWorker_(undefined, true);
+	if (mode === CLOUDFLARE_PUBLICATION_MODE_QUEUED_V2 && hasPendingCloudflarePublishWork_(queueState)) {
+		const nextAttemptAt = cloudflareQueueNextAttemptIso_(queueState);
+		recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(undefined, true, nextAttemptAt, null), nextAttemptAt);
+	}
 	else removeCloudflarePublishWorkerTriggers_(false);
 	return getCloudflarePublishQueueDiagnostics_();
 }
@@ -2218,27 +2532,46 @@ function repairCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 // Dynamic scheduling failures are represented locally so this recovery path
 // remains available even when the failed invocation could not persist remote
 // failure state before its deadline.
-function repairCloudflarePublishSchedulingFromPermanentWatchdog_() {
+function repairCloudflarePublishSchedulingFromPermanentWatchdog_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const properties = PropertiesService.getScriptProperties();
-	const markerRaw = String(properties.getProperty(CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR_PROPERTY_) || "").trim();
-	let marker = {};
-	try { marker = markerRaw ? JSON.parse(markerRaw) : {}; } catch (err) {}
-	let repairVersionId = normalizeActiveVersionId_(marker && marker.activeVersionId);
-	const canonicalVersionId = typeof readPublishedActiveVersionId_ === "function" ? normalizeActiveVersionId_(readPublishedActiveVersionId_()) : "";
-	if (repairVersionId && canonicalVersionId && canonicalVersionId !== repairVersionId) {
-		// A newer canonical publication supersedes this local repair marker. Never
-		// replace that target with an older auto-refresh version.
-		repairVersionId = "";
-		clearCloudflarePublishSchedulerRepair_();
+	const marker = readCloudflarePublishSchedulerRepair_();
+	if (options.localOnly === true) {
+		if (!isCloudflareQueuedPublicationEnabled_()) {
+			// The permanent watchdog has no generation guard against a concurrent
+			// re-enable/enqueue. Leave installed one-shots to consume their exact
+			// identities instead of broadly deleting a newly published path.
+			return { ok: true, localOnly: true, pending: false, removed: 0, reason: "disabled", exactIdentityCleanup: true };
+		}
+		const diagnostics = getCloudflareDynamicTriggerDiagnostics_();
+		const hasLocalIntent = !!(
+			marker.pending ||
+			diagnostics.continuation.configuredId || diagnostics.continuation.actualCount ||
+			diagnostics.recovery.configuredId || diagnostics.recovery.actualCount
+		);
+		if (!hasLocalIntent) return { ok: true, localOnly: true, pending: false, diagnostics: diagnostics, reason: "no-local-intent" };
+		const notBeforeMs = Math.max(
+			Number(options.notBeforeMs) || 0,
+			parseIsoToMs_(marker.nextAttemptAt),
+			typeof getRuntimeUrlFetchQuotaCooldownUntilMs_ === "function" ? getRuntimeUrlFetchQuotaCooldownUntilMs_() : 0,
+		);
+		const lease = parseCloudflarePublishQueueLockState_(properties.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+		const paths = recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(undefined, true, notBeforeMs, lease || {}), notBeforeMs, { localOnly: true });
+		return { ok: !!paths.scheduled, localOnly: true, pending: true, repaired: !!paths.scheduled, continuation: paths.continuation, recovery: paths.recovery, markerRetained: !!normalizeActiveVersionId_(marker.activeVersionId) };
 	}
+	if (!isCloudflareQueuedPublicationEnabled_()) return { ok: true, pending: false, reason: "disabled", exactIdentityCleanup: true };
 	let activeRepair = null;
-	let state = readCloudflarePublishQueueState_();
-	if (repairVersionId && String((state.active && state.active.targetVersionId) || "") !== repairVersionId) {
-		activeRepair = enqueueCloudflareActiveTarget_(repairVersionId, marker.activeReason || "permanent-watchdog-active-repair");
-		state = readCloudflarePublishQueueState_();
+	if (normalizeActiveVersionId_(marker.activeVersionId)) activeRepair = recoverCloudflareActiveSchedulerRepairForWorker_(undefined);
+	let markerBeforeState = readCloudflarePublishSchedulerRepairSnapshot_();
+	// A marker may have been installed while the first bounded repair was
+	// finishing. Give it one immediate bounded consumption attempt; if another
+	// writer wins later, the compare-and-clear checks below retain and schedule it.
+	if (normalizeActiveVersionId_(markerBeforeState.marker.activeVersionId)) {
+		activeRepair = recoverCloudflareActiveSchedulerRepairForWorker_(undefined);
+		markerBeforeState = readCloudflarePublishSchedulerRepairSnapshot_();
 	}
+	let state = readCloudflarePublishQueueState_();
 	if (
-		isCloudflareQueuedPublicationEnabled_() &&
 		state.active.committedVersionId &&
 		state.lastRetentionVersionId !== state.active.committedVersionId &&
 		!state.dirty.retention
@@ -2249,31 +2582,26 @@ function repairCloudflarePublishSchedulingFromPermanentWatchdog_() {
 			}
 			return { pending: hasPendingCloudflarePublishWork_(latest) };
 		});
+		markerBeforeState = readCloudflarePublishSchedulerRepairSnapshot_();
 		state = readCloudflarePublishQueueState_();
-	}
-	const activeState = state.active && typeof state.active === "object" ? state.active : {};
-	const matchingTargetCommittedIdle = !!(
-		repairVersionId &&
-		String(activeState.targetVersionId || "") === repairVersionId &&
-		String(activeState.committedVersionId || "") === repairVersionId &&
-		String(activeState.phase || "") === "idle"
-	);
-	if (matchingTargetCommittedIdle && !hasPendingCloudflarePublishWork_(state)) {
-		clearCloudflarePublishSchedulerRepair_();
-		return { ok: true, pending: false, repaired: true, healthy: true, alreadyCommitted: true, activeRepair: activeRepair };
 	}
 	const pending = hasPendingCloudflarePublishWork_(state);
 	if (!pending) {
-		if (!repairVersionId || (activeRepair && activeRepair.ok !== false)) clearCloudflarePublishSchedulerRepair_();
-		return { ok: !repairVersionId || !!(activeRepair && activeRepair.ok !== false), pending: false, repaired: !!(activeRepair && activeRepair.ok !== false), activeRepair: activeRepair };
+		const markerAfterState = readCloudflarePublishSchedulerRepairSnapshot_();
+		if (markerAfterState.marker.pending === true) {
+			const markerNotBefore = parseIsoToMs_(markerAfterState.marker.nextAttemptAt);
+			const leaseForMarker = parseCloudflarePublishQueueLockState_(properties.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
+			const markerPaths = recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(undefined, true, markerNotBefore, leaseForMarker || {}), markerNotBefore, { markerOnly: true });
+			return { ok: !!markerPaths.scheduled, pending: true, repaired: !!(activeRepair && activeRepair.repaired), activeRepair: activeRepair, markerOnly: true, continuation: markerPaths.continuation, recovery: markerPaths.recovery };
+		}
+		let markerCleared = false;
+		if (markerBeforeState.raw && markerAfterState.raw === markerBeforeState.raw) markerCleared = clearCloudflarePublishSchedulerRepair_(true, markerBeforeState.raw);
+		return { ok: true, pending: false, repaired: !!(activeRepair && activeRepair.repaired), activeRepair: activeRepair, markerCleared: markerCleared, exactIdentityCleanup: true };
 	}
 	const nextAttemptAt = cloudflareQueueNextAttemptIso_(state);
-	const continuation = scheduleCloudflarePublishWorker_(undefined, true, nextAttemptAt);
 	const lease = parseCloudflarePublishQueueLockState_(properties.getProperty(CLOUDFLARE_PUBLISH_QUEUE_LOCK_KEY));
-	const recovery = lease ? scheduleCloudflarePublishWorkerRecovery_(true, lease) : { scheduled: false, reason: "no-live-owner" };
-	if (continuation && continuation.scheduled) clearCloudflarePublishSchedulerRepair_();
-	else markCloudflarePublishSchedulerRepair_(continuation && (continuation.error || continuation.reason), nextAttemptAt);
-	return { ok: !!(continuation && continuation.scheduled), pending: true, repaired: !!(continuation && continuation.scheduled), activeRepair: activeRepair, continuation: continuation, recovery: recovery };
+	const paths = recordCloudflarePendingTriggerPaths_(ensureCloudflarePendingTriggerPaths_(undefined, true, nextAttemptAt, lease || {}), nextAttemptAt);
+	return { ok: !!paths.scheduled, pending: true, repaired: !!paths.scheduled, activeRepair: activeRepair, continuation: paths.continuation, recovery: paths.recovery };
 }
 function repairCloudflareBotVersionObjects(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return repairCloudflareBotVersionObjects_(payloadRaw); }
 function inspectCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) { assertCloudflarePublicDataPublishAuth_(secretOrPasswordRaw); return getCloudflarePublishQueueDiagnostics_(); }

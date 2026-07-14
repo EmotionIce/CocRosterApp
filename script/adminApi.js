@@ -13,6 +13,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getAutoRefreshSettings(args[0]);
 		case "getAutoRefreshDiagnostics":
 			return getAutoRefreshDiagnostics(args[0]);
+		case "getProductionTriggerAuthorizationDiagnostics":
+			return getProductionTriggerAuthorizationDiagnostics(args[0]);
 		case "setAutoRefreshEnabled":
 			return setAutoRefreshEnabled(args[0], args[1]);
 		case "repairAutoRefreshScheduler":
@@ -534,6 +536,14 @@ function getAutoRefreshSettings(password) {
 function getAutoRefreshDiagnostics(password) {
 	assertAdminPassword_(password);
 	return buildAutoRefreshDiagnostics_();
+}
+
+// Read-only, authenticated authorization and production-trigger diagnostics.
+// Deliberately omits AuthorizationInfo.getAuthorizationUrl(). Interactive
+// consent must be completed from the Apps Script editor.
+function getProductionTriggerAuthorizationDiagnostics(password) {
+	assertAdminPassword_(password);
+	return buildProductionTriggerAuthorizationDiagnostics_();
 }
 
 // Set auto refresh enabled.
