@@ -407,6 +407,12 @@ const AUTO_REFRESH_QUEUE_WORKER_START_RESERVE_MS = 90 * 1000;
 const AUTO_REFRESH_QUEUE_FINALIZE_RESERVE_MS = 120 * 1000;
 const AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS = 120 * 1000;
 const AUTO_REFRESH_QUEUE_ROSTER_WRITE_RESERVE_MS = 60 * 1000;
+// CWL coordination is side work and must never consume the parent worker's
+// checkpoint/scheduling reserve. A nested deadline leaves enough of the outer
+// execution available to terminalize the side task and continue canonical work.
+const AUTO_REFRESH_QUEUE_CWL_SIDE_TASK_BUDGET_MS = 150 * 1000;
+const AUTO_REFRESH_QUEUE_CWL_SIDE_TASK_CHECKPOINT_RESERVE_MS = 30 * 1000;
+const AUTO_REFRESH_QUEUE_CWL_SIDE_TASK_START_RESERVE_MS = 180 * 1000;
 const AUTO_REFRESH_METRIC_COPY_TASK_TAG_LIMIT = 100;
 const AUTO_REFRESH_ROSTER_INPUT_READ_CHUNK_TAG_LIMIT = 25;
 const AUTO_REFRESH_ROSTER_PHASE_MAX_ATTEMPTS = 6;

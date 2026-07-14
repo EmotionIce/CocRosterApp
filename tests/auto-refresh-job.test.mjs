@@ -927,6 +927,276 @@ test("final CWL coordinator and finalization can complete in one invocation", ()
   assert.equal(backend.__triggers.length, 0);
 });
 
+test("CWL side-task deadline keeps outer checkpoint reserve and advances canonical work", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "cwlCoordinator" },
+    { type: "cwlFinalCoordinator" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  let nestedRemainingMs = 0;
+  let checkpointRemainingMs = 0;
+  const realNow = Date.now;
+  let nowMs = realNow();
+  Date.now = () => nowMs;
+  backend.executeAutoRefreshCwlCoordinatorTask_ = () => {
+    nestedRemainingMs = backend.getExecutionRemainingMs_();
+    // Consume the full usable portion of the nested budget. The nested context
+    // must unwind before the worker checkpoints the terminal side outcome.
+    nowMs += 120000;
+    throw backend.createExecutionDeadlineError_("FIREBASE_REQUEST_TIMEOUT_SECONDS", 60000);
+  };
+  const originalWriteTask = backend.writeAutoRefreshTask_;
+  backend.writeAutoRefreshTask_ = (runIdRaw, taskRaw) => {
+    if (taskRaw && taskRaw.sidePhaseTerminal === true) checkpointRemainingMs = backend.getExecutionRemainingMs_();
+    return originalWriteTask(runIdRaw, taskRaw);
+  };
+
+  let result;
+  try {
+    result = backend.runWithExecutionDeadline_(
+      "test-auto-refresh-worker",
+      backend.AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS,
+      () => backend.continueAutoRefreshQueueWorker_({ executionStartMs: nowMs }),
+      { cleanupReserveMs: backend.APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS, recoveryScope: "autoRefresh" },
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  const failedSideTask = backend.readAutoRefreshTask_(runId, tasks[0].taskId);
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.ok(nestedRemainingMs <= 150000);
+  assert.ok(nestedRemainingMs > 145000);
+  assert.ok(checkpointRemainingMs >= 145000);
+  assert.equal(failedSideTask.status, "completed");
+  assert.equal(failedSideTask.sidePhaseTerminal, true);
+  assert.equal(failedSideTask.summary, "side-phase-failed");
+  assert.equal(current.currentTaskIndex, 1);
+  assert.equal(result.reason, "cwlBoundary");
+  assert.equal(result.tasksCompleted, 1);
+});
+
+test("terminal CWL side deadline does not rerun through the real roster preflight", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "cwlCoordinator" },
+    { type: "roster", rosterId: "main" },
+  ]);
+  let cwlCalls = 0;
+  let rosterCalls = 0;
+  backend.executeAutoRefreshCwlCoordinatorTask_ = () => {
+    cwlCalls++;
+    throw backend.createExecutionDeadlineError_("FIREBASE_REQUEST_TIMEOUT_SECONDS", 60000);
+  };
+  backend.executeAutoRefreshRosterTask_ = () => {
+    rosterCalls++;
+    return { issueCount: 0 };
+  };
+  backend.executeAutoRefreshFinalizeTask_ = () => ({ ok: true, status: "completed" });
+
+  const result = backend.runWithExecutionDeadline_(
+    "test-auto-refresh-worker",
+    backend.AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS,
+    () => backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() }),
+    { cleanupReserveMs: backend.APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS, recoveryScope: "autoRefresh" },
+  );
+  const current = backend.readAutoRefreshQueueCurrent_();
+  const marker = backend.readRuntimeRecoveryMarker_();
+
+  assert.equal(result.status, "completed");
+  assert.equal(cwlCalls, 1);
+  assert.equal(rosterCalls, 1);
+  assert.equal(current.cwlCoordinatorSidePhaseTerminal, true);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "completed");
+  assert.ok(marker.scopes["cwl-refresh:unbound"]);
+});
+
+test("recovery reconstructs CWL terminality when interruption splits task and current checkpoints", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "cwlCoordinator" },
+    { type: "roster", rosterId: "main" },
+  ]);
+  let cwlCalls = 0;
+  let rosterCalls = 0;
+  backend.executeAutoRefreshCwlCoordinatorTask_ = () => {
+    cwlCalls++;
+    throw backend.createExecutionDeadlineError_("FIREBASE_REQUEST_TIMEOUT_SECONDS", 60000);
+  };
+  backend.executeAutoRefreshRosterTask_ = () => {
+    rosterCalls++;
+    return { issueCount: 0 };
+  };
+  backend.executeAutoRefreshFinalizeTask_ = () => ({ ok: true, status: "completed" });
+  const originalWriteCurrent = backend.writeAutoRefreshQueueCurrent_;
+  let splitInterrupted = false;
+  backend.writeAutoRefreshQueueCurrent_ = (stateRaw, ...args) => {
+    if (!splitInterrupted && stateRaw && stateRaw.cwlCoordinatorSidePhaseTerminal === true) {
+      splitInterrupted = true;
+      throw backend.createExecutionDeadlineError_("current-checkpoint-after-terminal-cwl-task", 60000);
+    }
+    return originalWriteCurrent(stateRaw, ...args);
+  };
+
+  assert.throws(
+    () => backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() }),
+    (error) => error && error.code === "EXECUTION_DEADLINE",
+  );
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).sidePhaseTerminal, true);
+  assert.equal(backend.readAutoRefreshQueueCurrent_().cwlCoordinatorSidePhaseTerminal, false);
+
+  const recovered = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(recovered.status, "completed");
+  assert.equal(cwlCalls, 1);
+  assert.equal(rosterCalls, 1);
+  assert.equal(current.cwlCoordinatorSidePhaseTerminal, true);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "completed");
+});
+
+test("rollout hydrates CWL terminality after an older worker already advanced the queue index", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks, current: seededCurrent } = setupSyntheticQueueRun(backend, [
+    { type: "cwlCoordinator" },
+    { type: "roster", rosterId: "main" },
+  ]);
+  const terminalTask = backend.readAutoRefreshTask_(runId, tasks[0].taskId);
+  terminalTask.status = "completed";
+  terminalTask.completedAt = new Date().toISOString();
+  terminalTask.sidePhaseTerminal = true;
+  terminalTask.summary = "side-phase-failed";
+  backend.writeAutoRefreshTask_(runId, terminalTask);
+  seededCurrent.currentTaskIndex = 1;
+  seededCurrent.processedTasks = 1;
+  backend.writeAutoRefreshQueueCurrent_(seededCurrent, false);
+  let cwlCalls = 0;
+  let rosterCalls = 0;
+  backend.executeAutoRefreshCwlCoordinatorTask_ = () => { cwlCalls++; return {}; };
+  backend.executeAutoRefreshRosterTask_ = () => { rosterCalls++; return { issueCount: 0 }; };
+  backend.executeAutoRefreshFinalizeTask_ = () => ({ ok: true, status: "completed" });
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const current = backend.readAutoRefreshQueueCurrent_();
+
+  assert.equal(result.status, "completed");
+  assert.equal(cwlCalls, 0);
+  assert.equal(rosterCalls, 1);
+  assert.equal(current.cwlCoordinatorSidePhaseTerminal, true);
+});
+
+test("terminal final CWL side deadline does not rerun in front of canonical finalization", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { current: seededCurrent } = setupSyntheticQueueRun(backend, [
+    { type: "cwlFinalCoordinator" },
+    { type: "finalize" },
+  ]);
+  seededCurrent.cwlFinalCoordinatorCapture = { ok: true, status: "captured", aggregateOk: true };
+  backend.writeAutoRefreshQueueCurrent_(seededCurrent, false);
+  let finalCwlCalls = 0;
+  let finalizeCalls = 0;
+  backend.executeAutoRefreshFinalCwlCoordinatorTask_ = () => {
+    finalCwlCalls++;
+    throw backend.createExecutionDeadlineError_("FIREBASE_REQUEST_TIMEOUT_SECONDS", 60000);
+  };
+  backend.executeAutoRefreshFinalizeTask_ = () => {
+    finalizeCalls++;
+    return { ok: true, status: "completed" };
+  };
+
+  const result = backend.runWithExecutionDeadline_(
+    "test-auto-refresh-worker",
+    backend.AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS,
+    () => backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() }),
+    { cleanupReserveMs: backend.APP_SCRIPT_EXECUTION_CLEANUP_RESERVE_MS, recoveryScope: "autoRefresh" },
+  );
+  const current = backend.readAutoRefreshQueueCurrent_();
+  const suppressedCapture = backend.ensureAutoRefreshFinalCwlCoordinatorCapture_(current, null, Date.now());
+
+  assert.equal(result.status, "completed");
+  assert.equal(finalCwlCalls, 1);
+  assert.equal(finalizeCalls, 1);
+  assert.equal(current.cwlFinalCoordinatorSidePhaseTerminal, true);
+  assert.equal(suppressedCapture.status, "deferred");
+  assert.equal(suppressedCapture.aggregateOk, false);
+});
+
+test("CWL preflight cannot mark canonical work running after consuming its reserve", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [{ type: "roster", rosterId: "main" }]);
+  let rosterCalls = 0;
+  backend.runAutoRefreshCwlCoordinatorPreflightBeforeRoster_ = () => ({ captured: true, result: {} });
+  backend.runAutoRefreshFinalCwlCoordinatorPreflightBeforeFinalize_ = () => null;
+  backend.executeAutoRefreshRosterTask_ = () => { rosterCalls++; return { issueCount: 0 }; };
+
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() - 170000 });
+
+  assert.equal(result.reason, "afterCwlPreflightBudget");
+  assert.equal(rosterCalls, 0);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
+});
+
+test("CWL side task does not start without its independent checkpoint reserve", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [{ type: "cwlCoordinator" }]);
+  disableQueueCwlPreflights(backend);
+  let calls = 0;
+  backend.executeAutoRefreshCwlCoordinatorTask_ = () => { calls++; return {}; };
+
+  const elapsedMs = 270000 - 180000 + 1000;
+  const result = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() - elapsedMs });
+
+  assert.equal(calls, 0);
+  assert.equal(result.reason, "beforeCwlSideTaskBudget");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "pending");
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
+});
+
+test("worker deadline escape installs continuation and watchdog without failing the run", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.continueAutoRefreshQueueWorker_ = () => {
+    const err = new Error("execution budget exhausted");
+    err.code = "EXECUTION_DEADLINE";
+    err.autoRefreshDefer = true;
+    err.reason = "executionDeadline";
+    throw err;
+  };
+  backend.failCurrentAutoRefreshJobAfterError_ = () => assert.fail("deadline recovery must not fail canonical work");
+  backend.maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_ = () => null;
+
+  const result = backend.autoRefreshWorkerTickInternal_();
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+
+  assert.equal(result.status, "inProgress");
+  assert.equal(result.reason, "executionDeadline");
+  assert.equal(workerTriggers.length, 2);
+  assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
+});
+
+test("coordinator deadline escape installs continuation and watchdog without failing the run", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.startAutoRefreshQueueCoordinator_ = () => {
+    const err = new Error("execution budget exhausted");
+    err.code = "EXECUTION_DEADLINE";
+    err.autoRefreshDefer = true;
+    err.reason = "executionDeadline";
+    throw err;
+  };
+  backend.failCurrentAutoRefreshJobAfterError_ = () => assert.fail("deadline recovery must not fail canonical work");
+  backend.maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_ = () => null;
+
+  const result = backend.autoRefreshActiveRosterTickInternal_();
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+
+  assert.equal(result.status, "inProgress");
+  assert.equal(result.reason, "executionDeadline");
+  assert.equal(workerTriggers.length, 2);
+  assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
+});
+
 test("deferred finalization leaves the task pending with one normal continuation", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { runId, tasks } = setupSyntheticQueueRun(backend, [

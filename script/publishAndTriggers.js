@@ -462,6 +462,8 @@ function normalizeAutoRefreshQueueCurrent_(stateRaw) {
 		cwlFinalCoordinatorCapture: state.cwlFinalCoordinatorCapture && typeof state.cwlFinalCoordinatorCapture === "object" ? state.cwlFinalCoordinatorCapture : null,
 		cwlSeasonEventRefresh: state.cwlSeasonEventRefresh && typeof state.cwlSeasonEventRefresh === "object" ? state.cwlSeasonEventRefresh : null,
 		cwlFinalOutcome: state.cwlFinalOutcome && typeof state.cwlFinalOutcome === "object" ? state.cwlFinalOutcome : null,
+		cwlCoordinatorSidePhaseTerminal: state.cwlCoordinatorSidePhaseTerminal === true,
+		cwlFinalCoordinatorSidePhaseTerminal: state.cwlFinalCoordinatorSidePhaseTerminal === true,
 		cloudflarePublicDataPublish: state.cloudflarePublicDataPublish && typeof state.cloudflarePublicDataPublish === "object" ? state.cloudflarePublicDataPublish : null,
 		lock: state.lock && typeof state.lock === "object" ? state.lock : null,
 	};
@@ -1906,6 +1908,10 @@ function shouldRunAutoRefreshCwlCoordinatorPreflightBeforeRoster_(currentRaw, ta
 	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
 	const runId = current && current.runId;
 	if (!runId || String(task.type || "") !== "roster") return false;
+	// A failed/deferred persisted coordinator already created independent CWL
+	// recovery work. Never rerun that same side work in front of canonical roster
+	// processing for this run.
+	if (current.cwlCoordinatorSidePhaseTerminal === true) return false;
 	const summary = readAutoRefreshCwlCoordinatorSummary_(runId);
 	if (summary && summary.completed === true) return false;
 	if (typeof getCurrentCwlSeasonEventRefreshNeed_ === "function") {
@@ -2515,6 +2521,31 @@ function executeAutoRefreshFinalCwlCoordinatorTask_(currentRaw, taskRaw, executi
 		capturePhase: "final",
 		source: "auto-refresh-queue-final-cwl-coordinator",
 	});
+}
+
+function executeAutoRefreshCwlSideTaskWithBudget_(currentRaw, taskRaw, executionStartMsRaw) {
+	const task = taskRaw && typeof taskRaw === "object" ? taskRaw : {};
+	return runWithExecutionDeadline_(
+		String(task.type || "") === "cwlFinalCoordinator" ? "auto-refresh-final-cwl-side-task" : "auto-refresh-cwl-side-task",
+		AUTO_REFRESH_QUEUE_CWL_SIDE_TASK_BUDGET_MS,
+		function () {
+			return String(task.type || "") === "cwlFinalCoordinator"
+				? executeAutoRefreshFinalCwlCoordinatorTask_(currentRaw, task, executionStartMsRaw)
+				: executeAutoRefreshCwlCoordinatorTask_(currentRaw, task, executionStartMsRaw);
+		},
+		{
+			cleanupReserveMs: AUTO_REFRESH_QUEUE_CWL_SIDE_TASK_CHECKPOINT_RESERVE_MS,
+			recoveryScope: "autoRefresh",
+		},
+	);
+}
+
+function markAutoRefreshCwlSideTaskTerminal_(currentRaw, taskRaw) {
+	const current = currentRaw && typeof currentRaw === "object" ? currentRaw : {};
+	const taskType = String(taskRaw && taskRaw.type || "");
+	if (taskType === "cwlCoordinator") current.cwlCoordinatorSidePhaseTerminal = true;
+	if (taskType === "cwlFinalCoordinator") current.cwlFinalCoordinatorSidePhaseTerminal = true;
+	return current;
 }
 
 // Execute one resumable per-roster task.
@@ -3500,9 +3531,30 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 	});
 }
 
+// Hydrate rollout-safe side-phase state from the at-most-two prior CWL tasks.
+// Older workers already persisted sidePhaseTerminal on the task itself but did
+// not have the corresponding tiny-current fields.
+function hydrateAutoRefreshCwlSideTerminalStateFromPriorTasks_(currentRaw) {
+	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	if (!current || current.currentTaskIndex < 1) return current;
+	const limit = Math.min(current.currentTaskIndex, current.taskIds.length);
+	for (let i = 0; i < limit; i++) {
+		const taskId = String(current.taskIds[i] || "");
+		const isEarlyCandidate = taskId.indexOf("cwlCoordinator") >= 0;
+		const isFinalCandidate = taskId.indexOf("cwlFinalCoordinator") >= 0;
+		if ((!isEarlyCandidate || current.cwlCoordinatorSidePhaseTerminal === true) &&
+			(!isFinalCandidate || current.cwlFinalCoordinatorSidePhaseTerminal === true)) continue;
+		const task = readAutoRefreshTask_(current.runId, taskId);
+		if (task && String(task.status || "") === "completed" && task.sidePhaseTerminal === true) {
+			markAutoRefreshCwlSideTaskTerminal_(current, task);
+		}
+	}
+	return current;
+}
+
 // Find the next runnable queue task.
 function findNextAutoRefreshQueueTask_(currentRaw) {
-	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
+	const current = hydrateAutoRefreshCwlSideTerminalStateFromPriorTasks_(currentRaw);
 	if (!current) return null;
 	const taskIds = current.taskIds;
 	for (let i = Math.max(0, current.currentTaskIndex); i < taskIds.length; i++) {
@@ -3510,6 +3562,10 @@ function findNextAutoRefreshQueueTask_(currentRaw) {
 		if (!task) continue;
 		const status = String(task.status || "pending");
 		if (status === "completed" && isAutoRefreshTaskResultComplete_(current.runId, task)) {
+			// The task checkpoint is durable before the tiny current-state checkpoint.
+			// Reconstruct side-phase terminality here so interruption between those two
+			// writes cannot make a later roster/finalize preflight rerun CWL work.
+			if (task.sidePhaseTerminal === true) markAutoRefreshCwlSideTaskTerminal_(current, task);
 			current.currentTaskIndex = i + 1;
 			current.processedTasks = Math.max(current.processedTasks, i + 1);
 			continue;
@@ -3966,6 +4022,17 @@ function ensureAutoRefreshFinalCwlCoordinatorCapture_(currentRaw, sourceMetaRaw,
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const runId = current && current.runId;
 	if (!runId) return { ok: false, status: "missing-run-id", error: "Auto-refresh CWL final capture is missing run id." };
+	// The persisted final coordinator is a side phase. Once it terminalizes into
+	// independent recovery, neither the finalize preflight nor required final
+	// phases may retry it and consume the canonical selector-commit budget.
+	if (current.cwlFinalCoordinatorSidePhaseTerminal === true) {
+		return summarizeAutoRefreshFinalCwlCoordinatorCapture_(Object.assign({}, current.cwlFinalCoordinatorCapture || {}, {
+			ok: false,
+			status: "deferred",
+			reason: "persisted-final-cwl-side-phase-terminal",
+			aggregateOk: false,
+		}));
+	}
 	if (typeof getCurrentCwlSeasonEventRefreshNeed_ !== "function") {
 		return { ok: true, status: "unavailable", skipped: true, reason: "cwl-refresh-need-unavailable" };
 	}
@@ -4968,6 +5035,18 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 		const status = String(task.status || "pending");
 		const taskType = String(task.type || "");
 		const isPersistedCwlSideTask = taskType === "cwlCoordinator" || taskType === "cwlFinalCoordinator";
+		if (isPersistedCwlSideTask && !hasAutoRefreshJobBudgetFor_(executionStartMs, AUTO_REFRESH_QUEUE_CWL_SIDE_TASK_START_RESERVE_MS)) {
+			setAutoRefreshQueueInProgressResult_(current);
+			scheduleAutoRefreshJobResume_();
+			return {
+				ok: true,
+				status: "inProgress",
+				inProgress: true,
+				reason: "beforeCwlSideTaskBudget",
+				processedRosters: current.processedRosters,
+				totalRosters: current.rosterIds.length,
+			};
+		}
 		const updatedMs = parseIsoToMs_(task.updatedAt);
 		if (status === "running" && updatedMs > 0 && Date.now() - updatedMs < AUTO_REFRESH_QUEUE_TASK_STALE_MS) {
 			if (isPersistedCwlSideTask) {
@@ -4977,6 +5056,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				task.summary = "side-phase-running-preserved";
 				writeAutoRefreshTask_(current.runId, task);
 				current.cwlFinalOutcome = recordAutoRefreshCwlFinalOutcomeRecovery_(current.runId, buildAutoRefreshCwlFinalOutcome_({ ok: false, status: "deferred", reason: "side-phase-running" }, null));
+				markAutoRefreshCwlSideTaskTerminal_(current, task);
 				current.currentTaskIndex = Math.max(current.currentTaskIndex, toNonNegativeInt_(task.index) + 1);
 				current.processedTasks = Math.max(current.processedTasks, current.currentTaskIndex);
 				writeAutoRefreshQueueCurrent_(current, false);
@@ -5035,6 +5115,23 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			};
 			writeAutoRefreshQueueCurrent_(current, false);
 		}
+		const postCwlPreflightReserveMs = taskType === "finalize"
+			? AUTO_REFRESH_QUEUE_FINALIZE_RESERVE_MS
+			: taskType === "roster"
+				? AUTO_REFRESH_QUEUE_ROSTER_PROCESS_RESERVE_MS
+				: 0;
+		if ((cwlPreflight || finalCwlPreflight) && postCwlPreflightReserveMs > 0 && !hasAutoRefreshJobBudgetFor_(executionStartMs, postCwlPreflightReserveMs)) {
+			setAutoRefreshQueueInProgressResult_(current);
+			scheduleAutoRefreshJobResume_();
+			return {
+				ok: true,
+				status: "inProgress",
+				inProgress: true,
+				reason: "afterCwlPreflightBudget",
+				processedRosters: current.processedRosters,
+				totalRosters: current.rosterIds.length,
+			};
+		}
 		task.status = "running";
 		task.startedAt = task.startedAt || nowIso;
 		task.updatedAt = nowIso;
@@ -5068,11 +5165,9 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				? executeAutoRefreshFinalizeTask_(current, task, executionStartMs)
 				: task.type === "metricCopy"
 					? executeAutoRefreshMetricCopyTask_(current, task, executionStartMs)
-					: task.type === "cwlCoordinator"
-						? executeAutoRefreshCwlCoordinatorTask_(current, task, executionStartMs)
-						: task.type === "cwlFinalCoordinator"
-							? executeAutoRefreshFinalCwlCoordinatorTask_(current, task, executionStartMs)
-							: executeAutoRefreshRosterTask_(current, task, executionStartMs);
+					: isPersistedCwlSideTask
+						? executeAutoRefreshCwlSideTaskWithBudget_(current, task, executionStartMs)
+						: executeAutoRefreshRosterTask_(current, task, executionStartMs);
 			if (result && result.deferred) {
 				if (isCwlSideTask) {
 					task.status = "completed";
@@ -5081,6 +5176,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 					task.summary = "side-phase-" + String(result.reason || "deferred");
 					writeAutoRefreshTask_(current.runId, task);
 					current.cwlFinalOutcome = recordAutoRefreshCwlFinalOutcomeRecovery_(current.runId, buildAutoRefreshCwlFinalOutcome_(result, null));
+					markAutoRefreshCwlSideTaskTerminal_(current, task);
 					current.currentTaskIndex = Math.max(current.currentTaskIndex, toNonNegativeInt_(task.index) + 1);
 					current.processedTasks = Math.max(current.processedTasks, current.currentTaskIndex);
 					writeAutoRefreshQueueCurrent_(current, false);
@@ -5131,6 +5227,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				task.summary = "side-phase-failed";
 				writeAutoRefreshTask_(current.runId, task);
 				current.cwlFinalOutcome = recordAutoRefreshCwlFinalOutcomeRecovery_(current.runId, buildAutoRefreshCwlFinalOutcome_({ ok: false, status: err && err.autoRefreshDefer ? "deferred" : "error", reason: err && err.reason, error: errorMessage_(err) }, null));
+				markAutoRefreshCwlSideTaskTerminal_(current, task);
 				current.currentTaskIndex = Math.max(current.currentTaskIndex, toNonNegativeInt_(task.index) + 1);
 				current.processedTasks = Math.max(current.processedTasks, current.currentTaskIndex);
 				writeAutoRefreshQueueCurrent_(current, false);
@@ -6464,6 +6561,23 @@ function autoRefreshActiveRosterTickInternal_() {
 			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseUrlFetchQuota", quotaPaused: true };
 			return resultForLog;
 		}
+		if (isExecutionDeadlineError_(err)) {
+			// Deadline recovery must be local-only. Firebase checkpoint attempts are
+			// no longer admissible here, but replacing both one-shot paths prevents a
+			// task left running by the interrupted request from becoming orphaned.
+			const continuation = scheduleAutoRefreshJobResume_();
+			const watchdog = scheduleAutoRefreshJobWatchdog_();
+			resultForLog = {
+				ok: true,
+				status: "inProgress",
+				inProgress: true,
+				reason: "executionDeadline",
+				deferred: true,
+				scheduling: { continuation: continuation, watchdog: watchdog },
+			};
+			Logger.log("Auto-refresh coordinator deadline deferred with continuation and watchdog recovery.");
+			return resultForLog;
+		}
 		if (isActiveRosterJobLockBusyError_(err)) {
 			const lockRecovery = maybeClearStaleAutoRefreshLockAfterBusy_("autoRefreshActiveRosterTick lock busy recovery");
 			if (lockRecovery && lockRecovery.cleared) {
@@ -6561,6 +6675,22 @@ function autoRefreshWorkerTickInternal_() {
 			markAutoRefreshSchedulerRepairNeeded_("continuation", "firebase-urlfetch-quota", getRuntimeUrlFetchQuotaCooldownUntilMs_());
 			Logger.log("Auto-refresh worker paused without short retry because Firebase UrlFetch daily quota is exhausted.");
 			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseUrlFetchQuota", quotaPaused: true };
+			return resultForLog;
+		}
+		if (isExecutionDeadlineError_(err)) {
+			// The deadline guard intentionally prevents further Firebase access. Keep
+			// recovery local-only and preserve both independent one-shot paths.
+			const continuation = scheduleAutoRefreshJobResume_();
+			const watchdog = scheduleAutoRefreshJobWatchdog_();
+			resultForLog = {
+				ok: true,
+				status: "inProgress",
+				inProgress: true,
+				reason: "executionDeadline",
+				deferred: true,
+				scheduling: { continuation: continuation, watchdog: watchdog },
+			};
+			Logger.log("Auto-refresh worker deadline deferred with continuation and watchdog recovery.");
 			return resultForLog;
 		}
 		if (isActiveRosterJobLockBusyError_(err)) {
