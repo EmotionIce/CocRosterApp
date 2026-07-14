@@ -567,6 +567,24 @@ const installCwlFetch = (backend, getWarRaw, options = {}) => {
   return paths;
 };
 
+test("auto-refresh task builder preserves CWL work by default and omits it only when explicitly disabled", () => {
+  const backend = loadBackend();
+  const defaultTypes = Array.from(
+    backend.buildAutoRefreshQueueTasks_("run-default", ["main", "second"]),
+    (task) => task.type,
+  );
+  const regularWarTypes = Array.from(
+    backend.buildAutoRefreshQueueTasks_("run-regular", ["main", "second"], { includeCwlSideTasks: false }),
+    (task) => task.type,
+  );
+
+  assert.deepEqual(defaultTypes, ["cwlCoordinator", "roster", "roster", "cwlFinalCoordinator", "finalize"]);
+  assert.deepEqual(regularWarTypes, ["roster", "roster", "finalize"]);
+  assert.equal(backend.hasAutoRefreshCwlTrackingRoster_([{ trackingMode: "regularWar" }, { trackingMode: "cwl" }]), true);
+  assert.equal(backend.hasAutoRefreshCwlTrackingRoster_([{ trackingMode: "regularWar" }]), false);
+  assert.equal(backend.normalizeAutoRefreshQueueCurrent_({ runId: "pre-rollout", kind: "auto-refresh-queue" }).cwlSideWorkEnabled, true);
+});
+
 test("queue worker drains several lightweight tasks in one invocation with diagnostics", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { runId, tasks } = setupSyntheticQueueRun(backend, [
@@ -1605,6 +1623,38 @@ test("cooldown CWL refresh does not publish when not needed or collection fails"
   assert.equal(publishCalls, 0);
 });
 
+test("regular-war-only cooldown defers stale CWL work to event-scoped recovery without Clash collection", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const sourceData = buildRosterData();
+  for (const roster of sourceData.rosters) roster.trackingMode = "regularWar";
+  installPublishedActiveVersion(backend, sourceData);
+  backend.isRecentSuccessfulActiveWrite_ = () => true;
+  backend.getLastSuccessfulActiveWriteAt_ = () => "2026-07-15T00:00:00.000Z";
+  backend.getLastSuccessfulActiveWriteSource_ = () => "manual";
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: true, eventId: "cwl-active" });
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  let coordinatorCalls = 0;
+  backend.buildCwlCoordinatorResult_ = () => {
+    coordinatorCalls++;
+    throw new Error("regular-war cooldown must not collect CWL");
+  };
+
+  const result = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-15T00:15:00.000Z",
+  });
+  const scope = backend.buildCwlRuntimeRecoveryScope_("cwl-active");
+  const marker = backend.readRuntimeRecoveryMarker_();
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.cwlSeasonEventRefresh.status, "deferred");
+  assert.equal(result.cwlSeasonEventRefresh.reason, "regular-war-only-run");
+  assert.equal(result.cwlSeasonEventCloudflarePublish.reason, "cwl-refresh-not-attempted");
+  assert.equal(coordinatorCalls, 0);
+  assert.ok(marker.scopes[scope]);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick").length, 1);
+});
+
 test("cooldown CWL queue failure remains separate from Firebase refresh success", () => {
   const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
   const sourceData = buildRosterData();
@@ -1783,6 +1833,39 @@ test("queue coordinator stores tiny current state and sharded run data", () => {
   assert.equal(sourceOwnership.sourceOwnerRosterIdByTag["#PLAYER"], "main");
   const resumeTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
   assert.equal(resumeTriggers.length, 1);
+});
+
+test("regular-war-only queue coordinator omits CWL side tasks and persists that decision", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  for (const roster of sourceData.rosters) roster.trackingMode = "regularWar";
+  const data = backend.validateRosterData_(sourceData);
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: data, text: JSON.stringify(data) });
+  backend.isRecentSuccessfulActiveWrite_ = () => false;
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  backend.prefetchClanMembersSnapshotsByTag_ = () => ({
+    snapshotByClanTag: {
+      "#CLAN": { clanTag: "#CLAN", members: [{ tag: "#PLAYER", name: "Player", th: 16 }], metricsMembers: [] },
+      "#CLAN2": { clanTag: "#CLAN2", members: [], metricsMembers: [] },
+    },
+    errorByClanTag: {},
+    requestCount: 2,
+    batchCount: 1,
+  });
+
+  const result = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-07-15T00:00:00.000Z",
+  });
+  const current = backend.readAutoRefreshQueueCurrent_();
+  const sourceMeta = backend.readAutoRefreshRunShard_(current.runId, "source/meta");
+  const taskTypes = Array.from(current.taskIds, (taskId) => backend.readAutoRefreshTask_(current.runId, taskId).type);
+
+  assert.equal(result.inProgress, true);
+  assert.equal(current.cwlSideWorkEnabled, false);
+  assert.equal(sourceMeta.cwlSideWorkEnabled, false);
+  assert.deepEqual(taskTypes, ["roster", "roster", "finalize"]);
 });
 
 test("queue coordinator references published source version without copying full source payloads", () => {
@@ -4247,6 +4330,71 @@ test("final CWL capture freshness uses persisted write time after slow collectio
   );
 });
 
+test("regular-war-only final phases publish canonically and defer stale CWL to independent recovery", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: true, eventId: "cwl-stale" });
+  let coordinatorCalls = 0;
+  backend.buildCwlCoordinatorResult_ = () => {
+    coordinatorCalls++;
+    throw new Error("regular-war finalization must not collect CWL");
+  };
+  backend.ensureAutoRefreshCloudflarePublicDataPublished_ = (_current, label) => ({
+    ok: true,
+    status: "queued",
+    summary: { ok: true, status: "queued", versionId: "run-regular", label },
+  });
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+  const current = {
+    runId: "run-regular",
+    kind: "auto-refresh-queue",
+    status: "finalizing",
+    cwlSideWorkEnabled: false,
+    rosterIds: ["main"],
+    taskIds: ["finalize"],
+    taskCount: 1,
+  };
+
+  const result = backend.runAutoRefreshRequiredFinalPhases_(current, null, "complete", Date.now());
+  const scope = backend.buildCwlRuntimeRecoveryScope_("cwl-stale");
+  const marker = backend.readRuntimeRecoveryMarker_();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cloudflarePublicDataPublish.status, "queued");
+  assert.equal(result.cwlFinalCoordinatorCapture.status, "deferred");
+  assert.equal(result.cwlFinalCoordinatorCapture.reason, "regular-war-only-run");
+  assert.equal(result.cwlFinalOutcome.retryPending, true);
+  assert.equal(coordinatorCalls, 0);
+  assert.ok(marker.scopes[scope]);
+});
+
+test("regular-war-only final phases do not create recovery when no CWL event needs work", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: false });
+  backend.ensureAutoRefreshCloudflarePublicDataPublished_ = (_current, label) => ({
+    ok: true,
+    status: "queued",
+    summary: { ok: true, status: "queued", versionId: "run-regular-idle", label },
+  });
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+
+  const result = backend.runAutoRefreshRequiredFinalPhases_({
+    runId: "run-regular-idle",
+    kind: "auto-refresh-queue",
+    status: "finalizing",
+    cwlSideWorkEnabled: false,
+    rosterIds: ["main"],
+    taskIds: ["finalize"],
+    taskCount: 1,
+  }, null, "complete", Date.now());
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cloudflarePublicDataPublish.status, "queued");
+  assert.equal(result.cwlFinalCoordinatorCapture.status, "no-current-cwl-event");
+  assert.equal(result.cwlFinalOutcome.retryPending, false);
+  assert.deepEqual(clone(backend.readRuntimeRecoveryMarker_().scopes), {});
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick").length, 0);
+});
+
 test("queue finalization records failed final CWL refresh and completes the canonical run", () => {
   const initial = buildCurrentCwlEventDb();
   initial.events.seasonEvents.byId["cwl-active"].cwl.groups = {
@@ -4418,6 +4566,94 @@ test("Cloudflare degraded scheduling completes the roster run and records repair
   assert.equal(lastJob.cloudflarePublicDataPublish.degradedScheduling, true);
   assert.equal(lastJob.cloudflarePublicDataPublish.repairPending, true);
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+});
+
+test("CWL recovery scheduling replaces overdue one-shots, deduplicates healthy intent, and preserves a path on failure", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.markRuntimeRecoveryNeeded_(backend.buildCwlRuntimeRecoveryScope_("cwl-stale"), "test", { eventId: "cwl-stale" });
+
+  const initial = backend.scheduleCwlSeasonEventRecovery_();
+  const initialId = initial.triggerId;
+  backend.ScriptApp.newTrigger("cwlSeasonEventRecoveryTick").timeBased().after(60000).create();
+  const reused = backend.scheduleCwlSeasonEventRecovery_();
+  let recoveryTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick");
+
+  assert.equal(initial.scheduled, true);
+  assert.equal(reused.reused, true);
+  assert.equal(reused.triggerId, initialId);
+  assert.equal(reused.duplicateCount, 1);
+  assert.equal(recoveryTriggers.length, 1);
+
+  backend.__properties.set(
+    "CWL_RECOVERY_TRIGGER_AT",
+    String(Date.now() - backend.CWL_RECOVERY_TRIGGER_MAX_OVERDUE_MS - 1000),
+  );
+  const replaced = backend.repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_();
+  const replacementId = replaced.detail.triggerId;
+  recoveryTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick");
+
+  assert.equal(replaced.scheduled, true);
+  assert.equal(replaced.detail.reused, false);
+  assert.notEqual(replacementId, initialId);
+  assert.equal(backend.__properties.get("CWL_RECOVERY_TRIGGER_ID"), replacementId);
+  assert.equal(recoveryTriggers.length, 1);
+  assert.equal(recoveryTriggers[0].getUniqueId(), replacementId);
+
+  backend.__properties.set(
+    "CWL_RECOVERY_TRIGGER_AT",
+    String(Date.now() - backend.CWL_RECOVERY_TRIGGER_MAX_OVERDUE_MS - 1000),
+  );
+  backend.__failNextTriggerCreates(1);
+  const failed = backend.scheduleCwlSeasonEventRecovery_();
+  recoveryTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick");
+
+  assert.equal(failed.scheduled, false);
+  assert.equal(failed.reason, "create-failed");
+  assert.equal(failed.preservedTriggerId, replacementId);
+  assert.equal(backend.__properties.get("CWL_RECOVERY_TRIGGER_ID"), replacementId);
+  assert.equal(recoveryTriggers.length, 1);
+  assert.equal(recoveryTriggers[0].getUniqueId(), replacementId);
+});
+
+test("fired CWL recovery cleanup is locked and cannot clear a newer trigger identity", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.markRuntimeRecoveryNeeded_(backend.buildCwlRuntimeRecoveryScope_("cwl-race"), "test", { eventId: "cwl-race" });
+  const oldSchedule = backend.scheduleCwlSeasonEventRecovery_();
+  const oldId = oldSchedule.triggerId;
+  const replacement = backend.ScriptApp.newTrigger("cwlSeasonEventRecoveryTick").timeBased().after(60000).create();
+  const replacementId = replacement.getUniqueId();
+  backend.__properties.set("CWL_RECOVERY_TRIGGER_ID", replacementId);
+  backend.__properties.set("CWL_RECOVERY_TRIGGER_AT", String(Date.now() + 60000));
+
+  let lockHeld = false;
+  let lockAcquisitions = 0;
+  backend.LockService.getScriptLock = () => ({
+    tryLock() { lockAcquisitions++; lockHeld = true; return true; },
+    releaseLock() { lockHeld = false; },
+  });
+  backend.PropertiesService.getScriptProperties = () => ({
+    getProperty(key) {
+      if (key === "CWL_RECOVERY_TRIGGER_ID" || key === "CWL_RECOVERY_TRIGGER_AT") assert.equal(lockHeld, true);
+      return backend.__properties.has(key) ? backend.__properties.get(key) : null;
+    },
+    setProperty(key, value) { backend.__properties.set(key, String(value)); },
+    deleteProperty(key) {
+      if (key === "CWL_RECOVERY_TRIGGER_ID" || key === "CWL_RECOVERY_TRIGGER_AT") assert.equal(lockHeld, true);
+      backend.__properties.delete(key);
+    },
+  });
+
+  const consumed = backend.consumeCwlSeasonEventRecoveryTrigger_({ triggerUid: oldId });
+  const recoveryTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick");
+
+  assert.equal(lockAcquisitions, 1);
+  assert.equal(lockHeld, false);
+  assert.equal(consumed.consumed, true);
+  assert.equal(consumed.owned, false);
+  assert.equal(backend.__properties.get("CWL_RECOVERY_TRIGGER_ID"), replacementId);
+  assert.equal(backend.__properties.get("CWL_RECOVERY_TRIGGER_AT") != null, true);
+  assert.equal(recoveryTriggers.some((trigger) => trigger.getUniqueId() === oldId), false);
+  assert.equal(recoveryTriggers.some((trigger) => trigger.getUniqueId() === replacementId), true);
 });
 
 test("failed CWL side work gets an independent retry whose marker survives scheduling failure and clears on success", () => {

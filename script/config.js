@@ -130,6 +130,7 @@ const CWL_RECOVERY_HANDLER_NAME = "cwlSeasonEventRecoveryTick";
 const CWL_RECOVERY_TRIGGER_ID_PROPERTY = "CWL_RECOVERY_TRIGGER_ID";
 const CWL_RECOVERY_TRIGGER_AT_PROPERTY = "CWL_RECOVERY_TRIGGER_AT";
 const CWL_RECOVERY_TRIGGER_DELAY_MS = 5 * 60 * 1000;
+const CWL_RECOVERY_TRIGGER_MAX_OVERDUE_MS = 10 * 60 * 1000;
 let executionDeadlineContextStack_ = [];
 
 function readRuntimeRecoveryMarker_() {

@@ -462,6 +462,7 @@ function normalizeAutoRefreshQueueCurrent_(stateRaw) {
 		cwlFinalCoordinatorCapture: state.cwlFinalCoordinatorCapture && typeof state.cwlFinalCoordinatorCapture === "object" ? state.cwlFinalCoordinatorCapture : null,
 		cwlSeasonEventRefresh: state.cwlSeasonEventRefresh && typeof state.cwlSeasonEventRefresh === "object" ? state.cwlSeasonEventRefresh : null,
 		cwlFinalOutcome: state.cwlFinalOutcome && typeof state.cwlFinalOutcome === "object" ? state.cwlFinalOutcome : null,
+		cwlSideWorkEnabled: state.cwlSideWorkEnabled !== false,
 		cwlCoordinatorSidePhaseTerminal: state.cwlCoordinatorSidePhaseTerminal === true,
 		cwlFinalCoordinatorSidePhaseTerminal: state.cwlFinalCoordinatorSidePhaseTerminal === true,
 		cloudflarePublicDataPublish: state.cloudflarePublicDataPublish && typeof state.cloudflarePublicDataPublish === "object" ? state.cloudflarePublicDataPublish : null,
@@ -824,6 +825,7 @@ function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
 	const tasks = [];
 	const metricCopyKeysRaw = Array.isArray(options.metricCopyKeys) ? options.metricCopyKeys : [];
 	const metricCopyKeys = [];
+	const includeCwlSideTasks = options.includeCwlSideTasks !== false;
 	const metricCopySeen = {};
 	for (let i = 0; i < metricCopyKeysRaw.length; i++) {
 		const key = normalizeAutoRefreshMetricCopyKey_(metricCopyKeysRaw[i]);
@@ -851,20 +853,22 @@ function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
 			summary: "",
 		});
 	}
-	tasks.push({
-		taskId: buildAutoRefreshTaskId_(tasks.length, "cwlCoordinator", ""),
-		runId: runId,
-		type: "cwlCoordinator",
-		status: "pending",
-		rosterId: "",
-		index: tasks.length,
-		attempts: 0,
-		startedAt: "",
-		updatedAt: "",
-		completedAt: "",
-		error: "",
-		summary: "",
-	});
+	if (includeCwlSideTasks) {
+		tasks.push({
+			taskId: buildAutoRefreshTaskId_(tasks.length, "cwlCoordinator", ""),
+			runId: runId,
+			type: "cwlCoordinator",
+			status: "pending",
+			rosterId: "",
+			index: tasks.length,
+			attempts: 0,
+			startedAt: "",
+			updatedAt: "",
+			completedAt: "",
+			error: "",
+			summary: "",
+		});
+	}
 	for (let i = 0; i < rosterIds.length; i++) {
 		const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
 		if (!rosterId) continue;
@@ -883,20 +887,22 @@ function buildAutoRefreshQueueTasks_(runIdRaw, rosterIdsRaw, optionsRaw) {
 			summary: "",
 		});
 	}
-	tasks.push({
-		taskId: buildAutoRefreshTaskId_(tasks.length, "cwlFinalCoordinator", ""),
-		runId: runId,
-		type: "cwlFinalCoordinator",
-		status: "pending",
-		rosterId: "",
-		index: tasks.length,
-		attempts: 0,
-		startedAt: "",
-		updatedAt: "",
-		completedAt: "",
-		error: "",
-		summary: "",
-	});
+	if (includeCwlSideTasks) {
+		tasks.push({
+			taskId: buildAutoRefreshTaskId_(tasks.length, "cwlFinalCoordinator", ""),
+			runId: runId,
+			type: "cwlFinalCoordinator",
+			status: "pending",
+			rosterId: "",
+			index: tasks.length,
+			attempts: 0,
+			startedAt: "",
+			updatedAt: "",
+			completedAt: "",
+			error: "",
+			summary: "",
+		});
+	}
 	tasks.push({
 		taskId: buildAutoRefreshTaskId_(tasks.length, "finalize", ""),
 		runId: runId,
@@ -977,6 +983,7 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		connectedClanTags: connectedClanTags,
 		cwlRosterClanTags: Object.keys(cwlRosterClanSet).sort(),
 		cwlEligibleAccountTagsByRosterId: cwlEligibleAccountTagsByRosterId,
+		cwlSideWorkEnabled: runPlan.cwlSideWorkEnabled !== false,
 		sourceFingerprint: String(sourceFingerprintRaw || ""),
 		sourceVersionId: sourceVersionId,
 		sourceShardMode: sourceVersionId ? "activeVersion" : "runCopy",
@@ -3286,6 +3293,7 @@ function writeAutoRefreshQueueLastJobState_(currentRaw, statusRaw, summaryRaw, e
 		sourceFingerprint: current.sourceFingerprint,
 		sourceVersionId: current.sourceVersionId,
 		sourceLastUpdatedAt: current.sourceLastUpdatedAt,
+		cwlSideWorkEnabled: current.cwlSideWorkEnabled !== false,
 		rosterIds: current.rosterIds,
 		taskCount: current.taskCount,
 		processedTasks: current.processedTasks,
@@ -3377,6 +3385,16 @@ function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, 
 	}
 }
 
+// Keep stale CWL lifecycle recovery out of regular-war-only roster runs. A
+// current CWL-tracking roster still opts the run into both coordinator passes.
+function hasAutoRefreshCwlTrackingRoster_(rostersRaw) {
+	const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
+	for (let i = 0; i < rosters.length; i++) {
+		if (getRosterTrackingMode_(rosters[i]) === "cwl") return true;
+	}
+	return false;
+}
+
 // Create a new sharded auto-refresh run and schedule the worker.
 function startAutoRefreshQueueCoordinator_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -3401,19 +3419,31 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 				if (need && need.needsCwl === true && typeof buildCwlCoordinatorResult_ === "function" && typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function") {
 					const sourceSnapshot = readAutoRefreshCoordinatorSourceSnapshot_();
 					const rosterData = validateRosterData_(sourceSnapshot && sourceSnapshot.rosterData);
-					const coordinator = buildCwlCoordinatorResult_(rosterData, {
-						nowIso: new Date().toISOString(),
-						source: "auto-refresh-cooldown-cwl",
-					});
-					cwlSeasonEventRefresh = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, { cwlCoordinator: coordinator }, {
-						source: "auto-refresh-cooldown",
-					});
-					if (cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
-						cwlSeasonEventRefresh.requestCounts = coordinator.requestCounts || {};
+					if (!hasAutoRefreshCwlTrackingRoster_(rosterData.rosters)) {
+						const capture = {
+							ok: false,
+							status: "deferred",
+							reason: "regular-war-only-run",
+							eventId: String(need.eventId || ""),
+							aggregateOk: false,
+						};
+						cwlSeasonEventRefresh = { ok: false, status: "deferred", reason: capture.reason, eventId: capture.eventId, preserved: true };
+						recordAutoRefreshCwlFinalOutcomeRecovery_("auto-refresh-cooldown", buildAutoRefreshCwlFinalOutcome_(capture, cwlSeasonEventRefresh));
+					} else {
+						const coordinator = buildCwlCoordinatorResult_(rosterData, {
+							nowIso: new Date().toISOString(),
+							source: "auto-refresh-cooldown-cwl",
+						});
+						cwlSeasonEventRefresh = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, { cwlCoordinator: coordinator }, {
+							source: "auto-refresh-cooldown",
+						});
+						if (cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
+							cwlSeasonEventRefresh.requestCounts = coordinator.requestCounts || {};
+						}
+						cwlSeasonEventCloudflarePublish = cwlSeasonEventRefresh && cwlSeasonEventRefresh.cloudflarePublish
+							? cwlSeasonEventRefresh.cloudflarePublish
+							: publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(cwlSeasonEventRefresh, "auto-refresh-cooldown-cwl");
 					}
-					cwlSeasonEventCloudflarePublish = cwlSeasonEventRefresh && cwlSeasonEventRefresh.cloudflarePublish
-						? cwlSeasonEventRefresh.cloudflarePublish
-						: publishCloudflareSeasonEventsAfterAutoRefreshCwlBestEffort_(cwlSeasonEventRefresh, "auto-refresh-cooldown-cwl");
 				}
 			} catch (err) {
 				Logger.log("Auto-refresh cooldown CWL event update failed: %s", errorMessage_(err));
@@ -3453,6 +3483,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			allowRegularWarHistoryRepair: false,
 			allowRegularWarProvisionalFallback: false,
 		});
+		runPlan.cwlSideWorkEnabled = hasAutoRefreshCwlTrackingRoster_(runPlan.targetedSourceRosters);
 		let metricCopyKeys = [];
 		let metricKeyReadMs = 0;
 		if (sourceVersionId && !(sourceSnapshot && sourceSnapshot.sourceMetricsLoaded === true)) {
@@ -3481,7 +3512,10 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			}
 			throw err;
 		}
-		const tasks = buildAutoRefreshQueueTasks_(runId, runPlan.rosterIds, { metricCopyKeys: metricCopyKeys });
+		const tasks = buildAutoRefreshQueueTasks_(runId, runPlan.rosterIds, {
+			metricCopyKeys: metricCopyKeys,
+			includeCwlSideTasks: runPlan.cwlSideWorkEnabled,
+		});
 		const taskIds = writeAutoRefreshQueueTasks_(runId, tasks);
 		const current = writeAutoRefreshQueueCurrent_({
 			runId: runId,
@@ -3493,6 +3527,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			sourceFingerprint: sourceFingerprint,
 			sourceVersionId: sourceVersionId,
 			sourceLastUpdatedAt: String(rosterData.lastUpdatedAt || ""),
+			cwlSideWorkEnabled: runPlan.cwlSideWorkEnabled,
 			rosterIds: runPlan.rosterIds,
 			taskIds: taskIds,
 			taskCount: taskIds.length,
@@ -3513,11 +3548,12 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 		const summary = "Auto-refresh queued: 0/" + runPlan.rosterIds.length + " roster(s) processed.";
 		setAutoRefreshRunResult_("inProgress", summary, "", 0, "", startedAt, new Date().toISOString());
 		Logger.log(
-			"autoRefresh coordinator queued runId=%s rosters=%s tasks=%s metricKeys=%s sourceReadMs=%s fingerprintMs=%s metricKeyReadMs=%s ownershipMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s sourceFingerprint=%s",
+			"autoRefresh coordinator queued runId=%s rosters=%s tasks=%s metricKeys=%s cwlSideWorkEnabled=%s sourceReadMs=%s fingerprintMs=%s metricKeyReadMs=%s ownershipMs=%s shardWriteMs=%s totalMs=%s remainingMs=%s sourceFingerprint=%s",
 			runId,
 			runPlan.rosterIds.length,
 			taskIds.length,
 			metricCopyKeys.length,
+			runPlan.cwlSideWorkEnabled,
 			sourceReadMs,
 			fingerprintMs,
 			metricKeyReadMs,
@@ -4022,6 +4058,35 @@ function ensureAutoRefreshFinalCwlCoordinatorCapture_(currentRaw, sourceMetaRaw,
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const runId = current && current.runId;
 	if (!runId) return { ok: false, status: "missing-run-id", error: "Auto-refresh CWL final capture is missing run id." };
+	if (current.cwlSideWorkEnabled === false) {
+		if (typeof getCurrentCwlSeasonEventRefreshNeed_ !== "function") {
+			return { ok: true, status: "unavailable", skipped: true, reason: "cwl-refresh-need-unavailable" };
+		}
+		let need;
+		try {
+			need = getCurrentCwlSeasonEventRefreshNeed_();
+		} catch (err) {
+			return { ok: false, status: "need-error", reason: "cwl-refresh-need-error", error: errorMessage_(err) };
+		}
+		if (!need || need.needsCwl !== true) {
+			return summarizeAutoRefreshFinalCwlCoordinatorCapture_({
+				ok: true,
+				status: "no-current-cwl-event",
+				skipped: true,
+				reason: "no-current-cwl-event",
+				eventId: String((need && need.eventId) || ""),
+				aggregateOk: true,
+			});
+		}
+		return summarizeAutoRefreshFinalCwlCoordinatorCapture_({
+			ok: false,
+			status: "deferred",
+			skipped: true,
+			reason: "regular-war-only-run",
+			eventId: String((need && need.eventId) || ""),
+			aggregateOk: false,
+		});
+	}
 	// The persisted final coordinator is a side phase. Once it terminalizes into
 	// independent recovery, neither the finalize preflight nor required final
 	// phases may retry it and consume the canonical selector-commit budget.
@@ -5824,7 +5889,8 @@ function scheduleCwlSeasonEventRecovery_(notBeforeMsRaw) {
 	const scopes = listPendingCwlRuntimeRecoveryScopes_();
 	if (!scopes.length) return { scheduled: false, skipped: true, reason: "no-cwl-recovery-marker" };
 	const props = PropertiesService.getScriptProperties();
-	const desiredAtMs = Math.max(Date.now() + 1000, Number(notBeforeMsRaw) || Date.now() + CWL_RECOVERY_TRIGGER_DELAY_MS, getRuntimeUrlFetchQuotaCooldownUntilMs_());
+	const nowMs = Date.now();
+	const desiredAtMs = Math.max(nowMs + 1000, Number(notBeforeMsRaw) || nowMs + CWL_RECOVERY_TRIGGER_DELAY_MS, getRuntimeUrlFetchQuotaCooldownUntilMs_());
 	const lock = LockService.getScriptLock();
 	const didLock = typeof lock.tryLock === "function" ? lock.tryLock(1000) : (lock.waitLock(1000), true);
 	if (!didLock) return { scheduled: false, degraded: true, reason: "lock-busy" };
@@ -5833,20 +5899,37 @@ function scheduleCwlSeasonEventRecovery_(notBeforeMsRaw) {
 		const configuredId = String(props.getProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY) || "").trim();
 		const configuredAtMs = Math.max(0, Number(props.getProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY) || 0));
 		const configured = findCwlSeasonEventRecoveryTriggerById_(triggers, configuredId);
-		if (configured && configuredAtMs > 0 && configuredAtMs <= desiredAtMs) {
-			return { scheduled: true, reused: true, triggerId: configuredId, scheduledAtMs: configuredAtMs };
+		const configuredHealthy = !!(
+			configured &&
+			configuredAtMs > 0 &&
+			configuredAtMs <= desiredAtMs &&
+			nowMs <= configuredAtMs + CWL_RECOVERY_TRIGGER_MAX_OVERDUE_MS
+		);
+		if (configuredHealthy) {
+			let duplicateCount = 0;
+			for (let i = 0; i < triggers.length; i++) {
+				if (triggers[i] === configured || getTriggerUniqueId_(triggers[i]) === configuredId) continue;
+				try { ScriptApp.deleteTrigger(triggers[i]); duplicateCount++; } catch (err) {}
+			}
+			return { scheduled: true, reused: true, triggerId: configuredId, scheduledAtMs: configuredAtMs, duplicateCount: duplicateCount };
 		}
 		let created;
-		try { created = ScriptApp.newTrigger(CWL_RECOVERY_HANDLER_NAME).timeBased().after(Math.max(1000, desiredAtMs - Date.now())).create(); }
+		try { created = ScriptApp.newTrigger(CWL_RECOVERY_HANDLER_NAME).timeBased().after(Math.max(1000, desiredAtMs - nowMs)).create(); }
 		catch (err) { return { scheduled: false, degraded: true, reason: "create-failed", error: errorMessage_(err), preservedTriggerId: configuredId }; }
 		const createdId = getTriggerUniqueId_(created);
-		if (!createdId) return { scheduled: false, degraded: true, reason: "missing-trigger-id", preservedTriggerId: configuredId };
+		if (!createdId) {
+			try { ScriptApp.deleteTrigger(created); } catch (err) {}
+			return { scheduled: false, degraded: true, reason: "missing-trigger-id", preservedTriggerId: configuredId };
+		}
+		// Publish the replacement identity before deleting any prior recovery path.
 		props.setProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY, createdId);
 		props.setProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY, String(desiredAtMs));
-		if (configured && configuredId !== createdId) {
-			try { ScriptApp.deleteTrigger(configured); } catch (err) {}
+		let replacedCount = 0;
+		for (let i = 0; i < triggers.length; i++) {
+			if (triggers[i] === created || getTriggerUniqueId_(triggers[i]) === createdId) continue;
+			try { ScriptApp.deleteTrigger(triggers[i]); replacedCount++; } catch (err) {}
 		}
-		return { scheduled: true, reused: false, triggerId: createdId, scheduledAtMs: desiredAtMs };
+		return { scheduled: true, reused: false, triggerId: createdId, scheduledAtMs: desiredAtMs, replacedCount: replacedCount };
 	} finally {
 		try { lock.releaseLock(); } catch (err) {}
 	}
@@ -5856,15 +5939,22 @@ function consumeCwlSeasonEventRecoveryTrigger_(eventRaw) {
 	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
 	const firedId = String(event.triggerUid || event.triggerId || "").trim();
 	if (!firedId) return { consumed: false, reason: "missing-trigger-id" };
+	const lock = LockService.getScriptLock();
+	const didLock = typeof lock.tryLock === "function" ? lock.tryLock(1000) : (lock.waitLock(1000), true);
+	if (!didLock) return { consumed: false, reason: "lock-busy", triggerId: firedId };
 	const props = PropertiesService.getScriptProperties();
-	const configuredId = String(props.getProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY) || "").trim();
-	const trigger = findCwlSeasonEventRecoveryTriggerById_(listCwlSeasonEventRecoveryTriggers_(), firedId);
-	if (trigger) { try { ScriptApp.deleteTrigger(trigger); } catch (err) {} }
-	if (firedId === configuredId) {
-		props.deleteProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY);
-		props.deleteProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY);
+	try {
+		const configuredId = String(props.getProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY) || "").trim();
+		const trigger = findCwlSeasonEventRecoveryTriggerById_(listCwlSeasonEventRecoveryTriggers_(), firedId);
+		if (trigger) { try { ScriptApp.deleteTrigger(trigger); } catch (err) {} }
+		if (firedId === configuredId) {
+			props.deleteProperty(CWL_RECOVERY_TRIGGER_ID_PROPERTY);
+			props.deleteProperty(CWL_RECOVERY_TRIGGER_AT_PROPERTY);
+		}
+		return { consumed: !!trigger || firedId === configuredId, triggerId: firedId, owned: firedId === configuredId };
+	} finally {
+		try { lock.releaseLock(); } catch (err) {}
 	}
-	return { consumed: !!trigger || firedId === configuredId, triggerId: firedId, owned: firedId === configuredId };
 }
 
 function runOneCwlSeasonEventRecovery_() {
