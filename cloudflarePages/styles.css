@@ -1087,6 +1087,404 @@ h1{
   }
 }
 
+/* Public roster player rows: dense warm-charcoal four-zone cards. */
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-list{
+  gap:7px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card{
+  --player-th-column:46px;
+  --player-league-column:50px;
+  --player-stat-column:78px;
+  --player-row-height:66px;
+  min-width:0;
+  min-height:var(--player-row-height);
+  display:grid;
+  grid-template-columns:minmax(0, 1fr);
+  padding:0;
+  overflow:hidden;
+  border:1px solid rgba(190,174,143,.20) !important;
+  border-radius:9px;
+  background:
+    linear-gradient(105deg, rgba(202,170,111,.055), transparent 31%),
+    linear-gradient(180deg, rgba(19,18,17,.99), rgba(10,10,11,.995)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,240,202,.035),
+    inset 0 0 18px rgba(193,157,97,.025),
+    0 5px 14px rgba(0,0,0,.22) !important;
+  transition:border-color .16s ease, background-color .16s ease, box-shadow .16s ease;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card:hover{
+  border-color:rgba(210,190,151,.31) !important;
+  background:
+    linear-gradient(105deg, rgba(215,181,117,.07), transparent 35%),
+    linear-gradient(180deg, rgba(22,20,18,.995), rgba(11,11,12,.995)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,240,202,.05),
+    inset 0 0 20px rgba(193,157,97,.035),
+    0 7px 17px rgba(0,0,0,.27) !important;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-top{
+  position:relative;
+  z-index:1;
+  grid-area:1 / 1;
+  width:100%;
+  min-width:0;
+  min-height:var(--player-row-height);
+  display:grid;
+  grid-template-columns:
+    var(--player-th-column)
+    var(--player-league-column)
+    minmax(0, 1fr)
+    var(--player-stat-column);
+  align-items:stretch;
+  gap:0;
+  margin:0;
+  padding:0;
+  overflow:hidden;
+  border:0;
+  border-radius:8px;
+  background:transparent !important;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-top::after{
+  content:"";
+  position:absolute;
+  z-index:0;
+  top:7px;
+  right:var(--player-stat-column);
+  bottom:7px;
+  width:1px;
+  background:linear-gradient(transparent, rgba(186,169,139,.20) 17%, rgba(186,169,139,.20) 83%, transparent);
+  pointer-events:none;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-top[data-player-profile-trigger="1"]:hover{
+  background:rgba(214,184,128,.025) !important;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-top[data-player-profile-trigger="1"]:focus-visible{
+  outline:none !important;
+  border-color:transparent !important;
+  background:rgba(214,184,128,.035) !important;
+  box-shadow:inset 0 0 0 2px rgba(211,188,139,.48) !important;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-left{
+  position:relative;
+  z-index:1;
+  grid-column:3;
+  min-width:0;
+  align-self:start;
+  display:block;
+  padding:10px 9px 24px 10px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-ident,
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-name-row{
+  min-width:0;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-name-row{
+  flex-wrap:nowrap;
+  gap:5px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-name{
+  min-width:0;
+  color:#eee5cc;
+  font-size:12.5px;
+  font-weight:800;
+  letter-spacing:-.01em;
+  line-height:1.15;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-info-badge{
+  min-width:15px;
+  width:15px;
+  height:15px;
+  padding:0;
+  border-color:rgba(184,170,143,.18) !important;
+  border-radius:4px !important;
+  background:rgba(15,14,14,.72) !important;
+  color:#8d897f !important;
+  font-size:8px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-right{
+  display:contents;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-th,
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-league{
+  position:relative;
+  z-index:1;
+  grid-row:1;
+  align-self:stretch;
+  justify-self:stretch;
+  width:auto;
+  height:auto;
+  min-width:0;
+  min-height:var(--player-row-height);
+  margin:0;
+  padding:0;
+  border:0;
+  border-right:1px solid rgba(187,171,141,.15);
+  border-radius:0;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-th{
+  grid-column:1;
+  background:linear-gradient(180deg, rgba(22,21,19,.88), rgba(13,13,13,.78));
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-league{
+  grid-column:2;
+  background:
+    linear-gradient(145deg, rgba(225,194,137,.045), transparent 52%),
+    linear-gradient(180deg, rgba(37,34,29,.82), rgba(22,21,19,.90));
+  box-shadow:inset 0 1px 0 rgba(255,238,199,.025);
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-th-icon{
+  width:28px;
+  height:28px;
+  max-width:72%;
+  max-height:72%;
+  object-fit:contain;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-league-icon{
+  width:30px;
+  height:30px;
+  max-width:74%;
+  max-height:74%;
+  object-fit:contain;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-th-fallback{
+  color:#aaa18f;
+  font-size:9px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-league__tier-overlay{
+  font-size:9px;
+  text-shadow:0 1px 2px #080808, 0 0 3px #080808;
+  -webkit-text-stroke:.5px rgba(8,8,8,.88);
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-cwl{
+  position:relative;
+  z-index:2;
+  grid-column:4;
+  grid-row:1;
+  align-self:start;
+  justify-self:stretch;
+  min-width:0;
+  height:24px;
+  display:grid;
+  grid-template-columns:10px minmax(0, 1fr) auto;
+  align-items:center;
+  gap:3px;
+  margin:7px 6px 0;
+  padding:0 6px;
+  border:1px solid rgba(188,171,138,.25) !important;
+  border-radius:5px !important;
+  background:linear-gradient(180deg, rgba(27,25,22,.92), rgba(15,15,15,.94)) !important;
+  color:#e8dfc9 !important;
+  box-shadow:inset 0 1px 0 rgba(255,239,201,.025);
+  font-size:9px;
+  line-height:1;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-stat-glyph,
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-cwl-label{
+  display:block;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-stat-glyph{
+  color:#bca778;
+  font-size:9px;
+  font-weight:800;
+  text-align:center;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-cwl-label{
+  min-width:0;
+  overflow:hidden;
+  color:#8f8a7e;
+  font-size:7.5px;
+  font-weight:740;
+  letter-spacing:.04em;
+  text-overflow:ellipsis;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-cwl-value{
+  color:#f0e7d2;
+  font-size:10px;
+  font-weight:850;
+  font-variant-numeric:tabular-nums;
+  letter-spacing:.01em;
+  white-space:nowrap;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-cwl-indicator{
+  position:absolute;
+  top:-4px;
+  right:-4px;
+  width:12px;
+  height:12px;
+  border:1px solid rgba(198,128,127,.46);
+  background:#2a1717;
+  color:#e6aaa7;
+  font-size:8px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-meta-row{
+  position:relative;
+  z-index:3;
+  grid-area:1 / 1;
+  align-self:end;
+  min-width:0;
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) var(--player-stat-column);
+  align-items:end;
+  gap:0;
+  margin:0;
+  padding:0 6px 7px calc(var(--player-th-column) + var(--player-league-column) + 10px);
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-discord-line{
+  min-width:0;
+  padding-right:8px;
+  gap:5px;
+  color:#85837f;
+  font-size:10px;
+  line-height:1.1;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-discord-icon{
+  width:11px;
+  height:11px;
+  flex:0 0 11px;
+  object-fit:contain;
+  opacity:.68;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-discord-text{
+  min-width:0;
+  color:#85837f;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge{
+  position:relative;
+  justify-self:stretch;
+  min-width:0;
+  height:24px;
+  display:grid;
+  grid-template-columns:10px minmax(0, 1fr) auto;
+  align-items:center;
+  gap:3px;
+  margin-left:6px;
+  padding:0 6px;
+  border:1px solid rgba(188,171,138,.25) !important;
+  border-radius:5px !important;
+  background:linear-gradient(180deg, rgba(27,25,22,.92), rgba(15,15,15,.94)) !important;
+  color:#e8dfc9 !important;
+  box-shadow:inset 0 1px 0 rgba(255,239,201,.025);
+  line-height:1;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge::before{
+  content:"◆";
+  color:#bca778;
+  font-size:7px;
+  text-align:center;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-icon{
+  min-width:0;
+  overflow:hidden;
+  color:#8f8a7e;
+  font-size:7.5px;
+  font-weight:740;
+  letter-spacing:.04em;
+  text-overflow:ellipsis;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-value{
+  color:#f0e7d2;
+  font-size:10px;
+  font-weight:850;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-attention-row,
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-suggest-note{
+  grid-column:1;
+  margin:0;
+  padding:6px 8px;
+  border-top:1px solid rgba(188,171,138,.12);
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-attention-row{
+  gap:4px;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-attention-item{
+  min-height:18px;
+  padding:1px 6px;
+  font-size:9px;
+}
+
+@media (max-width: 420px){
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card{
+    --player-th-column:42px;
+    --player-league-column:46px;
+    --player-stat-column:74px;
+    --player-row-height:64px;
+  }
+
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-left{
+    padding-right:6px;
+    padding-left:8px;
+  }
+
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-meta-row{
+    padding-left:calc(var(--player-th-column) + var(--player-league-column) + 8px);
+  }
+
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-name{
+    font-size:12px;
+  }
+
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-th-icon{
+    width:26px;
+    height:26px;
+  }
+
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-league-icon{
+    width:28px;
+    height:28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce){
+  body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card{
+    transition:none;
+  }
+}
+
 /* TURTLE public Home redesign: shell constellation built from the real clan artwork. */
 body{
   background: #04050c;
@@ -4114,6 +4512,11 @@ table.roster{ display:none !important; }
   font-weight: 700;
   font-size: 11px;
   white-space: nowrap;
+}
+
+.player-stat-glyph,
+.player-cwl-label{
+  display:none;
 }
 
 .player-cwl.alert{

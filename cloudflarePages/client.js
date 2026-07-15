@@ -7010,6 +7010,11 @@
         }
 
         const cwlBadge = el("div", "player-cwl");
+        cwlBadge.classList.add(trackingMode === "regularWar" ? "player-cwl--attacks" : "player-cwl--stars");
+        const cwlStatGlyph = el("span", "player-stat-glyph", trackingMode === "regularWar" ? "↗" : "✦");
+        cwlStatGlyph.setAttribute("aria-hidden", "true");
+        cwlBadge.appendChild(cwlStatGlyph);
+        cwlBadge.appendChild(el("span", "player-cwl-label", trackingMode === "regularWar" ? "Atk" : "Stars"));
         if (trackingMode === "regularWar") {
             const attacksUsed = toNonNegativeInt(regularWarStats.current.attacksUsed);
             const attacksAllowed = toNonNegativeInt(regularWarStats.current.attacksAllowed);
