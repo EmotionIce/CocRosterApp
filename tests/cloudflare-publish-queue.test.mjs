@@ -1107,6 +1107,52 @@ test("active public manifest/roster phase reads no metrics", () => {
   assert.equal(reads.some((path) => path.includes("playerMetrics")), false);
 });
 
+test("active roster publication carries war star standings into public and bot KV objects", () => {
+  const q = loadQueue();
+  const roster = {
+    id: "main",
+    regularWar: {
+      currentWar: {
+        state: "inwar",
+        clanStars: 24,
+        opponentStars: 20,
+        starStandingAvailable: true,
+      },
+    },
+    cwlStats: {
+      currentWar: {
+        state: "inwar",
+        clanStars: 12,
+        opponentStars: 10,
+        starStandingAvailable: true,
+      },
+    },
+  };
+  const manifest = { versionId: "version-B", rosterIds: ["main"] };
+  q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
+  q.firebaseRequestJson_ = (path) => path.endsWith("/manifest") ? manifest : null;
+  q.firebaseBatchGetJson_ = (paths) => ({ [paths[0]]: roster });
+
+  const publicBatch = q.buildCloudflareActivePhaseRequest_(
+    activeState(q, "public-manifest-rosters"),
+    { phase: "public-manifest-rosters", cursor: 0 },
+  );
+  const publicRosters = publicBatch.request.objects.find((item) => item.path.endsWith("/rosters")).payload;
+  assert.equal(publicRosters.main.regularWar.currentWar.clanStars, 24);
+  assert.equal(publicRosters.main.cwlStats.currentWar.opponentStars, 10);
+
+  q.readActiveRosterSnapshotFromVersion_ = () => ({
+    rosterData: { schemaVersion: 1, rosters: [roster], playerMetrics: { byTag: {} } },
+  });
+  const botBatch = q.buildCloudflareActivePhaseRequest_(
+    activeState(q, "bot-active"),
+    { phase: "bot-active", cursor: 0 },
+  );
+  const botRosters = botBatch.request.objects.find((item) => item.path.endsWith("/rosters")).payload;
+  assert.equal(botRosters[0].regularWar.currentWar.opponentStars, 20);
+  assert.equal(botRosters[0].cwlStats.currentWar.clanStars, 12);
+});
+
 test("active metrics and bot-derived phases only read their required metric path", () => {
   const q = loadQueue();
   q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;

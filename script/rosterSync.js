@@ -1387,6 +1387,7 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 		);
 		if (result && result.applied) finalizedCwlWars++;
 	}
+	const cwlCurrentWar = sanitizeCwlCurrentWar_(cwlView.currentWar);
 	ctx.roster.cwlStats = {
 		lastRefreshedAt:
 			cwlView.freshness && typeof cwlView.freshness.dataSuccessAt === "string" && cwlView.freshness.dataSuccessAt
@@ -1395,6 +1396,7 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 		season: typeof cwlView.season === "string" ? cwlView.season : "",
 		byTag: byTag,
 	};
+	if (cwlCurrentWar) ctx.roster.cwlStats.currentWar = cwlCurrentWar;
 	warPerformance.lastRefreshedAt = nowIso;
 	ctx.roster.warPerformance = warPerformance;
 	clearRosterBenchSuggestions_(ctx.roster);
@@ -2073,12 +2075,16 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	const byTag = {};
 	let warsProcessed = 0;
 	let finalizedCwlWars = 0;
+	let cwlCurrentWar = null;
 
 	for (let i = 0; i < usableWars.length; i++) {
 		const warTag = usableWars[i].warTag;
 		const war = usableWars[i].war;
 		const warState = usableWars[i].warState;
 		warsProcessed++;
+		if (!cwlCurrentWar && warState === "inwar") {
+			cwlCurrentWar = buildCwlCurrentWarFromWar_(war, warTag, ctx.clanTag, i);
+		}
 		if (warState === "warended") {
 			const ingested = ingestCwlWarIntoWarPerformance_(warPerformance, war, warTag, ctx.clanTag, trackedHistoryTagSet, nowIso, "cwlRefreshWarEnded");
 			if (ingested) finalizedCwlWars++;
@@ -2092,6 +2098,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		season: typeof leaguegroup.season === "string" ? leaguegroup.season : "",
 		byTag: byTag,
 	};
+	if (cwlCurrentWar) ctx.roster.cwlStats.currentWar = cwlCurrentWar;
 	warPerformance.lastRefreshedAt = nowIso;
 	ctx.roster.warPerformance = warPerformance;
 	clearRosterBenchSuggestions_(ctx.roster);

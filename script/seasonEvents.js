@@ -3980,7 +3980,12 @@ function sanitizeCwlRuntimeContribution_(contributionRaw) {
 	return {
 		warTag: normalizeTag_(contribution.warTag),
 		clanTag: normalizeTag_(contribution.clanTag),
+		clanName: String(contribution.clanName == null ? "" : contribution.clanName),
+		clanStars: toNonNegativeInt_(contribution.clanStars),
 		opponentTag: normalizeTag_(contribution.opponentTag),
+		opponentName: String(contribution.opponentName == null ? "" : contribution.opponentName),
+		opponentStars: toNonNegativeInt_(contribution.opponentStars),
+		starStandingAvailable: toBooleanFlag_(contribution.starStandingAvailable),
 		roundIndex: toNonNegativeInt_(contribution.roundIndex),
 		state: normalizeWarState_(contribution.state),
 		startTime: sanitizeSeasonEventTimestampOrEmpty_(contribution.startTime),
@@ -4805,11 +4810,17 @@ function buildCwlRuntimeContributionFromWar_(warRaw, warTagRaw, clanTagRaw, grou
 	const sides = getWarSidesForClan_(war, clanTag);
 	if (!warTag || !clanTag || !sides) return null;
 	const state = normalizeWarState_(war.state);
+	const currentWar = buildCwlCurrentWarFromWar_(war, warTag, clanTag, roundIndexRaw);
 	const aggregateByTag = sanitizeCwlRuntimeContributionAggregate_(buildCwlWarAggregateForClan_(war, clanTag, null));
 	const contribution = {
 		warTag: warTag,
 		clanTag: clanTag,
+		clanName: currentWar ? currentWar.clanName : String(sides.side && sides.side.name != null ? sides.side.name : ""),
+		clanStars: currentWar ? currentWar.clanStars : toNonNegativeInt_(sides.side && sides.side.stars),
 		opponentTag: normalizeTag_(sides.opponentSide && sides.opponentSide.tag),
+		opponentName: currentWar ? currentWar.opponentName : String(sides.opponentSide && sides.opponentSide.name != null ? sides.opponentSide.name : ""),
+		opponentStars: currentWar ? currentWar.opponentStars : toNonNegativeInt_(sides.opponentSide && sides.opponentSide.stars),
+		starStandingAvailable: !!currentWar,
 		roundIndex: toNonNegativeInt_(roundIndexRaw),
 		state: state,
 		startTime: sanitizeSeasonEventTimestampOrEmpty_(war.startTime || war.preparationStartTime),
@@ -5328,10 +5339,18 @@ function buildCwlRuntimeViews_(runtimeRaw, clanTagsRaw) {
 			if (!currentWar && (record.state === "preparation" || record.state === "inwar")) {
 				currentWar = {
 					warTag: record.warTag,
-					warState: record.state,
+					state: record.state,
 					members: contribution.members,
 					roundIndex: record.roundIndex,
+					clanTag: record.clanTag,
+					clanName: contribution.clanName,
+					clanStars: contribution.clanStars,
 					opponentTag: record.opponentTag,
+					opponentName: contribution.opponentName,
+					opponentStars: contribution.opponentStars,
+					starStandingAvailable: contribution.starStandingAvailable,
+					startTime: contribution.startTime,
+					endTime: contribution.endTime,
 				};
 			}
 		}

@@ -2447,19 +2447,71 @@ function sanitizeRegularWarCurrentWar_(rawCurrentWar) {
 	return {
 		warKey: warKey,
 		available: toBooleanFlag_(currentWar.available),
+		starStandingAvailable: toBooleanFlag_(currentWar.starStandingAvailable),
 		state: state || "notinwar",
 		teamSize: toNonNegativeInt_(currentWar.teamSize),
 		attacksPerMember: toNonNegativeInt_(currentWar.attacksPerMember),
 		clanTag: clanTag,
 		clanName: typeof currentWar.clanName === "string" ? currentWar.clanName : "",
+		clanStars: toNonNegativeInt_(currentWar.clanStars),
 		opponentTag: opponentTag,
 		opponentName: typeof currentWar.opponentName === "string" ? currentWar.opponentName : "",
+		opponentStars: toNonNegativeInt_(currentWar.opponentStars),
 		preparationStartTime: preparationStartTime,
 		startTime: startTime,
 		endTime: endTime,
 		unavailableReason: typeof currentWar.unavailableReason === "string" ? currentWar.unavailableReason : "",
 		statusMessage: typeof currentWar.statusMessage === "string" ? currentWar.statusMessage : "",
 	};
+}
+
+// Sanitize compact CWL current-war metadata retained with roster stats.
+function sanitizeCwlCurrentWar_(rawCurrentWar) {
+	const currentWar = rawCurrentWar && typeof rawCurrentWar === "object" ? rawCurrentWar : {};
+	const state = normalizeWarState_(currentWar.state || currentWar.warState);
+	if (state !== "preparation" && state !== "inwar") return null;
+	const clanTag = normalizeTag_(currentWar.clanTag);
+	const opponentTag = normalizeTag_(currentWar.opponentTag);
+	const warTag = normalizeTag_(currentWar.warTag);
+	if (!clanTag || !opponentTag || !warTag) return null;
+	return {
+		warTag: warTag,
+		state: state,
+		roundIndex: toNonNegativeInt_(currentWar.roundIndex),
+		clanTag: clanTag,
+		clanName: typeof currentWar.clanName === "string" ? currentWar.clanName : "",
+		clanStars: toNonNegativeInt_(currentWar.clanStars),
+		opponentTag: opponentTag,
+		opponentName: typeof currentWar.opponentName === "string" ? currentWar.opponentName : "",
+		opponentStars: toNonNegativeInt_(currentWar.opponentStars),
+		starStandingAvailable: toBooleanFlag_(currentWar.starStandingAvailable),
+		startTime: typeof currentWar.startTime === "string" ? currentWar.startTime : "",
+		endTime: typeof currentWar.endTime === "string" ? currentWar.endTime : "",
+	};
+}
+
+// Build compact CWL current-war metadata from an already-fetched war payload.
+function buildCwlCurrentWarFromWar_(warRaw, warTagRaw, clanTagRaw, roundIndexRaw) {
+	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
+	const clanTag = normalizeTag_(clanTagRaw);
+	const state = normalizeWarState_(war.state);
+	if (state !== "preparation" && state !== "inwar") return null;
+	const sides = getWarSidesForClan_(war, clanTag);
+	if (!sides) return null;
+	return sanitizeCwlCurrentWar_({
+		warTag: warTagRaw,
+		state: state,
+		roundIndex: roundIndexRaw,
+		clanTag: normalizeTag_(sides.side && sides.side.tag) || clanTag,
+		clanName: String(sides.side && sides.side.name != null ? sides.side.name : ""),
+		clanStars: toNonNegativeInt_(sides.side && sides.side.stars),
+		opponentTag: normalizeTag_(sides.opponentSide && sides.opponentSide.tag),
+		opponentName: String(sides.opponentSide && sides.opponentSide.name != null ? sides.opponentSide.name : ""),
+		opponentStars: toNonNegativeInt_(sides.opponentSide && sides.opponentSide.stars),
+		starStandingAvailable: true,
+		startTime: typeof war.startTime === "string" ? war.startTime : "",
+		endTime: typeof war.endTime === "string" ? war.endTime : "",
+	});
 }
 
 // Sanitize regular war aggregate meta.
@@ -2643,11 +2695,14 @@ function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
 		byTag[normalizedTag] = sanitizeCwlStatEntry_(byTagRaw[keys[i]]);
 	}
 
-	return {
+	const out = {
 		lastRefreshedAt: typeof stats.lastRefreshedAt === "string" ? stats.lastRefreshedAt : "",
 		season: typeof stats.season === "string" ? stats.season : "",
 		byTag: byTag,
 	};
+	const currentWar = sanitizeCwlCurrentWar_(stats.currentWar);
+	if (currentWar) out.currentWar = currentWar;
+	return out;
 }
 
 // Sanitize roster regular war.

@@ -26,6 +26,7 @@ const loadClientInternals = (overrides = {}) => {
       "        readDurableCachedRosterSnapshot,",
       "        writeCachedRosterSnapshot,",
       "        resolveLeaderboardRankedSeasonCycle,",
+      "        getRosterCurrentWarStarStanding,",
       "    };",
       "    return;",
       bootMarker,
@@ -48,6 +49,42 @@ const loadClientInternals = (overrides = {}) => {
   vm.runInContext(instrumentedCode, context);
   return context.window.__ROSTER_CLIENT_TEST_INTERNALS__;
 };
+
+test("formats ongoing regular-war and CWL star standings only when fresh score data is available", () => {
+  const { getRosterCurrentWarStarStanding } = loadClientInternals();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(getRosterCurrentWarStarStanding("regularWar", {
+      state: "inwar",
+      clanName: "Turtle",
+      clanStars: 23,
+      opponentName: "Other",
+      opponentStars: 19,
+      starStandingAvailable: true,
+    }, {}))),
+    { clanStars: 23, opponentStars: 19, text: "Stars 23 - 19", title: "Turtle 23 - 19 Other" },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(getRosterCurrentWarStarStanding("cwl", {}, {
+      currentWar: {
+        state: "inwar",
+        clanTag: "#CLAN",
+        clanStars: 11,
+        opponentTag: "#OPP",
+        opponentStars: 9,
+        starStandingAvailable: true,
+      },
+    }))),
+    { clanStars: 11, opponentStars: 9, text: "Stars 11 - 9", title: "#CLAN 11 - 9 #OPP" },
+  );
+  assert.equal(getRosterCurrentWarStarStanding("regularWar", {
+    state: "inwar",
+    clanStars: 23,
+    opponentStars: 19,
+  }, {}), null);
+  assert.equal(getRosterCurrentWarStarStanding("cwl", {}, {
+    currentWar: { state: "warended", clanStars: 30, opponentStars: 28, starStandingAvailable: true },
+  }), null);
+});
 
 const makeMemoryIndexedDb = () => {
   const records = new Map();

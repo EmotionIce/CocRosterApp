@@ -483,6 +483,8 @@ const buildOneRoundCwlWar = (options = {}) => ({
   endTime: options.endTime || "2026-07-05T20:00:00.000Z",
   clan: {
     tag: options.clanTag || "#CLAN",
+    name: options.clanName || "Tracked Clan",
+    stars: options.clanStars == null ? 17 : options.clanStars,
     members: [{
       tag: options.playerTag || "#PLAYER",
       name: options.playerName || "Player",
@@ -495,6 +497,8 @@ const buildOneRoundCwlWar = (options = {}) => ({
   },
   opponent: {
     tag: options.opponentTag || "#OPP",
+    name: options.opponentName || "Opponent Clan",
+    stars: options.opponentStars == null ? 14 : options.opponentStars,
     members: [{ tag: options.defenderTag || "#BASE", name: "Base", attacks: [] }],
   },
 });
@@ -525,6 +529,84 @@ const buildCurrentCwlEventDb = () => ({
       },
     },
   },
+});
+
+test("regular-war star standing is oriented to the tracked clan and survives roster validation", () => {
+  const backend = loadBackend();
+  const mapped = backend.mapCurrentRegularWarFromApiData_("#2LUCULP", {
+    state: "inWar",
+    teamSize: 15,
+    attacksPerMember: 2,
+    startTime: "2026-07-15T18:00:00.000Z",
+    endTime: "2026-07-16T18:00:00.000Z",
+    clan: { tag: "#9PYLQG", name: "Other", stars: 18, members: [] },
+    opponent: { tag: "#2LUCULP", name: "Tracked", stars: 21, members: [] },
+  });
+  assert.deepEqual(
+    {
+      clanTag: mapped.currentWarMeta.clanTag,
+      clanStars: mapped.currentWarMeta.clanStars,
+      opponentTag: mapped.currentWarMeta.opponentTag,
+      opponentStars: mapped.currentWarMeta.opponentStars,
+      starStandingAvailable: mapped.currentWarMeta.starStandingAvailable,
+    },
+    { clanTag: "#2LUCULP", clanStars: 21, opponentTag: "#9PYLQG", opponentStars: 18, starStandingAvailable: true },
+  );
+
+  const data = buildRosterData();
+  data.rosters[0].trackingMode = "regularWar";
+  data.rosters[0].connectedClanTag = "#2LUCULP";
+  data.rosters[0].regularWar = {
+    lastRefreshedAt: "2026-07-15T20:00:00.000Z",
+    currentWar: mapped.currentWarMeta,
+    byTag: {},
+    membershipByTag: {},
+  };
+  const currentWar = backend.validateRosterData_(data).rosters[0].regularWar.currentWar;
+  assert.equal(currentWar.clanStars, 21);
+  assert.equal(currentWar.opponentStars, 18);
+  assert.equal(currentWar.starStandingAvailable, true);
+  assert.equal(currentWar.endTime, "2026-07-16T18:00:00.000Z");
+});
+
+test("direct CWL refresh stores the daily war star standing from prefetched data", () => {
+  const backend = loadBackend();
+  const rawData = buildRosterData();
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  const data = backend.validateRosterData_(rawData);
+  const leaguegroup = buildOneRoundCwlLeagueGroup({ clanTag: "#2LUCULP", opponentTag: "#9PYLQG" });
+  const war = buildOneRoundCwlWar({
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+    clanStars: 16,
+    opponentStars: 13,
+  });
+  const refreshed = backend.refreshCwlStatsCore_(data, "main", {
+    autoRefreshSnapshotMode: true,
+    prefetchedLeaguegroupRawByClanTag: { "#2LUCULP": leaguegroup },
+    prefetchedCwlWarRawByTag: { "#WAR1": war },
+  });
+  const currentWar = refreshed.rosterData.rosters[0].cwlStats.currentWar;
+  assert.deepEqual(
+    {
+      state: currentWar.state,
+      clanTag: currentWar.clanTag,
+      clanStars: currentWar.clanStars,
+      opponentTag: currentWar.opponentTag,
+      opponentStars: currentWar.opponentStars,
+      endTime: currentWar.endTime,
+      starStandingAvailable: currentWar.starStandingAvailable,
+    },
+    {
+      state: "inwar",
+      clanTag: "#2LUCULP",
+      clanStars: 16,
+      opponentTag: "#9PYLQG",
+      opponentStars: 13,
+      endTime: "2026-07-05T20:00:00.000Z",
+      starStandingAvailable: true,
+    },
+  );
 });
 
 const installPublishedActiveVersion = (backend, dataRaw) => {
@@ -3284,10 +3366,14 @@ test("roster queue shards reuse the CWL coordinator view without league or war r
     endTime: "2026-07-05T20:00:00.000Z",
     clan: {
       tag: "#2LUCULP",
+      name: "Turtle",
+      stars: 3,
       members: [{ tag: "#8CCVV", name: "Player", attacks: [{ defenderTag: "#BASE", stars: 3, destructionPercentage: 100 }] }],
     },
     opponent: {
       tag: "#9PYLQG",
+      name: "Opponent",
+      stars: 1,
       members: [{ tag: "#BASE", name: "Base", attacks: [] }],
     },
   };
@@ -3319,9 +3405,21 @@ test("roster queue shards reuse the CWL coordinator view without league or war r
   backend.processRefreshAllRosterPipelineIntoAccumulator_ = (rosterData, rosterId, options, accumulator) => {
     assert.equal(rosterId, "main");
     assert.equal(options.cwlCoordinatorClanView.clanTag, "#2LUCULP");
+    assert.equal(options.cwlCoordinatorClanView.currentWar.clanStars, 3);
+    assert.equal(options.cwlCoordinatorClanView.currentWar.opponentStars, 1);
+    assert.equal(options.cwlCoordinatorClanView.currentWar.endTime, "2026-07-05T20:00:00.000Z");
     const stats = backend.refreshCwlStatsCore_(rosterData, rosterId, options);
     assert.equal(stats.result.source, "cwlRuntime");
     assert.equal(stats.rosterData.rosters[0].cwlStats.byTag["#8CCVV"].starsTotal, 3);
+    assert.deepEqual(
+      {
+        state: stats.rosterData.rosters[0].cwlStats.currentWar.state,
+        clanStars: stats.rosterData.rosters[0].cwlStats.currentWar.clanStars,
+        opponentStars: stats.rosterData.rosters[0].cwlStats.currentWar.opponentStars,
+        starStandingAvailable: stats.rosterData.rosters[0].cwlStats.currentWar.starStandingAvailable,
+      },
+      { state: "inwar", clanStars: 3, opponentStars: 1, starStandingAvailable: true },
+    );
     accumulator.perRoster.push({ rosterId, ok: true, issueCount: 0, issues: [] });
     return { rosterData: stats.rosterData, pipelineResult: { cwlStats: stats.result } };
   };

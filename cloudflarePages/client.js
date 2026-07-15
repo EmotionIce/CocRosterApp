@@ -3044,6 +3044,27 @@
         return null;
     };
 
+    // Build the current clan-versus-opponent star standing for an ongoing war.
+    const getRosterCurrentWarStarStanding = (trackingModeRaw, regularWarCurrentRaw, cwlStatsRaw) => {
+        const trackingMode = toStr(trackingModeRaw).trim() === "regularWar" ? "regularWar" : "cwl";
+        const regularWarCurrent = regularWarCurrentRaw && typeof regularWarCurrentRaw === "object" ? regularWarCurrentRaw : {};
+        const cwlStats = cwlStatsRaw && typeof cwlStatsRaw === "object" ? cwlStatsRaw : {};
+        const cwlCurrent = cwlStats.currentWar && typeof cwlStats.currentWar === "object" ? cwlStats.currentWar : {};
+        const currentWar = trackingMode === "regularWar" ? regularWarCurrent : cwlCurrent;
+        const state = toStr(currentWar.state || currentWar.warState).trim().toLowerCase();
+        if (state !== "inwar" || currentWar.starStandingAvailable !== true) return null;
+        const clanStars = toNonNegativeInt(currentWar.clanStars);
+        const opponentStars = toNonNegativeInt(currentWar.opponentStars);
+        const clanLabel = toStr(currentWar.clanName).trim() || normalizeClanTag(currentWar.clanTag) || "Clan";
+        const opponentLabel = toStr(currentWar.opponentName).trim() || normalizeClanTag(currentWar.opponentTag) || "Opponent";
+        return {
+            clanStars,
+            opponentStars,
+            text: "Stars " + clanStars + " - " + opponentStars,
+            title: clanLabel + " " + clanStars + " - " + opponentStars + " " + opponentLabel,
+        };
+    };
+
     // Render one live regular-war countdown badge.
     const renderWarCountdownNode = (node) => {
         if (!node) return;
@@ -7312,6 +7333,8 @@
         const suggestionModel = hideSuggestions || prepActive || trackingMode !== "cwl" ? null : getRosterBenchSuggestionModel(roster);
         const regularWarData = roster && roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : {};
         const regularWarCurrentMeta = regularWarData.currentWar && typeof regularWarData.currentWar === "object" ? regularWarData.currentWar : {};
+        const cwlStatsData = roster && roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
+        const currentWarStarStanding = getRosterCurrentWarStarStanding(trackingMode, regularWarCurrentMeta, cwlStatsData);
         const regularWarAggregateMeta = regularWarData.aggregateMeta && typeof regularWarData.aggregateMeta === "object"
             ? regularWarData.aggregateMeta
             : {};
@@ -7368,6 +7391,11 @@
         ));
         if (prepActive) {
             meta.appendChild(el("span", "badge roster-prep-public-badge roster-head-status", "Showing planned CWL Rosters"));
+        }
+        if (currentWarStarStanding) {
+            const starsBadge = el("span", "badge roster-war-stars roster-head-status", currentWarStarStanding.text);
+            starsBadge.title = currentWarStarStanding.title;
+            meta.appendChild(starsBadge);
         }
         if (trackingMode === "regularWar") {
             const regularWarCountdown = getRegularWarCountdownDescriptor(regularWarCurrentMeta);
