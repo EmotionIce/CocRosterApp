@@ -8441,7 +8441,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     pointer-events:none;
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover){
+  .roster-navigator.is-expanded{
     width:var(--roster-nav-expanded-width);
     border-color:rgba(110,214,198,.23);
     background:
@@ -8453,7 +8453,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
       inset 0 1px 0 rgba(255,255,255,.05);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover)::before{
+  .roster-navigator.is-expanded::before{
     opacity:.78;
     background-position:250px 0, 0 0;
   }
@@ -8521,7 +8521,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     opacity:.48;
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__toggle-mark{
+  .roster-navigator.is-expanded .roster-navigator__toggle-mark{
     border-color:rgba(214,247,109,.35);
     background-color:rgba(214,247,109,.035);
     box-shadow:0 0 16px rgba(110,214,198,.08), inset 0 1px 0 rgba(255,255,255,.04);
@@ -8566,13 +8566,13 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     transition:opacity .18s ease, transform .28s cubic-bezier(.22,1,.36,1);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__toggle-copy,
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__toggle-chevron{
+  .roster-navigator.is-expanded .roster-navigator__toggle-copy,
+  .roster-navigator.is-expanded .roster-navigator__toggle-chevron{
     opacity:1;
     transform:translateX(0);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__toggle{
+  .roster-navigator.is-expanded .roster-navigator__toggle{
     width:202px;
   }
 
@@ -8586,7 +8586,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     transition:width .34s cubic-bezier(.22,1,.36,1);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__panel{
+  .roster-navigator.is-expanded .roster-navigator__panel{
     width:202px;
   }
 
@@ -8611,7 +8611,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     transition:opacity .17s ease, transform .28s cubic-bezier(.22,1,.36,1);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__eyebrow{
+  .roster-navigator.is-expanded .roster-navigator__eyebrow{
     opacity:1;
     transform:translateX(0);
   }
@@ -8671,7 +8671,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     transform:translateX(2px);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__link{
+  .roster-navigator.is-expanded .roster-navigator__link{
     width:202px;
   }
 
@@ -8708,7 +8708,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     transition:opacity .16s ease .02s, transform .28s cubic-bezier(.22,1,.36,1);
   }
 
-  .roster-navigator:is(.is-expanded, :focus-within, :hover) .roster-navigator__copy{
+  .roster-navigator.is-expanded .roster-navigator__copy{
     opacity:1;
     transform:translateX(0);
   }

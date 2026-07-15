@@ -4775,6 +4775,7 @@
         rosterNavigatorProgrammaticAnchor = "";
         const refs = getRosterNavigatorRefs();
         if (refs.desktop) refs.desktop.classList.remove("is-jumping");
+        setRosterNavigatorExpanded(false);
         queueRosterNavigatorScrollSync();
     };
 
@@ -4791,6 +4792,33 @@
         const refs = getRosterNavigatorRefs();
         if (refs.desktop) refs.desktop.classList.toggle("is-jumping", !!rosterNavigatorProgrammaticAnchor);
         scheduleRosterNavigatorProgrammaticJumpFinish();
+    };
+
+    // Recognize keyboard actions that are expected to move the page.
+    const isRosterNavigatorScrollKey = (keyRaw) => [
+        "ArrowDown",
+        "ArrowUp",
+        "PageDown",
+        "PageUp",
+        "Home",
+        "End",
+        " ",
+    ].includes(toStr(keyRaw));
+
+    // Collapse only from genuine scroll intent, not scroll events caused by layout reflow.
+    const handleRosterNavigatorScrollIntent = (event) => {
+        if (event && event.defaultPrevented) return;
+        if (event && event.type === "keydown") {
+            if (!isRosterNavigatorScrollKey(event.key)) return;
+            const target = event.target && event.target.nodeType === 1 ? event.target : null;
+            const tagName = target ? toStr(target.tagName).toUpperCase() : "";
+            if (target && (target.isContentEditable || tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT")) return;
+            if (event.key === " " && target && target.closest && target.closest("button, a, [role='button']")) return;
+        }
+        const refs = getRosterNavigatorRefs();
+        if (refs.toggle && refs.toggle.getAttribute("aria-expanded") === "true") {
+            setRosterNavigatorExpanded(false);
+        }
     };
 
     // Scroll events still update geometry, but cannot replace a pending jump destination.
@@ -4889,6 +4917,9 @@
         refs.select.addEventListener("change", () => {
             jumpToRosterAnchor(refs.select.value, { writeHistory: true, smooth: true });
         });
+        window.addEventListener("wheel", handleRosterNavigatorScrollIntent, { passive: true });
+        window.addEventListener("touchmove", handleRosterNavigatorScrollIntent, { passive: true });
+        window.addEventListener("keydown", handleRosterNavigatorScrollIntent);
         window.addEventListener("scroll", handleRosterNavigatorScroll, { passive: true });
         if ("onscrollend" in window) window.addEventListener("scrollend", finishRosterNavigatorProgrammaticJump, { passive: true });
         window.addEventListener("resize", () => {

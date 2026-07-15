@@ -10,6 +10,9 @@ const clientCode = fs.readFileSync(clientPath, "utf8");
 const indexCode = fs.readFileSync(indexPath, "utf8");
 const stylesCode = fs.readFileSync(stylesPath, "utf8");
 const bootMarker = '    markBootTiming("shell-boot-start");';
+const scrollHandlerStart = clientCode.indexOf("    const handleRosterNavigatorScroll = () => {");
+const scrollHandlerEnd = clientCode.indexOf("\n    };", scrollHandlerStart);
+const scrollHandlerCode = clientCode.slice(scrollHandlerStart, scrollHandlerEnd + 7);
 
 const loadNavigatorInternals = () => {
   assert.ok(clientCode.includes(bootMarker), "expected client boot marker to exist");
@@ -22,6 +25,7 @@ const loadNavigatorInternals = () => {
       "        buildRosterNavigatorModels,",
       "        resolveRosterNavigatorActiveIndex,",
       "        resolveRosterNavigatorMarkerY,",
+      "        isRosterNavigatorScrollKey,",
       "    };",
       "    return;",
       bootMarker,
@@ -84,6 +88,17 @@ test("scrollspy resolution advances in order and selects the final roster at pag
   assert.equal(resolveRosterNavigatorMarkerY(140, 227), 251);
 });
 
+test("recognizes keyboard scrolling without treating activation keys as scroll intent", () => {
+  const { isRosterNavigatorScrollKey } = loadNavigatorInternals();
+
+  for (const key of ["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "]) {
+    assert.equal(isRosterNavigatorScrollKey(key), true, `expected ${JSON.stringify(key)} to count as scrolling`);
+  }
+  assert.equal(isRosterNavigatorScrollKey("Enter"), false);
+  assert.equal(isRosterNavigatorScrollKey("Escape"), false);
+  assert.equal(isRosterNavigatorScrollKey("Tab"), false);
+});
+
 test("ships distinct semantic desktop and mobile navigation controls", () => {
   assert.match(indexCode, /<aside id="rosterNavigator"[^>]*aria-label="Roster navigation"/);
   assert.match(indexCode, /<nav aria-label="Jump between rosters">/);
@@ -93,7 +108,14 @@ test("ships distinct semantic desktop and mobile navigation controls", () => {
   assert.doesNotMatch(indexCode, /id="rosterNavigator"[^>]*role="tablist"/);
   assert.match(stylesCode, /@media \(min-width: 960px\)[\s\S]*\.roster-board-layout\.has-roster-navigator/);
   assert.match(stylesCode, /grid-template-columns:58px minmax\(0, 1fr\)/);
-  assert.match(stylesCode, /\.roster-navigator:is\(\.is-expanded, :focus-within, :hover\)/);
+  assert.match(stylesCode, /\.roster-navigator\.is-expanded\{[\s\S]*width:var\(--roster-nav-expanded-width\)/);
+  assert.doesNotMatch(stylesCode, /\.roster-navigator:is\(\.is-expanded, :focus-within, :hover\)/);
+  assert.match(clientCode, /const handleRosterNavigatorScrollIntent = \(event\) => \{[\s\S]*aria-expanded[\s\S]*setRosterNavigatorExpanded\(false\)/);
+  assert.match(clientCode, /addEventListener\("wheel", handleRosterNavigatorScrollIntent, \{ passive: true \}\)/);
+  assert.match(clientCode, /addEventListener\("touchmove", handleRosterNavigatorScrollIntent, \{ passive: true \}\)/);
+  assert.match(clientCode, /const finishRosterNavigatorProgrammaticJump = \(\) => \{[\s\S]*setRosterNavigatorExpanded\(false\)[\s\S]*queueRosterNavigatorScrollSync\(\)/);
+  assert.ok(scrollHandlerStart >= 0 && scrollHandlerEnd > scrollHandlerStart, "expected the geometry-only scroll handler");
+  assert.doesNotMatch(scrollHandlerCode, /setRosterNavigatorExpanded/);
   assert.match(stylesCode, /backdrop-filter:blur\(15px\) saturate\(125%\)/);
   assert.match(stylesCode, /\.roster-card--anchored\{[\s\S]*scroll-margin-top/);
   assert.match(stylesCode, /--roster-mobile-navigator-height/);
