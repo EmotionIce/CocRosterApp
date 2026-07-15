@@ -1088,6 +1088,13 @@ h1{
 }
 
 /* Public roster player rows: dense warm-charcoal four-zone cards. */
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-card--anchored{
+  padding-inline:clamp(7px, 1.1vw, 14px) !important;
+  border:0 !important;
+  background:transparent !important;
+  box-shadow:none !important;
+}
+
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-list{
   gap:7px;
 }
@@ -1147,18 +1154,6 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   border:0;
   border-radius:8px;
   background:transparent !important;
-}
-
-body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-top::after{
-  content:"";
-  position:absolute;
-  z-index:0;
-  top:7px;
-  right:var(--player-stat-column);
-  bottom:7px;
-  width:1px;
-  background:linear-gradient(transparent, rgba(186,169,139,.20) 17%, rgba(186,169,139,.20) 83%, transparent);
-  pointer-events:none;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card > .player-top[data-player-profile-trigger="1"]:hover{
@@ -1291,7 +1286,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   grid-template-columns:10px minmax(0, 1fr) auto;
   align-items:center;
   gap:3px;
-  margin:7px 6px 0;
+  margin:7px 6px 0 0;
   padding:0 6px;
   border:1px solid rgba(188,171,138,.25) !important;
   border-radius:5px !important;
@@ -1384,6 +1379,9 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge{
+  --form-tone:145,143,136;
+  --form-tone-border:.22;
+  --form-tone-glow:.045;
   position:relative;
   justify-self:stretch;
   min-width:0;
@@ -1394,19 +1392,55 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   gap:3px;
   margin-left:6px;
   padding:0 6px;
-  border:1px solid rgba(188,171,138,.25) !important;
+  border:1px solid rgba(var(--form-tone), var(--form-tone-border)) !important;
   border-radius:5px !important;
-  background:linear-gradient(180deg, rgba(27,25,22,.92), rgba(15,15,15,.94)) !important;
+  background:
+    radial-gradient(115% 175% at 100% 50%, rgba(var(--form-tone), var(--form-tone-glow)), transparent 62%),
+    linear-gradient(180deg, rgba(27,26,24,.93), rgba(15,15,15,.95)) !important;
   color:#e8dfc9 !important;
-  box-shadow:inset 0 1px 0 rgba(255,239,201,.025);
+  box-shadow:
+    inset 0 1px 0 rgba(255,239,201,.025),
+    inset -10px 0 18px rgba(var(--form-tone), .035),
+    0 0 8px rgba(var(--form-tone), .02);
   line-height:1;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-neutral{
+  --form-tone:145,143,136;
+  --form-tone-border:.20;
+  --form-tone-glow:.04;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-low{
+  --form-tone:188,82,72;
+  --form-tone-border:.32;
+  --form-tone-glow:.115;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-fair{
+  --form-tone:181,126,82;
+  --form-tone-border:.27;
+  --form-tone-glow:.085;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-good{
+  --form-tone:103,158,107;
+  --form-tone-border:.28;
+  --form-tone-glow:.095;
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-strong{
+  --form-tone:111,184,112;
+  --form-tone-border:.34;
+  --form-tone-glow:.13;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge::before{
   content:"◆";
-  color:#bca778;
+  color:rgba(var(--form-tone), .88);
   font-size:7px;
   text-align:center;
+  text-shadow:0 0 7px rgba(var(--form-tone), .20);
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-icon{
