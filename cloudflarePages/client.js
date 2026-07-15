@@ -32,6 +32,7 @@
     const ROSTER_SNAPSHOT_IDB_DB_NAME = "roster-public-cache";
     const ROSTER_SNAPSHOT_IDB_STORE_NAME = "snapshots";
     const ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS = 14 * DAY_MS;
+    const ROSTER_ANCHOR_PREFIX = "roster-";
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
         : { format: (value) => String(value) };
@@ -55,6 +56,11 @@
     let landingMediaCanStart = false;
     let landingMediaDeferredStartScheduled = false;
     let rosterHydrationInFlight = false;
+    let rosterNavigatorBound = false;
+    let rosterNavigatorEntries = [];
+    let rosterNavigatorFrameId = 0;
+    let rosterNavigatorHeaderResizeObserver = null;
+    let rosterNavigatorLastHandledHash = "";
     const missingSectionExpandedByRoster = Object.create(null);
 
     const profileCache = Object.create(null);
@@ -831,6 +837,26 @@
         }
     };
 
+    // Parse a supported roster anchor from a URL hash.
+    const parseRosterAnchorHash = (hashRaw) => {
+        let value = toStr(hashRaw).trim().replace(/^#/, "");
+        if (!value) return "";
+        try {
+            value = decodeURIComponent(value);
+        } catch (err) {
+            return "";
+        }
+        value = value.toLowerCase();
+        if (!value.startsWith(ROSTER_ANCHOR_PREFIX)) return "";
+        return /^roster-[a-z0-9][a-z0-9-]*$/.test(value) ? value : "";
+    };
+
+    // Read the current roster anchor from the browser URL.
+    const readRosterAnchorHash = () => {
+        if (typeof window === "undefined" || !window.location) return "";
+        return parseRosterAnchorHash(window.location.hash);
+    };
+
     // Resolve load time public view.
     const resolveLoadTimePublicView = () => {
         if (typeof window !== "undefined" && window && window.ROSTER_ADMIN_MODE) {
@@ -838,6 +864,7 @@
         }
         const pageQueryValue = readPublicPageQueryValue();
         const savedView = sanitizePublicViewValue(publicViewState && publicViewState.view);
+        if (readRosterAnchorHash()) return PUBLIC_VIEW_VALUES.rosters;
         if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.landing) return PUBLIC_VIEW_VALUES.landing;
         if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.rosters) return PUBLIC_VIEW_VALUES.rosters;
         if (pageQueryValue === PUBLIC_PAGE_QUERY_VALUES.leaderboard) return PUBLIC_VIEW_VALUES.leaderboard;
@@ -4566,6 +4593,303 @@
             " in " + matchedRosters + " " + pluralize(matchedRosters, "roster", "rosters") + ".";
     };
 
+    // Convert roster identity text into a stable URL-safe anchor fragment.
+    const slugifyRosterAnchorPart = (valueRaw) => {
+        const raw = toStr(valueRaw).trim().toLowerCase();
+        if (!raw) return "";
+        const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+        return normalized
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 56)
+            .replace(/-+$/g, "");
+    };
+
+    // Build the ordered roster navigator model with collision-safe anchors.
+    const buildRosterNavigatorModels = (rostersRaw) => {
+        const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
+        const usedAnchors = Object.create(null);
+        const models = [];
+        for (let i = 0; i < rosters.length; i++) {
+            const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+            const title = toStr(roster.title).trim() || ("Roster " + (i + 1));
+            const identityPart = slugifyRosterAnchorPart(roster.id) || slugifyRosterAnchorPart(title) || String(i + 1);
+            const anchorBase = ROSTER_ANCHOR_PREFIX + identityPart;
+            usedAnchors[anchorBase] = (usedAnchors[anchorBase] || 0) + 1;
+            const duplicateIndex = usedAnchors[anchorBase];
+            models.push({
+                roster: roster,
+                index: i,
+                anchorId: duplicateIndex === 1 ? anchorBase : (anchorBase + "-" + duplicateIndex),
+                title: title,
+                modeLabel: getRosterTrackingMode(roster) === "regularWar" ? "Regular war" : "CWL",
+            });
+        }
+        return models;
+    };
+
+    // Resolve the active roster from ordered section top coordinates.
+    const resolveRosterNavigatorActiveIndex = (sectionTopsRaw, markerYRaw, atDocumentEnd) => {
+        const sectionTops = Array.isArray(sectionTopsRaw) ? sectionTopsRaw : [];
+        if (!sectionTops.length) return -1;
+        if (atDocumentEnd) return sectionTops.length - 1;
+        const markerY = Number(markerYRaw);
+        const safeMarkerY = Number.isFinite(markerY) ? markerY : 0;
+        let activeIndex = 0;
+        for (let i = 0; i < sectionTops.length; i++) {
+            const top = Number(sectionTops[i]);
+            if (!Number.isFinite(top)) continue;
+            if (top <= safeMarkerY + 1) activeIndex = i;
+            else break;
+        }
+        return activeIndex;
+    };
+
+    // Keep the scroll marker below whichever sticky navigation layer is visible.
+    const resolveRosterNavigatorMarkerY = (headerBottomRaw, mobileBottomRaw) => {
+        const headerBottom = Number(headerBottomRaw);
+        const mobileBottom = Number(mobileBottomRaw);
+        return Math.max(
+            24,
+            Number.isFinite(headerBottom) ? headerBottom + 18 : 0,
+            Number.isFinite(mobileBottom) ? mobileBottom + 10 : 0,
+        );
+    };
+
+    // Get static roster navigator elements.
+    const getRosterNavigatorRefs = () => ({
+        desktop: $("#rosterNavigator"),
+        list: $("#rosterNavigatorList"),
+        position: $("#rosterNavigatorPosition"),
+        mobile: $("#rosterMobileNavigator"),
+        select: $("#rosterMobileSelect"),
+        shell: $(".public-shell"),
+        header: $(".public-header"),
+    });
+
+    // Hide or reveal both navigator variants as one feature.
+    const setRosterNavigatorVisibility = (isVisible) => {
+        const refs = getRosterNavigatorRefs();
+        if (refs.desktop) refs.desktop.classList.toggle("hidden", !isVisible);
+        if (refs.mobile) refs.mobile.classList.toggle("hidden", !isVisible);
+        const layout = $("#rosterBoardLayout");
+        if (layout) layout.classList.toggle("has-roster-navigator", !!isVisible);
+    };
+
+    // Measure the primary sticky header so secondary navigation never overlaps it.
+    const syncRosterNavigatorHeaderOffset = () => {
+        const refs = getRosterNavigatorRefs();
+        if (!refs.shell || !refs.header || typeof refs.header.getBoundingClientRect !== "function") return;
+        const headerHeight = Math.max(0, Math.ceil(refs.header.getBoundingClientRect().height));
+        refs.shell.style.setProperty("--roster-sticky-header-height", headerHeight + "px");
+        const mobileHeight = refs.mobile && typeof refs.mobile.getBoundingClientRect === "function"
+            ? Math.max(0, Math.ceil(refs.mobile.getBoundingClientRect().height))
+            : 0;
+        if (mobileHeight) refs.shell.style.setProperty("--roster-mobile-navigator-height", mobileHeight + "px");
+    };
+
+    // Synchronize the desktop highlight and mobile chooser.
+    const syncRosterNavigatorActiveState = (indexRaw) => {
+        if (!rosterNavigatorEntries.length) return;
+        const index = Math.max(0, Math.min(rosterNavigatorEntries.length - 1, Number(indexRaw) || 0));
+        const refs = getRosterNavigatorRefs();
+        for (let i = 0; i < rosterNavigatorEntries.length; i++) {
+            const entry = rosterNavigatorEntries[i];
+            const isActive = i === index;
+            if (entry.link) {
+                entry.link.classList.toggle("is-current", isActive);
+                if (isActive) entry.link.setAttribute("aria-current", "location");
+                else entry.link.removeAttribute("aria-current");
+            }
+        }
+        const activeEntry = rosterNavigatorEntries[index];
+        if (refs.select && activeEntry && refs.select.value !== activeEntry.model.anchorId) {
+            refs.select.value = activeEntry.model.anchorId;
+        }
+        if (refs.position) {
+            refs.position.textContent = String(index + 1).padStart(2, "0") + " / " + String(rosterNavigatorEntries.length).padStart(2, "0");
+        }
+    };
+
+    // Update the highlighted roster from the current scroll position.
+    const updateRosterNavigatorFromScroll = () => {
+        rosterNavigatorFrameId = 0;
+        if (!rosterNavigatorEntries.length || getEffectivePublicView() !== PUBLIC_VIEW_VALUES.rosters) return;
+        const refs = getRosterNavigatorRefs();
+        const headerBottom = refs.header && typeof refs.header.getBoundingClientRect === "function"
+            ? refs.header.getBoundingClientRect().bottom
+            : 0;
+        const mobileStyles = refs.mobile && typeof window.getComputedStyle === "function"
+            ? window.getComputedStyle(refs.mobile)
+            : null;
+        const mobileBottom = refs.mobile && mobileStyles && mobileStyles.display !== "none" && !refs.mobile.classList.contains("hidden")
+            ? refs.mobile.getBoundingClientRect().bottom
+            : 0;
+        const markerY = resolveRosterNavigatorMarkerY(headerBottom, mobileBottom);
+        const sectionTops = rosterNavigatorEntries.map((entry) => entry.card.getBoundingClientRect().top);
+        const documentElement = typeof document !== "undefined" ? document.documentElement : null;
+        const atDocumentEnd = !!(
+            documentElement &&
+            typeof window !== "undefined" &&
+            window.scrollY + window.innerHeight >= documentElement.scrollHeight - 2
+        );
+        syncRosterNavigatorActiveState(resolveRosterNavigatorActiveIndex(sectionTops, markerY, atDocumentEnd));
+    };
+
+    // Queue one scrollspy update per animation frame.
+    const queueRosterNavigatorScrollSync = () => {
+        if (rosterNavigatorFrameId || typeof window === "undefined") return;
+        const requestFrame = typeof window.requestAnimationFrame === "function"
+            ? window.requestAnimationFrame.bind(window)
+            : (callback) => window.setTimeout(callback, 0);
+        rosterNavigatorFrameId = requestFrame(updateRosterNavigatorFromScroll);
+    };
+
+    // Replace a roster anchor without polluting history when leaving the roster view.
+    function clearRosterAnchorHash() {
+        if (!readRosterAnchorHash() || typeof window === "undefined" || !window.location) return;
+        rosterNavigatorLastHandledHash = "";
+        const nextUrl = toStr(window.location.pathname) + toStr(window.location.search);
+        if (window.history && typeof window.history.replaceState === "function") {
+            window.history.replaceState(null, "", nextUrl || "/");
+        }
+    }
+
+    // Scroll to one roster and optionally create a direct-link history entry.
+    const jumpToRosterAnchor = (anchorRaw, optionsRaw) => {
+        const anchorId = parseRosterAnchorHash("#" + toStr(anchorRaw).replace(/^#/, ""));
+        if (!anchorId) return false;
+        const entry = rosterNavigatorEntries.find((item) => item.model.anchorId === anchorId);
+        if (!entry || !entry.card || typeof entry.card.scrollIntoView !== "function") return false;
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const reduceMotion = typeof window !== "undefined" && typeof window.matchMedia === "function"
+            ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+            : false;
+        if (options.writeHistory !== false && typeof window !== "undefined" && window.location) {
+            const nextUrl = toStr(window.location.pathname) + toStr(window.location.search) + "#" + anchorId;
+            if (window.history && typeof window.history.pushState === "function") {
+                window.history.pushState(null, "", nextUrl);
+            } else {
+                window.location.hash = anchorId;
+            }
+        }
+        rosterNavigatorLastHandledHash = anchorId;
+        syncRosterNavigatorActiveState(entry.model.index);
+        entry.card.scrollIntoView({
+            behavior: options.smooth === false || reduceMotion ? "auto" : "smooth",
+            block: "start",
+        });
+        return true;
+    };
+
+    // Honor a direct roster URL after cards have rendered.
+    const syncRosterNavigatorFromHash = (forceScroll) => {
+        const anchorId = readRosterAnchorHash();
+        if (!anchorId) return false;
+        const entryIndex = rosterNavigatorEntries.findIndex((item) => item.model.anchorId === anchorId);
+        if (entryIndex < 0) return false;
+        syncRosterNavigatorActiveState(entryIndex);
+        if (!forceScroll && rosterNavigatorLastHandledHash === anchorId) return true;
+        rosterNavigatorLastHandledHash = anchorId;
+        const run = () => jumpToRosterAnchor(anchorId, { writeHistory: false, smooth: false });
+        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(run);
+        else if (typeof window !== "undefined") window.setTimeout(run, 0);
+        return true;
+    };
+
+    // Respond to browser back/forward and manually entered roster anchors.
+    const handleRosterNavigatorHistoryChange = () => {
+        const anchorId = readRosterAnchorHash();
+        if (!anchorId) return;
+        rosterNavigatorLastHandledHash = "";
+        if (getEffectivePublicView() !== PUBLIC_VIEW_VALUES.rosters) setPublicView(PUBLIC_VIEW_VALUES.rosters);
+        syncRosterNavigatorFromHash(true);
+    };
+
+    // Bind long-lived navigator interactions once.
+    const bindRosterNavigatorUi = () => {
+        if (rosterNavigatorBound || typeof window === "undefined") return;
+        const refs = getRosterNavigatorRefs();
+        if (!refs.list || !refs.select) return;
+        rosterNavigatorBound = true;
+        refs.list.addEventListener("click", (event) => {
+            const eventTarget = event.target && event.target.nodeType === 1
+                ? event.target
+                : (event.target && event.target.parentElement ? event.target.parentElement : null);
+            const link = eventTarget && eventTarget.closest ? eventTarget.closest("a[data-roster-anchor]") : null;
+            if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            if (typeof event.button === "number" && event.button !== 0) return;
+            event.preventDefault();
+            jumpToRosterAnchor(link.dataset.rosterAnchor, { writeHistory: true, smooth: true });
+        });
+        refs.select.addEventListener("change", () => {
+            jumpToRosterAnchor(refs.select.value, { writeHistory: true, smooth: true });
+        });
+        window.addEventListener("scroll", queueRosterNavigatorScrollSync, { passive: true });
+        window.addEventListener("resize", () => {
+            syncRosterNavigatorHeaderOffset();
+            queueRosterNavigatorScrollSync();
+        });
+        window.addEventListener("hashchange", handleRosterNavigatorHistoryChange);
+        window.addEventListener("popstate", handleRosterNavigatorHistoryChange);
+        if (typeof window.ResizeObserver === "function" && refs.header) {
+            rosterNavigatorHeaderResizeObserver = new window.ResizeObserver(() => {
+                syncRosterNavigatorHeaderOffset();
+                queueRosterNavigatorScrollSync();
+            });
+            rosterNavigatorHeaderResizeObserver.observe(refs.header);
+        }
+        syncRosterNavigatorHeaderOffset();
+    };
+
+    // Render both responsive roster navigator controls from visible cards.
+    const renderRosterNavigator = (modelsRaw, cardsRaw) => {
+        const models = Array.isArray(modelsRaw) ? modelsRaw : [];
+        const cards = Array.isArray(cardsRaw) ? cardsRaw : [];
+        const refs = getRosterNavigatorRefs();
+        rosterNavigatorEntries = [];
+        if (!refs.list || !refs.select) return;
+        refs.list.textContent = "";
+        refs.select.textContent = "";
+        const isAdminMode = typeof window !== "undefined" && !!window.ROSTER_ADMIN_MODE;
+        const isVisible = !isAdminMode && models.length > 1 && models.length === cards.length;
+        setRosterNavigatorVisibility(isVisible);
+        if (!isVisible) return;
+
+        for (let i = 0; i < models.length; i++) {
+            const model = models[i];
+            const card = cards[i];
+            const item = document.createElement("li");
+            item.className = "roster-navigator__item";
+            const link = document.createElement("a");
+            link.className = "roster-navigator__link";
+            link.href = "#" + model.anchorId;
+            link.dataset.rosterAnchor = model.anchorId;
+            link.setAttribute("aria-label", "Jump to " + model.title);
+            const index = el("span", "roster-navigator__index", String(i + 1).padStart(2, "0"));
+            index.setAttribute("aria-hidden", "true");
+            const copy = el("span", "roster-navigator__copy");
+            copy.appendChild(el("span", "roster-navigator__title", model.title));
+            copy.appendChild(el("span", "roster-navigator__mode", model.modeLabel));
+            link.appendChild(index);
+            link.appendChild(copy);
+            item.appendChild(link);
+            refs.list.appendChild(item);
+
+            const option = document.createElement("option");
+            option.value = model.anchorId;
+            option.textContent = String(i + 1) + ". " + model.title;
+            refs.select.appendChild(option);
+            rosterNavigatorEntries.push({ model: model, card: card, link: link, option: option });
+        }
+
+        bindRosterNavigatorUi();
+        syncRosterNavigatorHeaderOffset();
+        if (!syncRosterNavigatorFromHash(false)) syncRosterNavigatorActiveState(0);
+        queueRosterNavigatorScrollSync();
+    };
+
     // Normalize leaderboard league text.
     const normalizeLeaderboardLeagueText = (valueRaw) => {
         const raw = toStr(valueRaw).trim().toLowerCase();
@@ -8047,6 +8371,7 @@
     const renderRostersLoadingState = () => {
         const target = $("#rosters");
         if (!target) return;
+        renderRosterNavigator([], []);
         target.textContent = "";
         for (let i = 0; i < 3; i++) {
             const card = el("article", "card roster-loading-card view-loading-skeleton");
@@ -8144,6 +8469,7 @@
     // Set public view.
     const setPublicView = (viewRaw) => {
         const nextView = sanitizePublicViewValue(viewRaw);
+        if (nextView !== PUBLIC_VIEW_VALUES.rosters) clearRosterAnchorHash();
         if (!publicViewState || typeof publicViewState !== "object") publicViewState = buildDefaultPublicViewState();
         if (publicViewState.view === nextView) {
             syncPublicViewButtonsUi();
@@ -8239,15 +8565,24 @@
         const isSearchMode = !!filtered.query;
         const hideSuggestions = isSearchMode && !isAdminMode;
 
+        const navigatorModels = buildRosterNavigatorModels(filtered.rosters);
+        const rosterCards = [];
         target.textContent = "";
         for (let i = 0; i < filtered.rosters.length; i++) {
-            target.appendChild(renderRosterCard(filtered.rosters[i], {
+            const card = renderRosterCard(filtered.rosters[i], {
                 showEmptySections: !isSearchMode,
                 hideSuggestions: hideSuggestions,
                 expandMissingByDefault: isSearchMode,
                 data: data,
-            }));
+            });
+            card.id = navigatorModels[i].anchorId;
+            card.classList.add("roster-card--anchored");
+            card.dataset.rosterAnchor = navigatorModels[i].anchorId;
+            rosterCards.push(card);
+            target.appendChild(card);
         }
+
+        renderRosterNavigator(navigatorModels, rosterCards);
 
         if (!filtered.rosters.length) {
             const emptyCard = el("div", "card");
