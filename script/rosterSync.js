@@ -2012,6 +2012,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 
 	const usableWars = [];
+	let preparationWar = null;
 	let sawWarTag404 = false;
 	for (let i = 0; i < warTags.length; i++) {
 		const warTag = warTags[i];
@@ -2043,10 +2044,14 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			throw new Error("Invalid CWL war payload for war tag " + warTag + ".");
 		}
 		const warState = normalizeWarState_(war && war.state);
-		if (warState !== "inwar" && warState !== "warended") continue;
+		if (warState !== "preparation" && warState !== "inwar" && warState !== "warended") continue;
 
 		const side = pickWarSideForClan_(war, ctx.clanTag);
 		if (!side) continue;
+		if (warState === "preparation") {
+			if (!preparationWar) preparationWar = { warTag: warTag, war: war, roundIndex: i };
+			continue;
+		}
 
 		usableWars.push({
 			warTag: warTag,
@@ -2054,7 +2059,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			warState: warState,
 		});
 	}
-	if (!usableWars.length) {
+	if (!usableWars.length && !preparationWar) {
 		const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 		return {
 			ok: true,
@@ -2075,7 +2080,9 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	const byTag = {};
 	let warsProcessed = 0;
 	let finalizedCwlWars = 0;
-	let cwlCurrentWar = null;
+	let cwlCurrentWar = preparationWar
+		? buildCwlCurrentWarFromWar_(preparationWar.war, preparationWar.warTag, ctx.clanTag, preparationWar.roundIndex)
+		: null;
 
 	for (let i = 0; i < usableWars.length; i++) {
 		const warTag = usableWars[i].warTag;

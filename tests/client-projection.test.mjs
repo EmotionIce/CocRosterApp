@@ -26,6 +26,7 @@ const loadClientInternals = (overrides = {}) => {
       "        readDurableCachedRosterSnapshot,",
       "        writeCachedRosterSnapshot,",
       "        resolveLeaderboardRankedSeasonCycle,",
+      "        getRosterCurrentWarPresentation,",
       "        getRosterCurrentWarStarStanding,",
       "    };",
       "    return;",
@@ -84,6 +85,45 @@ test("formats ongoing regular-war and CWL star standings only when fresh score d
   assert.equal(getRosterCurrentWarStarStanding("cwl", {}, {
     currentWar: { state: "warended", clanStars: 30, opponentStars: 28, starStandingAvailable: true },
   }), null);
+});
+
+test("presents regular and CWL preparation wars with opponents and start countdowns", () => {
+  const { getRosterCurrentWarPresentation } = loadClientInternals();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(getRosterCurrentWarPresentation("regularWar", {
+      state: "preparation",
+      clanName: "Turtle",
+      clanStars: 0,
+      opponentName: "Rivals",
+      opponentStars: 0,
+      starStandingAvailable: true,
+      startTime: "2026-07-17T18:00:00.000Z",
+    }, {}))),
+    {
+      state: "preparation",
+      phaseLabel: "Preparation day",
+      clanName: "Turtle",
+      clanStars: 0,
+      opponentName: "Rivals",
+      opponentStars: 0,
+      scoreAvailable: false,
+      countdownKind: "starts",
+      countdownTargetAt: "2026-07-17T18:00:00.000Z",
+    },
+  );
+  const cwl = getRosterCurrentWarPresentation("cwl", {}, {
+    currentWar: {
+      warState: "preparation",
+      clanTag: "#CLAN",
+      opponentTag: "#OPP",
+      startTime: "2026-08-02T08:00:00.000Z",
+    },
+  });
+  assert.equal(cwl.phaseLabel, "Preparation day");
+  assert.equal(cwl.clanName, "#CLAN");
+  assert.equal(cwl.opponentName, "#OPP");
+  assert.equal(cwl.countdownKind, "starts");
+  assert.equal(cwl.scoreAvailable, false);
 });
 
 const makeMemoryIndexedDb = () => {

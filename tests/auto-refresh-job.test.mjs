@@ -609,6 +609,54 @@ test("direct CWL refresh stores the daily war star standing from prefetched data
   );
 });
 
+test("direct CWL refresh retains a preparation-day matchup from prefetched data", () => {
+  const backend = loadBackend();
+  const rawData = buildRosterData();
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  const data = backend.validateRosterData_(rawData);
+  const leaguegroup = buildOneRoundCwlLeagueGroup({
+    state: "preparation",
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+  });
+  const war = buildOneRoundCwlWar({
+    state: "preparation",
+    clanTag: "#2LUCULP",
+    clanName: "Turtle",
+    opponentTag: "#9PYLQG",
+    opponentName: "Rivals",
+    clanStars: 0,
+    opponentStars: 0,
+    startTime: "2026-08-02T08:00:00.000Z",
+  });
+  const refreshed = backend.refreshCwlStatsCore_(data, "main", {
+    autoRefreshSnapshotMode: true,
+    prefetchedLeaguegroupRawByClanTag: { "#2LUCULP": leaguegroup },
+    prefetchedCwlWarRawByTag: { "#WAR1": war },
+  });
+  const currentWar = refreshed.rosterData.rosters[0].cwlStats.currentWar;
+  assert.deepEqual(
+    {
+      state: currentWar.state,
+      clanName: currentWar.clanName,
+      opponentName: currentWar.opponentName,
+      clanStars: currentWar.clanStars,
+      opponentStars: currentWar.opponentStars,
+      startTime: currentWar.startTime,
+      starStandingAvailable: currentWar.starStandingAvailable,
+    },
+    {
+      state: "preparation",
+      clanName: "Turtle",
+      opponentName: "Rivals",
+      clanStars: 0,
+      opponentStars: 0,
+      startTime: "2026-08-02T08:00:00.000Z",
+      starStandingAvailable: true,
+    },
+  );
+});
+
 const installPublishedActiveVersion = (backend, dataRaw) => {
   const data = backend.validateRosterData_(dataRaw || buildRosterData());
   return backend.writeActiveRosterVersionShards_("source-1", data, {

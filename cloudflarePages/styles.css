@@ -8197,6 +8197,532 @@ body:not(.admin-shell-page) .roster-head-status--warning{
   }
 }
 
+/* Public roster tactical header: framed clan-war overview inspired by the in-game war board. */
+body:not(.admin-shell-page) .roster-head{
+  --war-clan:214,247,109;
+  --war-opponent:221,93,62;
+  position:relative;
+  isolation:isolate;
+  display:grid;
+  gap:0;
+  overflow:hidden;
+  margin:0 0 22px;
+  padding:0;
+  border:1px solid rgba(246,232,185,.23);
+  border-radius:2px;
+  background:
+    linear-gradient(115deg, rgba(16,18,21,.99), rgba(7,10,13,.995) 58%, rgba(12,13,16,.99)) padding-box;
+  box-shadow:
+    inset 0 1px 0 rgba(255,249,226,.035),
+    0 18px 40px rgba(0,0,0,.28);
+}
+
+body:not(.admin-shell-page) .roster-head::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  z-index:-1;
+  pointer-events:none;
+  background:
+    linear-gradient(90deg, rgba(var(--war-clan),.025), transparent 40%, rgba(var(--war-opponent),.025)),
+    repeating-linear-gradient(116deg, rgba(246,232,185,.025) 0 1px, transparent 1px 35px);
+  mask-image:none;
+}
+
+body:not(.admin-shell-page) .roster-head::after{
+  content:"";
+  position:absolute;
+  inset:0 0 auto;
+  width:100%;
+  height:1px;
+  pointer-events:none;
+  background:linear-gradient(90deg, rgba(var(--war-clan),.55), rgba(212,194,127,.32) 52%, rgba(var(--war-opponent),.48));
+  box-shadow:none;
+}
+
+body:not(.admin-shell-page) .roster-head--cwl{
+  --war-clan:110,214,198;
+  --war-opponent:255,121,214;
+}
+
+body:not(.admin-shell-page) .roster-head--state-preparation{
+  --war-clan:214,247,109;
+  --war-opponent:212,194,127;
+}
+
+body:not(.admin-shell-page) .roster-head__top{
+  position:relative;
+  z-index:1;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  min-height:82px;
+  padding:13px 16px;
+}
+
+body:not(.admin-shell-page) .roster-head__identity-lead{
+  display:flex;
+  align-items:center;
+  min-width:0;
+  gap:13px;
+}
+
+body:not(.admin-shell-page) .roster-head__crest{
+  position:relative;
+  flex:0 0 54px;
+  width:54px;
+  height:58px;
+  display:grid;
+  place-items:center;
+  clip-path:polygon(9% 0, 91% 0, 100% 12%, 92% 78%, 50% 100%, 8% 78%, 0 12%);
+  border:1px solid transparent;
+  background:
+    linear-gradient(155deg, rgba(35,31,23,.98), rgba(8,11,14,.98)) padding-box,
+    linear-gradient(145deg, rgba(246,232,185,.62), rgba(212,194,127,.16)) border-box;
+  color:#e6c970;
+  font-size:28px;
+  line-height:1;
+  text-shadow:0 0 15px rgba(230,201,112,.25);
+  box-shadow:inset 0 0 18px rgba(212,194,127,.08);
+}
+
+body:not(.admin-shell-page) .roster-head__identity{
+  display:grid;
+  gap:4px;
+  min-width:0;
+}
+
+body:not(.admin-shell-page) .roster-head__eyebrow{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  color:rgb(var(--war-clan));
+  font-size:9px;
+  font-weight:840;
+  line-height:1.2;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+
+body:not(.admin-shell-page) .roster-head__eyebrow::before{
+  content:none;
+}
+
+body:not(.admin-shell-page) .roster-head h2{
+  max-width:24ch;
+  margin:0;
+  color:var(--turtle-cream);
+  font-size:clamp(22px, 3vw, 29px);
+  font-weight:830;
+  line-height:1.05;
+  letter-spacing:-.015em;
+  text-wrap:balance;
+  text-shadow:0 2px 24px rgba(0,0,0,.34);
+}
+
+body:not(.admin-shell-page) .roster-head__actions{
+  flex:0 0 auto;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link{
+  min-height:38px;
+  margin:0;
+  padding:0 15px;
+  border:1px solid rgba(212,194,127,.48) !important;
+  border-radius:0 !important;
+  clip-path:polygon(9px 0, 100% 0, calc(100% - 9px) 100%, 0 100%);
+  background:rgba(8,11,14,.78) !important;
+  color:#f3e6b7 !important;
+  font-size:9px;
+  font-weight:820;
+  letter-spacing:.075em;
+  text-transform:uppercase;
+  transition:transform .16s ease, background-color .16s ease, border-color .16s ease;
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link::after{
+  content:"↗";
+  margin-left:7px;
+  color:rgb(var(--war-clan));
+  font-size:12px;
+  line-height:1;
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link:hover{
+  border-color:rgba(var(--war-clan),.72) !important;
+  background:rgba(var(--war-clan),.075) !important;
+  color:#fff !important;
+  transform:translateY(-1px);
+}
+
+body:not(.admin-shell-page) .roster-head__clan-link:focus-visible{
+  outline:2px solid rgb(var(--war-clan));
+  outline-offset:3px;
+}
+
+body:not(.admin-shell-page) .roster-war-matchup{
+  position:relative;
+  z-index:1;
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) 76px minmax(0, 1fr);
+  align-items:stretch;
+  min-height:84px;
+  border-top:1px solid rgba(246,232,185,.10);
+  border-bottom:1px solid rgba(246,232,185,.10);
+  background:
+    linear-gradient(90deg, rgba(var(--war-clan),.055), transparent 42%),
+    linear-gradient(270deg, rgba(var(--war-opponent),.055), transparent 42%),
+    rgba(3,6,8,.48);
+}
+
+body:not(.admin-shell-page) .roster-war-team{
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:13px;
+  min-width:0;
+  padding:14px clamp(16px, 3vw, 32px);
+}
+
+body:not(.admin-shell-page) .roster-war-team--clan{
+  color:rgb(var(--war-clan));
+  clip-path:polygon(0 0, calc(100% - 22px) 0, 100% 50%, calc(100% - 22px) 100%, 0 100%);
+}
+
+body:not(.admin-shell-page) .roster-war-team--opponent{
+  color:rgb(var(--war-opponent));
+  clip-path:polygon(22px 0, 100% 0, 100% 100%, 22px 100%, 0 50%);
+}
+
+body:not(.admin-shell-page) .roster-war-team__name{
+  min-width:0;
+  overflow:hidden;
+  color:currentColor;
+  font-size:10px;
+  font-weight:830;
+  letter-spacing:.105em;
+  text-overflow:ellipsis;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+
+body:not(.admin-shell-page) .roster-war-team__score{
+  flex:0 0 auto;
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  color:#e9dfbe;
+  font-variant-numeric:tabular-nums;
+}
+
+body:not(.admin-shell-page) .roster-war-team__star{
+  color:#dbb65f;
+  font-size:25px;
+  line-height:1;
+  text-shadow:0 0 12px rgba(219,182,95,.22);
+}
+
+body:not(.admin-shell-page) .roster-war-team__score-value{
+  color:#ece3c8;
+  font-size:clamp(30px, 4.4vw, 42px);
+  font-weight:860;
+  line-height:1;
+  letter-spacing:-.045em;
+}
+
+body:not(.admin-shell-page) .roster-war-team__score-value--pending{
+  color:rgba(236,227,200,.38);
+  font-size:31px;
+  font-weight:620;
+}
+
+body:not(.admin-shell-page) .roster-war-versus{
+  position:relative;
+  z-index:2;
+  display:grid;
+  place-content:center;
+  justify-items:center;
+  gap:4px;
+  min-width:0;
+}
+
+body:not(.admin-shell-page) .roster-war-versus::before,
+body:not(.admin-shell-page) .roster-war-versus::after{
+  content:"";
+  position:absolute;
+  inset:13px 3px;
+  z-index:-1;
+  clip-path:polygon(24% 0, 76% 0, 100% 50%, 76% 100%, 24% 100%, 0 50%);
+}
+
+body:not(.admin-shell-page) .roster-war-versus::before{
+  background:linear-gradient(135deg, rgba(var(--war-clan),.78), rgba(212,194,127,.24) 49%, rgba(var(--war-opponent),.68));
+}
+
+body:not(.admin-shell-page) .roster-war-versus::after{
+  inset:14px 4px;
+  background:#0a0d10;
+}
+
+body:not(.admin-shell-page) .roster-war-versus__label{
+  color:#f4ecd4;
+  font-size:12px;
+  line-height:1;
+  letter-spacing:.08em;
+}
+
+body:not(.admin-shell-page) .roster-war-versus__phase{
+  max-width:60px;
+  color:#aaa38f;
+  font-size:7px;
+  font-weight:720;
+  line-height:1.2;
+  letter-spacing:.08em;
+  text-align:center;
+  text-transform:uppercase;
+}
+
+body:not(.admin-shell-page) .roster-command-row{
+  position:relative;
+  z-index:1;
+  display:flex;
+  align-items:stretch;
+  flex-wrap:wrap;
+  gap:0;
+  width:100%;
+  min-height:48px;
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:rgba(7,9,12,.70);
+}
+
+body:not(.admin-shell-page) .roster-head-metric{
+  position:relative;
+  flex:1 1 145px;
+  min-width:0;
+  min-height:48px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  padding:9px 16px;
+  border:0;
+  border-right:1px solid rgba(246,232,185,.09);
+  border-radius:0;
+  background:transparent;
+}
+
+body:not(.admin-shell-page) .roster-head-metric__icon{
+  color:rgb(var(--war-clan));
+  font-size:16px;
+  line-height:1;
+}
+
+body:not(.admin-shell-page) .roster-head-metric--secondary .roster-head-metric__icon{
+  color:#8e958f;
+}
+
+body:not(.admin-shell-page) .roster-head-metric__label{
+  color:#b4b0a3;
+  font-size:9px;
+  font-weight:720;
+  line-height:1.2;
+  letter-spacing:.105em;
+  text-transform:uppercase;
+}
+
+body:not(.admin-shell-page) .roster-head-metric__value{
+  color:#e5dcc1;
+  font-size:12px;
+  font-weight:800;
+  line-height:1;
+  font-variant-numeric:tabular-nums;
+}
+
+body:not(.admin-shell-page) .roster-head-status{
+  position:relative;
+  flex:1 1 190px;
+  min-height:48px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:9px 16px !important;
+  border:0 !important;
+  border-radius:0 !important;
+  background:transparent !important;
+  color:#d8cb9f !important;
+  font-size:9px;
+  font-weight:760;
+  letter-spacing:.075em;
+  text-align:center;
+  text-transform:uppercase;
+}
+
+body:not(.admin-shell-page) .roster-war-countdown::before{
+  content:"⌛";
+  margin-right:8px;
+  color:#d7b459;
+  font-size:15px;
+}
+
+body:not(.admin-shell-page) .roster-war-phase::before{
+  content:"◈";
+  margin-right:8px;
+  color:rgb(var(--war-clan));
+}
+
+body:not(.admin-shell-page) .roster-head-status--warning{
+  color:#ffd7f2 !important;
+}
+
+@media (max-width: 680px){
+  body:not(.admin-shell-page) .roster-head{
+    margin-bottom:20px;
+    padding:0;
+  }
+
+  body:not(.admin-shell-page) .roster-head__top{
+    min-height:76px;
+    padding:12px;
+    flex-direction:row;
+    align-items:center;
+    gap:10px;
+  }
+
+  body:not(.admin-shell-page) .roster-head__identity-lead{
+    gap:10px;
+  }
+
+  body:not(.admin-shell-page) .roster-head__crest{
+    flex-basis:48px;
+    width:48px;
+    height:52px;
+    font-size:24px;
+  }
+
+  body:not(.admin-shell-page) .roster-head h2{
+    max-width:19ch;
+    font-size:clamp(20px, 5.8vw, 25px);
+  }
+
+  body:not(.admin-shell-page) .roster-head__clan-link{
+    min-height:35px;
+    padding-inline:11px;
+    font-size:8px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-matchup{
+    grid-template-columns:minmax(0, 1fr) 62px minmax(0, 1fr);
+    min-height:78px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team{
+    flex-direction:column;
+    gap:5px;
+    padding:11px 13px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team--opponent{
+    flex-direction:column;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team__name{
+    max-width:100%;
+    font-size:8px;
+    letter-spacing:.08em;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team__star{
+    font-size:20px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team__score-value{
+    font-size:30px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-versus::before{
+    inset:13px 1px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-versus::after{
+    inset:14px 2px;
+  }
+
+  body:not(.admin-shell-page) .roster-command-row{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+  }
+
+  body:not(.admin-shell-page) .roster-head-metric{
+    min-height:44px;
+    padding:8px 10px;
+  }
+
+  body:not(.admin-shell-page) .roster-head-status{
+    grid-column:1 / -1;
+    min-height:42px;
+    border-top:1px solid rgba(246,232,185,.09) !important;
+  }
+}
+
+@media (max-width: 430px){
+  body:not(.admin-shell-page) .roster-head__top{
+    padding:10px;
+  }
+
+  body:not(.admin-shell-page) .roster-head__crest{
+    flex-basis:43px;
+    width:43px;
+    height:47px;
+    font-size:21px;
+  }
+
+  body:not(.admin-shell-page) .roster-head__eyebrow{
+    font-size:8px;
+    letter-spacing:.1em;
+  }
+
+  body:not(.admin-shell-page) .roster-head h2{
+    font-size:clamp(18px, 5.5vw, 22px);
+  }
+
+  body:not(.admin-shell-page) .roster-head__clan-link{
+    max-width:76px;
+    padding-inline:8px;
+    line-height:1.15;
+    text-align:center;
+    white-space:normal;
+  }
+
+  body:not(.admin-shell-page) .roster-war-matchup{
+    grid-template-columns:minmax(0, 1fr) 54px minmax(0, 1fr);
+  }
+
+  body:not(.admin-shell-page) .roster-war-team{
+    padding-inline:9px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-versus__phase{
+    max-width:46px;
+    font-size:6px;
+  }
+
+  body:not(.admin-shell-page) .roster-head-metric{
+    gap:6px;
+    padding-inline:7px;
+  }
+
+  body:not(.admin-shell-page) .roster-head-metric__label{
+    font-size:8px;
+  }
+}
+
 /* Anchored roster navigation: a secondary route, never another primary tab row. */
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
   --roster-sticky-header-height:72px;
