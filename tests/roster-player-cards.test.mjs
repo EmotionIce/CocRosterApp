@@ -33,7 +33,9 @@ test("ships a scoped dense four-area public roster layout", () => {
   assert.match(playerCardStyles, /\.player-right\{\s*display:contents/);
   assert.match(playerCardStyles, /\.player-cwl\{[\s\S]*grid-column:4[\s\S]*grid-row:1/);
   assert.match(playerCardStyles, /margin:7px 6px 0 0/);
-  assert.match(playerCardStyles, /\.player-form-badge\{[\s\S]*grid-template-columns:10px minmax\(0, 1fr\) auto/);
+  assert.match(playerCardStyles, /\.player-cwl\{[\s\S]*grid-template-columns:9px minmax\(0, 1fr\) auto[\s\S]*gap:2px[\s\S]*padding:0 5px/);
+  assert.match(playerCardStyles, /\.player-form-badge\{[\s\S]*grid-template-columns:9px minmax\(0, 1fr\) auto[\s\S]*gap:2px[\s\S]*padding:0 5px/);
+  assert.match(playerCardStyles, /@media \(max-width: 420px\)\{[\s\S]*--player-stat-column:78px/);
   assert.doesNotMatch(playerCardStyles, /\.player-top::after/);
 });
 

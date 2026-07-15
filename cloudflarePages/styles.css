@@ -1283,11 +1283,11 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   min-width:0;
   height:24px;
   display:grid;
-  grid-template-columns:10px minmax(0, 1fr) auto;
+  grid-template-columns:9px minmax(0, 1fr) auto;
   align-items:center;
-  gap:3px;
+  gap:2px;
   margin:7px 6px 0 0;
-  padding:0 6px;
+  padding:0 5px;
   border:1px solid rgba(188,171,138,.25) !important;
   border-radius:5px !important;
   background:linear-gradient(180deg, rgba(27,25,22,.92), rgba(15,15,15,.94)) !important;
@@ -1387,11 +1387,11 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   min-width:0;
   height:24px;
   display:grid;
-  grid-template-columns:10px minmax(0, 1fr) auto;
+  grid-template-columns:9px minmax(0, 1fr) auto;
   align-items:center;
-  gap:3px;
+  gap:2px;
   margin-left:6px;
-  padding:0 6px;
+  padding:0 5px;
   border:1px solid rgba(var(--form-tone), var(--form-tone-border)) !important;
   border-radius:5px !important;
   background:
@@ -1498,7 +1498,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card{
     --player-th-column:42px;
     --player-league-column:46px;
-    --player-stat-column:74px;
+    --player-stat-column:78px;
     --player-row-height:64px;
   }
 
