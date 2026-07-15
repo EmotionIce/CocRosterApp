@@ -7421,11 +7421,13 @@ function markCwlSeasonEventAggregateStale_(eventRaw, reasonRaw, nowIsoRaw) {
 	if (!eventId) return { ok: false, status: "missing-event-id" };
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
 	const existing = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(eventId, "live"));
+	let liveChanged = false;
 	if (existing && existing.eventId) {
 		existing.stale = true;
 		existing.staleSince = existing.staleSince || nowIso;
 		existing.staleReason = sanitizeSeasonEventText_(reasonRaw, 160) || "partial-cwl-refresh";
 		writeSeasonEventFirebasePayload_(buildCwlSeasonEventAggregatePath_(eventId, "live"), "PUT", existing);
+		liveChanged = true;
 	}
 	const cwl = sanitizeCwlSeasonEventMeta_(event.cwl);
 	cwl.stale = true;
@@ -7436,7 +7438,7 @@ function markCwlSeasonEventAggregateStale_(eventRaw, reasonRaw, nowIsoRaw) {
 		cwl: cwl,
 		updatedAt: nowIso,
 	});
-	return { ok: true, status: "stale", eventId: eventId, reason: cwl.staleReason };
+	return { ok: true, status: "stale", eventId: eventId, reason: cwl.staleReason, publicationActions: { liveAggregateAction: liveChanged ? "put" : "none", finalAggregateAction: "none", pointerAction: "none" } };
 }
 
 // Publish CWL aggregate and lifecycle update from a complete shared snapshot.
@@ -7491,7 +7493,8 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 		const existingLive = sanitizeCwlSeasonEventAggregate_(readCwlSeasonEventAggregate_(eventId, "live"));
 		const existingRankedTagsJson = JSON.stringify(Array.isArray(existingLive.rankedTags) ? existingLive.rankedTags : []);
 		const nextRankedTagsJson = JSON.stringify(Array.isArray(aggregate.rankedTags) ? aggregate.rankedTags : []);
-		if (existingLive.hash !== aggregate.hash || existingLive.stale === true || existingRankedTagsJson !== nextRankedTagsJson) {
+		const liveAggregateChanged = existingLive.hash !== aggregate.hash || existingLive.stale === true || existingRankedTagsJson !== nextRankedTagsJson;
+		if (liveAggregateChanged) {
 			writeSeasonEventFirebasePayload_(buildCwlSeasonEventAggregatePath_(eventId, "live"), "PUT", aggregate);
 		}
 
@@ -7561,6 +7564,7 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 					completionFingerprint: fingerprint,
 					finalized: true,
 					finalPlayerCount: finalAggregate.playerCount,
+					publicationActions: { liveAggregateAction: "delete", finalAggregateAction: "put", pointerAction: "put" },
 				};
 			} else {
 				nextState = "finalizing";
@@ -7601,6 +7605,7 @@ function publishCwlSeasonEventRefreshResult_(eventRaw, metaRaw, aggregateResultR
 			aggregateHash: aggregate.hash,
 			finalized: false,
 			finalPlayerCount: finalAggregate ? finalAggregate.playerCount : 0,
+			publicationActions: { liveAggregateAction: liveAggregateChanged ? "put" : "none", finalAggregateAction: "none", pointerAction: "put" },
 		};
 	});
 }
@@ -7612,8 +7617,13 @@ function finishCwlLifecycleRefreshPublication_(resultRaw, eventRaw) {
 	if (!eventId || result.ok === false) return result;
 	const resultState = normalizeCwlTrackingState_(result.status);
 	const lifecycleState = resultState || normalizeCwlTrackingState_(event.cwlTrackingState) || "waiting";
+	const actions = result.publicationActions && typeof result.publicationActions === "object" ? result.publicationActions : null;
+	if (actions && actions.skip === true) return result;
 	const descriptor = buildCwlLifecyclePublicationDescriptor_(eventId, lifecycleState, {
 		reason: "cwl-lifecycle-" + lifecycleState,
+		liveAggregateAction: actions && actions.liveAggregateAction,
+		finalAggregateAction: actions && actions.finalAggregateAction,
+		pointerAction: actions && actions.pointerAction,
 	});
 	result.publication = descriptor;
 	result.cloudflarePublish = publishCwlLifecycleDescriptor_(descriptor);
@@ -7680,6 +7690,7 @@ function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, o
 				eventId: event.eventId,
 				targetReset: true,
 				event: summarizeSeasonEvent_(event),
+				publicationActions: { liveAggregateAction: "delete", finalAggregateAction: "delete", pointerAction: "none" },
 			}, event);
 		}
 	}
@@ -7701,6 +7712,9 @@ function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, o
 			eventId: event.eventId,
 			targetStatus: targetResult.status,
 			event: summarizeSeasonEvent_(event),
+			publicationActions: targetResult.changed
+				? { liveAggregateAction: "none", finalAggregateAction: "none", pointerAction: "none" }
+				: { skip: true },
 		};
 		return finishCwlLifecycleRefreshPublication_(unresolved, event);
 	}
@@ -7715,6 +7729,7 @@ function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, o
 			status: "waiting",
 			eventId: event.eventId,
 			event: summarizeSeasonEvent_(Object.assign({}, event, { updatedAt: nowIso })),
+			publicationActions: { liveAggregateAction: "none", finalAggregateAction: "none", pointerAction: "none" },
 		}, event);
 	}
 
@@ -7745,10 +7760,12 @@ function refreshCurrentCwlSeasonEventFromSnapshot_(rosterDataRaw, snapshotRaw, o
 			eventId: event.eventId,
 			discoveryIncomplete: !!aggregateResult.discoveryIncomplete,
 			requestCounts: coordinator.requestCounts || {},
+			publicationActions: { liveAggregateAction: "none", finalAggregateAction: "none", pointerAction: "none" },
 		}, event);
 	}
 	if (!aggregateResult.ok) {
-		return finishCwlLifecycleRefreshPublication_(markCwlSeasonEventAggregateStale_(event, aggregateResult.reason || "partial-cwl-refresh", nowIso), event);
+		const stale = markCwlSeasonEventAggregateStale_(event, aggregateResult.reason || "partial-cwl-refresh", nowIso);
+		return finishCwlLifecycleRefreshPublication_(stale, event);
 	}
 	return finishCwlLifecycleRefreshPublication_(publishCwlSeasonEventRefreshResult_(event, meta, aggregateResult, nowIso), event);
 }

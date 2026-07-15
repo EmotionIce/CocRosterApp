@@ -4300,6 +4300,8 @@ test("CWL partial refresh marks previous aggregate stale without replacing score
                   expectedRounds: 1,
                 },
               },
+              groupCount: 1,
+              firstBoundGroupId: "grp-test",
             },
           },
         },
@@ -4334,6 +4336,9 @@ test("CWL partial refresh marks previous aggregate stale without replacing score
 
   assert.equal(result.status, "stale");
   assert.equal(live.byTag["#A"].starsTotal, 3);
+  assert.equal(result.publication.liveAggregateAction, "put");
+  assert.equal(result.publication.finalAggregateAction, "none");
+  assert.equal(result.publication.pointerAction, "none");
   assert.equal(live.stale, true);
 });
 
@@ -4405,6 +4410,11 @@ test("CWL completion requires authoritative group end plus two spaced complete o
   assert.equal(second.status, "completed");
   assert.equal(first.publication.lifecycleState, "finalizing");
   assert.equal(second.publication.lifecycleState, "completed");
+  assert.equal(first.publication.finalAggregateAction, "none");
+  assert.equal(first.publication.pointerAction, "put");
+  assert.equal(second.publication.liveAggregateAction, "delete");
+  assert.equal(second.publication.finalAggregateAction, "put");
+  assert.equal(second.publication.pointerAction, "put");
   assert.equal(db.currentCwl, null);
   assert.equal(db.current.cwl, null);
   assert.equal(db.latestCompletedCwl.eventId, "cwl-active");
@@ -4566,6 +4576,9 @@ test("CWL partial-event bootstrap preserves stale aggregate until a coherent run
   const event = backend.readSeasonEventById_("cwl-partial");
 
   assert.equal(failed.status, "stale");
+  assert.equal(failed.publication.liveAggregateAction, "put");
+  assert.equal(failed.publication.finalAggregateAction, "none");
+  assert.equal(failed.publication.pointerAction, "none");
   assert.equal(staleLive.hash, "stale-display");
   assert.equal(staleLive.byTag["#PLAYER"].starsTotal, 1);
   assert.equal(recovered.status, "active");
