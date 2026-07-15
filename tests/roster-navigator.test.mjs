@@ -79,17 +79,22 @@ test("scrollspy resolution advances in order and selects the final roster at pag
   assert.equal(resolveRosterNavigatorActiveIndex(sectionTops, 200, false), 1);
   assert.equal(resolveRosterNavigatorActiveIndex(sectionTops, 950, false), 2);
   assert.equal(resolveRosterNavigatorActiveIndex(sectionTops, 120, true), 2);
+  assert.equal(resolveRosterNavigatorActiveIndex(sectionTops, 120, false, 2), 2);
   assert.equal(resolveRosterNavigatorMarkerY(140, 0), 158);
-  assert.equal(resolveRosterNavigatorMarkerY(140, 227), 237);
+  assert.equal(resolveRosterNavigatorMarkerY(140, 227), 251);
 });
 
 test("ships distinct semantic desktop and mobile navigation controls", () => {
   assert.match(indexCode, /<aside id="rosterNavigator"[^>]*aria-label="Roster navigation"/);
   assert.match(indexCode, /<nav aria-label="Jump between rosters">/);
+  assert.match(indexCode, /id="rosterNavigatorToggle"[\s\S]*aria-expanded="false"/);
   assert.match(indexCode, /<label[^>]*for="rosterMobileSelect">/);
-  assert.match(indexCode, /<select id="rosterMobileSelect"/);
+  assert.match(indexCode, /<select id="rosterMobileSelect"[^>]*aria-label="Jump to roster"/);
   assert.doesNotMatch(indexCode, /id="rosterNavigator"[^>]*role="tablist"/);
   assert.match(stylesCode, /@media \(min-width: 960px\)[\s\S]*\.roster-board-layout\.has-roster-navigator/);
+  assert.match(stylesCode, /grid-template-columns:58px minmax\(0, 1fr\)/);
+  assert.match(stylesCode, /\.roster-navigator:is\(\.is-expanded, :focus-within, :hover\)/);
+  assert.match(stylesCode, /backdrop-filter:blur\(15px\) saturate\(125%\)/);
   assert.match(stylesCode, /\.roster-card--anchored\{[\s\S]*scroll-margin-top/);
   assert.match(stylesCode, /--roster-mobile-navigator-height/);
 });

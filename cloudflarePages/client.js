@@ -61,6 +61,8 @@
     let rosterNavigatorFrameId = 0;
     let rosterNavigatorHeaderResizeObserver = null;
     let rosterNavigatorLastHandledHash = "";
+    let rosterNavigatorProgrammaticAnchor = "";
+    let rosterNavigatorProgrammaticSettleTimer = 0;
     const missingSectionExpandedByRoster = Object.create(null);
 
     const profileCache = Object.create(null);
@@ -4630,9 +4632,11 @@
     };
 
     // Resolve the active roster from ordered section top coordinates.
-    const resolveRosterNavigatorActiveIndex = (sectionTopsRaw, markerYRaw, atDocumentEnd) => {
+    const resolveRosterNavigatorActiveIndex = (sectionTopsRaw, markerYRaw, atDocumentEnd, lockedIndexRaw) => {
         const sectionTops = Array.isArray(sectionTopsRaw) ? sectionTopsRaw : [];
         if (!sectionTops.length) return -1;
+        const lockedIndex = Number(lockedIndexRaw);
+        if (Number.isInteger(lockedIndex) && lockedIndex >= 0 && lockedIndex < sectionTops.length) return lockedIndex;
         if (atDocumentEnd) return sectionTops.length - 1;
         const markerY = Number(markerYRaw);
         const safeMarkerY = Number.isFinite(markerY) ? markerY : 0;
@@ -4653,7 +4657,7 @@
         return Math.max(
             24,
             Number.isFinite(headerBottom) ? headerBottom + 18 : 0,
-            Number.isFinite(mobileBottom) ? mobileBottom + 10 : 0,
+            Number.isFinite(mobileBottom) ? mobileBottom + 24 : 0,
         );
     };
 
@@ -4662,17 +4666,29 @@
         desktop: $("#rosterNavigator"),
         list: $("#rosterNavigatorList"),
         position: $("#rosterNavigatorPosition"),
+        toggle: $("#rosterNavigatorToggle"),
         mobile: $("#rosterMobileNavigator"),
         select: $("#rosterMobileSelect"),
         shell: $(".public-shell"),
         header: $(".public-header"),
     });
 
+    // Pin or release the expanded desktop route without changing document flow.
+    const setRosterNavigatorExpanded = (isExpanded) => {
+        const refs = getRosterNavigatorRefs();
+        if (!refs.desktop || !refs.toggle) return;
+        const expanded = !!isExpanded;
+        refs.desktop.classList.toggle("is-expanded", expanded);
+        refs.toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        refs.toggle.setAttribute("aria-label", expanded ? "Collapse roster navigation" : "Expand roster navigation");
+    };
+
     // Hide or reveal both navigator variants as one feature.
     const setRosterNavigatorVisibility = (isVisible) => {
         const refs = getRosterNavigatorRefs();
         if (refs.desktop) refs.desktop.classList.toggle("hidden", !isVisible);
         if (refs.mobile) refs.mobile.classList.toggle("hidden", !isVisible);
+        if (!isVisible) setRosterNavigatorExpanded(false);
         const layout = $("#rosterBoardLayout");
         if (layout) layout.classList.toggle("has-roster-navigator", !!isVisible);
     };
@@ -4734,7 +4750,10 @@
             typeof window !== "undefined" &&
             window.scrollY + window.innerHeight >= documentElement.scrollHeight - 2
         );
-        syncRosterNavigatorActiveState(resolveRosterNavigatorActiveIndex(sectionTops, markerY, atDocumentEnd));
+        const lockedIndex = rosterNavigatorProgrammaticAnchor
+            ? rosterNavigatorEntries.findIndex((entry) => entry.model.anchorId === rosterNavigatorProgrammaticAnchor)
+            : -1;
+        syncRosterNavigatorActiveState(resolveRosterNavigatorActiveIndex(sectionTops, markerY, atDocumentEnd, lockedIndex));
     };
 
     // Queue one scrollspy update per animation frame.
@@ -4746,9 +4765,44 @@
         rosterNavigatorFrameId = requestFrame(updateRosterNavigatorFromScroll);
     };
 
+    // Release the jump lock after scrolling settles, then resume normal scrollspy behavior.
+    const finishRosterNavigatorProgrammaticJump = () => {
+        if (rosterNavigatorProgrammaticSettleTimer && typeof window !== "undefined") {
+            window.clearTimeout(rosterNavigatorProgrammaticSettleTimer);
+        }
+        rosterNavigatorProgrammaticSettleTimer = 0;
+        if (!rosterNavigatorProgrammaticAnchor) return;
+        rosterNavigatorProgrammaticAnchor = "";
+        const refs = getRosterNavigatorRefs();
+        if (refs.desktop) refs.desktop.classList.remove("is-jumping");
+        queueRosterNavigatorScrollSync();
+    };
+
+    // Debounce the end of either a smooth or instant programmatic jump.
+    const scheduleRosterNavigatorProgrammaticJumpFinish = () => {
+        if (typeof window === "undefined") return;
+        if (rosterNavigatorProgrammaticSettleTimer) window.clearTimeout(rosterNavigatorProgrammaticSettleTimer);
+        rosterNavigatorProgrammaticSettleTimer = window.setTimeout(finishRosterNavigatorProgrammaticJump, 180);
+    };
+
+    // Hold the selected destination steady while intermediate cards pass the scroll marker.
+    const beginRosterNavigatorProgrammaticJump = (anchorId) => {
+        rosterNavigatorProgrammaticAnchor = toStr(anchorId);
+        const refs = getRosterNavigatorRefs();
+        if (refs.desktop) refs.desktop.classList.toggle("is-jumping", !!rosterNavigatorProgrammaticAnchor);
+        scheduleRosterNavigatorProgrammaticJumpFinish();
+    };
+
+    // Scroll events still update geometry, but cannot replace a pending jump destination.
+    const handleRosterNavigatorScroll = () => {
+        if (rosterNavigatorProgrammaticAnchor) scheduleRosterNavigatorProgrammaticJumpFinish();
+        queueRosterNavigatorScrollSync();
+    };
+
     // Replace a roster anchor without polluting history when leaving the roster view.
     function clearRosterAnchorHash() {
         if (!readRosterAnchorHash() || typeof window === "undefined" || !window.location) return;
+        finishRosterNavigatorProgrammaticJump();
         rosterNavigatorLastHandledHash = "";
         const nextUrl = toStr(window.location.pathname) + toStr(window.location.search);
         if (window.history && typeof window.history.replaceState === "function") {
@@ -4775,6 +4829,7 @@
             }
         }
         rosterNavigatorLastHandledHash = anchorId;
+        beginRosterNavigatorProgrammaticJump(anchorId);
         syncRosterNavigatorActiveState(entry.model.index);
         entry.card.scrollIntoView({
             behavior: options.smooth === false || reduceMotion ? "auto" : "smooth",
@@ -4811,8 +4866,16 @@
     const bindRosterNavigatorUi = () => {
         if (rosterNavigatorBound || typeof window === "undefined") return;
         const refs = getRosterNavigatorRefs();
-        if (!refs.list || !refs.select) return;
+        if (!refs.list || !refs.select || !refs.toggle) return;
         rosterNavigatorBound = true;
+        refs.toggle.addEventListener("click", () => {
+            setRosterNavigatorExpanded(refs.toggle.getAttribute("aria-expanded") !== "true");
+        });
+        if (refs.desktop) {
+            refs.desktop.addEventListener("keydown", (event) => {
+                if (event.key === "Escape") setRosterNavigatorExpanded(false);
+            });
+        }
         refs.list.addEventListener("click", (event) => {
             const eventTarget = event.target && event.target.nodeType === 1
                 ? event.target
@@ -4826,7 +4889,8 @@
         refs.select.addEventListener("change", () => {
             jumpToRosterAnchor(refs.select.value, { writeHistory: true, smooth: true });
         });
-        window.addEventListener("scroll", queueRosterNavigatorScrollSync, { passive: true });
+        window.addEventListener("scroll", handleRosterNavigatorScroll, { passive: true });
+        if ("onscrollend" in window) window.addEventListener("scrollend", finishRosterNavigatorProgrammaticJump, { passive: true });
         window.addEventListener("resize", () => {
             syncRosterNavigatorHeaderOffset();
             queueRosterNavigatorScrollSync();

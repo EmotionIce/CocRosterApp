@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <link rel="stylesheet" href="./styles.css?v=20260715b" />
+  <link rel="stylesheet" href="./styles.css?v=20260715e" />
 </head>
 <body style="margin:0;">
 <div class="container public-shell">
@@ -219,19 +219,32 @@
     </div>
     <div id="rosterBoardLayout" class="roster-board-layout">
       <aside id="rosterNavigator" class="roster-navigator hidden" aria-label="Roster navigation">
-        <div class="roster-navigator__eyebrow">Roster index</div>
-        <nav aria-label="Jump between rosters">
-          <ol id="rosterNavigatorList" class="roster-navigator__list"></ol>
-        </nav>
-        <div id="rosterNavigatorPosition" class="roster-navigator__position" aria-hidden="true"></div>
+        <button id="rosterNavigatorToggle" class="roster-navigator__toggle" type="button"
+          aria-expanded="false" aria-controls="rosterNavigatorPanel" aria-label="Expand roster navigation">
+          <span class="roster-navigator__toggle-mark" aria-hidden="true"></span>
+          <span class="roster-navigator__toggle-copy">
+            <strong>Rosters</strong>
+            <span>Open route</span>
+          </span>
+          <span class="roster-navigator__toggle-chevron" aria-hidden="true">›</span>
+        </button>
+        <div id="rosterNavigatorPanel" class="roster-navigator__panel">
+          <div class="roster-navigator__eyebrow">
+            <span>Roster route</span>
+            <span id="rosterNavigatorPosition" class="roster-navigator__position" aria-hidden="true"></span>
+          </div>
+          <nav aria-label="Jump between rosters">
+            <ol id="rosterNavigatorList" class="roster-navigator__list"></ol>
+          </nav>
+        </div>
       </aside>
       <div class="roster-board-main">
         <div id="rosterMobileNavigator" class="roster-mobile-navigator hidden">
           <label class="roster-mobile-navigator__label" for="rosterMobileSelect">
             <span class="roster-mobile-navigator__route" aria-hidden="true"></span>
-            <span>Jump to roster</span>
+            <span>Roster</span>
           </label>
-          <select id="rosterMobileSelect" class="roster-mobile-navigator__select"></select>
+          <select id="rosterMobileSelect" class="roster-mobile-navigator__select" aria-label="Jump to roster"></select>
         </div>
         <div id="rosters"></div>
       </div>
@@ -252,7 +265,7 @@
 
 
   <script src="./public-config.js?v=20260408b"></script>
-  <script defer src="./client.js?v=20260715b"></script>
+  <script defer src="./client.js?v=20260715e"></script>
 </body>
 </html>
 
