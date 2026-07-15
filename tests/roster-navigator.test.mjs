@@ -133,4 +133,6 @@ test("ships distinct semantic desktop and mobile navigation controls", () => {
   assert.match(stylesCode, /--roster-mobile-navigator-height/);
   assert.match(stylesCode, /\.roster-mobile-navigator\.is-integrated\{[\s\S]*width:100%/);
   assert.match(clientCode, /syncRosterStickyHeaderStates\(stickyTop, activeIndex\)/);
+  assert.match(clientCode, /if \(i === 0\) stickyFlowActive = isStuck/);
+  assert.doesNotMatch(clientCode, /mobileEnabled && activeHeaderIsStuck/);
 });

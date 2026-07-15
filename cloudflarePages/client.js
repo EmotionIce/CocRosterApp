@@ -4817,7 +4817,7 @@
             mobileStyles.display !== "none" &&
             !refs.mobile.classList.contains("hidden")
         );
-        let activeHeaderIsStuck = false;
+        let stickyFlowActive = false;
         for (let i = 0; i < rosterNavigatorEntries.length; i++) {
             const entry = rosterNavigatorEntries[i];
             const head = entry.head || (entry.card && entry.card.querySelector ? entry.card.querySelector(".roster-head") : null);
@@ -4831,9 +4831,9 @@
             if (head) head.classList.toggle("is-stuck", isStuck);
             if (head) head.classList.toggle("is-nav-integrated", mobileNavigatorVisible && i === activeIndex && isStuck);
             if (entry.card) entry.card.classList.toggle("has-stuck-roster-head", isStuck);
-            if (i === activeIndex) activeHeaderIsStuck = isStuck;
+            if (i === 0) stickyFlowActive = isStuck;
         }
-        if (refs.mobile) refs.mobile.classList.toggle("is-integrated", mobileEnabled && activeHeaderIsStuck);
+        if (refs.mobile) refs.mobile.classList.toggle("is-integrated", mobileEnabled && stickyFlowActive);
     };
 
     // Update the highlighted roster from the current scroll position.
