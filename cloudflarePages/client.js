@@ -3087,16 +3087,27 @@
         const kind = toStr(node.dataset && node.dataset.warCountdownKind).trim();
         const targetAt = toStr(node.dataset && node.dataset.warCountdownTargetAt).trim();
         const targetMs = parseWarTimestampMs(targetAt);
+        const labelNode = node.querySelector ? node.querySelector("[data-war-countdown-label]") : null;
+        const valueNode = node.querySelector ? node.querySelector("[data-war-countdown-value]") : null;
+        const setCountdownCopy = (label, value) => {
+            if (labelNode && valueNode) {
+                labelNode.textContent = label;
+                valueNode.textContent = value;
+                return;
+            }
+            node.textContent = label + (value ? (" " + value) : "");
+        };
         if (!kind || !(targetMs > 0)) {
-            node.textContent = "";
+            setCountdownCopy("", "");
             return;
         }
+        const label = kind === "starts" ? "War starts" : "War ends";
         const diffMs = targetMs - Date.now();
         if (diffMs <= 0) {
-            node.textContent = kind === "starts" ? "War starting" : "War ending";
+            setCountdownCopy(label, kind === "starts" ? "Starting now" : "Ending now");
             return;
         }
-        node.textContent = (kind === "starts" ? "War starts in " : "War ends in ") + formatRemainingWarDuration(diffMs);
+        setCountdownCopy(label, formatRemainingWarDuration(diffMs));
         node.title = formatProfileTimestamp(targetAt) || targetAt;
     };
 
@@ -4698,6 +4709,22 @@
         );
     };
 
+    // Keep the compact roster header immediately below the mobile navigation stack.
+    const resolveRosterStickyHeaderTop = (headerHeightRaw, mobileHeightRaw) => {
+        const headerHeight = Number(headerHeightRaw);
+        const mobileHeight = Number(mobileHeightRaw);
+        return Math.max(0, Number.isFinite(headerHeight) ? headerHeight : 0)
+            + Math.max(0, Number.isFinite(mobileHeight) ? mobileHeight : 0)
+            + 18;
+    };
+
+    // A header compacts once its sticky edge is reached and stays compact through its card handoff.
+    const resolveRosterStickyHeaderState = (headerTopRaw, stickyTopRaw) => {
+        const headerTop = Number(headerTopRaw);
+        const stickyTop = Number(stickyTopRaw);
+        return Number.isFinite(headerTop) && Number.isFinite(stickyTop) && headerTop <= stickyTop + 1;
+    };
+
     // Get static roster navigator elements.
     const getRosterNavigatorRefs = () => ({
         desktop: $("#rosterNavigator"),
@@ -4725,7 +4752,10 @@
         const refs = getRosterNavigatorRefs();
         if (refs.desktop) refs.desktop.classList.toggle("hidden", !isVisible);
         if (refs.mobile) refs.mobile.classList.toggle("hidden", !isVisible);
-        if (!isVisible) setRosterNavigatorExpanded(false);
+        if (!isVisible) {
+            if (refs.mobile) refs.mobile.classList.remove("is-integrated");
+            setRosterNavigatorExpanded(false);
+        }
         const layout = $("#rosterBoardLayout");
         if (layout) layout.classList.toggle("has-roster-navigator", !!isVisible);
     };
@@ -4736,15 +4766,19 @@
         if (!refs.shell || !refs.header || typeof refs.header.getBoundingClientRect !== "function") return;
         const headerHeight = Math.max(0, Math.ceil(refs.header.getBoundingClientRect().height));
         refs.shell.style.setProperty("--roster-sticky-header-height", headerHeight + "px");
-        const mobileHeight = refs.mobile && typeof refs.mobile.getBoundingClientRect === "function"
+        const mobileStyles = refs.mobile && typeof window.getComputedStyle === "function"
+            ? window.getComputedStyle(refs.mobile)
+            : null;
+        const mobileHeight = refs.mobile && mobileStyles && mobileStyles.display !== "none" && !refs.mobile.classList.contains("hidden")
             ? Math.max(0, Math.ceil(refs.mobile.getBoundingClientRect().height))
             : 0;
-        if (mobileHeight) refs.shell.style.setProperty("--roster-mobile-navigator-height", mobileHeight + "px");
+        refs.shell.style.setProperty("--roster-mobile-navigator-height", mobileHeight + "px");
+        refs.shell.style.setProperty("--roster-card-sticky-top", resolveRosterStickyHeaderTop(headerHeight, mobileHeight) + "px");
     };
 
     // Synchronize the desktop highlight and mobile chooser.
     const syncRosterNavigatorActiveState = (indexRaw) => {
-        if (!rosterNavigatorEntries.length) return;
+        if (!rosterNavigatorEntries.length) return -1;
         const index = Math.max(0, Math.min(rosterNavigatorEntries.length - 1, Number(indexRaw) || 0));
         const refs = getRosterNavigatorRefs();
         for (let i = 0; i < rosterNavigatorEntries.length; i++) {
@@ -4763,6 +4797,43 @@
         if (refs.position) {
             refs.position.textContent = String(index + 1).padStart(2, "0") + " / " + String(rosterNavigatorEntries.length).padStart(2, "0");
         }
+        return index;
+    };
+
+    // Reuse scrollspy geometry to switch mobile roster headers between full and docked states.
+    const syncRosterStickyHeaderStates = (stickyTopRaw, activeIndexRaw) => {
+        const stickyTop = Number(stickyTopRaw);
+        const activeIndex = Number(activeIndexRaw);
+        const refs = getRosterNavigatorRefs();
+        const mobileEnabled = typeof window !== "undefined" && typeof window.matchMedia === "function"
+            ? window.matchMedia("(max-width: 959px)").matches
+            : (typeof window !== "undefined" && Number(window.innerWidth) < 960);
+        const mobileStyles = refs.mobile && typeof window !== "undefined" && typeof window.getComputedStyle === "function"
+            ? window.getComputedStyle(refs.mobile)
+            : null;
+        const mobileNavigatorVisible = !!(
+            refs.mobile &&
+            mobileStyles &&
+            mobileStyles.display !== "none" &&
+            !refs.mobile.classList.contains("hidden")
+        );
+        let activeHeaderIsStuck = false;
+        for (let i = 0; i < rosterNavigatorEntries.length; i++) {
+            const entry = rosterNavigatorEntries[i];
+            const head = entry.head || (entry.card && entry.card.querySelector ? entry.card.querySelector(".roster-head") : null);
+            entry.head = head || null;
+            const isStuck = !!(
+                mobileEnabled &&
+                head &&
+                typeof head.getBoundingClientRect === "function" &&
+                resolveRosterStickyHeaderState(head.getBoundingClientRect().top, stickyTop)
+            );
+            if (head) head.classList.toggle("is-stuck", isStuck);
+            if (head) head.classList.toggle("is-nav-integrated", mobileNavigatorVisible && i === activeIndex && isStuck);
+            if (entry.card) entry.card.classList.toggle("has-stuck-roster-head", isStuck);
+            if (i === activeIndex) activeHeaderIsStuck = isStuck;
+        }
+        if (refs.mobile) refs.mobile.classList.toggle("is-integrated", mobileEnabled && activeHeaderIsStuck);
     };
 
     // Update the highlighted roster from the current scroll position.
@@ -4780,6 +4851,16 @@
             ? refs.mobile.getBoundingClientRect().bottom
             : 0;
         const markerY = resolveRosterNavigatorMarkerY(headerBottom, mobileBottom);
+        const shellStyles = refs.shell && typeof window.getComputedStyle === "function"
+            ? window.getComputedStyle(refs.shell)
+            : null;
+        const stickyTopFromCss = shellStyles ? parseFloat(shellStyles.getPropertyValue("--roster-card-sticky-top")) : NaN;
+        const stickyTop = Number.isFinite(stickyTopFromCss)
+            ? stickyTopFromCss
+            : resolveRosterStickyHeaderTop(
+                refs.header && typeof refs.header.getBoundingClientRect === "function" ? refs.header.getBoundingClientRect().height : 0,
+                refs.mobile && mobileBottom ? refs.mobile.getBoundingClientRect().height : 0,
+            );
         const sectionTops = rosterNavigatorEntries.map((entry) => entry.card.getBoundingClientRect().top);
         const documentElement = typeof document !== "undefined" ? document.documentElement : null;
         const atDocumentEnd = !!(
@@ -4790,7 +4871,10 @@
         const lockedIndex = rosterNavigatorProgrammaticAnchor
             ? rosterNavigatorEntries.findIndex((entry) => entry.model.anchorId === rosterNavigatorProgrammaticAnchor)
             : -1;
-        syncRosterNavigatorActiveState(resolveRosterNavigatorActiveIndex(sectionTops, markerY, atDocumentEnd, lockedIndex));
+        const activeIndex = syncRosterNavigatorActiveState(
+            resolveRosterNavigatorActiveIndex(sectionTops, markerY, atDocumentEnd, lockedIndex),
+        );
+        syncRosterStickyHeaderStates(stickyTop, activeIndex);
     };
 
     // Queue one scrollspy update per animation frame.
@@ -4987,7 +5071,21 @@
         const isAdminMode = typeof window !== "undefined" && !!window.ROSTER_ADMIN_MODE;
         const isVisible = !isAdminMode && models.length > 1 && models.length === cards.length;
         setRosterNavigatorVisibility(isVisible);
-        if (!isVisible) return;
+        if (!isVisible) {
+            if (!isAdminMode && models.length === cards.length) {
+                rosterNavigatorEntries = models.map((model, index) => ({
+                    model: model,
+                    card: cards[index],
+                    head: cards[index] && cards[index].querySelector ? cards[index].querySelector(".roster-head") : null,
+                    link: null,
+                    option: null,
+                }));
+                bindRosterNavigatorUi();
+                syncRosterNavigatorHeaderOffset();
+                queueRosterNavigatorScrollSync();
+            }
+            return;
+        }
 
         for (let i = 0; i < models.length; i++) {
             const model = models[i];
@@ -5013,7 +5111,13 @@
             option.value = model.anchorId;
             option.textContent = String(i + 1) + ". " + model.title;
             refs.select.appendChild(option);
-            rosterNavigatorEntries.push({ model: model, card: card, link: link, option: option });
+            rosterNavigatorEntries.push({
+                model: model,
+                card: card,
+                head: card && card.querySelector ? card.querySelector(".roster-head") : null,
+                link: link,
+                option: option,
+            });
         }
 
         bindRosterNavigatorUi();
@@ -7401,6 +7505,25 @@
             metric.appendChild(el("strong", "roster-head-metric__value", toStr(value)));
             return metric;
         };
+        const buildWarClock = (modifier) => {
+            if (!currentWarPresentation || !currentWarPresentation.countdownTargetAt) return null;
+            const clock = el("span", "roster-war-clock roster-head-status" + (modifier ? (" " + modifier) : ""));
+            clock.dataset.warCountdownKind = currentWarPresentation.countdownKind;
+            clock.dataset.warCountdownTargetAt = currentWarPresentation.countdownTargetAt;
+            const icon = el("span", "roster-war-clock__icon", "\u231b");
+            icon.setAttribute("aria-hidden", "true");
+            const copy = el("span", "roster-war-clock__copy");
+            const label = el("span", "roster-war-clock__label");
+            label.dataset.warCountdownLabel = "";
+            const value = el("strong", "roster-war-clock__value");
+            value.dataset.warCountdownValue = "";
+            copy.appendChild(label);
+            copy.appendChild(value);
+            clock.appendChild(icon);
+            clock.appendChild(copy);
+            renderWarCountdownNode(clock);
+            return clock;
+        };
         const meta = el("div", "roster-meta roster-command-row");
         meta.appendChild(buildHeadMetric(
             trackingMode === "regularWar" ? "In war" : "Main lineup",
@@ -7419,11 +7542,7 @@
         }
         if (currentWarPresentation) {
             if (currentWarPresentation.countdownTargetAt) {
-                const countdownBadge = el("span", "badge roster-war-countdown roster-head-status");
-                countdownBadge.dataset.warCountdownKind = currentWarPresentation.countdownKind;
-                countdownBadge.dataset.warCountdownTargetAt = currentWarPresentation.countdownTargetAt;
-                renderWarCountdownNode(countdownBadge);
-                meta.appendChild(countdownBadge);
+                meta.appendChild(buildWarClock("roster-war-clock--full"));
             } else {
                 meta.appendChild(el("span", "badge roster-war-phase roster-head-status", currentWarPresentation.phaseLabel));
             }
@@ -7442,7 +7561,7 @@
             const openClanBtn = document.createElement("a");
             openClanBtn.className = "roster-open-clan roster-head__clan-link";
             openClanBtn.href = clanProfileUrl;
-            openClanBtn.textContent = "Open clan in-game";
+            openClanBtn.textContent = "Open in-game";
             headActions.appendChild(openClanBtn);
         }
 
@@ -7465,11 +7584,31 @@
         headTop.appendChild(identityLead);
         if (headActions.childNodes.length) headTop.appendChild(headActions);
         head.appendChild(headTop);
+        const compactHead = el("div", "roster-head__compact");
+        compactHead.setAttribute("aria-hidden", "true");
+        compactHead.appendChild(el("span", "roster-head__compact-crest", "\u2694"));
+        const compactIdentity = el("span", "roster-head__compact-identity");
+        compactIdentity.appendChild(el("strong", "roster-head__compact-title", titleText));
+        compactIdentity.appendChild(el("span", "roster-head__compact-mode", currentWarPresentation ? currentWarPresentation.phaseLabel : eyebrowText));
+        compactHead.appendChild(compactIdentity);
+        if (currentWarPresentation) {
+            const compactStanding = el("span", "roster-head__compact-standing");
+            compactStanding.textContent = currentWarPresentation.scoreAvailable
+                ? ("\u2605 " + currentWarPresentation.clanStars + " \u2013 " + currentWarPresentation.opponentStars)
+                : ("VS " + currentWarPresentation.opponentName);
+            compactStanding.title = currentWarPresentation.clanName + " versus " + currentWarPresentation.opponentName;
+            compactHead.appendChild(compactStanding);
+            const compactClock = buildWarClock("roster-war-clock--compact");
+            if (compactClock) compactHead.appendChild(compactClock);
+        }
+        head.appendChild(compactHead);
         if (currentWarPresentation) {
             const matchup = el("div", "roster-war-matchup roster-war-matchup--" + currentWarPresentation.state);
             const matchupLabel = currentWarPresentation.state === "preparation"
                 ? currentWarPresentation.phaseLabel + ": " + currentWarPresentation.clanName + " versus " + currentWarPresentation.opponentName
-                : currentWarPresentation.clanName + " " + currentWarPresentation.clanStars + " stars versus " + currentWarPresentation.opponentName + " " + currentWarPresentation.opponentStars + " stars";
+                : (currentWarPresentation.scoreAvailable
+                    ? currentWarPresentation.clanName + " " + currentWarPresentation.clanStars + " stars versus " + currentWarPresentation.opponentName + " " + currentWarPresentation.opponentStars + " stars"
+                    : currentWarPresentation.phaseLabel + ": " + currentWarPresentation.clanName + " versus " + currentWarPresentation.opponentName);
             matchup.setAttribute("role", "group");
             matchup.setAttribute("aria-label", matchupLabel);
 

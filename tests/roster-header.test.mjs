@@ -16,6 +16,9 @@ test("renders a three-band roster header with a live or preparation matchup", ()
   assert.match(clientCode, /roster-war-versus__label/);
   assert.match(clientCode, /currentWarPresentation\.phaseLabel/);
   assert.match(clientCode, /currentWarPresentation\.scoreAvailable/);
+  assert.match(clientCode, /roster-head__compact/);
+  assert.match(clientCode, /roster-war-clock__label/);
+  assert.match(clientCode, /openClanBtn\.textContent = "Open in-game"/);
 });
 
 test("ships the framed tactical styling and narrow-phone layout", () => {
@@ -32,4 +35,13 @@ test("preparation and CWL variants retain distinct tactical accent colors", () =
   assert.match(headerStyles, /\.roster-head--cwl\{[\s\S]*--war-clan:110,214,198/);
   assert.match(headerStyles, /\.roster-head--state-preparation\{[\s\S]*--war-opponent:212,194,127/);
   assert.match(headerStyles, /\.roster-war-countdown::before/);
+});
+
+test("keeps the default header lean and animates to a one-row mobile dock", () => {
+  assert.match(headerStyles, /\.roster-head__top\{[\s\S]*min-height:56px/);
+  assert.match(headerStyles, /\.roster-head-metric\{[\s\S]*border:0;[\s\S]*background:transparent;[\s\S]*opacity:\.72/);
+  assert.match(headerStyles, /\.roster-war-clock__value\{[\s\S]*font-variant-numeric:tabular-nums/);
+  assert.match(headerStyles, /@media \(max-width: 959px\)[\s\S]*position:sticky;[\s\S]*top:var\(--roster-card-sticky-top/);
+  assert.match(headerStyles, /\.roster-head\.is-stuck \.roster-head__compact\{[\s\S]*max-height:48px/);
+  assert.match(headerStyles, /\.roster-head\.is-stuck \.roster-head__top,[\s\S]*max-height:0/);
 });

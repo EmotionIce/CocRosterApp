@@ -25,6 +25,8 @@ const loadNavigatorInternals = () => {
       "        buildRosterNavigatorModels,",
       "        resolveRosterNavigatorActiveIndex,",
       "        resolveRosterNavigatorMarkerY,",
+      "        resolveRosterStickyHeaderTop,",
+      "        resolveRosterStickyHeaderState,",
       "        isRosterNavigatorScrollKey,",
       "    };",
       "    return;",
@@ -88,6 +90,16 @@ test("scrollspy resolution advances in order and selects the final roster at pag
   assert.equal(resolveRosterNavigatorMarkerY(140, 227), 251);
 });
 
+test("mobile roster headers compact at the shared navigation edge", () => {
+  const { resolveRosterStickyHeaderTop, resolveRosterStickyHeaderState } = loadNavigatorInternals();
+
+  assert.equal(resolveRosterStickyHeaderTop(72, 40), 130);
+  assert.equal(resolveRosterStickyHeaderTop(72, 0), 90);
+  assert.equal(resolveRosterStickyHeaderState(131, 130), true);
+  assert.equal(resolveRosterStickyHeaderState(132, 130), false);
+  assert.equal(resolveRosterStickyHeaderState(-400, 130), true);
+});
+
 test("recognizes keyboard scrolling without treating activation keys as scroll intent", () => {
   const { isRosterNavigatorScrollKey } = loadNavigatorInternals();
 
@@ -119,4 +131,6 @@ test("ships distinct semantic desktop and mobile navigation controls", () => {
   assert.match(stylesCode, /backdrop-filter:blur\(15px\) saturate\(125%\)/);
   assert.match(stylesCode, /\.roster-card--anchored\{[\s\S]*scroll-margin-top/);
   assert.match(stylesCode, /--roster-mobile-navigator-height/);
+  assert.match(stylesCode, /\.roster-mobile-navigator\.is-integrated\{[\s\S]*width:100%/);
+  assert.match(clientCode, /syncRosterStickyHeaderStates\(stickyTop, activeIndex\)/);
 });
