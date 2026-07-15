@@ -19,6 +19,7 @@ test("preserves player content order while adding compact stat labels", () => {
   assert.ok(statsIndex < discordIndex && discordIndex < formIndex);
   assert.match(clientCode, /player-cwl--attacks/);
   assert.match(clientCode, /player-cwl-label/);
+  assert.match(clientCode, /if \(score >= 90\) tone = "strong";\s*else if \(score >= 70\) tone = "good";\s*else if \(score >= 45\) tone = "fair";/);
 });
 
 test("ships a scoped dense four-area public roster layout", () => {
@@ -42,7 +43,8 @@ test("keeps icons undistorted and responsive without blue card surfaces", () => 
   assert.match(playerCardStyles, /text-overflow:ellipsis/);
   assert.match(playerCardStyles, /@media \(max-width: 420px\)/);
   assert.match(playerCardStyles, /\.player-form-badge\.tone-neutral\{[\s\S]*--form-tone:145,143,136/);
-  assert.match(playerCardStyles, /\.player-form-badge\.tone-low\{[\s\S]*--form-tone:188,82,72/);
-  assert.match(playerCardStyles, /\.player-form-badge\.tone-strong\{[\s\S]*--form-tone:111,184,112/);
+  assert.match(playerCardStyles, /\.player-form-badge\.tone-low\{[\s\S]*--form-tone:190,75,67/);
+  assert.match(playerCardStyles, /\.player-form-badge\.tone-fair\{[\s\S]*--form-tone:190,91,72/);
+  assert.match(playerCardStyles, /\.player-form-badge\.tone-strong\{[\s\S]*rgba\(215,184,105,\.17\)/);
   assert.doesNotMatch(playerCardStyles, /59,130,246|96,165,250|14,165,233|56,189,248|#(?:0ea5e9|3b82f6|60a5fa)/i);
 });

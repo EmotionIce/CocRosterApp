@@ -1412,27 +1412,40 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-low{
-  --form-tone:188,82,72;
-  --form-tone-border:.32;
-  --form-tone-glow:.115;
+  --form-tone:190,75,67;
+  --form-tone-border:.34;
+  --form-tone-glow:.13;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-fair{
-  --form-tone:181,126,82;
-  --form-tone-border:.27;
-  --form-tone-glow:.085;
+  --form-tone:190,91,72;
+  --form-tone-border:.30;
+  --form-tone-glow:.105;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-good{
-  --form-tone:103,158,107;
-  --form-tone-border:.28;
-  --form-tone-glow:.095;
+  --form-tone:98,151,103;
+  --form-tone-border:.26;
+  --form-tone-glow:.085;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-strong{
-  --form-tone:111,184,112;
-  --form-tone-border:.34;
-  --form-tone-glow:.13;
+  --form-tone:103,163,105;
+  --form-tone-border:.32;
+  --form-tone-glow:.105;
+  background:
+    radial-gradient(105% 180% at 100% 50%, rgba(215,184,105,.17), transparent 61%),
+    radial-gradient(120% 180% at 0% 50%, rgba(103,163,105,.11), transparent 66%),
+    linear-gradient(180deg, rgba(28,27,23,.94), rgba(15,15,14,.96)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,239,201,.035),
+    inset -11px 0 19px rgba(215,184,105,.052),
+    0 0 9px rgba(215,184,105,.035);
+}
+
+body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge.tone-strong::before{
+  color:#d7bd73;
+  text-shadow:0 0 8px rgba(215,184,105,.28);
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-form-badge::before{

@@ -6904,8 +6904,8 @@
 
         const score = Math.round(clamp01(blendedValue) * 100);
         let tone = "low";
-        if (score >= 80) tone = "strong";
-        else if (score >= 65) tone = "good";
+        if (score >= 90) tone = "strong";
+        else if (score >= 70) tone = "good";
         else if (score >= 45) tone = "fair";
         return {
             valueText: String(score),
