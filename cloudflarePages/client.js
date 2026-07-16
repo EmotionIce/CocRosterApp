@@ -3081,6 +3081,16 @@
         };
     };
 
+    // Select the result-aware matchup treatment without coupling it to either clan side.
+    const getRosterWarScoreState = (currentWarRaw) => {
+        const currentWar = currentWarRaw && typeof currentWarRaw === "object" ? currentWarRaw : {};
+        if (!currentWar.scoreAvailable) return "pending";
+        const clanStars = toNonNegativeInt(currentWar.clanStars);
+        const opponentStars = toNonNegativeInt(currentWar.opponentStars);
+        if (clanStars === opponentStars) return "tied";
+        return clanStars > opponentStars ? "clan-leading" : "opponent-leading";
+    };
+
     // Render one live regular-war countdown badge.
     const renderWarCountdownNode = (node) => {
         if (!node) return;
@@ -7455,6 +7465,7 @@
         const regularWarCurrentMeta = regularWarData.currentWar && typeof regularWarData.currentWar === "object" ? regularWarData.currentWar : {};
         const cwlStatsData = roster && roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
         const currentWarPresentation = getRosterCurrentWarPresentation(trackingMode, regularWarCurrentMeta, cwlStatsData);
+        const currentWarScoreState = getRosterWarScoreState(currentWarPresentation);
         const regularWarAggregateMeta = regularWarData.aggregateMeta && typeof regularWarData.aggregateMeta === "object"
             ? regularWarData.aggregateMeta
             : {};
@@ -7473,7 +7484,7 @@
 
         const card = el("div", "card roster-card");
         const headStateClass = currentWarPresentation ? (" roster-head--state-" + currentWarPresentation.state) : " roster-head--state-idle";
-        const head = el("div", "roster-head roster-head--" + (trackingMode === "regularWar" ? "war" : "cwl") + headStateClass);
+        const head = el("div", "roster-head roster-head--" + (trackingMode === "regularWar" ? "war" : "cwl") + headStateClass + " roster-head--score-" + currentWarScoreState);
         const headTop = el("div", "roster-head__top");
         const identityLead = el("div", "roster-head__identity-lead");
         const crest = el("span", "roster-head__crest", "⚔");
@@ -7603,7 +7614,10 @@
         }
         head.appendChild(compactHead);
         if (currentWarPresentation) {
-            const matchup = el("div", "roster-war-matchup roster-war-matchup--" + currentWarPresentation.state);
+            const matchup = el(
+                "div",
+                "roster-war-matchup roster-war-matchup--" + currentWarPresentation.state + " roster-war-matchup--score-" + currentWarScoreState,
+            );
             const matchupLabel = currentWarPresentation.state === "preparation"
                 ? currentWarPresentation.phaseLabel + ": " + currentWarPresentation.clanName + " versus " + currentWarPresentation.opponentName
                 : (currentWarPresentation.scoreAvailable

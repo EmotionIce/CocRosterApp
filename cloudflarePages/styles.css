@@ -9163,6 +9163,217 @@ body:not(.admin-shell-page) .roster-war-clock--compact .roster-war-clock__value{
   }
 }
 
+/* Result-aware war score: outlined wedges fade outward and converge on the VS glow. */
+body:not(.admin-shell-page) .roster-war-matchup{
+  --score-clan:var(--war-clan);
+  --score-opponent:var(--war-opponent);
+  --score-center:212,194,127;
+  isolation:isolate;
+  overflow:hidden;
+  background:
+    linear-gradient(90deg, rgba(var(--score-clan),.065), transparent 43%),
+    linear-gradient(270deg, rgba(var(--score-opponent),.065), transparent 43%),
+    rgba(3,6,8,.58);
+}
+
+body:not(.admin-shell-page) .roster-war-matchup--score-clan-leading{
+  --score-clan:205,244,92;
+  --score-opponent:239,89,57;
+  --score-center:221,198,90;
+}
+
+body:not(.admin-shell-page) .roster-war-matchup--score-opponent-leading{
+  --score-clan:239,89,57;
+  --score-opponent:205,244,92;
+  --score-center:221,198,90;
+}
+
+body:not(.admin-shell-page) .roster-war-matchup--score-tied{
+  --score-clan:159,166,164;
+  --score-opponent:159,166,164;
+  --score-center:187,193,190;
+}
+
+body:not(.admin-shell-page) .roster-war-matchup::before,
+body:not(.admin-shell-page) .roster-war-matchup::after{
+  content:"";
+  position:absolute;
+  z-index:0;
+  pointer-events:none;
+}
+
+body:not(.admin-shell-page) .roster-war-matchup::before{
+  inset:-22px 30%;
+  background:radial-gradient(circle, rgba(var(--score-center),.14), transparent 64%);
+  filter:blur(5px);
+}
+
+body:not(.admin-shell-page) .roster-war-matchup::after{
+  top:50%;
+  right:28%;
+  left:28%;
+  height:1px;
+  background:linear-gradient(
+    90deg,
+    transparent,
+    rgba(var(--score-clan),.38) 34%,
+    rgba(var(--score-center),.42) 50%,
+    rgba(var(--score-opponent),.38) 66%,
+    transparent
+  );
+  box-shadow:0 0 9px rgba(var(--score-center),.16);
+}
+
+body:not(.admin-shell-page) .roster-war-team{
+  z-index:1;
+  isolation:isolate;
+  clip-path:none;
+  color:rgb(var(--score-clan));
+}
+
+body:not(.admin-shell-page) .roster-war-team--opponent{
+  color:rgb(var(--score-opponent));
+}
+
+body:not(.admin-shell-page) .roster-war-team::before,
+body:not(.admin-shell-page) .roster-war-team::after{
+  content:"";
+  position:absolute;
+  z-index:0;
+  pointer-events:none;
+}
+
+body:not(.admin-shell-page) .roster-war-team--clan::before{
+  inset:3px -7px 3px 0;
+  clip-path:polygon(0 0, calc(100% - 16px) 0, 100% 50%, calc(100% - 16px) 100%, 0 100%);
+  background:linear-gradient(
+    90deg,
+    rgba(var(--score-clan),.025),
+    rgba(var(--score-clan),.24) 58%,
+    rgba(var(--score-clan),.92)
+  );
+  -webkit-mask-image:linear-gradient(90deg, transparent, #000 27%, #000);
+  mask-image:linear-gradient(90deg, transparent, #000 27%, #000);
+  filter:drop-shadow(4px 0 8px rgba(var(--score-clan),.27));
+}
+
+body:not(.admin-shell-page) .roster-war-team--clan::after{
+  inset:4px -6px 4px 1px;
+  clip-path:polygon(0 0, calc(100% - 16px) 0, 100% 50%, calc(100% - 16px) 100%, 0 100%);
+  background:linear-gradient(
+    90deg,
+    rgba(4,7,9,.04),
+    rgba(var(--score-clan),.025) 46%,
+    rgba(5,8,10,.97)
+  );
+  -webkit-mask-image:linear-gradient(90deg, transparent, #000 27%, #000);
+  mask-image:linear-gradient(90deg, transparent, #000 27%, #000);
+}
+
+body:not(.admin-shell-page) .roster-war-team--opponent::before{
+  inset:3px 0 3px -7px;
+  clip-path:polygon(16px 0, 100% 0, 100% 100%, 16px 100%, 0 50%);
+  background:linear-gradient(
+    90deg,
+    rgba(var(--score-opponent),.92),
+    rgba(var(--score-opponent),.24) 42%,
+    rgba(var(--score-opponent),.025)
+  );
+  -webkit-mask-image:linear-gradient(90deg, #000, #000 73%, transparent);
+  mask-image:linear-gradient(90deg, #000, #000 73%, transparent);
+  filter:drop-shadow(-4px 0 8px rgba(var(--score-opponent),.27));
+}
+
+body:not(.admin-shell-page) .roster-war-team--opponent::after{
+  inset:4px 1px 4px -6px;
+  clip-path:polygon(16px 0, 100% 0, 100% 100%, 16px 100%, 0 50%);
+  background:linear-gradient(
+    90deg,
+    rgba(5,8,10,.97),
+    rgba(var(--score-opponent),.025) 54%,
+    rgba(4,7,9,.04)
+  );
+  -webkit-mask-image:linear-gradient(90deg, #000, #000 73%, transparent);
+  mask-image:linear-gradient(90deg, #000, #000 73%, transparent);
+}
+
+body:not(.admin-shell-page) .roster-war-team > *{
+  position:relative;
+  z-index:1;
+}
+
+body:not(.admin-shell-page) .roster-war-team--clan .roster-war-team__score-value{
+  color:rgb(var(--score-clan));
+  text-shadow:0 0 14px rgba(var(--score-clan),.17);
+}
+
+body:not(.admin-shell-page) .roster-war-team--opponent .roster-war-team__score-value{
+  color:rgb(var(--score-opponent));
+  text-shadow:0 0 14px rgba(var(--score-opponent),.17);
+}
+
+body:not(.admin-shell-page) .roster-war-team__score-value--pending{
+  color:rgba(226,225,213,.38) !important;
+  text-shadow:none !important;
+}
+
+body:not(.admin-shell-page) .roster-war-versus{
+  z-index:3;
+}
+
+body:not(.admin-shell-page) .roster-war-versus::before{
+  inset:5px -7px;
+  background:linear-gradient(
+    135deg,
+    rgba(var(--score-clan),.96),
+    rgba(var(--score-clan),.38) 43%,
+    rgba(var(--score-center),.34) 50%,
+    rgba(var(--score-opponent),.38) 57%,
+    rgba(var(--score-opponent),.96)
+  );
+  filter:
+    drop-shadow(-4px 0 7px rgba(var(--score-clan),.42))
+    drop-shadow(4px 0 7px rgba(var(--score-opponent),.42));
+}
+
+body:not(.admin-shell-page) .roster-war-versus::after{
+  inset:6px -6px;
+  background:
+    radial-gradient(circle, rgba(var(--score-center),.055), transparent 68%),
+    #090c0f;
+}
+
+body:not(.admin-shell-page) .roster-war-matchup--score-tied .roster-war-team__star{
+  color:#c6c9c7;
+  text-shadow:0 0 10px rgba(190,197,194,.14);
+}
+
+@media (max-width: 680px){
+  body:not(.admin-shell-page) .roster-war-team--clan::before{
+    right:-9px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team--clan::after{
+    right:-8px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team--opponent::before{
+    left:-9px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-team--opponent::after{
+    left:-8px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-versus::before{
+    inset:5px -8px;
+  }
+
+  body:not(.admin-shell-page) .roster-war-versus::after{
+    inset:6px -7px;
+  }
+}
+
 @media (max-width: 959px){
   body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-head{
     position:sticky;

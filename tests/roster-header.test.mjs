@@ -45,3 +45,12 @@ test("keeps the default header lean and animates to a one-row mobile dock", () =
   assert.match(headerStyles, /\.roster-head\.is-stuck \.roster-head__compact\{[\s\S]*max-height:48px/);
   assert.match(headerStyles, /\.roster-head\.is-stuck \.roster-head__top,[\s\S]*max-height:0/);
 });
+
+test("renders result-aware score wedges with a fading split glow", () => {
+  assert.match(clientCode, /roster-war-matchup--score-" \+ currentWarScoreState/);
+  assert.match(headerStyles, /\.roster-war-matchup--score-clan-leading\{[\s\S]*--score-clan:205,244,92;[\s\S]*--score-opponent:239,89,57/);
+  assert.match(headerStyles, /\.roster-war-matchup--score-opponent-leading\{[\s\S]*--score-clan:239,89,57;[\s\S]*--score-opponent:205,244,92/);
+  assert.match(headerStyles, /\.roster-war-matchup--score-tied\{[\s\S]*--score-clan:159,166,164;[\s\S]*--score-opponent:159,166,164/);
+  assert.match(headerStyles, /\.roster-war-team--clan::before\{[\s\S]*mask-image:linear-gradient\(90deg, transparent, #000 27%, #000\)/);
+  assert.match(headerStyles, /\.roster-war-versus::before\{[\s\S]*drop-shadow\(-4px 0 7px[\s\S]*drop-shadow\(4px 0 7px/);
+});

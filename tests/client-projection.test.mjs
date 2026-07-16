@@ -28,6 +28,7 @@ const loadClientInternals = (overrides = {}) => {
       "        resolveLeaderboardRankedSeasonCycle,",
       "        getRosterCurrentWarPresentation,",
       "        getRosterCurrentWarStarStanding,",
+      "        getRosterWarScoreState,",
       "    };",
       "    return;",
       bootMarker,
@@ -85,6 +86,16 @@ test("formats ongoing regular-war and CWL star standings only when fresh score d
   assert.equal(getRosterCurrentWarStarStanding("cwl", {}, {
     currentWar: { state: "warended", clanStars: 30, opponentStars: 28, starStandingAvailable: true },
   }), null);
+});
+
+test("maps live star standings to result-aware matchup colors", () => {
+  const { getRosterWarScoreState } = loadClientInternals();
+
+  assert.equal(getRosterWarScoreState({ scoreAvailable: true, clanStars: 37, opponentStars: 34 }), "clan-leading");
+  assert.equal(getRosterWarScoreState({ scoreAvailable: true, clanStars: 32, opponentStars: 38 }), "opponent-leading");
+  assert.equal(getRosterWarScoreState({ scoreAvailable: true, clanStars: 60, opponentStars: 60 }), "tied");
+  assert.equal(getRosterWarScoreState({ scoreAvailable: false, clanStars: 0, opponentStars: 0 }), "pending");
+  assert.equal(getRosterWarScoreState(null), "pending");
 });
 
 test("presents regular and CWL preparation wars with opponents and start countdowns", () => {
