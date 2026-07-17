@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { webcrypto } from "node:crypto";
+import { TextDecoder } from "node:util";
 
 const repoRoot = new URL("../", import.meta.url);
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -39,7 +40,7 @@ const loadWorkerForBoundary = () => {
   const source = fs.readFileSync(new URL("cloudflarePages/worker-core.js", repoRoot), "utf8")
     .replace(/export\s+default\s+\{/, "globalThis.workerDefault = {")
     .replace(/export\s+\{\s*CloudflarePublicationCoordinator\s*\};?/, "globalThis.workerCoordinatorClass = CloudflarePublicationCoordinator;");
-  const context = { URL, Request, Response, Headers, TextEncoder, Uint8Array, crypto: webcrypto, console };
+  const context = { URL, Request, Response, Headers, TextEncoder, TextDecoder, Uint8Array, crypto: webcrypto, console };
   vm.createContext(context);
   vm.runInContext(source, context);
   context.workerDefault.__Coordinator = context.workerCoordinatorClass;
@@ -200,11 +201,18 @@ const installCloudflareTransport = (queue, objectStore = new Map()) => {
   queue.getCloudflarePublicDataPublishSecret_ = () => "secret";
   queue.sendCloudflareQueuedV2Request_ = (request) => {
     for (const item of request.objects || []) objectStore.set(`${item.scope}:${item.path}`, clone(item.payload));
+    for (const derivation of request.derivations || []) {
+      const base = `activeVersions/${derivation.versionId}`;
+      objectStore.set(`bot:${base}/playerMetrics/byTag`, {});
+      objectStore.set(`bot:${base}/playerMetrics/meta`, {});
+      objectStore.set(`bot:${base}/indexes/linkedAccountsByDiscordId`, {});
+      objectStore.set(`bot:${base}/indexes/linkedAccountsByDiscordUsername`, {});
+    }
     for (const item of request.commits || []) {
       if (item.delete) objectStore.delete(`${item.scope}:${item.path}`);
       else objectStore.set(`${item.scope}:${item.path}`, clone(item.payload));
     }
-    return { ok: true, response: { ok: true } };
+    return { ok: true, response: { ok: true, completedDerivationCount: (request.derivations || []).length } };
   };
   queue.verifyCloudflareActiveVersionObjects_ = (_versionId, required) => {
     const missing = required.filter((item) => !objectStore.has(`${item.scope}:${item.path}`));
@@ -842,7 +850,7 @@ test("pending publication installs recovery before claim and revalidates it afte
     assert.equal(q.__triggers.some((trigger) => trigger.handler === "cloudflarePublishWorkerRecoveryTick"), true);
     return { label: "claimed", request: { objects: [] } };
   };
-  q.sendCloudflareQueuedV2Request_ = () => ({ ok: true, response: { ok: true } });
+  q.sendCloudflareQueuedV2Request_ = () => ({ ok: true, response: { ok: true, completedDerivationCount: 1 } });
 
   const result = q.cloudflarePublishWorkerTick();
 
@@ -1176,15 +1184,41 @@ test("active roster publication carries war star standings into public and bot K
   assert.equal(botRosters[0].cwlStats.currentWar.clanStars, 12);
 });
 
-test("active metrics and bot-derived phases only read their required metric path", () => {
+test("active metrics are read from Firebase once and bot derivation reuses Cloudflare", () => {
   const q = loadQueue();
   q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
   const reads = [];
   q.firebaseRequestJson_ = (path) => { reads.push(path); return { byTag: { "#P": { identity: { tag: "#P", discordId: "d1" } } } }; };
-  q.buildCloudflareLinkedAccountIndexes_ = () => ({ byDiscordId: { d1: [{ tag: "#P" }] }, byDiscordUsername: {} });
-  q.buildCloudflareActivePhaseRequest_(activeState(q, "public-player-metrics"), { phase: "public-player-metrics", cursor: 0 });
-  q.buildCloudflareActivePhaseRequest_(activeState(q, "bot-derived"), { phase: "bot-derived", cursor: 0 });
-  assert.deepEqual(reads, ["activeVersions/version-B/playerMetrics", "activeVersions/version-B/playerMetrics"]);
+  const publicPhase = q.buildCloudflareActivePhaseRequest_(activeState(q, "public-player-metrics"), { phase: "public-player-metrics", cursor: 0 });
+  const fallbackPhase = q.buildCloudflareActivePhaseRequest_(activeState(q, "bot-derived"), { phase: "bot-derived", cursor: 0 });
+  assert.deepEqual(reads, ["activeVersions/version-B/playerMetrics"]);
+  assert.equal(JSON.stringify(publicPhase.request.derivations), JSON.stringify([{ kind: "bot-player-metrics", versionId: "version-B" }]));
+  assert.equal(JSON.stringify(fallbackPhase.request.derivations), JSON.stringify([{ kind: "bot-player-metrics", versionId: "version-B" }]));
+  assert.equal((fallbackPhase.request.objects || []).length, 0);
+});
+
+test("active phase progression skips redundant bot derivation only after Worker confirmation", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = activeState(q, "public-player-metrics");
+  q.__setState(state);
+  q.completeCloudflareActivePhase_(
+    { category: "active", phase: "public-player-metrics", cursor: 0, targetVersionId: "version-B", generation: 7 },
+    { response: { ok: true, completedDerivationCount: 1 } },
+  );
+  assert.equal(q.__getState().active.botDerivedReady, true);
+  q.completeCloudflareActivePhase_(
+    { category: "active", phase: "bot-active", cursor: 0, targetVersionId: "version-B", generation: 7 },
+    { response: { ok: true } },
+  );
+  assert.equal(q.__getState().active.phase, "commit");
+
+  const rolloutState = activeState(q, "bot-active");
+  q.__setState(rolloutState);
+  q.completeCloudflareActivePhase_(
+    { category: "active", phase: "bot-active", cursor: 0, targetVersionId: "version-B", generation: 7 },
+    { response: { ok: true } },
+  );
+  assert.equal(q.__getState().active.phase, "bot-derived");
 });
 
 test("commit phase verifies immutable objects and never rebuilds the complete snapshot", () => {
@@ -1333,7 +1367,7 @@ test("two consecutive active publications and an unchanged enqueue are idempoten
   assert.deepEqual(state.active, before.active);
 });
 
-test("canonical active enqueue traces all five phases to public and bot pointer reads", () => {
+test("canonical active enqueue derives bot metrics during the public metrics phase", () => {
   const q = installCasFirebase(loadQueue());
   const state = q.createEmptyCloudflarePublishQueueState_();
   state.active.committedVersionId = "version-A";
@@ -1365,13 +1399,90 @@ test("canonical active enqueue traces all five phases to public and bot pointer 
     phases.push(before);
     q.processCloudflareActiveQueueRequest_(q.__getState());
   }
-  assert.deepEqual(phases, ["public-manifest-rosters", "public-player-metrics", "bot-active", "bot-derived", "commit"]);
+  assert.deepEqual(phases, ["public-manifest-rosters", "public-player-metrics", "bot-active", "commit"]);
   assert.equal(q.__getState().active.committedVersionId, "version-B");
   assert.equal(objectStore.get("public:activePublished/currentVersionId"), "version-B");
   assert.equal(objectStore.get("bot:active/currentVersionId"), "version-B");
   assert.ok(objectStore.has("public:activeVersions/version-B/manifest"));
   assert.ok(objectStore.has("bot:activeVersions/version-B/active"));
   assert.ok(objectStore.has("bot:activeVersions/version-B/playerMetrics/byTag"));
+});
+
+test("Worker derives bot metrics from the in-flight public object without a KV source read", async () => {
+	const worker = loadWorkerForBoundary();
+	const codec = loadRealFirebaseCodec();
+	const metrics = codec.encode({
+	  schemaVersion: 1,
+	  updatedAt: "2026-07-17T12:00:00.000Z",
+	  byTag: {
+		"#PLAYER": {
+		  identity: { tag: "#PLAYER", name: "Player", discordUsername: "player.name" },
+		  latestSnapshot: { trophies: 5432, townHallLevel: 17, league: { name: "Legend League" } },
+		},
+	  },
+	});
+	const values = new Map();
+	let sourceReads = 0;
+	const store = {
+	  async get(key) { sourceReads += 1; return values.has(key) ? values.get(key) : null; },
+	  async put(key, value) { values.set(key, String(value)); },
+	  async delete(key) { values.delete(key); },
+	};
+	const env = { ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret", ROSTER_DATA_KV: store };
+	const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+	  method: "POST",
+	  headers: { authorization: "Bearer secret", "content-type": "application/json" },
+	  body: JSON.stringify({
+		requestId: "derive-in-flight",
+		batchId: "derive-in-flight",
+		objects: [{ scope: "public", path: "activeVersions/version-B/playerMetrics", payload: metrics }],
+		derivations: [{ kind: "bot-player-metrics", versionId: "version-B" }],
+	  }),
+	}), env, {});
+	const result = await response.json();
+	assert.equal(response.status, 200);
+	assert.equal(result.completedDerivationCount, 1);
+	assert.equal(result.completedDerivedObjectCount, 4);
+	assert.equal(sourceReads, 0);
+	assert.equal(JSON.stringify(JSON.parse(values.get("bot-data/activeVersions/version-B/playerMetrics/byTag.json"))), JSON.stringify(metrics.byTag));
+	assert.equal(JSON.stringify(JSON.parse(values.get("bot-data/activeVersions/version-B/playerMetrics/meta.json"))), JSON.stringify({
+	  schemaVersion: 1,
+	  updatedAt: "2026-07-17T12:00:00.000Z",
+	}));
+	const usernameIndex = codec.decode(JSON.parse(values.get("bot-data/activeVersions/version-B/indexes/linkedAccountsByDiscordUsername.json")));
+	assert.equal(usernameIndex["player.name"][0].tag, "#PLAYER");
+	assert.equal(usernameIndex["player.name"][0].leagueName, "Legend League");
+});
+
+test("Worker rollout fallback derives from an already-published Cloudflare metrics object", async () => {
+  const worker = loadWorkerForBoundary();
+  const codec = loadRealFirebaseCodec();
+  const metrics = codec.encode({
+    schemaVersion: 1,
+    byTag: { "#PLAYER": { identity: { tag: "#PLAYER", discordId: "123" } } },
+  });
+  const sourceKey = "public-data/activeVersions/version-rollout/playerMetrics.json";
+  const values = new Map([[sourceKey, JSON.stringify(metrics)]]);
+  const reads = [];
+  const store = {
+    async get(key) { reads.push(key); return values.has(key) ? values.get(key) : null; },
+    async put(key, value) { values.set(key, String(value)); },
+  };
+  const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+    method: "POST",
+    headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "derive-rollout",
+      batchId: "derive-rollout",
+      derivations: [{ kind: "bot-player-metrics", versionId: "version-rollout" }],
+    }),
+  }), { ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret", ROSTER_DATA_KV: store }, {});
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.completedDerivationCount, 1);
+  assert.deepEqual(reads, [sourceKey]);
+  const linked = codec.decode(JSON.parse(values.get("bot-data/activeVersions/version-rollout/indexes/linkedAccountsByDiscordId.json")));
+  assert.equal(linked["123"][0].tag, "#PLAYER");
 });
 
 test("compact bootstrap contains coordination data only", () => {

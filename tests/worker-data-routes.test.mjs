@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import { TextDecoder } from "node:util";
 import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
@@ -17,6 +18,7 @@ const loadWorker = () => {
     Response,
     Headers,
     TextEncoder,
+    TextDecoder,
     Uint8Array,
     crypto: webcrypto,
     console,

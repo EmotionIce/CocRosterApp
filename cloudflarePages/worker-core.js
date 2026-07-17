@@ -1768,6 +1768,184 @@ const normalizeCommitOperation = (entryRaw, defaultScopeRaw, publishedAt) => {
   return Object.assign({ operation: "put" }, normalizePublishObject(entry, defaultScopeRaw, publishedAt));
 };
 
+const normalizeDataDerivation = (entryRaw) => {
+  const entry = entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw) ? entryRaw : null;
+  if (!entry) throw new Error("Each derivation must be an object.");
+  const kind = String(entry.kind || "").trim();
+  const versionId = String(entry.versionId || "").trim();
+  if (kind !== "bot-player-metrics") throw new Error("Unsupported data derivation.");
+  if (!/^[A-Za-z0-9_.-]{1,160}$/.test(versionId) || versionId.startsWith("__FB64__")) {
+    throw new Error("Data derivation requires a safe active version id.");
+  }
+  return { kind, versionId };
+};
+
+const FIREBASE_DERIVATION_KEY_PREFIX = "__FB64__";
+const BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+const encodeBytesBase64Url = (bytesRaw) => {
+  const bytes = bytesRaw instanceof Uint8Array ? bytesRaw : new Uint8Array(bytesRaw || []);
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const hasB = i + 1 < bytes.length;
+    const hasC = i + 2 < bytes.length;
+    const b = hasB ? bytes[i + 1] : 0;
+    const c = hasC ? bytes[i + 2] : 0;
+    out += BASE64URL_ALPHABET[a >> 2];
+    out += BASE64URL_ALPHABET[((a & 3) << 4) | (b >> 4)];
+    if (hasB) out += BASE64URL_ALPHABET[((b & 15) << 2) | (c >> 6)];
+    if (hasC) out += BASE64URL_ALPHABET[c & 63];
+  }
+  return out;
+};
+
+const decodeBytesBase64Url = (valueRaw) => {
+  const value = String(valueRaw || "").trim();
+  if (!value || value.length % 4 === 1 || /[^A-Za-z0-9_-]/.test(value)) throw new Error("Invalid base64url key payload.");
+  const bytes = [];
+  for (let i = 0; i < value.length; i += 4) {
+    const remaining = Math.min(4, value.length - i);
+    const a = BASE64URL_ALPHABET.indexOf(value[i]);
+    const b = BASE64URL_ALPHABET.indexOf(value[i + 1]);
+    const c = remaining > 2 ? BASE64URL_ALPHABET.indexOf(value[i + 2]) : 0;
+    const d = remaining > 3 ? BASE64URL_ALPHABET.indexOf(value[i + 3]) : 0;
+    if (a < 0 || b < 0 || c < 0 || d < 0) throw new Error("Invalid base64url key payload.");
+    bytes.push((a << 2) | (b >> 4));
+    if (remaining > 2) bytes.push(((b & 15) << 4) | (c >> 2));
+    if (remaining > 3) bytes.push(((c & 3) << 6) | d);
+  }
+  return new Uint8Array(bytes);
+};
+
+const decodeFirebaseDerivationKey = (keyRaw) => {
+  const key = String(keyRaw == null ? "" : keyRaw);
+  if (!key.startsWith(FIREBASE_DERIVATION_KEY_PREFIX)) return key;
+  const encoded = key.slice(FIREBASE_DERIVATION_KEY_PREFIX.length);
+  if (!encoded) throw new Error("Invalid encoded Firebase key.");
+  return new TextDecoder().decode(decodeBytesBase64Url(encoded));
+};
+
+const encodeFirebaseDerivationKey = (keyRaw) => {
+  const key = String(keyRaw == null ? "" : keyRaw);
+  const requiresEncoding = !key || key.startsWith(FIREBASE_DERIVATION_KEY_PREFIX) || /[.$#[\]\/]/.test(key) || /[\u0000-\u001F\u007F]/.test(key);
+  return requiresEncoding ? FIREBASE_DERIVATION_KEY_PREFIX + encodeBytesBase64Url(new TextEncoder().encode(key)) : key;
+};
+
+const normalizeDerivationTag = (valueRaw) => {
+  const value = String(valueRaw == null ? "" : valueRaw).trim().toUpperCase();
+  if (!value) return "";
+  return value.startsWith("#") ? value : "#" + value;
+};
+
+const derivationNonNegativeInt = (valueRaw) => Math.max(0, Math.floor(Number(valueRaw) || 0));
+
+const metricToDerivedLinkedAccount = (metricRaw, fallbackTagRaw, matchTypeRaw) => {
+  const metric = metricRaw && typeof metricRaw === "object" && !Array.isArray(metricRaw) ? metricRaw : {};
+  const identity = metric.identity && typeof metric.identity === "object" && !Array.isArray(metric.identity) ? metric.identity : {};
+  const latest = metric.latestSnapshot && typeof metric.latestSnapshot === "object" && !Array.isArray(metric.latestSnapshot) ? metric.latestSnapshot : {};
+  const tag = normalizeDerivationTag(identity.tag || latest.tag || fallbackTagRaw);
+  if (!tag) return null;
+  const league = latest.league && typeof latest.league === "object" && !Array.isArray(latest.league) ? latest.league : {};
+  const leagueTier = latest.leagueTier && typeof latest.leagueTier === "object" && !Array.isArray(latest.leagueTier) ? latest.leagueTier : {};
+  const townHall = derivationNonNegativeInt(latest.townHallLevel != null ? latest.townHallLevel : latest.th);
+  return {
+    tag,
+    playerTag: tag,
+    name: String(identity.name || latest.name || tag).trim(),
+    townHall,
+    townHallLevel: townHall,
+    trophies: derivationNonNegativeInt(latest.trophies),
+    leagueName: String(league.name || leagueTier.name || "").trim(),
+    discordId: String(identity.discordId || "").trim(),
+    discordUsername: String(identity.discordUsername || "").trim(),
+    matchType: String(matchTypeRaw || "").trim(),
+  };
+};
+
+const buildDerivedLinkedAccountIndexes = (encodedByTagRaw) => {
+  const encodedByTag = encodedByTagRaw && typeof encodedByTagRaw === "object" && !Array.isArray(encodedByTagRaw) ? encodedByTagRaw : {};
+  const byDiscordId = {};
+  const byDiscordUsername = {};
+  for (const encodedTag of Object.keys(encodedByTag)) {
+    const metric = encodedByTag[encodedTag];
+    if (!metric || typeof metric !== "object" || Array.isArray(metric)) continue;
+    const fallbackTag = decodeFirebaseDerivationKey(encodedTag);
+    const idAccount = metricToDerivedLinkedAccount(metric, fallbackTag, "discordId");
+    if (idAccount && idAccount.discordId) {
+      const key = encodeFirebaseDerivationKey(idAccount.discordId);
+      if (!byDiscordId[key]) byDiscordId[key] = [];
+      byDiscordId[key].push(idAccount);
+      continue;
+    }
+    const usernameAccount = metricToDerivedLinkedAccount(metric, fallbackTag, "discordUsername");
+    if (usernameAccount && usernameAccount.discordUsername) {
+      const key = encodeFirebaseDerivationKey(usernameAccount.discordUsername);
+      if (!byDiscordUsername[key]) byDiscordUsername[key] = [];
+      byDiscordUsername[key].push(usernameAccount);
+    }
+  }
+  const sortAccounts = (accounts) => accounts.sort((left, right) => {
+    const leftName = String(left.name || left.tag || "");
+    const rightName = String(right.name || right.tag || "");
+    return leftName.localeCompare(rightName) || String(left.tag || "").localeCompare(String(right.tag || ""));
+  });
+  Object.keys(byDiscordId).forEach((key) => sortAccounts(byDiscordId[key]));
+  Object.keys(byDiscordUsername).forEach((key) => sortAccounts(byDiscordUsername[key]));
+  return { byDiscordId, byDiscordUsername };
+};
+
+const makeDerivedPublishObject = (pathRaw, payloadRaw, publishedAt) => {
+  const scope = "bot";
+  const path = normalizeDataObjectPath(pathRaw);
+  return {
+    scope,
+    path,
+    key: buildDataObjectKey(scope, path),
+    payloadText: JSON.stringify(payloadRaw),
+    cacheControl: getDataObjectCacheControl(scope, path),
+    contentType: "application/json; charset=utf-8",
+    publishedAt,
+  };
+};
+
+const readDerivationPlayerMetrics = async (store, derivation, objectsRaw) => {
+  const sourcePath = normalizeDataObjectPath("activeVersions/" + derivation.versionId + "/playerMetrics");
+  const sourceKey = buildDataObjectKey("public", sourcePath);
+  const objects = Array.isArray(objectsRaw) ? objectsRaw : [];
+  const inFlight = objects.find((item) => item && item.scope === "public" && item.key === sourceKey);
+  let payloadText = inFlight ? String(inFlight.payloadText || "") : "";
+  if (!payloadText) {
+    const object = await getDataStoreObject(store, sourceKey);
+    if (!object) throw new Error("Public player metrics source is missing for " + derivation.versionId + ".");
+    payloadText = typeof object.text === "function" ? await object.text() : String(object.body || "");
+  }
+  let metrics = null;
+  try { metrics = JSON.parse(payloadText); } catch (err) { throw new Error("Public player metrics source is invalid JSON."); }
+  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) throw new Error("Public player metrics source is invalid.");
+  return metrics;
+};
+
+const buildDerivationPublishObjects = async (store, derivation, objectsRaw, publishedAt) => {
+  const metrics = await readDerivationPlayerMetrics(store, derivation, objectsRaw);
+  const byTag = metrics.byTag && typeof metrics.byTag === "object" && !Array.isArray(metrics.byTag) ? metrics.byTag : {};
+  const metricsMeta = Object.assign({}, metrics);
+  delete metricsMeta.byTag;
+  const linked = buildDerivedLinkedAccountIndexes(byTag);
+  const base = "activeVersions/" + derivation.versionId;
+  const outputs = [
+    makeDerivedPublishObject(base + "/playerMetrics/byTag", byTag, publishedAt),
+    makeDerivedPublishObject(base + "/playerMetrics/meta", metricsMeta, publishedAt),
+    makeDerivedPublishObject(base + "/indexes/linkedAccountsByDiscordId", linked.byDiscordId, publishedAt),
+    makeDerivedPublishObject(base + "/indexes/linkedAccountsByDiscordUsername", linked.byDiscordUsername, publishedAt),
+  ];
+  for (const item of outputs) {
+    const bytes = new TextEncoder().encode(item.payloadText).byteLength;
+    if (bytes > DATA_PUBLISH_V2_MAX_OBJECT_BYTES) throw new Error("Derived Cloudflare object exceeds hard limit path=" + item.scope + ":" + item.path.replace(/\.json$/i, "") + " bytes=" + bytes + ".");
+  }
+  return outputs;
+};
+
 const normalizeActiveCommitGuard = (guardRaw) => {
   const guard = guardRaw && typeof guardRaw === "object" && !Array.isArray(guardRaw) ? guardRaw : null;
   if (!guard) return null;
@@ -1847,12 +2025,14 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
   const objects = Array.isArray(batch.objects) ? batch.objects : [];
   const deletes = Array.isArray(batch.deletes) ? batch.deletes : [];
   const commits = Array.isArray(batch.commits) ? batch.commits : [];
+  const derivations = Array.isArray(batch.derivations) ? batch.derivations : [];
   const commitGuard = batch.commitGuard || null;
   const retention = normalizeDataRetentionRequest(batch.retention);
   const baseCounts = {
     objectCount: objects.length,
     deleteCount: deletes.length,
     commitCount: commits.length,
+    derivationCount: derivations.length,
   };
 
   if (!store) {
@@ -1910,6 +2090,48 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
         error: "Delete publication failed; commit objects were not written.",
       }, baseCounts),
     };
+  }
+
+  let completedDerivationCount = 0;
+  let completedDerivedObjectCount = 0;
+  for (let i = 0; i < derivations.length; i++) {
+    let derivedObjects = [];
+    try {
+      derivedObjects = await buildDerivationPublishObjects(store, derivations[i], objects, publishedAt);
+    } catch (err) {
+      return {
+        status: 502,
+        payload: Object.assign({
+          ok: false, requestId, batchId, publishedAt, payloadBytes,
+          completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed,
+          completedDerivationCount, completedDerivedObjectCount, completedCommitCount: 0,
+          writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0,
+          failed: { phase: "derivation", index: i, scope: "bot", path: "activeVersions/" + String(derivations[i] && derivations[i].versionId || ""), error: err && err.message ? err.message : String(err) },
+          error: "Derived object publication failed; commit objects were not written.",
+        }, baseCounts),
+      };
+    }
+    const derivedResult = await runBoundedDataOperations(derivedObjects, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
+      await putDataStoreObject(store, item.key, item.payloadText, {
+        contentType: item.contentType,
+        cacheControl: item.cacheControl,
+        customMetadata: { publishedAt: item.publishedAt, scope: item.scope, schema: "roster-public-data-v2-derived" },
+      });
+    }, "derivation");
+    completedDerivedObjectCount += derivedResult.completed;
+    if (!derivedResult.ok) {
+      return {
+        status: 502,
+        payload: Object.assign({
+          ok: false, requestId, batchId, publishedAt, payloadBytes,
+          completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed,
+          completedDerivationCount, completedDerivedObjectCount, completedCommitCount: 0,
+          writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0, failed: derivedResult.failure,
+          error: "Derived object publication failed; commit objects were not written.",
+        }, baseCounts),
+      };
+    }
+    completedDerivationCount += 1;
   }
 
   const writeDurationMs = Date.now() - writeStartedAt;
@@ -1980,9 +2202,10 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
     payload: Object.assign({
       ok: true, requestId, batchId, publishedAt, payloadBytes,
       completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
+      completedDerivationCount, completedDerivedObjectCount,
       commitGuard: commitGuard || null,
       writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
-      scopes: Array.from(new Set(objects.concat(deletes, commits).map((item) => item.scope))).sort(),
+      scopes: Array.from(new Set(objects.concat(deletes, commits).map((item) => item.scope).concat(derivations.length ? ["bot"] : []))).sort(),
       retention: retentionResult,
     }, baseCounts),
   };
@@ -2122,6 +2345,7 @@ const handleDataPublishV2 = async (request, env) => {
   const objectsRaw = Array.isArray(body.objects) ? body.objects : [];
   const deletesRaw = Array.isArray(body.deletePaths) ? body.deletePaths : Array.isArray(body.deletes) ? body.deletes : [];
   const commitsRaw = Array.isArray(body.commits) ? body.commits : Array.isArray(body.commitObjects) ? body.commitObjects : [];
+  const derivationsRaw = Array.isArray(body.derivations) ? body.derivations : [];
   let retention = null;
   let commitGuard = null;
   let dispatchGuard = null;
@@ -2134,20 +2358,22 @@ const handleDataPublishV2 = async (request, env) => {
   }
   const payloadBytes = new TextEncoder().encode(JSON.stringify(body)).byteLength;
 
-  if (!objectsRaw.length && !deletesRaw.length && !commitsRaw.length && !retention) {
-    return jsonResponse(400, { ok: false, requestId, batchId, error: "At least one object, delete path, commit, or retention cursor is required." });
+  if (!objectsRaw.length && !deletesRaw.length && !commitsRaw.length && !derivationsRaw.length && !retention) {
+    return jsonResponse(400, { ok: false, requestId, batchId, error: "At least one object, delete path, commit, derivation, or retention cursor is required." });
   }
-  if (objectsRaw.length > 500 || deletesRaw.length > 500 || commitsRaw.length > 50) {
+  if (objectsRaw.length > 500 || deletesRaw.length > 500 || commitsRaw.length > 50 || derivationsRaw.length > 8) {
     return jsonResponse(413, { ok: false, requestId, batchId, error: "Publish batch is too large." });
   }
 
   let objects = [];
   let deletes = [];
   let commits = [];
+  let derivations = [];
   try {
     objects = objectsRaw.map((entry) => normalizePublishObject(entry, defaultScope, publishedAt));
     deletes = deletesRaw.map((entry) => normalizeDeleteObject(entry, defaultScope));
     commits = commitsRaw.map((entry) => normalizeCommitOperation(entry, defaultScope, publishedAt));
+    derivations = derivationsRaw.map((entry) => normalizeDataDerivation(entry));
   } catch (err) {
     return jsonResponse(400, { ok: false, requestId, batchId, error: err && err.message ? err.message : "Invalid publish object." });
   }
@@ -2172,7 +2398,7 @@ const handleDataPublishV2 = async (request, env) => {
       }, publishCorsHeaders());
     }
   }
-  const normalizedEnvelopeBytes = new TextEncoder().encode(JSON.stringify({ requestId, batchId, publishedAt, objects, deletes, commits, commitGuard, dispatchGuard, retention })).byteLength;
+  const normalizedEnvelopeBytes = new TextEncoder().encode(JSON.stringify({ requestId, batchId, publishedAt, objects, deletes, commits, derivations, commitGuard, dispatchGuard, retention })).byteLength;
   if (normalizedEnvelopeBytes > DATA_PUBLISH_V2_MAX_PAYLOAD_BYTES) {
     return jsonResponse(413, { ok: false, requestId, batchId, error: `Cloudflare request exceeds payload limit bytes=${normalizedEnvelopeBytes}.` }, publishCorsHeaders());
   }
@@ -2180,7 +2406,7 @@ const handleDataPublishV2 = async (request, env) => {
   if (dryRun) {
     return jsonResponse(200, {
       ok: true, dryRun: true, requestId, batchId, publishedAt, payloadBytes,
-      objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length,
+      objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length, derivationCount: derivations.length,
       commitGuard: commitGuard || null, dispatchGuard: dispatchGuard || null, retention: retention || null,
       writeDurationMs: 0, commitDurationMs: 0,
     });
@@ -2194,6 +2420,7 @@ const handleDataPublishV2 = async (request, env) => {
     objects,
     deletes,
     commits,
+    derivations,
     commitGuard,
     dispatchGuard,
     retention,

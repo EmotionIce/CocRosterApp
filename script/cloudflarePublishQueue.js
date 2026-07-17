@@ -269,6 +269,7 @@ function createEmptyCloudflarePublishQueueState_() {
 			targetGeneration: 0,
 			phase: "idle",
 			cursor: 0,
+			botDerivedReady: false,
 			committedVersionId: "",
 			committedGeneration: 0,
 			dispatch: null,
@@ -410,6 +411,7 @@ function normalizeCloudflarePublishQueueState_(raw) {
 			targetGeneration: Math.max(0, toNonNegativeInt_(activeRaw.targetGeneration)),
 			phase: normalizedPhase,
 			cursor: normalizedCursor,
+			botDerivedReady: activeRaw.botDerivedReady === true,
 			committedVersionId: committedVersionId,
 			committedGeneration: Math.max(0, toNonNegativeInt_(activeRaw.committedGeneration)),
 			dispatch: activeRaw.dispatch && typeof activeRaw.dispatch === "object" ? activeRaw.dispatch : null,
@@ -962,6 +964,7 @@ function mergeCloudflareActiveTargetIntoQueueState_(stateRaw, versionIdRaw, reas
 		state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
 		state.active.phase = "public-manifest-rosters";
 		state.active.cursor = 0;
+		state.active.botDerivedReady = false;
 		state.active.dispatch = null;
 		state.active.failure = null;
 		state.active.migration = migration && migration.migrated ? { kind: "unsafe-version", sourceVersionId: migration.legacyVersionId, targetVersionId: versionId } : null;
@@ -1262,6 +1265,15 @@ function normalizeCloudflareQueueCommitForSize_(entryRaw, defaultScopeRaw, publi
 	return Object.assign({ operation: "put" }, normalizeCloudflareQueuePublishObjectForSize_(entry, defaultScopeRaw, publishedAtRaw));
 }
 
+function normalizeCloudflareQueueDerivationForSize_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw) ? entryRaw : null;
+	if (!entry) throw new Error("Each derivation must be an object.");
+	const kind = String(entry.kind || "").trim();
+	const versionId = normalizeActiveVersionId_(entry.versionId);
+	if (kind !== "bot-player-metrics" || !versionId) throw new Error("Invalid Cloudflare queued derivation.");
+	return { kind: kind, versionId: versionId };
+}
+
 function cloudflareQueueNormalizedEnvelopeBytes_(requestRaw) {
 	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
 	const defaultScope = normalizeCloudflareDataScope_(request.scope || "public");
@@ -1271,6 +1283,7 @@ function cloudflareQueueNormalizedEnvelopeBytes_(requestRaw) {
 	const deletes = deletesRaw.map((entry) => normalizeCloudflareQueueDeleteForSize_(entry, defaultScope));
 	const commitsRaw = Array.isArray(request.commits) ? request.commits : Array.isArray(request.commitObjects) ? request.commitObjects : [];
 	const commits = commitsRaw.map((entry) => normalizeCloudflareQueueCommitForSize_(entry, defaultScope, publishedAt));
+	const derivations = (Array.isArray(request.derivations) ? request.derivations : []).map((entry) => normalizeCloudflareQueueDerivationForSize_(entry));
 	return cloudflareQueueJsonBytes_({
 		requestId: String(request.requestId || "request-id"),
 		batchId: String(request.batchId || "batch-id"),
@@ -1278,6 +1291,7 @@ function cloudflareQueueNormalizedEnvelopeBytes_(requestRaw) {
 		objects: objects,
 		deletes: deletes,
 		commits: commits,
+		derivations: derivations,
 		commitGuard: request.commitGuard || null,
 		dispatchGuard: request.dispatchGuard || null,
 		retention: request.retention || null,
@@ -1289,8 +1303,10 @@ function assertCloudflareQueuedRequestBounds_(requestRaw) {
 	const objects = Array.isArray(request.objects) ? request.objects : [];
 	const deletes = Array.isArray(request.deletes) ? request.deletes : [];
 	const commits = Array.isArray(request.commits) ? request.commits : [];
+	const derivations = Array.isArray(request.derivations) ? request.derivations : [];
 	const maxObjects = Number(cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_MAX_OBJECTS_PER_REQUEST", 24));
-	if (objects.length > maxObjects || deletes.length > maxObjects || commits.length > maxObjects) throw new Error("Cloudflare queued request exceeds object-count limit.");
+	if (objects.length > maxObjects || deletes.length > maxObjects || commits.length > maxObjects || derivations.length > maxObjects) throw new Error("Cloudflare queued request exceeds object-count limit.");
+	for (let i = 0; i < derivations.length; i++) normalizeCloudflareQueueDerivationForSize_(derivations[i]);
 	const publishedAt = String(request.publishedAt || new Date().toISOString());
 	const defaultScope = normalizeCloudflareDataScope_(request.scope || "public");
 	const all = objects.map((entry) => normalizeCloudflareQueuePublishObjectForSize_(entry, defaultScope, publishedAt)).concat(
@@ -1353,7 +1369,7 @@ function sendCloudflareQueuedV2Request_(requestRaw, labelRaw, ownerTokenRaw) {
 		throw error;
 	}
 	recordCloudflarePublishQueueHeartbeat_("http-complete", { payloadBytes: payloadBytes, status: String(statusCode) });
-	Logger.log("Cloudflare queued publish label=%s batch=%s objects=%s deletes=%s commits=%s bytes=%s httpMs=%s status=%s", String(labelRaw || ""), String(request.batchId || ""), (request.objects || []).length, (request.deletes || []).length, (request.commits || []).length, payloadBytes, Math.max(0, Date.now() - startedAt), statusCode);
+	Logger.log("Cloudflare queued publish label=%s batch=%s objects=%s deletes=%s commits=%s derivations=%s bytes=%s httpMs=%s status=%s", String(labelRaw || ""), String(request.batchId || ""), (request.objects || []).length, (request.deletes || []).length, (request.commits || []).length, (request.derivations || []).length, payloadBytes, Math.max(0, Date.now() - startedAt), statusCode);
 	return { ok: true, response: parsed, statusCode: statusCode, payloadBytes: payloadBytes, durationMs: Math.max(0, Date.now() - startedAt) };
 }
 
@@ -1503,7 +1519,13 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 	if (phase === "public-player-metrics") {
 		assertCloudflarePublishQueueDeadline_(45000, "active player metrics read");
 		const metrics = readDecodedCloudflareQueueObject_(typeof buildActiveVersionPath_ === "function" ? buildActiveVersionPath_(versionId, "playerMetrics") : buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionId), "playerMetrics")) || {};
-		return { label: "active-public-player-metrics", request: { batchId: "active:" + versionId + ":public-player-metrics", objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics", metrics, "public")] } };
+		return { label: "active-public-player-metrics", request: {
+			batchId: "active:" + versionId + ":public-player-metrics",
+			objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics", metrics, "public")],
+			// The Worker derives bot metrics and linked-account indexes from this
+			// in-flight object. Apps Script sends the large payload only once.
+			derivations: [{ kind: "bot-player-metrics", versionId: versionId }],
+		} };
 	}
 	if (phase === "bot-active") {
 		assertCloudflarePublishQueueDeadline_(90000, "active bot payload reconstruction");
@@ -1544,17 +1566,13 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 	}
 	if (phase === "bot-derived") {
 		assertCloudflarePublishQueueDeadline_(60000, "active bot derived data");
-		const metrics = readDecodedCloudflareQueueObject_(typeof buildActiveVersionPath_ === "function" ? buildActiveVersionPath_(versionId, "playerMetrics") : buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionId), "playerMetrics")) || {};
-		const byTag = metrics.byTag && typeof metrics.byTag === "object" ? metrics.byTag : {};
-		const metricsMeta = Object.assign({}, metrics);
-		delete metricsMeta.byTag;
-		const linked = buildCloudflareLinkedAccountIndexes_({ playerMetrics: metrics });
-		return { label: "active-bot-derived", request: { batchId: "active:" + versionId + ":bot-derived", objects: [
-			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics/byTag", byTag, "bot"),
-			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics/meta", metricsMeta, "bot"),
-			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordId", linked.byDiscordId, "bot"),
-			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordUsername", linked.byDiscordUsername, "bot"),
-		] } };
+		// Rollout/recovery fallback for an in-flight target whose public metrics
+		// phase was completed by an older Worker. The new Worker reads the already
+		// published immutable Cloudflare object; Firebase is never reread here.
+		return { label: "active-bot-derived", request: {
+			batchId: "active:" + versionId + ":bot-derived",
+			derivations: [{ kind: "bot-player-metrics", versionId: versionId }],
+		} };
 	}
 	if (phase === "commit") {
 		assertCloudflarePublishQueueDeadline_(60000, "active commit preparation");
@@ -2050,14 +2068,24 @@ function completeCloudflareActivePhase_(claimRaw, sentRaw, ownerTokenRaw) {
 		state.active.dispatch = null;
 		state.active.failure = null;
 		if (claim.phase === "public-manifest-rosters") state.active.phase = "public-player-metrics";
-		else if (claim.phase === "public-player-metrics") state.active.phase = "bot-active";
-		else if (claim.phase === "bot-active") state.active.phase = "bot-derived";
-		else if (claim.phase === "bot-derived") state.active.phase = "commit";
+		else if (claim.phase === "public-player-metrics") {
+			const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
+			state.active.botDerivedReady = toNonNegativeInt_(response.completedDerivationCount) >= 1;
+			state.active.phase = "bot-active";
+		}
+		else if (claim.phase === "bot-active") state.active.phase = state.active.botDerivedReady === true ? "commit" : "bot-derived";
+		else if (claim.phase === "bot-derived") {
+			const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
+			if (toNonNegativeInt_(response.completedDerivationCount) < 1) throw new Error("Cloudflare bot metrics derivation did not complete.");
+			state.active.botDerivedReady = true;
+			state.active.phase = "commit";
+		}
 		else if (claim.phase === "commit") {
 			state.active.committedVersionId = claim.targetVersionId;
 			state.active.committedGeneration = Math.max(state.active.committedGeneration, claim.generation);
 			state.active.phase = "idle";
 			state.active.cursor = 0;
+			state.active.botDerivedReady = false;
 			state.active.republish = false;
 			state.active.migration = null;
 			state.dirty.retention = makeCloudflareDirtyRevision_(state, "active-version-commit", { category: "retention", cursor: "" });
@@ -2434,7 +2462,7 @@ function initializeCloudflarePublishQueue_(optionsRaw) {
 		} else if (committed && !sharedSelectorPresent && (!state.active.targetVersionId || state.active.phase === "idle")) {
 			state.active.targetVersionId = canonical;
 			state.active.targetGeneration = Math.max(Math.max(0, toNonNegativeInt_(state.active.targetGeneration)) + 1, Date.now());
-			state.active.phase = "public-manifest-rosters"; state.active.cursor = 0; state.active.dispatch = null; state.active.failure = null; state.active.republish = true;
+			state.active.phase = "public-manifest-rosters"; state.active.cursor = 0; state.active.botDerivedReady = false; state.active.dispatch = null; state.active.failure = null; state.active.republish = true;
 			state.active.migration = { kind: "shared-selector", sourceVersionId: canonical, targetVersionId: canonical };
 		}
 		if (state.active.committedVersionId || canonical) markCloudflarePublishQueueReconstructionDirty_(state, "queue-initialization", canonical);
