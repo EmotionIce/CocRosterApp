@@ -1507,10 +1507,25 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 	}
 	if (phase === "bot-active") {
 		assertCloudflarePublishQueueDeadline_(90000, "active bot payload reconstruction");
-		const snapshot = readActiveRosterSnapshotFromVersion_(versionId);
-		if (!snapshot || !snapshot.rosterData) throw new Error("Active target version is incomplete: " + versionId + ".");
-		const activeMeta = Object.assign({}, snapshot.rosterData, { activeVersionId: versionId });
-		const rosters = Array.isArray(activeMeta.rosters) ? activeMeta.rosters : [];
+		// This phase publishes roster metadata and roster shards only. Reconstruct
+		// them without downloading the large playerMetrics shard that is consumed
+		// separately by the public-player-metrics and bot-derived phases.
+		const manifest = readCloudflareTargetManifest_(versionId);
+		const rosterMap = readCloudflareTargetRosterMap_(versionId, manifest);
+		const rosterIds = Array.isArray(manifest.rosterIds) && manifest.rosterIds.length
+			? manifest.rosterIds.map((id) => String(id || "").trim()).filter(Boolean)
+			: Object.keys(rosterMap);
+		const rosterData = validateRosterData_({
+			schemaVersion: typeof manifest.schemaVersion === "number" && isFinite(manifest.schemaVersion) ? manifest.schemaVersion : 1,
+			pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
+			rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder : rosterIds,
+			rosters: rosterIds.map((rosterId) => rosterMap[rosterId]).filter((roster) => roster && typeof roster === "object"),
+			playerMetrics: createEmptyPlayerMetricsStore_(),
+			lastUpdatedAt: String(manifest.lastUpdatedAt || ""),
+			publicConfig: manifest.publicConfig && typeof manifest.publicConfig === "object" ? manifest.publicConfig : undefined,
+		});
+		const activeMeta = Object.assign({}, rosterData, { activeVersionId: versionId });
+		const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 		delete activeMeta.rosters;
 		delete activeMeta.playerMetrics;
 		const descriptor = {

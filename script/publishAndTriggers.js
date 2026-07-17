@@ -2591,17 +2591,29 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 	let processMs = 0;
 	let shardWriteMs = 0;
 	let processedSummary = null;
+	let sourceRosterForInvocation = isAutoRefreshFullSourceRoster_(preparedInput && preparedInput.sourceRoster, rosterId)
+		? preparedInput.sourceRoster
+		: null;
 
-	const reloadInput = () => {
-		preparedInput = readAutoRefreshPreparedRosterInput_(runId, rosterId);
+	// The queue worker holds the active-roster lock for this entire invocation.
+	// Load the durable checkpoint once, keep the successful writes mirrored in
+	// memory, and let the next invocation rehydrate from Firebase after a defer.
+	const getInput = () => {
 		return preparedInput && typeof preparedInput === "object" ? preparedInput : {};
 	};
 
 	const persistInput = (patchRaw) => {
-		const previous = reloadInput();
+		const previous = getInput();
 		const patch = patchRaw && typeof patchRaw === "object" ? patchRaw : {};
 		preparedInput = writeAutoRefreshPreparedRosterInput_(runId, rosterId, Object.assign({}, previous, patch));
 		return preparedInput;
+	};
+
+	const getSourceRosterForInvocation = () => {
+		if (!isAutoRefreshFullSourceRoster_(sourceRosterForInvocation, rosterId)) {
+			sourceRosterForInvocation = readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId);
+		}
+		return sourceRosterForInvocation;
 	};
 
 	const phaseStartedThisInvocation = {};
@@ -2657,7 +2669,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		}
 
 		if (state.phase === "primarySnapshot") {
-			const input = reloadInput();
+			const input = getInput();
 			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
 			if (!sourceMeta) {
 				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
@@ -2726,7 +2738,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		}
 
 		if (state.phase === "warInputs") {
-			const input = reloadInput();
+			const input = getInput();
 			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
 			if (!sourceMeta) {
 				checkpointAutoRefreshRosterPhase_(current, task, state, "source", { cursor: {} });
@@ -2765,7 +2777,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				clanTag &&
 				!Object.prototype.hasOwnProperty.call(regularWarLogByClanTag, clanTag) &&
 				!Object.prototype.hasOwnProperty.call(regularWarLogErrorByClanTag, clanTag) &&
-				(sourceRoster = isAutoRefreshFullSourceRoster_(sourceRoster, rosterId) ? sourceRoster : readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId)) &&
+				(sourceRoster = isAutoRefreshFullSourceRoster_(sourceRoster, rosterId) ? sourceRoster : getSourceRosterForInvocation()) &&
 				shouldPrefetchRegularWarLogForRoster_(
 					sourceRoster,
 					currentRegularWarByClanTag,
@@ -2818,13 +2830,13 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		}
 
 		if (state.phase === "metricSeedInputs") {
-			const input = reloadInput();
+			const input = getInput();
 			let sourceRoster = isAutoRefreshFullSourceRoster_(input.sourceRoster, rosterId)
 				? input.sourceRoster
 				: null;
 			if (!sourceRoster) {
 				try {
-					sourceRoster = readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId);
+					sourceRoster = getSourceRosterForInvocation();
 				} catch (err) {
 					if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-source-roster-read", err, executionStartMsRaw);
 					throw err;
@@ -2937,7 +2949,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 		}
 
 		if (state.phase === "processSnapshot") {
-			const input = reloadInput();
+			const input = getInput();
 			const sourceMeta = input.sourceMeta && typeof input.sourceMeta === "object" ? input.sourceMeta : null;
 			let sourceRoster = isAutoRefreshFullSourceRoster_(input.sourceRoster, rosterId)
 				? input.sourceRoster
@@ -2948,7 +2960,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 					continue;
 				}
 				try {
-					sourceRoster = readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionId);
+					sourceRoster = getSourceRosterForInvocation();
 				} catch (err) {
 					if (err && err.autoRefreshDefer) return markAutoRefreshRosterPhaseDeferred_(current, task, state, "firebase-source-roster-read", err, executionStartMsRaw);
 					throw err;

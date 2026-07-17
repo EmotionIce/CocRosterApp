@@ -137,6 +137,8 @@ const loadQueue = (dateOverride = Date) => {
     makeCloudflareDataObject_: (path, payload, scope = "public") => ({ path, payload, scope }),
     encodeFirebaseObjectKeysRecursive_: (value) => value,
     decodeFirebaseObjectKeysRecursive_: (value) => value,
+    createEmptyPlayerMetricsStore_: () => ({ schemaVersion: 1, updatedAt: "", byTag: {} }),
+    validateRosterData_: (value) => clone(value),
     buildFirebaseChildPath_: (...parts) => parts.filter(Boolean).join("/"),
     encodeFirebaseObjectKey_: (value) => String(value),
     errorMessage_: (err) => String(err?.message || err),
@@ -1107,6 +1109,30 @@ test("active public manifest/roster phase reads no metrics", () => {
   assert.equal(reads.some((path) => path.includes("playerMetrics")), false);
 });
 
+test("active bot roster phase reads no metrics", () => {
+  const q = loadQueue();
+  const state = activeState(q, "bot-active");
+  const reads = [];
+  const manifest = { versionId: "version-B", rosterIds: ["main"], rosterOrder: ["main"], pageTitle: "Roster" };
+  const roster = { id: "main", title: "Main", main: [], subs: [], missing: [] };
+  q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
+  q.firebaseRequestJson_ = (path) => {
+    reads.push(path);
+    if (path.endsWith("/manifest")) return manifest;
+    throw new Error(`unexpected read ${path}`);
+  };
+  q.firebaseBatchGetJson_ = (paths) => {
+    reads.push(...paths);
+    return { [paths[0]]: roster };
+  };
+
+  const built = q.buildCloudflareActivePhaseRequest_(state, { phase: "bot-active", cursor: 0 });
+  const botRosters = built.request.objects.find((item) => item.path.endsWith("/rosters")).payload;
+
+  assert.equal(botRosters[0].id, "main");
+  assert.equal(reads.some((path) => path.includes("playerMetrics")), false);
+});
+
 test("active roster publication carries war star standings into public and bot KV objects", () => {
   const q = loadQueue();
   const roster = {
@@ -1141,9 +1167,6 @@ test("active roster publication carries war star standings into public and bot K
   assert.equal(publicRosters.main.regularWar.currentWar.clanStars, 24);
   assert.equal(publicRosters.main.cwlStats.currentWar.opponentStars, 10);
 
-  q.readActiveRosterSnapshotFromVersion_ = () => ({
-    rosterData: { schemaVersion: 1, rosters: [roster], playerMetrics: { byTag: {} } },
-  });
   const botBatch = q.buildCloudflareActivePhaseRequest_(
     activeState(q, "bot-active"),
     { phase: "bot-active", cursor: 0 },

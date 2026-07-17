@@ -2775,7 +2775,7 @@ test("queue worker reads immutable source version shards when sourceVersionId is
   assert.equal(result.rosterId, "main");
   assert.equal(backend.readAutoRefreshRunShard_(runId, "source/rosters"), null);
   assert.equal(backend.readAutoRefreshRunShard_(runId, "source/playerMetrics"), null);
-  assert.ok(reads.includes("activeVersions/source-1/rosters/main"));
+  assert.equal(reads.filter((path) => path === "activeVersions/source-1/rosters/main").length, 1);
   assert.ok(reads.some((path) => path.startsWith("activeVersions/source-1/playerMetrics/byTag/")));
   assert.equal(reads.some((path) => path.startsWith("internal/autoRefresh/runs/run-1/source/rosters/")), false);
   assert.equal(reads.some((path) => path.startsWith("internal/autoRefresh/runs/run-1/source/playerMetrics/")), false);
@@ -4000,6 +4000,12 @@ test("roster queue chunk progress does not consume metric seed retry attempts", 
   const { runId, current, tasks } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
   const metricChunks = [];
   const seedChunks = [];
+  let preparedInputReads = 0;
+  const originalReadPreparedInput = backend.readAutoRefreshPreparedRosterInput_;
+  backend.readAutoRefreshPreparedRosterInput_ = (...args) => {
+    preparedInputReads++;
+    return originalReadPreparedInput(...args);
+  };
   backend.fetchClanMembersSnapshot_ = () => ({
     clanTag: "#CLAN",
     members: seedTags.map((tag) => ({ tag, name: tag, townHallLevel: 16 })),
@@ -4029,6 +4035,7 @@ test("roster queue chunk progress does not consume metric seed retry attempts", 
   assert.equal(result.rosterId, "main");
   assert.deepEqual(metricChunks.map((chunk) => chunk.length), [25, 25, 25, 5]);
   assert.deepEqual(seedChunks.map((chunk) => chunk.length), [25, 25, 25, 5]);
+  assert.equal(preparedInputReads, 1);
   assert.equal(state.phase, "completed");
   assert.equal(state.attemptByPhase.metricSeedInputs, 1);
 });
