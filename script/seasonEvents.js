@@ -421,8 +421,9 @@ function buildSeasonEventAuditKey_(timestampRaw) {
 	return Utilities.formatDate(safeDate, "Etc/UTC", "yyyyMMdd'T'HHmmss_SSS'Z'") + "_" + uuid;
 }
 
-// Write event audit entry.
-function writeSeasonEventAuditEntry_(eventIdRaw, auditRaw) {
+// Build one sanitized event-audit write so participant mutations can include it
+// in the same atomic Firebase update as the participant and tag indexes.
+function buildSeasonEventAuditWrite_(eventIdRaw, auditRaw) {
 	const audit = auditRaw && typeof auditRaw === "object" ? auditRaw : {};
 	const eventId = sanitizeSeasonEventText_(eventIdRaw || audit.eventId, 180);
 	if (!eventId) throw new Error("Event ID is required for audit.");
@@ -446,8 +447,18 @@ function writeSeasonEventAuditEntry_(eventIdRaw, auditRaw) {
 		details: isSeasonEventPlainObject_(audit.details) ? audit.details : {},
 	};
 	const auditKey = buildSeasonEventAuditKey_(nowIso);
-	writeSeasonEventFirebasePayload_(buildSeasonEventAuditPath_(eventId, auditKey), "PUT", entry);
-	return entry;
+	return {
+		path: buildSeasonEventAuditPath_(eventId, auditKey),
+		payload: entry,
+		entry: entry,
+	};
+}
+
+// Write event audit entry.
+function writeSeasonEventAuditEntry_(eventIdRaw, auditRaw) {
+	const write = buildSeasonEventAuditWrite_(eventIdRaw, auditRaw);
+	writeSeasonEventFirebasePayload_(write.path, "PUT", write.payload);
+	return write.entry;
 }
 
 // Format YYYY-MM season id in UTC.
@@ -2499,6 +2510,18 @@ function getSeasonEvent(payloadRaw, secretOrPassword) {
 	return out;
 }
 
+// Resolve the exact current event selected for a Discord mutation. The caller
+// keeps the returned event id for the locked re-read so a pointer rollover
+// cannot switch targets halfway through one interaction.
+function readCurrentSeasonEventForMutation_(eventTypeRaw) {
+	const eventType = normalizeSeasonEventType_(eventTypeRaw);
+	if (!eventType) return null;
+	if (eventType === "cwl") return readCurrentCwlSeasonEvent_();
+	const pointer = readSeasonEventPointer_(buildSeasonEventCurrentPointerPath_(eventType));
+	const currentEventId = sanitizeSeasonEventText_(pointer && pointer.eventId, 180);
+	return currentEventId ? readSeasonEventById_(currentEventId) : null;
+}
+
 // Read authoritative mutation context for Discord season-event actions.
 function getSeasonEventMutationContext(payloadRaw, botSecret) {
 	assertDiscordBotApiSecret_(botSecret);
@@ -2511,21 +2534,15 @@ function getSeasonEventMutationContext(payloadRaw, botSecret) {
 		globalName: payload.discordGlobalName,
 		displayName: payload.discordDisplayName,
 	});
-	let event = null;
-	if (eventType === "cwl") event = readCurrentCwlSeasonEvent_();
-	else {
-		const pointer = readSeasonEventPointer_(buildSeasonEventCurrentPointerPath_(eventType));
-		const currentEventId = sanitizeSeasonEventText_(pointer && pointer.eventId, 180);
-		event = currentEventId ? readSeasonEventById_(currentEventId) : null;
-	}
+	let event = readCurrentSeasonEventForMutation_(eventType);
 	if (!event) {
 		const requestedEventId = sanitizeSeasonEventText_(payload.eventId, 180);
 		const requestedEvent = requestedEventId ? readSeasonEventById_(requestedEventId) : null;
 		if (requestedEvent && normalizeSeasonEventType_(requestedEvent.type) === eventType) event = requestedEvent;
 	}
 	if (!event) return { ok: true, status: "event-not-found", event: null, participant: null, linkedAccounts: [], eligibleAccounts: [] };
-	const snapshot = readActiveRosterSnapshot_();
-	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+	const snapshot = readActivePlayerMetricsSnapshot_();
+	const rosterData = { playerMetrics: snapshot && snapshot.playerMetrics ? snapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
 	const eligibleAccounts = eventType === "cwl" ? filterCwlSeasonEventAccountsForTarget_(event, linkedAccounts) : linkedAccounts;
 	const participantsByDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
@@ -2926,6 +2943,52 @@ function addSeasonEventParticipantTagIndexes_(eventIdRaw, participantRaw, assign
 	}
 }
 
+// Commit a participant, owned tag-index changes, the event timestamp, and its
+// audit row with one Firebase multi-location PATCH. The locked event snapshot
+// already contains the tag ownership map, so rereading every old tag before a
+// delete would only lengthen the global participant lock.
+function writeSeasonEventParticipantMutation_(eventIdRaw, eventRaw, existingRaw, participantRaw, nowIsoRaw, auditRaw) {
+	const eventId = sanitizeSeasonEventText_(eventIdRaw, 180);
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const existing = existingRaw && typeof existingRaw === "object" ? sanitizeSeasonEventParticipant_(existingRaw) : null;
+	const participant = sanitizeSeasonEventParticipant_(participantRaw);
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
+	if (!eventId || !participant.discordId) throw new Error("A season-event participant mutation requires event and Discord IDs.");
+	const writes = [];
+	const participantsByTag = event.participantsByTag && typeof event.participantsByTag === "object" ? event.participantsByTag : {};
+	const removed = {};
+	const oldAccounts = existing && Array.isArray(existing.accounts) ? existing.accounts : [];
+	for (let i = 0; i < oldAccounts.length; i++) {
+		const tag = normalizeTag_(oldAccounts[i] && oldAccounts[i].tag);
+		if (!tag || removed[tag]) continue;
+		removed[tag] = true;
+		const index = participantsByTag[tag] && typeof participantsByTag[tag] === "object" ? participantsByTag[tag] : null;
+		const assignedDiscordId = sanitizeDiscordIdValue_(index && index.discordId);
+		if (!assignedDiscordId || assignedDiscordId === participant.discordId) {
+			writes.push({ path: buildSeasonEventParticipantTagIndexPath_(eventId, tag), payload: null });
+		}
+	}
+	writes.push({ path: buildSeasonEventParticipantPath_(eventId, participant.discordId), payload: participant });
+	if (participant.status === "signed_up") {
+		const accounts = Array.isArray(participant.accounts) ? participant.accounts : [];
+		const assigned = {};
+		for (let i = 0; i < accounts.length; i++) {
+			const tag = normalizeTag_(accounts[i] && accounts[i].tag);
+			if (!tag || assigned[tag]) continue;
+			assigned[tag] = true;
+			writes.push({
+				path: buildSeasonEventParticipantTagIndexPath_(eventId, tag),
+				payload: { discordId: participant.discordId, tag: tag, assignedAt: nowIso },
+			});
+		}
+	}
+	writes.push({ path: buildFirebaseChildPath_(buildSeasonEventByIdPath_(eventId), "updatedAt"), payload: nowIso });
+	const auditWrite = buildSeasonEventAuditWrite_(eventId, auditRaw);
+	writes.push({ path: auditWrite.path, payload: auditWrite.payload });
+	writeSeasonEventAtomicPayloads_(writes);
+	return { participant: participant, audit: auditWrite.entry, writeCount: writes.length };
+}
+
 // Run a short season-event participant write lock section.
 function withSeasonEventParticipantWriteLock_(callback) {
 	if (typeof callback !== "function") throw new Error("Season event participant write callback is required.");
@@ -2942,17 +3005,42 @@ function withSeasonEventParticipantWriteLock_(callback) {
 function registerSeasonEventSignup(payloadRaw, botSecret) {
 	assertDiscordBotApiSecret_(botSecret);
 	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
-	const eventId = sanitizeSeasonEventText_(payload.eventId, 180);
-	if (!eventId) throw new Error("Event ID is required.");
+	let eventId = sanitizeSeasonEventText_(payload.eventId, 180);
+	const resolvesCurrentEvent = !eventId;
+	const requestedEventType = normalizeSeasonEventType_(payload.eventType || payload.type);
+	if (!eventId && !requestedEventType) throw new Error("Event ID or a valid event type is required.");
 	const discordUser = sanitizeSeasonEventDiscordUser_(payload.discordUser);
 	const nowIso = new Date().toISOString();
 
-	const eventBeforeLock = readSeasonEventById_(eventId);
+	const eventBeforeLock = eventId ? readSeasonEventById_(eventId) : readCurrentSeasonEventForMutation_(requestedEventType);
+	eventId = sanitizeSeasonEventText_(eventBeforeLock && eventBeforeLock.eventId, 180) || eventId;
 	const availability = checkSeasonEventSignupAvailability_(eventBeforeLock, nowIso);
 	if (availability) return buildSeasonEventStatusResponse_(availability, { event: eventBeforeLock ? summarizeSeasonEvent_(eventBeforeLock) : null });
+	if (
+		normalizeSeasonEventType_(eventBeforeLock && eventBeforeLock.type) === "cwl" &&
+		!getResolvedCwlSeasonEventTarget_(eventBeforeLock) &&
+		!isLegacyCompletedCwlSeasonEventWithoutTarget_(eventBeforeLock)
+	) {
+		return buildSeasonEventStatusResponse_("cwl-target-unresolved", { event: summarizeSeasonEvent_(eventBeforeLock) });
+	}
+	const participantBeforeLockRaw = eventBeforeLock && eventBeforeLock.participantsByDiscordId && typeof eventBeforeLock.participantsByDiscordId === "object"
+		? eventBeforeLock.participantsByDiscordId[discordUser.id]
+		: null;
+	const participantBeforeLock = participantBeforeLockRaw && typeof participantBeforeLockRaw === "object"
+		? sanitizeSeasonEventParticipant_(participantBeforeLockRaw)
+		: null;
+	// The bot previously discovered this state in a separate mutation-context
+	// call. Preserve the same manage-signup response before doing any account
+	// lookup when the direct current-event endpoint is used.
+	if (resolvesCurrentEvent && participantBeforeLock && participantBeforeLock.status === "signed_up" && (!Array.isArray(payload.playerTags) || !payload.playerTags.length)) {
+		return buildSeasonEventStatusResponse_("already-signed-up", {
+			event: summarizeSeasonEvent_(eventBeforeLock),
+			participant: participantBeforeLock,
+		});
+	}
 
-	const activeSnapshot = readActiveRosterSnapshot_();
-	const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+	const activeSnapshot = readActivePlayerMetricsSnapshot_();
+	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
 	const selected = selectSeasonEventAccountsForDiscordUser_(eventBeforeLock, linkedAccounts, payload.playerTags);
 	if (!selected.ok) {
@@ -3003,12 +3091,8 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 			});
 		}
 
-		if (existing) removeSeasonEventParticipantTagIndexes_(eventId, existing);
 		const participant = buildSeasonEventParticipantPayload_(discordUser, lockedSelected.accounts, nowIso, payload.source || { type: "discord-signup" }, existing);
-		writeSeasonEventFirebasePayload_(buildSeasonEventParticipantPath_(eventId, participant.discordId), "PUT", participant);
-		addSeasonEventParticipantTagIndexes_(eventId, participant, nowIso);
-		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(eventId), "PATCH", { updatedAt: nowIso });
-		writeSeasonEventAuditEntry_(eventId, {
+		writeSeasonEventParticipantMutation_(eventId, event, existing, participant, nowIso, {
 			action: "participant-signed-up",
 			eventId: eventId,
 			discordId: participant.discordId,
@@ -3048,8 +3132,8 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 	const eventBeforeLock = readSeasonEventById_(eventId);
 	if (!eventBeforeLock) return buildSeasonEventStatusResponse_("event-not-found", { event: null });
 
-	const activeSnapshot = readActiveRosterSnapshot_();
-	const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+	const activeSnapshot = readActivePlayerMetricsSnapshot_();
+	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
 	const selected = selectSeasonEventAccountsForDiscordUser_(eventBeforeLock, linkedAccounts, payload.playerTags);
 	if (!selected.ok) {
@@ -3093,12 +3177,8 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 			});
 		}
 
-		removeSeasonEventParticipantTagIndexes_(eventId, existing);
 		const participant = buildSeasonEventParticipantPayload_(discordUser, lockedSelected.accounts, nowIso, payload.source || { type: "discord-account-update" }, existing);
-		writeSeasonEventFirebasePayload_(buildSeasonEventParticipantPath_(eventId, participant.discordId), "PUT", participant);
-		addSeasonEventParticipantTagIndexes_(eventId, participant, nowIso);
-		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(eventId), "PATCH", { updatedAt: nowIso });
-		writeSeasonEventAuditEntry_(eventId, {
+		writeSeasonEventParticipantMutation_(eventId, event, existing, participant, nowIso, {
 			action: "participant-accounts-updated",
 			eventId: eventId,
 			discordId: participant.discordId,
@@ -3145,7 +3225,6 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 		const existing = existingRaw ? sanitizeSeasonEventParticipant_(existingRaw) : null;
 		if (!existing) return buildSeasonEventStatusResponse_("not-signed-up", { event: summarizeSeasonEvent_(event), participant: null });
 
-		removeSeasonEventParticipantTagIndexes_(eventId, existing);
 		const participant = Object.assign({}, existing, {
 			discordUsername: discordUser.username || existing.discordUsername,
 			discordGlobalName: discordUser.globalName || existing.discordGlobalName,
@@ -3155,9 +3234,7 @@ function cancelSeasonEventSignup(payloadRaw, botSecret) {
 			cancelledAt: existing.cancelledAt || nowIso,
 			source: sanitizeSeasonEventSource_(payload.source || { type: "discord-cancel" }),
 		});
-		writeSeasonEventFirebasePayload_(buildSeasonEventParticipantPath_(eventId, participant.discordId), "PUT", participant);
-		writeSeasonEventFirebasePayload_(buildSeasonEventByIdPath_(eventId), "PATCH", { updatedAt: nowIso });
-		writeSeasonEventAuditEntry_(eventId, {
+		writeSeasonEventParticipantMutation_(eventId, event, existing, participant, nowIso, {
 			action: "participant-cancelled",
 			eventId: eventId,
 			discordId: participant.discordId,
@@ -6525,8 +6602,8 @@ function getSeasonEventLeaderboard(payloadRaw, secretOrPassword) {
 	if (!eventId) throw new Error("Event ID is required.");
 	const event = readSeasonEventById_(eventId);
 	if (!event) return buildSeasonEventLeaderboard_(null, {}, { now: payload.now || payload.nowIso });
-	const activeSnapshot = readActiveRosterSnapshot_();
-	const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+	const activeSnapshot = readActivePlayerMetricsSnapshot_();
+	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	return buildSeasonEventLeaderboard_(event, rosterData, {
 		limit: payload.limit,
 		includeDebug: payload.includeDebug === true,
@@ -6549,8 +6626,8 @@ function getCurrentSeasonEventLeaderboards(payloadRaw, secretOrPassword) {
 	if (typeof enqueueCloudflareSeasonEventReconciliation_ === "function") {
 		reconcile.cloudflarePublish = enqueueCloudflareSeasonEventReconciliation_(reconcile.publicationMutations, "leaderboard-local-season-metadata");
 	}
-	const activeSnapshot = readActiveRosterSnapshot_();
-	const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
+	const activeSnapshot = readActivePlayerMetricsSnapshot_();
+	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(payload.now || payload.nowIso) || new Date().toISOString();
 	const pushEvent = reconcile.events && reconcile.events.push && reconcile.events.push.eventId ? readSeasonEventById_(reconcile.events.push.eventId) : null;
 	const donationEvent = reconcile.events && reconcile.events.donation && reconcile.events.donation.eventId ? readSeasonEventById_(reconcile.events.donation.eventId) : null;

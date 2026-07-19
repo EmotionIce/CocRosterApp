@@ -1923,6 +1923,7 @@ test("season event signup enforces linked accounts and account limits", () => {
   }, "secret");
 
   assert.equal(donationNeedsChoice.status, "multiple-linked-accounts");
+  assert.deepEqual(Array.from(donationNeedsChoice.linkedAccounts, account => account.tag), ["#8CCVV", "#9PYLQG"]);
 
   const donationSignup = backend.registerSeasonEventSignup({
     eventId: "donation-2026-05",
@@ -1950,6 +1951,212 @@ test("season event signup enforces linked accounts and account limits", () => {
   }, "secret");
 
   assert.equal(notLinked.status, "not-linked");
+});
+
+test("season event signup resolves the current event directly and preserves existing-participant behavior", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+
+  const signed = backend.registerSeasonEventSignup({
+    eventType: "donation",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#9PYLQG"],
+    source: { type: "discord-button" },
+  }, "secret");
+
+  assert.equal(signed.status, "signed-up");
+  assert.equal(signed.event.eventId, "donation-2026-05");
+
+  const existingEventIdContract = backend.registerSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    source: { type: "discord-button" },
+  }, "secret");
+  assert.equal(existingEventIdContract.status, "multiple-linked-accounts");
+
+  backend.readActivePlayerMetricsSnapshot_ = () => {
+    throw new Error("already-signed-up must not reload active player metrics");
+  };
+  const existing = backend.registerSeasonEventSignup({
+    eventType: "donation",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    source: { type: "discord-button" },
+  }, "secret");
+
+  assert.equal(existing.status, "already-signed-up");
+  assert.equal(existing.participant.discordId, "222");
+});
+
+test("direct current CWL signup reports unresolved target before existing participant state", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const event = {
+    eventId: "cwl-unresolved-direct",
+    type: "cwl",
+    title: "CWL",
+    status: "open",
+    visibility: "public",
+    signupsOpen: true,
+    startsAt: "2000-01-01T00:00:00.000Z",
+    endsAt: "2100-01-01T00:00:00.000Z",
+    cwlTrackingState: "active",
+    cwl: { target: { status: "unresolved", reason: "not-selected" } },
+    participantsByDiscordId: {
+      "111": { discordId: "111", status: "signed_up", accounts: [{ tag: "#2LUCULP", name: "Alpha" }] },
+    },
+  };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(event.eventId), "PUT", event);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: event.eventId, type: "cwl" });
+  backend.readActivePlayerMetricsSnapshot_ = () => {
+    throw new Error("unresolved CWL must not load active player metrics");
+  };
+
+  const result = backend.registerSeasonEventSignup({
+    eventType: "cwl",
+    discordUser: { id: "111", username: "alpha" },
+  }, "secret");
+
+  assert.equal(result.status, "cwl-target-unresolved");
+});
+
+test("season event signup commits participant state with one atomic Firebase batch", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+  backend.enqueueCloudflareSeasonEventPublication_ = () => ({ ok: true, queued: true });
+  const originalBatchPut = backend.firebaseBatchPutJson_;
+  const batches = [];
+  backend.firebaseBatchPutJson_ = (entries, options) => {
+    batches.push({ entries: clone(entries), options: clone(options || {}) });
+    return originalBatchPut(entries, options);
+  };
+  backend.removeSeasonEventParticipantTagIndexes_ = () => assert.fail("signup must not issue serial tag-index removals");
+  backend.addSeasonEventParticipantTagIndexes_ = () => assert.fail("signup must not issue serial tag-index writes");
+
+  const result = backend.registerSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#9PYLQG", "#8CCVV"],
+    source: { type: "discord-button" },
+  }, "secret");
+
+  assert.equal(result.status, "signed-up");
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].options.disableFallback, true);
+  const paths = batches[0].entries.map(entry => entry.path);
+  assert.ok(paths.includes(backend.buildSeasonEventParticipantPath_("donation-2026-05", "222")));
+  assert.ok(paths.includes(backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#9PYLQG")));
+  assert.ok(paths.includes(backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#8CCVV")));
+  assert.ok(paths.includes(backend.buildFirebaseChildPath_(backend.buildSeasonEventByIdPath_("donation-2026-05"), "updatedAt")));
+  assert.equal(paths.filter(path => path.includes("/audit/")).length, 1);
+});
+
+test("failed atomic season event signup leaves Firebase unchanged and does not enqueue publication", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+  let enqueueCount = 0;
+  backend.enqueueCloudflareSeasonEventPublication_ = () => {
+    enqueueCount += 1;
+    return { ok: true, queued: true };
+  };
+  const before = clone(backend.__getFirebaseDb());
+  backend.firebaseBatchPutJson_ = () => {
+    throw new Error("atomic write failed");
+  };
+
+  assert.throws(() => backend.registerSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#9PYLQG"],
+  }, "secret"), /atomic write failed/);
+  assert.deepEqual(backend.__getFirebaseDb(), before);
+  assert.equal(enqueueCount, 0);
+});
+
+test("active player metrics snapshot reads only the selected immutable metrics shard", () => {
+  const backend = loadBackend();
+  const playerMetrics = buildSeasonEventRosterData().playerMetrics;
+  installMemoryFirebase(backend, {
+    activePublished: { currentVersionId: "version-1" },
+    activeVersions: {
+      "version-1": {
+        playerMetrics: backend.encodeFirebaseObjectKeysRecursive_(playerMetrics),
+      },
+    },
+  });
+  const realRequest = backend.firebaseRequestJson_;
+  const requests = [];
+  backend.firebaseRequestJson_ = (path, method, payload) => {
+    requests.push({ path: String(path || ""), method: String(method || "GET").toUpperCase() });
+    return realRequest(path, method, payload);
+  };
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("complete active roster reconstruction must not be used");
+  };
+
+  const snapshot = backend.readActivePlayerMetricsSnapshot_();
+
+  assert.equal(snapshot.versionId, "version-1");
+  assert.equal(JSON.stringify(snapshot.playerMetrics), JSON.stringify(playerMetrics));
+  assert.deepEqual(requests, [
+    { path: "activePublished/currentVersionId", method: "GET" },
+    { path: "activeVersions/version-1/playerMetrics", method: "GET" },
+  ]);
+});
+
+test("active player metrics snapshot rejects noncanonical identities and uses the validated fallback", () => {
+  const backend = loadBackend();
+  const fallbackMetrics = buildSeasonEventRosterData().playerMetrics;
+  installMemoryFirebase(backend, {
+    activePublished: { currentVersionId: "version-bad" },
+    activeVersions: {
+      "version-bad": {
+        playerMetrics: backend.encodeFirebaseObjectKeysRecursive_({
+          byTag: {
+            "#2LUCULP": {
+              identity: { tag: "#9PYLQG", name: "Wrong identity" },
+              latestSnapshot: { tag: "#9PYLQG", name: "Wrong identity" },
+            },
+          },
+        }),
+      },
+    },
+  });
+  let fallbackCalls = 0;
+  backend.readActiveRosterSnapshot_ = () => {
+    fallbackCalls += 1;
+    return {
+      rosterData: { playerMetrics: fallbackMetrics },
+      source: "firebase:/active",
+      versionId: "fallback-version",
+    };
+  };
+
+  const snapshot = backend.readActivePlayerMetricsSnapshot_();
+
+  assert.equal(fallbackCalls, 1);
+  assert.equal(snapshot.fallback, true);
+  assert.equal(snapshot.source, "firebase:/active");
+  assert.equal(snapshot.versionId, "fallback-version");
+  assert.equal(JSON.stringify(snapshot.playerMetrics), JSON.stringify(fallbackMetrics));
+});
+
+test("active player metrics snapshot recovers a missing selected shard from validated active data", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const versionedData = backend.validateRosterData_(buildValidRosterData());
+  const fallbackData = buildValidRosterData();
+  fallbackData.pageTitle = "Fallback Active";
+  fallbackData.playerMetrics.byTag["#PLAYER"].identity.name = "Fallback Identity";
+  backend.writeActiveRosterVersionShards_("version-missing-metrics", versionedData, { publish: true, source: "test" });
+  backend.firebaseRequestJson_(backend.buildActiveVersionPath_("version-missing-metrics", "playerMetrics"), "DELETE");
+  backend.firebaseRequestJson_("active", "PUT", backend.encodeFirebaseObjectKeysRecursive_(fallbackData));
+
+  const snapshot = backend.readActivePlayerMetricsSnapshot_();
+
+  assert.equal(snapshot.fallback, true);
+  assert.equal(snapshot.source, "firebase:/active");
+  assert.equal(snapshot.playerMetrics.byTag["#PLAYER"].identity.name, "Fallback Identity");
 });
 
 test("season event signup does not match an ID-linked account by username collision", () => {
@@ -2084,6 +2291,50 @@ test("season event participant account updates and cancellation maintain tag ind
   assert.equal(cancelled.status, "cancelled");
   assert.equal(cancelled.participant.status, "cancelled");
   assert.equal(backend.firebaseRequestJson_(backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#8CCVV"), "GET"), null);
+});
+
+test("season event atomic updates preserve tag indexes owned by another participant", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+  backend.registerSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#9PYLQG", "#8CCVV"],
+  }, "secret");
+
+  const removedPath = backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#9PYLQG");
+  const retainedPath = backend.buildSeasonEventParticipantTagIndexPath_("donation-2026-05", "#8CCVV");
+  backend.writeSeasonEventFirebasePayload_(removedPath, "PUT", { discordId: "foreign-user", tag: "#9PYLQG" });
+  const originalBatchPut = backend.firebaseBatchPutJson_;
+  const batches = [];
+  backend.firebaseBatchPutJson_ = (entries, options) => {
+    batches.push(clone(entries));
+    return originalBatchPut(entries, options);
+  };
+
+  const updated = backend.updateSeasonEventParticipantAccounts({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+    playerTags: ["#8CCVV"],
+  }, "secret");
+
+  assert.equal(updated.status, "updated");
+  assert.equal(backend.decodeSeasonEventFirebasePayload_(backend.firebaseRequestJson_(removedPath, "GET")).discordId, "foreign-user");
+  assert.equal(batches[0].some(entry => entry.path === removedPath && entry.payload === null), false);
+  assert.equal(batches[0].some(entry => entry.path === retainedPath && entry.payload === null), true);
+  assert.equal(batches[0].some(entry => entry.path === retainedPath && entry.payload && entry.payload.discordId === "222"), true);
+  assert.equal(backend.decodeSeasonEventFirebasePayload_(backend.firebaseRequestJson_(retainedPath, "GET")).discordId, "222");
+
+  backend.writeSeasonEventFirebasePayload_(retainedPath, "PUT", { discordId: "foreign-user", tag: "#8CCVV" });
+  const cancelled = backend.cancelSeasonEventSignup({
+    eventId: "donation-2026-05",
+    discordUser: { id: "222", username: "bravo", globalName: "Bravo", displayName: "Bravo" },
+  }, "secret");
+
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(batches[1].some(entry => entry.path === retainedPath && entry.payload === null), false);
+  assert.equal(backend.decodeSeasonEventFirebasePayload_(backend.firebaseRequestJson_(retainedPath, "GET")).discordId, "foreign-user");
 });
 
 test("OAuth, Firebase single, Firebase fetchAll, and ETag CAS requests have explicit timeouts", () => {

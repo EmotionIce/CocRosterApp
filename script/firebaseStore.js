@@ -1092,9 +1092,10 @@ function readActiveRosterSnapshotFromVersion_(versionIdRaw) {
 	const rosterIds = rosterShardResult.rosterIds;
 	const rosters = rosterShardResult.rosters;
 	const encodedPlayerMetrics = firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerMetrics"), "GET");
-	const playerMetrics = encodedPlayerMetrics && typeof encodedPlayerMetrics === "object" && !Array.isArray(encodedPlayerMetrics)
-		? decodeFirebaseObjectKeysRecursive_(encodedPlayerMetrics)
-		: createEmptyPlayerMetricsStore_();
+	if (!encodedPlayerMetrics || typeof encodedPlayerMetrics !== "object" || Array.isArray(encodedPlayerMetrics)) {
+		throw new Error("Missing active version player metrics for " + versionId + ".");
+	}
+	const playerMetrics = decodeFirebaseObjectKeysRecursive_(encodedPlayerMetrics);
 	const payload = {
 		schemaVersion: typeof manifest.schemaVersion === "number" && isFinite(manifest.schemaVersion) ? manifest.schemaVersion : 1,
 		pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
@@ -1140,6 +1141,45 @@ function readActiveRosterSnapshotFromFirebase_() {
 		return decodeAndValidateActiveRosterPayload_(encodedPayload, "firebase:/active");
 	}
 	throw new Error("Missing active roster payload at /active. Run migrateLegacyFirebaseRootToNamespacedLayout_() if this database still uses the old root layout.");
+}
+
+// Read only the canonical player-metrics shard selected by the active-version
+// pointer. Season-event identity checks and leaderboards do not need roster
+// layout shards, so reconstructing the complete active payload adds unrelated
+// Firebase downloads and network round trips to every Discord interaction.
+function readActivePlayerMetricsSnapshot_() {
+	const versionId = readPublishedActiveVersionId_();
+	if (versionId) {
+		try {
+			const path = buildActiveVersionPath_(versionId, "playerMetrics");
+			const encodedPlayerMetrics = firebaseRequestJson_(path, "GET");
+			if (!encodedPlayerMetrics || typeof encodedPlayerMetrics !== "object" || Array.isArray(encodedPlayerMetrics)) {
+				throw new Error("Missing active version player metrics for " + versionId + ".");
+			}
+			const playerMetrics = decodeFirebaseObjectKeysRecursive_(encodedPlayerMetrics);
+			if (!playerMetrics || typeof playerMetrics !== "object" || Array.isArray(playerMetrics) || !playerMetrics.byTag || typeof playerMetrics.byTag !== "object" || Array.isArray(playerMetrics.byTag)) {
+				throw new Error("Invalid active version player metrics for " + versionId + ".");
+			}
+			assertCanonicalPlayerMetricsStore_(playerMetrics, "active version playerMetrics");
+			return {
+				playerMetrics: playerMetrics,
+				source: "firebase:/activeVersions/" + versionId + "/playerMetrics",
+				versionId: versionId,
+			};
+		} catch (err) {
+			Logger.log("Unable to read published active player metrics '%s'; falling back to the validated active snapshot: %s", versionId, errorMessage_(err));
+		}
+	}
+	const snapshot = readActiveRosterSnapshot_();
+	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+	return {
+		playerMetrics: rosterData.playerMetrics && typeof rosterData.playerMetrics === "object"
+			? rosterData.playerMetrics
+			: createEmptyPlayerMetricsStore_(),
+		source: String(snapshot && snapshot.source || "firebase:/active"),
+		versionId: String(snapshot && snapshot.versionId || versionId || ""),
+		fallback: true,
+	};
 }
 
 // Handle read active roster snapshot.
