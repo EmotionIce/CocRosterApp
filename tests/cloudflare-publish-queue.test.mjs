@@ -203,8 +203,6 @@ const installCloudflareTransport = (queue, objectStore = new Map()) => {
     for (const item of request.objects || []) objectStore.set(`${item.scope}:${item.path}`, clone(item.payload));
     for (const derivation of request.derivations || []) {
       const base = `activeVersions/${derivation.versionId}`;
-      objectStore.set(`bot:${base}/playerMetrics/byTag`, {});
-      objectStore.set(`bot:${base}/playerMetrics/meta`, {});
       objectStore.set(`bot:${base}/indexes/linkedAccountsByDiscordId`, {});
       objectStore.set(`bot:${base}/indexes/linkedAccountsByDiscordUsername`, {});
     }
@@ -728,11 +726,110 @@ test("schema-v2 ordinary and commit states migrate to the first idempotent phase
       active: { targetVersionId: "target", targetGeneration: 4, phase, cursor: 9, committedVersionId: "committed" },
       dirty: { relevantSnapshot: { revision: 3, phase: "ordinary", cursor: 4 } },
     });
-    assert.equal(migrated.schemaVersion, 4);
+    assert.equal(migrated.schemaVersion, 5);
     assert.equal(migrated.active.phase, "public-manifest-rosters");
     assert.equal(migrated.active.committedVersionId, "committed");
     assert.equal(migrated.dirty.repair.revision, 3);
   }
+});
+
+test("schema-v4 bot-active rollout resumes from private indexes and clears its obsolete dispatch", () => {
+  const q = loadQueue();
+  for (const [botDerivedReady, expectedPhase] of [[true, "commit"], [false, "bot-derived"]]) {
+    const migrated = q.normalizeCloudflarePublishQueueState_({
+      schemaVersion: 4,
+      active: {
+        targetVersionId: "target",
+        targetGeneration: 8,
+        phase: "bot-active",
+        cursor: 0,
+        botDerivedReady,
+        committedVersionId: "committed",
+        dispatch: { phase: "bot-active", generation: 8, guard: { generation: 9, batchId: "old-bot-active" } },
+      },
+    });
+    assert.equal(migrated.schemaVersion, 5);
+    assert.equal(migrated.active.phase, expectedPhase);
+    assert.equal(migrated.active.dispatch, null);
+    assert.equal(migrated.active.committedVersionId, "committed");
+  }
+});
+
+test("an ambiguous lost response retains its dispatch and replays after a newer batch without another KV write", async () => {
+  const q = installCasFirebase(loadQueue());
+  const initialState = activeState(q, "public-manifest-rosters");
+  q.__setState(initialState);
+  const claim = q.allocateCloudflarePhaseClaim_(q.__getState(), { category: "active" });
+  const worker = loadWorkerForBoundary();
+  const values = new Map();
+  const puts = [];
+  const kv = {
+    async get(key) { return values.has(key) ? values.get(key) : null; },
+    async put(key, value) { puts.push(key); values.set(key, String(value)); },
+    async delete(key) { values.delete(key); },
+  };
+  const durableValues = new Map();
+  const durableState = { storage: {
+    async get(key) { return durableValues.get(key); },
+    async put(key, value) { durableValues.set(key, value); },
+  } };
+  const coordinator = new worker.__Coordinator(durableState, { ROSTER_DATA_KV: kv });
+  const env = {
+    ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret",
+    ROSTER_DATA_KV: kv,
+    CLOUDFLARE_PUBLICATION_COORDINATOR: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: (request) => coordinator.fetch(request) }),
+    },
+  };
+  const publish = async (body) => {
+    const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+      method: "POST",
+      headers: { authorization: "Bearer secret", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }), env, {});
+    return { response, payload: await response.json() };
+  };
+  const firstBody = {
+    requestId: "lost-first",
+    batchId: claim.dispatchGuard.batchId,
+    publishedAt: "2026-07-19T19:00:00.000Z",
+    dispatchGuard: claim.dispatchGuard,
+    objects: [{ scope: "public", path: "quota/lost-response", payload: { value: 1 } }],
+  };
+  const first = await publish(firstBody);
+  assert.equal(first.response.status, 200);
+  assert.equal(first.payload.mutationCounts.actualPutCount, 1);
+
+  const failure = q.recordCloudflareQueueFailure_("simulated client timeout", { category: "active" }, undefined, claim);
+  assert.equal(failure.dispatchRetained, true);
+
+  const laterGuard = { generation: claim.dispatchGuard.generation + 1, batchId: "later-batch" };
+  const later = await publish({
+    requestId: "later",
+    batchId: laterGuard.batchId,
+    publishedAt: "2026-07-19T19:00:01.000Z",
+    dispatchGuard: laterGuard,
+    objects: [{ scope: "public", path: "quota/later", payload: { value: 2 } }],
+  });
+  assert.equal(later.response.status, 200);
+  assert.equal(puts.length, 2);
+
+  const retryState = q.__getState();
+  retryState.active.failure.nextAttemptAt = new Date(Date.now() - 1000).toISOString();
+  q.__setState(retryState);
+  const retryClaim = q.allocateCloudflarePhaseClaim_(q.__getState(), { category: "active" });
+  assert.deepEqual(clone(retryClaim.dispatchGuard), clone(claim.dispatchGuard));
+  const replay = await publish(Object.assign({}, firstBody, {
+    requestId: "lost-retry",
+    publishedAt: "2026-07-19T19:01:00.000Z",
+    dispatchGuard: retryClaim.dispatchGuard,
+  }));
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.payload.replayed, true);
+  assert.equal(replay.payload.requestId, "lost-first");
+  assert.equal(replay.payload.mutationCounts.actualPutCount, 0);
+  assert.equal(puts.length, 2);
 });
 
 test("queue CAS retries a 412 and preserves a concurrent enqueue", () => {
@@ -1117,31 +1214,22 @@ test("active public manifest/roster phase reads no metrics", () => {
   assert.equal(reads.some((path) => path.includes("playerMetrics")), false);
 });
 
-test("active bot roster phase reads no metrics", () => {
+test("legacy bot-active phase performs no Firebase reads and derives only private indexes", () => {
   const q = loadQueue();
   const state = activeState(q, "bot-active");
   const reads = [];
-  const manifest = { versionId: "version-B", rosterIds: ["main"], rosterOrder: ["main"], pageTitle: "Roster" };
-  const roster = { id: "main", title: "Main", main: [], subs: [], missing: [] };
-  q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
   q.firebaseRequestJson_ = (path) => {
     reads.push(path);
-    if (path.endsWith("/manifest")) return manifest;
     throw new Error(`unexpected read ${path}`);
-  };
-  q.firebaseBatchGetJson_ = (paths) => {
-    reads.push(...paths);
-    return { [paths[0]]: roster };
   };
 
   const built = q.buildCloudflareActivePhaseRequest_(state, { phase: "bot-active", cursor: 0 });
-  const botRosters = built.request.objects.find((item) => item.path.endsWith("/rosters")).payload;
-
-  assert.equal(botRosters[0].id, "main");
-  assert.equal(reads.some((path) => path.includes("playerMetrics")), false);
+  assert.deepEqual(reads, []);
+  assert.equal((built.request.objects || []).length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(built.request.derivations)), [{ kind: "bot-player-metrics", versionId: "version-B" }]);
 });
 
-test("active roster publication carries war star standings into public and bot KV objects", () => {
+test("active roster publication carries war star standings in the canonical public object", () => {
   const q = loadQueue();
   const roster = {
     id: "main",
@@ -1175,13 +1263,8 @@ test("active roster publication carries war star standings into public and bot K
   assert.equal(publicRosters.main.regularWar.currentWar.clanStars, 24);
   assert.equal(publicRosters.main.cwlStats.currentWar.opponentStars, 10);
 
-  const botBatch = q.buildCloudflareActivePhaseRequest_(
-    activeState(q, "bot-active"),
-    { phase: "bot-active", cursor: 0 },
-  );
-  const botRosters = botBatch.request.objects.find((item) => item.path.endsWith("/rosters")).payload;
-  assert.equal(botRosters[0].regularWar.currentWar.opponentStars, 20);
-  assert.equal(botRosters[0].cwlStats.currentWar.clanStars, 12);
+  assert.equal(publicRosters.main.regularWar.currentWar.opponentStars, 20);
+  assert.equal(publicRosters.main.cwlStats.currentWar.clanStars, 12);
 });
 
 test("active metrics are read from Firebase once and bot derivation reuses Cloudflare", () => {
@@ -1232,7 +1315,14 @@ test("commit phase verifies immutable objects and never rebuilds the complete sn
   const built = q.buildCloudflareActivePhaseRequest_(activeState(q, "commit"), { phase: "commit", cursor: 0 });
   assert.equal(built.request.commits.at(-1).path, "activePublished/currentSelector");
   assert.equal(built.request.commits.filter((item) => item.path === "activePublished/currentSelector").length, 1);
-  assert.equal(verified.length, 9);
+  assert.deepEqual(Array.from(verified, (item) => `${item.scope}:${item.path}`).sort(), [
+    "bot:activeVersions/version-B/indexes/linkedAccountsByDiscordId",
+    "bot:activeVersions/version-B/indexes/linkedAccountsByDiscordUsername",
+    "public:activeVersions/version-B/manifest",
+    "public:activeVersions/version-B/playerMetrics",
+    "public:activeVersions/version-B/rosters",
+  ].sort());
+  assert.equal(built.request.commits.some((item) => item.scope === "bot"), false);
   assert.equal(built.request.commits.some((item) => item.path.includes("rosters")), false);
   assert.equal(built.request.commits.some((item) => item.path.includes("playerMetrics")), false);
 });
@@ -1399,13 +1489,103 @@ test("canonical active enqueue derives bot metrics during the public metrics pha
     phases.push(before);
     q.processCloudflareActiveQueueRequest_(q.__getState());
   }
-  assert.deepEqual(phases, ["public-manifest-rosters", "public-player-metrics", "bot-active", "commit"]);
+  assert.deepEqual(phases, ["public-manifest-rosters", "public-player-metrics", "commit"]);
   assert.equal(q.__getState().active.committedVersionId, "version-B");
   assert.equal(objectStore.get("public:activePublished/currentVersionId"), "version-B");
-  assert.equal(objectStore.get("bot:active/currentVersionId"), "version-B");
+  assert.equal(objectStore.has("bot:active/currentVersionId"), false);
   assert.ok(objectStore.has("public:activeVersions/version-B/manifest"));
-  assert.ok(objectStore.has("bot:activeVersions/version-B/active"));
-  assert.ok(objectStore.has("bot:activeVersions/version-B/playerMetrics/byTag"));
+  assert.ok(objectStore.has("bot:activeVersions/version-B/indexes/linkedAccountsByDiscordId"));
+  assert.ok(objectStore.has("bot:activeVersions/version-B/indexes/linkedAccountsByDiscordUsername"));
+});
+
+test("a steady active generation uses nine KV puts and ages out with five KV deletes", async () => {
+  const q = loadQueue();
+  const worker = loadWorkerForBoundary();
+  const manifest = { schemaVersion: 1, versionId: "version-B", rosterIds: ["main"], rosterOrder: ["main"] };
+  const roster = { id: "main", main: [], subs: [], missing: [] };
+  const metrics = { schemaVersion: 1, byTag: {} };
+  q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
+  q.firebaseRequestJson_ = (path) => path.endsWith("/manifest") ? manifest : path.endsWith("/playerMetrics") ? metrics : null;
+  q.firebaseBatchGetJson_ = (paths) => Object.fromEntries(paths.map((path) => [path, roster]));
+  q.verifyCloudflareActiveVersionObjects_ = () => ({ ok: true });
+
+  const values = new Map();
+  const puts = [];
+  const deletes = [];
+  const kv = {
+    async get(key) { return values.has(key) ? values.get(key) : null; },
+    async put(key, value) { puts.push(key); values.set(key, String(value)); },
+    async delete(key) { deletes.push(key); values.delete(key); },
+    async list({ prefix }) {
+      return {
+        keys: Array.from(values.keys()).filter((key) => key.startsWith(prefix)).sort().map((name) => ({ name })),
+        cursor: "",
+        list_complete: true,
+      };
+    },
+  };
+  const durableValues = new Map();
+  const durableState = { storage: {
+    async get(key) { return durableValues.get(key); },
+    async put(key, value) { durableValues.set(key, value); },
+  } };
+  const coordinator = new worker.__Coordinator(durableState, { ROSTER_DATA_KV: kv });
+  const env = {
+    ROSTER_PUBLIC_DATA_PUBLISH_SECRET: "secret",
+    ROSTER_DATA_KV: kv,
+    CLOUDFLARE_PUBLICATION_COORDINATOR: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: (request) => coordinator.fetch(request) }),
+    },
+  };
+  let dispatchGeneration = 100;
+  const send = async (requestRaw, batchIdRaw) => {
+    const batchId = String(batchIdRaw);
+    const response = await worker.fetch(new Request("https://worker.test/api/internal/public-data/publish-v2", {
+      method: "POST",
+      headers: { authorization: "Bearer secret", "content-type": "application/json" },
+      body: JSON.stringify(Object.assign({}, requestRaw, {
+        requestId: `request-${batchId}`,
+        batchId,
+        publishedAt: "2026-07-19T19:00:00.000Z",
+        dispatchGuard: { generation: ++dispatchGeneration, batchId },
+      })),
+    }), env, {});
+    const payload = await response.json();
+    assert.equal(response.status, 200, payload.error || batchId);
+    return payload;
+  };
+
+  const state = activeState(q);
+  const phasePuts = [];
+  for (const phase of ["public-manifest-rosters", "public-player-metrics", "commit"]) {
+    state.active.phase = phase;
+    const built = q.buildCloudflareActivePhaseRequest_(state, { phase, cursor: 0 });
+    const payload = await send(built.request, built.request.batchId);
+    phasePuts.push(payload.mutationCounts.actualPutCount);
+  }
+  assert.deepEqual(phasePuts, [2, 3, 4]);
+  assert.equal(puts.length, 9);
+
+  values.set("public-data/activePublished/currentSelector.json", JSON.stringify({
+    currentVersionId: "version-C",
+    previousVersionId: "version-A",
+    generation: 8,
+  }));
+  durableValues.set("acceptedActiveCommit", { targetVersionId: "version-C", generation: 8 });
+  deletes.length = 0;
+  const publicRetention = await send({ retention: { cursor: "", limit: 100 } }, "retention-public");
+  assert.equal(publicRetention.retention.done, false);
+  const botRetention = await send({ retention: { cursor: publicRetention.retention.cursor, limit: 100 } }, "retention-bot");
+  assert.equal(botRetention.retention.done, true);
+  assert.equal(deletes.length, 5);
+  assert.deepEqual(deletes.slice().sort(), [
+    "bot-data/activeVersions/version-B/indexes/linkedAccountsByDiscordId.json",
+    "bot-data/activeVersions/version-B/indexes/linkedAccountsByDiscordUsername.json",
+    "public-data/activeVersions/version-B/manifest.json",
+    "public-data/activeVersions/version-B/playerMetrics.json",
+    "public-data/activeVersions/version-B/rosters.json",
+  ].sort());
 });
 
 test("Worker derives bot metrics from the in-flight public object without a KV source read", async () => {
@@ -1442,13 +1622,10 @@ test("Worker derives bot metrics from the in-flight public object without a KV s
 	const result = await response.json();
 	assert.equal(response.status, 200);
 	assert.equal(result.completedDerivationCount, 1);
-	assert.equal(result.completedDerivedObjectCount, 4);
+	assert.equal(result.completedDerivedObjectCount, 2);
 	assert.equal(sourceReads, 0);
-	assert.equal(JSON.stringify(JSON.parse(values.get("bot-data/activeVersions/version-B/playerMetrics/byTag.json"))), JSON.stringify(metrics.byTag));
-	assert.equal(JSON.stringify(JSON.parse(values.get("bot-data/activeVersions/version-B/playerMetrics/meta.json"))), JSON.stringify({
-	  schemaVersion: 1,
-	  updatedAt: "2026-07-17T12:00:00.000Z",
-	}));
+	assert.equal(values.has("bot-data/activeVersions/version-B/playerMetrics/byTag.json"), false);
+	assert.equal(values.has("bot-data/activeVersions/version-B/playerMetrics/meta.json"), false);
 	const usernameIndex = codec.decode(JSON.parse(values.get("bot-data/activeVersions/version-B/indexes/linkedAccountsByDiscordUsername.json")));
 	assert.equal(usernameIndex["player.name"][0].tag, "#PLAYER");
 	assert.equal(usernameIndex["player.name"][0].leagueName, "Legend League");
@@ -1754,7 +1931,6 @@ test("every active commit operation is retryable and the shared selector remains
     { path: "activePublished/currentManifest", scope: "public", payload: { versionId: "version-A" } },
     { path: "bootstrap/current", scope: "public", payload: { activeVersionId: "version-A" } },
     { path: "activePublished/currentVersionId", scope: "public", payload: "version-A" },
-    { path: "active/currentVersionId", scope: "bot", payload: "version-A" },
     { path: "activePublished/currentSelector", scope: "public", payload: { currentVersionId: "version-A", generation: 11 } },
   ];
   const keyFor = (entry) => `${entry.scope === "bot" ? "bot-data" : "public-data"}/${entry.path}.json`;
@@ -1792,6 +1968,8 @@ test("every active commit operation is retryable and the shared selector remains
     const failedPayload = await failed.json();
     assert.equal(failed.status, 502, `failure index ${failedIndex}`);
     assert.equal(failedPayload.completedCommitCount, failedIndex);
+    assert.equal(failedPayload.mutationCounts.actualPutCount, failedIndex + 1, `failure accounting index ${failedIndex}`);
+    assert.equal(failedPayload.mutationCounts.internalPutCount, 1, `guard accounting index ${failedIndex}`);
     assert.equal(values.has(keyFor(commits.at(-1))), false, `selector advertised at failure index ${failedIndex}`);
 
     rejectedKey = "";
@@ -1799,6 +1977,8 @@ test("every active commit operation is retryable and the shared selector remains
     const retriedPayload = await retried.json();
     assert.equal(retried.status, 200, `retry index ${failedIndex}`);
     assert.equal(retriedPayload.completedCommitCount, commits.length);
+    assert.equal(retriedPayload.mutationCounts.actualPutCount, commits.length, `retry accounting index ${failedIndex}`);
+    assert.equal(retriedPayload.mutationCounts.internalPutCount, 0, `idempotent guard index ${failedIndex}`);
     assert.equal(JSON.parse(values.get(keyFor(commits.at(-1)))).currentVersionId, "version-A");
   }
 });
@@ -1947,11 +2127,11 @@ test("bounded repair resumes through every event, CWL aggregate, season map, and
     const claim = Object.assign({}, work, { repairAdvance: advance });
     q.clearCloudflareDirtyWorkIfRevisionMatches_(state, claim);
   }
-  assert.equal(repairedEvents.length, eventIds.length * 2);
-  assert.equal(repairedAggregates.length, 8);
+  assert.equal(repairedEvents.length, eventIds.length);
+  assert.equal(repairedAggregates.length, 4);
   assert.ok(repairPhases.indexOf("season-map") > -1);
   assert.ok(repairPhases.indexOf("pointers") > repairPhases.lastIndexOf("season-map"));
-  for (const scopes of pointerScopes.values()) assert.deepEqual(scopes.sort(), ["bot", "public"]);
+  for (const scopes of pointerScopes.values()) assert.deepEqual(scopes.sort(), ["public"]);
   assert.equal(state.dirty.repair, null);
 });
 
@@ -1968,7 +2148,7 @@ test("repair skips a missing archived donation overlay but blocks a missing curr
     category: "repair", revision: 1, step: "donations", seasonIds: [], eventIds: [],
     donationSeasonIds: ["season-archived"], seasonIndex: 0, eventIndex: 0, donationIndex: 0,
   });
-  assert.equal(archived.deletes.length, 2);
+  assert.equal(archived.deletes.length, 1);
   assert.equal(archived.repairAdvance.step, "pointers");
   assert.throws(() => q.buildCloudflareTargetedRepairRequest_({
     category: "repair", revision: 2, step: "donations", seasonIds: [], eventIds: [],

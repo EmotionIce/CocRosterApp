@@ -260,7 +260,7 @@ function releaseCloudflarePublishQueueLease_(tokenRaw) {
 
 function createEmptyCloudflarePublishQueueState_() {
 	return {
-		schemaVersion: 4,
+		schemaVersion: 5,
 		paused: false,
 		nextRevision: 0,
 		nextDispatchGeneration: 0,
@@ -392,14 +392,20 @@ function normalizeCloudflarePublishQueueState_(raw) {
 	const rawPhase = String(activeRaw.phase || "idle").trim();
 	const republish = activeRaw.republish === true;
 	const hasUncommittedTarget = !!targetVersionId && (targetVersionId !== committedVersionId || republish || rawPhase !== "idle");
-	const normalizedPhase = legacySchema && hasUncommittedTarget
+	let normalizedPhase = legacySchema && hasUncommittedTarget
 		? "public-manifest-rosters"
 		: normalizeCloudflareQueuePhase_(activeRaw.phase, hasUncommittedTarget);
+	// Schema 5 removes the duplicate bot-active publication. An in-flight old
+	// target can continue from its already-derived indexes, or rebuild only the
+	// indexes from the public metrics object before committing.
+	if (normalizedPhase === "bot-active") {
+		normalizedPhase = activeRaw.botDerivedReady === true ? "commit" : "bot-derived";
+	}
 	const normalizedCursor = normalizedPhase === "public-manifest-rosters" && (legacySchema || rawPhase !== normalizedPhase)
 		? 0
 		: Math.max(0, toNonNegativeInt_(activeRaw.cursor));
 	return {
-		schemaVersion: 4,
+		schemaVersion: 5,
 		// Schema-v3 used paused for automatic size failures. During migration only
 		// a non-permanent legacy pause can be known to be administrative.
 		paused: source.paused === true && !(Math.max(0, toNonNegativeInt_(source.schemaVersion)) < 4 && legacyRetryRaw.permanent === true),
@@ -414,7 +420,7 @@ function normalizeCloudflarePublishQueueState_(raw) {
 			botDerivedReady: activeRaw.botDerivedReady === true,
 			committedVersionId: committedVersionId,
 			committedGeneration: Math.max(0, toNonNegativeInt_(activeRaw.committedGeneration)),
-			dispatch: activeRaw.dispatch && typeof activeRaw.dispatch === "object" ? activeRaw.dispatch : null,
+			dispatch: rawPhase === normalizedPhase && activeRaw.dispatch && typeof activeRaw.dispatch === "object" ? activeRaw.dispatch : null,
 			failure: normalizeCloudflareQueueFailure_(activeRaw.failure),
 			migration: activeRaw.migration && typeof activeRaw.migration === "object" ? activeRaw.migration : null,
 			activeBurst: Math.max(0, toNonNegativeInt_(activeRaw.activeBurst)),
@@ -1444,20 +1450,17 @@ function buildCloudflareCommittedVersionSelector_(stateRaw, currentVersionIdRaw)
 	};
 }
 
-function addCloudflareMirroredQueueObject_(objects, pathRaw, payloadRaw) {
+function addCloudflareCanonicalPublicQueueObject_(objects, pathRaw, payloadRaw) {
 	if (payloadRaw == null) return;
 	objects.push(makeCloudflareQueueObject_(pathRaw, payloadRaw, "public"));
-	objects.push(makeCloudflareQueueObject_(pathRaw, payloadRaw, "bot"));
 }
 
-function addCloudflareMirroredQueueDelete_(deletes, pathRaw) {
+function addCloudflareCanonicalPublicQueueDelete_(deletes, pathRaw) {
 	deletes.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "public" });
-	deletes.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "bot" });
 }
 
-function addCloudflareMirroredQueueCommitDelete_(commits, pathRaw) {
+function addCloudflareCanonicalPublicQueueCommitDelete_(commits, pathRaw) {
 	commits.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "public", delete: true });
-	commits.push({ path: normalizeCloudflareDataObjectPath_(pathRaw), scope: "bot", delete: true });
 }
 
 function readDecodedCloudflareQueueObject_(pathRaw) {
@@ -1528,41 +1531,12 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 		} };
 	}
 	if (phase === "bot-active") {
-		assertCloudflarePublishQueueDeadline_(90000, "active bot payload reconstruction");
-		// This phase publishes roster metadata and roster shards only. Reconstruct
-		// them without downloading the large playerMetrics shard that is consumed
-		// separately by the public-player-metrics and bot-derived phases.
-		const manifest = readCloudflareTargetManifest_(versionId);
-		const rosterMap = readCloudflareTargetRosterMap_(versionId, manifest);
-		const rosterIds = Array.isArray(manifest.rosterIds) && manifest.rosterIds.length
-			? manifest.rosterIds.map((id) => String(id || "").trim()).filter(Boolean)
-			: Object.keys(rosterMap);
-		const rosterData = validateRosterData_({
-			schemaVersion: typeof manifest.schemaVersion === "number" && isFinite(manifest.schemaVersion) ? manifest.schemaVersion : 1,
-			pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
-			rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder : rosterIds,
-			rosters: rosterIds.map((rosterId) => rosterMap[rosterId]).filter((roster) => roster && typeof roster === "object"),
-			playerMetrics: createEmptyPlayerMetricsStore_(),
-			lastUpdatedAt: String(manifest.lastUpdatedAt || ""),
-			publicConfig: manifest.publicConfig && typeof manifest.publicConfig === "object" ? manifest.publicConfig : undefined,
-		});
-		const activeMeta = Object.assign({}, rosterData, { activeVersionId: versionId });
-		const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
-		delete activeMeta.rosters;
-		delete activeMeta.playerMetrics;
-		const descriptor = {
-			schemaVersion: 2,
-			activeVersionId: versionId,
-			shardedActive: true,
-			activeMeta: activeMeta,
-			rostersPath: "activeVersions/" + encodedVersionId + "/rosters",
-			playerMetricsMetaPath: "activeVersions/" + encodedVersionId + "/playerMetrics/meta",
-			playerMetricsByTagPath: "activeVersions/" + encodedVersionId + "/playerMetrics/byTag",
-		};
-		return { label: "active-bot-versioned-active", request: { batchId: "active:" + versionId + ":bot-active", objects: [
-			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/active", descriptor, "bot"),
-			makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/rosters", rosters, "bot"),
-		] } };
+		// Compatibility for an old in-flight phase. The Worker now projects bot
+		// active data from public immutable shards, so only private indexes remain.
+		return { label: "active-bot-indexes-compat", request: {
+			batchId: "active:" + versionId + ":bot-active",
+			derivations: [{ kind: "bot-player-metrics", versionId: versionId }],
+		} };
 	}
 	if (phase === "bot-derived") {
 		assertCloudflarePublishQueueDeadline_(60000, "active bot derived data");
@@ -1581,10 +1555,6 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 			{ scope: "public", path: "activeVersions/" + encodedVersionId + "/manifest" },
 			{ scope: "public", path: "activeVersions/" + encodedVersionId + "/rosters" },
 			{ scope: "public", path: "activeVersions/" + encodedVersionId + "/playerMetrics" },
-			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/active" },
-			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/rosters" },
-			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/playerMetrics/byTag" },
-			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/playerMetrics/meta" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordId" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordUsername" },
 		];
@@ -1597,7 +1567,6 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 			makeCloudflareQueueObject_("activePublished/currentManifest", manifest, "public"),
 			bootstrap && makeCloudflareQueueObject_(bootstrap.path, bootstrap.payload, "public"),
 			makeCloudflareQueueObject_("activePublished/currentVersionId", versionId, "public"),
-			makeCloudflareQueueObject_("active/currentVersionId", versionId, "bot"),
 			makeCloudflareQueueObject_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_SELECTOR_PATH, selector, "public"),
 		], commitGuard: { kind: "active", generation: state.active.targetGeneration, targetVersionId: versionId } } };
 	}
@@ -1615,7 +1584,7 @@ function measureCloudflareActivePhasePayloads_(versionIdRaw, optionsRaw) {
 	state.active.targetVersionId = versionId;
 	state.active.targetGeneration = Math.max(1, toNonNegativeInt_(options.generation) || 1);
 	state.active.committedVersionId = normalizeActiveVersionId_(options.previousVersionId);
-	const phases = ["public-manifest-rosters", "public-player-metrics", "bot-active", "bot-derived", "commit"];
+	const phases = ["public-manifest-rosters", "public-player-metrics", "commit"];
 	return phases.map(function (phase) {
 		state.active.phase = phase;
 		const built = buildCloudflareActivePhaseRequest_(state, { phase: phase, cursor: 0, targetVersionId: versionId, generation: state.active.targetGeneration });
@@ -1743,7 +1712,7 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 	if (discovered.step === "donations" && discovered.donationIndex >= discovered.donationSeasonIds.length) discovered.step = "pointers";
 	const addPointer = (path, scope) => {
 		const value = readDecodedCloudflareQueueObject_(path);
-		const scopes = scope ? [scope] : ["public", "bot"];
+		const scopes = scope ? [scope] : ["public"];
 		for (let i = 0; i < scopes.length; i++) {
 			if (value == null) commits.push({ path: normalizeCloudflareDataObjectPath_(path), scope: scopes[i], delete: true });
 			else commits.push(makeCloudflareQueueObject_(path, value, scopes[i]));
@@ -1755,15 +1724,15 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		const event = readSeasonEventById_(eventId);
 		const eventPath = buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodeFirebaseObjectKey_(eventId));
 		if (!event) {
-			addCloudflareMirroredQueueDelete_(deletes, eventPath);
-			["live", "final"].forEach((kind) => addCloudflareMirroredQueueDelete_(deletes, buildCwlSeasonEventAggregatePath_(eventId, kind)));
+			addCloudflareCanonicalPublicQueueDelete_(deletes, eventPath);
+			["live", "final"].forEach((kind) => addCloudflareCanonicalPublicQueueDelete_(deletes, buildCwlSeasonEventAggregatePath_(eventId, kind)));
 			discovered.diagnostics = discovered.diagnostics.concat([{ at: new Date().toISOString(), category: "missing-historical-event", eventId: eventId }]).slice(-100);
-		} else addCloudflareMirroredQueueObject_(objects, eventPath, event);
+		} else addCloudflareCanonicalPublicQueueObject_(objects, eventPath, event);
 		if (event && normalizeSeasonEventType_(event.type) === "cwl" && typeof readCwlSeasonEventAggregate_ === "function") {
 			["live", "final"].forEach((kind) => {
 				const aggregate = readCwlSeasonEventAggregate_(eventId, kind);
-				if (aggregate && aggregate.eventId) addCloudflareMirroredQueueObject_(objects, buildCwlSeasonEventAggregatePath_(eventId, kind), projectCloudflareCwlAggregateForEvent_(event, aggregate, kind));
-				else addCloudflareMirroredQueueDelete_(deletes, buildCwlSeasonEventAggregatePath_(eventId, kind));
+				if (aggregate && aggregate.eventId) addCloudflareCanonicalPublicQueueObject_(objects, buildCwlSeasonEventAggregatePath_(eventId, kind), projectCloudflareCwlAggregateForEvent_(event, aggregate, kind));
+				else addCloudflareCanonicalPublicQueueDelete_(deletes, buildCwlSeasonEventAggregatePath_(eventId, kind));
 			});
 		}
 		repairAdvance = Object.assign({}, discovered, {
@@ -1775,9 +1744,9 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		const seasonPath = buildFirebaseChildPath_(SEASON_EVENTS_BY_SEASON_PATH, encodeFirebaseObjectKey_(seasonId));
 		const seasonPointers = readDecodedCloudflareQueueObject_(seasonPath);
 		if (!seasonPointers) {
-			addCloudflareMirroredQueueDelete_(deletes, seasonPath);
+			addCloudflareCanonicalPublicQueueDelete_(deletes, seasonPath);
 			discovered.diagnostics = discovered.diagnostics.concat([{ at: new Date().toISOString(), category: "missing-historical-season-map", seasonId: seasonId }]).slice(-100);
-		} else addCloudflareMirroredQueueObject_(objects, seasonPath, seasonPointers);
+		} else addCloudflareCanonicalPublicQueueObject_(objects, seasonPath, seasonPointers);
 		repairAdvance = Object.assign({}, discovered, {
 			seasonIndex: discovered.seasonIndex + 1,
 			step: discovered.seasonIndex + 1 >= discovered.seasonIds.length ? "donations" : "season-maps",
@@ -1787,7 +1756,7 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		const overlayPath = buildFirebaseChildPath_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason"), encodeFirebaseObjectKey_(seasonId));
 		const overlay = readDecodedCloudflareQueueObject_(overlayPath);
 		if (overlay) {
-			addCloudflareMirroredQueueObject_(objects, overlayPath, overlay);
+			addCloudflareCanonicalPublicQueueObject_(objects, overlayPath, overlay);
 		} else {
 			const currentDonation = readDecodedCloudflareQueueObject_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current"));
 			const currentDonationSeasonId = String(currentDonation && currentDonation.seasonId || "").trim();
@@ -1799,15 +1768,15 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 			// An archived event may legitimately outlive its detached overlay. Remove
 			// any stale mirror object and continue; only donationRefresh/current is
 			// forbidden from advertising a missing overlay.
-			addCloudflareMirroredQueueDelete_(deletes, overlayPath);
+			addCloudflareCanonicalPublicQueueDelete_(deletes, overlayPath);
 		}
 		repairAdvance = Object.assign({}, discovered, {
 			donationIndex: discovered.donationIndex + 1,
 			step: discovered.donationIndex + 1 >= discovered.donationSeasonIds.length ? "pointers" : "donations",
 		});
 	} else if (discovered.step === "pointers" || (discovered.step === "season-maps" && !discovered.seasonIds.length) || (discovered.step === "donations" && discovered.donationIndex >= discovered.donationSeasonIds.length)) {
-		// Season and CWL pointers are read by both website and bot consumers;
-		// mirror them together only after the referenced objects/aggregates have
+		// Season and CWL pointers are read by both website and bot consumers from
+		// their canonical public object, after the referenced objects/aggregates have
 		// completed their earlier repair phases. CWL signup data remains bot-only
 		// in its dedicated dirty category.
 		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => addPointer(path));
@@ -1815,8 +1784,7 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		const donationCurrent = readDecodedCloudflareQueueObject_(currentDonationPath);
 		if (donationCurrent) {
 			commits.push(makeCloudflareQueueObject_(currentDonationPath, donationCurrent, "public"));
-			commits.push(makeCloudflareQueueObject_(currentDonationPath, donationCurrent, "bot"));
-		} else addCloudflareMirroredQueueCommitDelete_(commits, currentDonationPath);
+		} else addCloudflareCanonicalPublicQueueCommitDelete_(commits, currentDonationPath);
 		repairAdvance = Object.assign({}, discovered, { step: "done" });
 	}
 	return { objects: objects, deletes: deletes, commits: commits, repairAdvance: repairAdvance };
@@ -1831,30 +1799,29 @@ function buildCloudflareDirtyRequest_(stateRaw, workRaw) {
 	if (work.category === "event") {
 		const event = readSeasonEventById_(work.key);
 		const path = buildFirebaseChildPath_(SEASON_EVENTS_BY_ID_PATH, encodeFirebaseObjectKey_(work.key));
-		if (event) addCloudflareMirroredQueueObject_(objects, path, event); else addCloudflareMirroredQueueDelete_(deletes, path);
+		if (event) addCloudflareCanonicalPublicQueueObject_(objects, path, event); else addCloudflareCanonicalPublicQueueDelete_(deletes, path);
 	} else if (work.category === "cwlAggregate") {
 		const event = readSeasonEventById_(work.key);
 		const aggregate = readCwlSeasonEventAggregate_(work.key, work.kind);
 		const path = buildCwlSeasonEventAggregatePath_(work.key, work.kind);
-		if (aggregate && aggregate.eventId) addCloudflareMirroredQueueObject_(objects, path, projectCloudflareCwlAggregateForEvent_(event, aggregate, work.kind)); else addCloudflareMirroredQueueDelete_(deletes, path);
+		if (aggregate && aggregate.eventId) addCloudflareCanonicalPublicQueueObject_(objects, path, projectCloudflareCwlAggregateForEvent_(event, aggregate, work.kind)); else addCloudflareCanonicalPublicQueueDelete_(deletes, path);
 	} else if (work.category === "donationSeason") {
 		const path = buildFirebaseChildPath_(buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "bySeason"), encodeFirebaseObjectKey_(work.key));
 		const overlay = readDecodedCloudflareQueueObject_(path);
-		if (overlay) addCloudflareMirroredQueueObject_(objects, path, overlay); else addCloudflareMirroredQueueDelete_(deletes, path);
+		if (overlay) addCloudflareCanonicalPublicQueueObject_(objects, path, overlay); else addCloudflareCanonicalPublicQueueDelete_(deletes, path);
 		const currentPath = buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current");
 		const current = readDecodedCloudflareQueueObject_(currentPath);
 		if (current) {
 			commits.push(makeCloudflareQueueObject_(currentPath, current, "public"));
-			commits.push(makeCloudflareQueueObject_(currentPath, current, "bot"));
-		} else addCloudflareMirroredQueueCommitDelete_(commits, currentPath);
+		} else addCloudflareCanonicalPublicQueueCommitDelete_(commits, currentPath);
 	} else if (work.category === "cwlLeagueSignups") {
 		const signup = readActiveCwlLeagueSignups_();
 		if (signup) objects.push(makeCloudflareQueueObject_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH, signup, "bot")); else deletes.push({ path: normalizeCloudflareDataObjectPath_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH), scope: "bot" });
 	} else if (work.category === "seasonPointers") {
 		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => {
 			const value = readDecodedCloudflareQueueObject_(path);
-			if (value == null) addCloudflareMirroredQueueCommitDelete_(commits, path);
-			else { commits.push(makeCloudflareQueueObject_(path, value, "public")); commits.push(makeCloudflareQueueObject_(path, value, "bot")); }
+			if (value == null) addCloudflareCanonicalPublicQueueCommitDelete_(commits, path);
+			else commits.push(makeCloudflareQueueObject_(path, value, "public"));
 		});
 	} else if (work.category === "bootstrap") {
 		const bootstrap = buildCloudflareQueuedBootstrapCommit_(stateRaw);
@@ -1973,6 +1940,7 @@ function recordCloudflareQueueFailure_(messageRaw, batchRaw, ownerTokenRaw, clai
 		const delay = Math.min(CLOUDFLARE_PUBLISH_QUEUE_MAX_RETRY_MS, CLOUDFLARE_PUBLISH_QUEUE_BASE_RETRY_MS * Math.pow(2, Math.min(10, attempt - 1)));
 		const deadLetter = permanent || attempt >= CLOUDFLARE_QUEUE_ITEM_MAX_ATTEMPTS_;
 		const failed = batchRaw && batchRaw.failed && typeof batchRaw.failed === "object" ? batchRaw.failed : {};
+		const hasDefiniteWorkerResponse = !!(batchRaw && batchRaw.response && typeof batchRaw.response === "object");
 		marker.failure = {
 			revision: claim.category === "active" ? claim.generation : claim.revision,
 			itemKey: itemKey,
@@ -1985,7 +1953,11 @@ function recordCloudflareQueueFailure_(messageRaw, batchRaw, ownerTokenRaw, clai
 			scope: String(failed.scope || ""),
 			path: String(failed.path || ""),
 		};
-		marker.dispatch = null;
+		// A timeout can happen after the Durable Object committed the batch. Keep
+		// that exact guard until its result can be replayed. A definite Worker
+		// failure was not cached as successful and may allocate a fresh guard.
+		const dispatchRetained = !deadLetter && !hasDefiniteWorkerResponse && !!marker.dispatch;
+		if (!dispatchRetained) marker.dispatch = null;
 		if (deadLetter) {
 			state.deadLetters[itemKey] = Object.assign({}, marker.failure, { category: claim.category, key: claim.key || "", kind: claim.kind || "" });
 			if (claim.category === "repair") {
@@ -1995,7 +1967,7 @@ function recordCloudflareQueueFailure_(messageRaw, batchRaw, ownerTokenRaw, clai
 			}
 		}
 		state.lastBatch = batchRaw && typeof batchRaw === "object" ? batchRaw : null;
-		return { attempt: attempt, nextAttemptAt: cloudflareQueueNextAttemptIso_(state), permanent: permanent, deadLetter: deadLetter, itemKey: itemKey, pending: hasPendingCloudflarePublishWork_(state) };
+		return { attempt: attempt, nextAttemptAt: cloudflareQueueNextAttemptIso_(state), permanent: permanent, deadLetter: deadLetter, dispatchRetained: dispatchRetained, itemKey: itemKey, pending: hasPendingCloudflarePublishWork_(state) };
 	}, ownerTokenRaw);
 }
 
@@ -2071,9 +2043,13 @@ function completeCloudflareActivePhase_(claimRaw, sentRaw, ownerTokenRaw) {
 		else if (claim.phase === "public-player-metrics") {
 			const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
 			state.active.botDerivedReady = toNonNegativeInt_(response.completedDerivationCount) >= 1;
-			state.active.phase = "bot-active";
+			state.active.phase = state.active.botDerivedReady === true ? "commit" : "bot-derived";
 		}
-		else if (claim.phase === "bot-active") state.active.phase = state.active.botDerivedReady === true ? "commit" : "bot-derived";
+		else if (claim.phase === "bot-active") {
+			const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
+			state.active.botDerivedReady = state.active.botDerivedReady === true || toNonNegativeInt_(response.completedDerivationCount) >= 1;
+			state.active.phase = state.active.botDerivedReady === true ? "commit" : "bot-derived";
+		}
 		else if (claim.phase === "bot-derived") {
 			const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
 			if (toNonNegativeInt_(response.completedDerivationCount) < 1) throw new Error("Cloudflare bot metrics derivation did not complete.");
@@ -2203,7 +2179,7 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw) {
 		return completeCloudflareActivePhase_(claim, sent, ownerTokenRaw);
 	} catch (err) {
 		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE" || err.code === "CLOUDFLARE_QUEUE_RECOVERY_UNAVAILABLE")) throw err;
-		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: "active", phase: claim.phase, targetVersionId: claim.targetVersionId, failed: err && err.publishFailure || null }, ownerTokenRaw, claim);
+		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: "active", phase: claim.phase, targetVersionId: claim.targetVersionId, failed: err && err.publishFailure || null, response: err && err.publishResponse || null }, ownerTokenRaw, claim);
 		return { ok: false, error: errorMessage_(err), failure: failure, claim: claim };
 	} finally {
 		cloudflarePublishQueueCurrentClaim_ = null;
@@ -2237,7 +2213,7 @@ function processCloudflareDirtyQueueRequest_(stateRaw, ownerTokenRaw) {
 		return completeCloudflareDirtyPhase_(claim, sent, ownerTokenRaw);
 	} catch (err) {
 		if (err && (err.code === "CLOUDFLARE_QUEUE_LEASE_LOST" || err.code === "CLOUDFLARE_QUEUE_DEADLINE" || err.code === "CLOUDFLARE_QUEUE_RECOVERY_UNAVAILABLE")) throw err;
-		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: claim.category, revision: claim.revision, failed: err && err.publishFailure || null }, ownerTokenRaw, claim);
+		const failure = recordCloudflareQueueFailure_(errorMessage_(err), { category: claim.category, revision: claim.revision, failed: err && err.publishFailure || null, response: err && err.publishResponse || null }, ownerTokenRaw, claim);
 		return { ok: false, error: errorMessage_(err), failure: failure, claim: claim };
 	} finally {
 		cloudflarePublishQueueCurrentClaim_ = null;
@@ -2513,8 +2489,8 @@ function retryCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 
 // Explicit, idempotent migration entry point for a missing/corrupted selected
 // bot generation. The selected immutable objects are never overwritten. A
-// fresh canonical Firebase version is created first, then the normal complete
-// public/bot phase sequence verifies it before selector-last commit.
+// fresh canonical Firebase version is created first, then the normal public
+// shard/private-index sequence verifies it before selector-last commit.
 function repairCloudflareBotVersionObjects_(payloadRaw) {
 	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
 	const requestedVersion = String(payload.versionId || "").trim();

@@ -21,6 +21,7 @@ const PUBLIC_ACTIVE_SELECTOR_PATH = "activePublished/currentSelector";
 const ACTIVE_COMMIT_GUARD_KEY = "internal/cloudflare-publish/active-commit-guard.json";
 const PUBLICATION_COORDINATOR_BINDING = "CLOUDFLARE_PUBLICATION_COORDINATOR";
 const PUBLICATION_COORDINATOR_NAME = "queued-v2-global";
+const PUBLICATION_COMPLETION_HISTORY_LIMIT = 16;
 
 // Normalize http URL.
 const normalizeHttpUrl = (valueRaw) => {
@@ -691,7 +692,11 @@ const executeImmutableVersionRetention = async (store, retentionRaw) => {
   const deleteResult = await runBoundedDataOperations(deleteKeys, DATA_PUBLISH_V2_CONCURRENCY, async (key) => {
     await deleteDataStoreObject(store, key);
   }, "retention-delete");
-  if (!deleteResult.ok) throw new Error("Immutable retention delete failed for " + String(deleteResult.failure && deleteResult.failure.path || "unknown key") + ".");
+  if (!deleteResult.ok) {
+    const error = new Error("Immutable retention delete failed for " + String(deleteResult.failure && deleteResult.failure.path || "unknown key") + ".");
+    error.actualDeleteCount = deleteResult.completed;
+    throw error;
+  }
   let nextScopeIndex = cursorState.scopeIndex;
   let nextStoreCursor = listed.cursor;
   if (listed.complete) {
@@ -840,9 +845,31 @@ const readDirectPublicActiveVersionId = async (store) => {
   return String(value || "").trim();
 };
 
-// The shared selector is metadata only. It is safe for the bot route to read
-// this public-scope selector because bot payloads are always fetched from the
-// bot scope below; public objects are never used as bot fallbacks.
+// Season-event and donation objects are already public data. Store them once
+// and let the authenticated bot route read the same exact object instead of
+// maintaining an identical bot-scoped copy.
+const isCanonicalPublicMutablePath = (pathRaw) => {
+  const path = String(pathRaw == null ? "" : pathRaw).replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
+  return /^(?:events\/seasonEvents\/(?:current|currentCwl|latestCompletedCwl|seasonState\/current|byId\/[^/]+|bySeason\/[^/]+|cwlAggregates\/byEvent\/[^/]+\/(?:live|final))|donationRefresh\/(?:current|bySeason\/[^/]+))$/.test(path);
+};
+
+const parseVirtualBotActivePath = (pathRaw) => {
+  const path = String(pathRaw == null ? "" : pathRaw).replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
+  const match = /^activeVersions\/([^/]+)\/(active|rosters|playerMetrics\/meta|playerMetrics\/byTag)$/.exec(path);
+  if (!match) return null;
+  try {
+    return { versionId: decodeURIComponent(match[1]), child: match[2] };
+  } catch (err) {
+    return null;
+  }
+};
+
+const isVirtualBotPointerPath = (pathRaw) =>
+  String(pathRaw == null ? "" : pathRaw).replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "") === "active/currentVersionId";
+
+// The shared selector is metadata only. Public active shards are also the
+// canonical source for the authenticated bot projection; private indexes stay
+// bot-scoped and must be complete for the selected generation.
 const readSharedCommittedSelector = async (store) => {
   const selector = await readLegacyPublicJsonObject(store, PUBLIC_ACTIVE_SELECTOR_PATH);
   if (!isPlainJsonObject(selector)) return null;
@@ -1175,38 +1202,130 @@ const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathR
   return rosterMap;
 };
 
-const readVersionedBotObject = async (store, versionIdRaw, objectPathRaw) => {
-  const versionedPath = buildVersionedBotObjectPath(versionIdRaw, objectPathRaw);
-  if (!versionedPath) return null;
-  const object = await getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
-  const normalizedObjectPath = String(objectPathRaw || "").replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
-  if (!object || normalizedObjectPath !== "active") return object;
-  let descriptor;
-  try { descriptor = JSON.parse(await object.text()); } catch (err) { return null; }
-  if (!descriptor || descriptor.shardedActive !== true) return buildProjectedDataStoreObject(descriptor);
+const parsePublicActiveVersionProjection = async (versionIdRaw, objectsRaw) => {
   const versionId = String(versionIdRaw || "").trim();
-  const base = "activeVersions/" + encodeURIComponent(versionId);
-  const [rostersObject, metricsMetaObject, byTagObject] = await Promise.all([
-    getDataStoreObject(store, buildDataObjectKey("bot", base + "/rosters")),
-    getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/meta")),
-    getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/byTag")),
-  ]);
-  if (!rostersObject || !metricsMetaObject || !byTagObject) return null;
+  if (!versionId) return null;
+  const objects = objectsRaw && typeof objectsRaw === "object" ? objectsRaw : {};
+  const manifestObject = objects.manifest || null;
+  const rostersObject = objects.rosters || null;
+  const metricsObject = objects.playerMetrics || null;
+  if (!manifestObject || !rostersObject || !metricsObject) return null;
   try {
-    const [rosters, metricsMeta, byTag] = await Promise.all([
+    const [manifest, rosterMap, playerMetrics] = await Promise.all([
+      manifestObject.text().then((text) => JSON.parse(text)),
       rostersObject.text().then((text) => JSON.parse(text)),
-      metricsMetaObject.text().then((text) => JSON.parse(text)),
-      byTagObject.text().then((text) => JSON.parse(text)),
+      metricsObject.text().then((text) => JSON.parse(text)),
     ]);
-    const activeMeta = isPlainJsonObject(descriptor.activeMeta) ? descriptor.activeMeta : {};
-    return buildProjectedDataStoreObject(Object.assign({}, activeMeta, {
+    if (!isPlainJsonObject(manifest) || !isPlainJsonObject(rosterMap) || !isPlainJsonObject(playerMetrics)) return null;
+    const rosterIds = Array.isArray(manifest.rosterIds) && manifest.rosterIds.length
+      ? manifest.rosterIds.map((value) => String(value || "").trim()).filter(Boolean)
+      : Object.keys(rosterMap).map((key) => decodeFirebaseDerivationKey(key));
+    const rosters = rosterIds.map((rosterId) =>
+      rosterMap[rosterId] || rosterMap[encodeFirebaseDerivationKey(rosterId)]
+    ).filter((roster) => isPlainJsonObject(roster));
+    // Presence checks protect against propagation gaps; this content check also
+    // prevents a syntactically valid but incomplete roster shard from becoming
+    // the authenticated bot projection.
+    if (rosters.length !== rosterIds.length) return null;
+    const active = {
+      schemaVersion: Number.isFinite(Number(manifest.schemaVersion)) ? Number(manifest.schemaVersion) : 1,
+      pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
+      rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder : rosterIds,
+      rosters,
+      playerMetrics,
       activeVersionId: versionId,
-      rosters: Array.isArray(rosters) ? rosters : [],
-      playerMetrics: Object.assign({}, isPlainJsonObject(metricsMeta) ? metricsMeta : {}, { byTag: isPlainJsonObject(byTag) ? byTag : {} }),
-    }));
+    };
+    if (manifest.lastUpdatedAt) active.lastUpdatedAt = String(manifest.lastUpdatedAt);
+    if (isPlainJsonObject(manifest.publicConfig)) active.publicConfig = manifest.publicConfig;
+    const metricsMeta = Object.assign({}, playerMetrics);
+    delete metricsMeta.byTag;
+    return {
+      versionId,
+      manifest,
+      rosterMap,
+      rosters,
+      playerMetrics,
+      metricsMeta,
+      byTag: isPlainJsonObject(playerMetrics.byTag) ? playerMetrics.byTag : {},
+      active,
+    };
   } catch (err) {
     return null;
   }
+};
+
+const readPublicActiveVersionProjection = async (store, versionIdRaw) => {
+  const versionId = String(versionIdRaw || "").trim();
+  if (!versionId) return null;
+  const base = "activeVersions/" + encodeURIComponent(versionId);
+  const [manifest, rosters, playerMetrics] = await Promise.all([
+    getDataStoreObject(store, buildDataObjectKey("public", base + "/manifest")),
+    getDataStoreObject(store, buildDataObjectKey("public", base + "/rosters")),
+    getDataStoreObject(store, buildDataObjectKey("public", base + "/playerMetrics")),
+  ]);
+  return parsePublicActiveVersionProjection(versionId, { manifest, rosters, playerMetrics });
+};
+
+const readVirtualBotImmutableObject = async (store, pathRaw) => {
+  const parsed = parseVirtualBotActivePath(pathRaw);
+  if (!parsed) return null;
+  const projection = await readPublicActiveVersionProjection(store, parsed.versionId);
+  if (!projection) return null;
+  if (parsed.child === "active") return buildProjectedDataStoreObject(projection.active);
+  if (parsed.child === "rosters") return buildProjectedDataStoreObject(projection.rosters);
+  if (parsed.child === "playerMetrics/meta") return buildProjectedDataStoreObject(projection.metricsMeta);
+  return buildProjectedDataStoreObject(projection.byTag);
+};
+
+const readVersionedBotObject = async (store, versionIdRaw, objectPathRaw, projectionRaw, botStatusRaw) => {
+  const versionedPath = buildVersionedBotObjectPath(versionIdRaw, objectPathRaw);
+  if (!versionedPath) return null;
+  const normalizedObjectPath = String(objectPathRaw || "").replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
+  if (normalizedObjectPath === "active") {
+    const projected = projectionRaw
+      ? await buildProjectedDataStoreObject(projectionRaw.active)
+      : await readVirtualBotImmutableObject(store, "activeVersions/" + encodeURIComponent(String(versionIdRaw || "").trim()) + "/active");
+    if (projected) return projected;
+    const legacyObject = await getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
+    if (!legacyObject) return null;
+    let descriptor;
+    try { descriptor = JSON.parse(await legacyObject.text()); } catch (err) { return null; }
+    if (!descriptor || descriptor.shardedActive !== true) return buildProjectedDataStoreObject(descriptor);
+    const versionId = String(versionIdRaw || "").trim();
+    const base = "activeVersions/" + encodeURIComponent(versionId);
+    const [rostersObject, metricsMetaObject, byTagObject] = await Promise.all([
+      getDataStoreObject(store, buildDataObjectKey("bot", base + "/rosters")),
+      getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/meta")),
+      getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/byTag")),
+    ]);
+    if (!rostersObject || !metricsMetaObject || !byTagObject) return null;
+    try {
+      const [rosters, metricsMeta, byTag] = await Promise.all([
+        rostersObject.text().then((text) => JSON.parse(text)),
+        metricsMetaObject.text().then((text) => JSON.parse(text)),
+        byTagObject.text().then((text) => JSON.parse(text)),
+      ]);
+      const activeMeta = isPlainJsonObject(descriptor.activeMeta) ? descriptor.activeMeta : {};
+      return buildProjectedDataStoreObject(Object.assign({}, activeMeta, {
+        activeVersionId: versionId,
+        rosters: Array.isArray(rosters) ? rosters : [],
+        playerMetrics: Object.assign({}, isPlainJsonObject(metricsMeta) ? metricsMeta : {}, { byTag: isPlainJsonObject(byTag) ? byTag : {} }),
+      }));
+    } catch (err) {
+      return null;
+    }
+  }
+  if (normalizedObjectPath === "active/playerMetrics/byTag") {
+    const projected = projectionRaw
+      ? await buildProjectedDataStoreObject(projectionRaw.byTag)
+      : await readVirtualBotImmutableObject(store, "activeVersions/" + encodeURIComponent(String(versionIdRaw || "").trim()) + "/playerMetrics/byTag");
+    if (projected) return projected;
+  }
+  const cachedBotObjects = botStatusRaw && botStatusRaw.objects && typeof botStatusRaw.objects === "object"
+    ? botStatusRaw.objects
+    : null;
+  if (cachedBotObjects && cachedBotObjects[normalizedObjectPath]) return cachedBotObjects[normalizedObjectPath];
+  return getDataStoreObject(store, buildDataObjectKey("bot", versionedPath));
 };
 
 const resolveSharedBotVersion = async (store, selectorRaw, objectPathRaw) => {
@@ -1216,7 +1335,16 @@ const resolveSharedBotVersion = async (store, selectorRaw, objectPathRaw) => {
   // Bot propagation may not independently fall back, or the two readers could
   // observe different generations during KV convergence.
   const shared = await resolveSharedActiveVersion(store);
-  const object = await readVersionedBotObject(store, shared.versionId, objectPathRaw);
+  if (!shared.status || !shared.status.complete || !shared.botStatus || !shared.botStatus.complete) {
+    return Object.assign({}, shared, { object: null });
+  }
+  const object = await readVersionedBotObject(
+    store,
+    shared.versionId,
+    objectPathRaw,
+    shared.status.projection,
+    shared.botStatus
+  );
   return Object.assign({}, shared, { object });
 };
 
@@ -1291,36 +1419,48 @@ const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
     return status;
   }
   const names = ["manifest", "rosters", "playerMetrics"];
+  const objects = await Promise.all(names.map((name) =>
+    getDataStoreObject(store, buildDataObjectKey("public", "activeVersions/" + versionId + "/" + name))
+  ));
+  const objectsByName = {};
   for (let i = 0; i < names.length; i++) {
     const name = names[i];
-    const object = await getDataStoreObject(store, buildDataObjectKey("public", "activeVersions/" + versionId + "/" + name));
+    const object = objects[i];
+    objectsByName[name] = object;
     status[name] = !!object;
     if (!object) status.missing.push(name);
   }
+  let projection = null;
+  if (!status.missing.length) {
+    projection = await parsePublicActiveVersionProjection(versionId, objectsByName);
+    if (!projection) status.missing.push("invalid-content");
+  }
   status.complete = status.missing.length === 0;
+  // Keep parsed content request-local and out of health JSON. Bot routes can
+  // now validate and project one generation with exactly the same three reads.
+  Object.defineProperty(status, "projection", { value: projection, enumerable: false });
   return status;
 };
 
 const readDirectActiveBotVersionStatus = async (store, versionIdRaw) => {
   const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
-  let names = ["active", "playerMetrics/byTag", "indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
+  const names = ["indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
   const status = { versionId, complete: false, missing: [] };
   if (!versionId) {
     status.missing = names.slice();
     return status;
   }
-  const activeObject = await getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/active"));
-  if (activeObject) {
-    try {
-      const descriptor = JSON.parse(await activeObject.text());
-      if (descriptor && descriptor.shardedActive === true) names = ["active", "rosters", "playerMetrics/meta", "playerMetrics/byTag", "indexes/linkedAccountsByDiscordId", "indexes/linkedAccountsByDiscordUsername"];
-    } catch (err) {}
-  }
+  const objects = await Promise.all(names.map((name) =>
+    getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/" + name))
+  ));
+  const objectsByName = {};
   for (let i = 0; i < names.length; i++) {
-    const object = names[i] === "active" && activeObject ? activeObject : await getDataStoreObject(store, buildDataObjectKey("bot", "activeVersions/" + encodeURIComponent(versionId) + "/" + names[i]));
+    const object = objects[i];
+    objectsByName[names[i]] = object;
     if (!object) status.missing.push(names[i]);
   }
   status.complete = status.missing.length === 0;
+  Object.defineProperty(status, "objects", { value: objectsByName, enumerable: false });
   return status;
 };
 
@@ -1584,8 +1724,10 @@ const handleDataPublish = async (request, env) => {
   }
 
   try {
-    for (let i = 0; i < objects.length; i++) {
-      const item = objects[i];
+    const objectPlan = buildEffectiveStoragePlan(objects, "object");
+    const deletePlan = buildEffectiveStoragePlan(deletes, "delete");
+    for (let i = 0; i < objectPlan.items.length; i++) {
+      const item = objectPlan.items[i];
       await putDataStoreObject(store, item.key, item.payloadText, {
         contentType: item.contentType,
         cacheControl: item.cacheControl,
@@ -1596,14 +1738,16 @@ const handleDataPublish = async (request, env) => {
         },
       });
     }
-    for (let i = 0; i < deletes.length; i++) {
-      await deleteDataStoreObject(store, deletes[i].key);
+    for (let i = 0; i < deletePlan.items.length; i++) {
+      await deleteDataStoreObject(store, deletePlan.items[i].key);
     }
     return jsonResponse(200, {
       ok: true,
       publishedAt,
       putCount: objects.length,
       deleteCount: deletes.length,
+      actualPutCount: objectPlan.items.length,
+      actualDeleteCount: deletePlan.items.length,
       scopes: Array.from(new Set(objects.concat(deletes).map((item) => item.scope))).sort(),
     });
   } catch (err) {
@@ -1642,8 +1786,11 @@ const handleDataVerifyV2 = async (request, env) => {
     } catch (err) {
       return jsonResponse(400, { ok: false, error: err && err.message ? err.message : "Invalid verification object." }, publishCorsHeaders());
     }
-    const object = await getDataStoreObject(store, buildDataObjectKey(scope, path));
     const logicalPath = path.replace(/\.json$/i, "");
+    let object = await getDataStoreObject(store, buildDataObjectKey(scope, path));
+    if (!object && scope === "bot" && parseVirtualBotActivePath(logicalPath)) {
+      object = await readVirtualBotImmutableObject(store, logicalPath);
+    }
     if (!object) { missing.push({ scope, path: logicalPath }); continue; }
     try {
       const payload = JSON.parse(await object.text());
@@ -1661,9 +1808,8 @@ const handleDataVerifyV2 = async (request, env) => {
   return jsonResponse(200, { ok: true, versionId: String(body && body.versionId || ""), verified: objects.length }, publishCorsHeaders());
 };
 
-// Resolve the committed bot pointer without ever serving a public object from
-// an authenticated bot route. A shared selector is authoritative; the legacy
-// bot-local pointer is used only while no shared selector exists.
+// Resolve the committed bot pointer. A shared selector is authoritative; the
+// legacy bot-local pointer is used only while no shared selector exists.
 const readCommittedBotVersionId = async (store) => {
   const selector = await readSharedCommittedSelector(store);
   if (selector) {
@@ -1698,21 +1844,30 @@ const buildVersionedBotObjectPath = (versionIdRaw, objectPathRaw) => {
 };
 
 const readBotDataObjectWithVersionFallback = async (store, objectPathRaw, legacyKey) => {
+  const normalizedPath = String(objectPathRaw || "").replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
+  if (isCanonicalPublicMutablePath(normalizedPath)) {
+    return getDataStoreObject(store, buildDataObjectKey("public", normalizedPath));
+  }
   const selector = await readSharedCommittedSelector(store);
   if (selector) {
-    const resolution = await resolveSharedBotVersion(store, selector, objectPathRaw);
-    const normalizedPath = String(objectPathRaw || "").replace(/\.json$/i, "");
-    if (normalizedPath === "active/currentVersionId") return buildProjectedDataStoreObject(resolution.versionId);
-    if (resolution.object) return resolution.object;
-    // A valid shared selector must never expose an older direct bot object;
-    // returning 404 is safer than mixing generations or scopes.
-    return null;
+    const versionedPath = buildVersionedBotObjectPath(selector.currentVersionId, normalizedPath);
+    if (normalizedPath === "active/currentVersionId" || versionedPath) {
+      const resolution = await resolveSharedBotVersion(store, selector, objectPathRaw);
+      if (normalizedPath === "active/currentVersionId") {
+        return resolution.status && resolution.status.complete && resolution.botStatus && resolution.botStatus.complete
+          ? buildProjectedDataStoreObject(resolution.versionId)
+          : null;
+      }
+      return resolution.object || null;
+    }
+    // Non-versioned bot objects (for example CWL signups) remain exact bot-key
+    // reads even after the shared active selector has been established.
+    return getDataStoreObject(store, legacyKey);
   }
   const versionId = await readCommittedBotVersionId(store);
   const versioned = await readVersionedBotObject(store, versionId, objectPathRaw);
   if (versioned) return versioned;
-  // Rollout compatibility: only the existing bot-scope key is eligible for
-  // fallback. Public-scope reads are never used here.
+  // Rollout compatibility for private/non-canonical bot objects.
   return getDataStoreObject(store, legacyKey);
 };
 
@@ -1929,13 +2084,9 @@ const readDerivationPlayerMetrics = async (store, derivation, objectsRaw) => {
 const buildDerivationPublishObjects = async (store, derivation, objectsRaw, publishedAt) => {
   const metrics = await readDerivationPlayerMetrics(store, derivation, objectsRaw);
   const byTag = metrics.byTag && typeof metrics.byTag === "object" && !Array.isArray(metrics.byTag) ? metrics.byTag : {};
-  const metricsMeta = Object.assign({}, metrics);
-  delete metricsMeta.byTag;
   const linked = buildDerivedLinkedAccountIndexes(byTag);
   const base = "activeVersions/" + derivation.versionId;
   const outputs = [
-    makeDerivedPublishObject(base + "/playerMetrics/byTag", byTag, publishedAt),
-    makeDerivedPublishObject(base + "/playerMetrics/meta", metricsMeta, publishedAt),
     makeDerivedPublishObject(base + "/indexes/linkedAccountsByDiscordId", linked.byDiscordId, publishedAt),
     makeDerivedPublishObject(base + "/indexes/linkedAccountsByDiscordUsername", linked.byDiscordUsername, publishedAt),
   ];
@@ -1976,6 +2127,7 @@ const claimActiveCommitGuard = async (store, guard, publishedAt) => {
   if (currentGeneration === guard.generation && current && String(current.targetVersionId || "") !== guard.targetVersionId) {
     return { ok: false, current };
   }
+  if (activeCommitGuardMatches(current, guard)) return { ok: true, current, kvPutCount: 0, reused: true };
   await putDataStoreObject(store, ACTIVE_COMMIT_GUARD_KEY, JSON.stringify({
     schemaVersion: 1,
     generation: guard.generation,
@@ -1984,10 +2136,15 @@ const claimActiveCommitGuard = async (store, guard, publishedAt) => {
   }), {
     contentType: "application/json; charset=utf-8",
     cacheControl: "no-store",
-    customMetadata: { publishedAt, schema: "roster-public-data-v2-active-guard" },
+      customMetadata: { publishedAt, schema: "roster-public-data-v2-active-guard" },
   });
-  const verified = await readActiveCommitGuard(store);
-  return { ok: activeCommitGuardMatches(verified, guard), current: verified };
+  try {
+    const verified = await readActiveCommitGuard(store);
+    return { ok: activeCommitGuardMatches(verified, guard), current: verified, kvPutCount: 1 };
+  } catch (err) {
+    err.kvPutCount = 1;
+    throw err;
+  }
 };
 
 const normalizePublicationDispatchGuard = (guardRaw, batchIdRaw) => {
@@ -2011,6 +2168,111 @@ const publicationGuardIsStale = (currentRaw, expected) => {
   return currentGeneration === expected.generation && !publicationGuardMatches(current, expected);
 };
 
+const completedPublicationRecord = (dispatchRaw) => {
+  const dispatch = dispatchRaw && typeof dispatchRaw === "object" ? dispatchRaw : {};
+  const completed = dispatch.completed && typeof dispatch.completed === "object" ? dispatch.completed : null;
+  if (!completed || !completed.payload || completed.payload.ok !== true) return null;
+  const generation = Math.max(0, Math.floor(Number(dispatch.generation) || 0));
+  const batchId = String(dispatch.batchId || "").trim();
+  if (!generation || !batchId) return null;
+  return {
+    generation,
+    batchId,
+    status: Math.max(200, Number(completed.status) || 200),
+    completedAt: String(completed.completedAt || ""),
+    payload: completed.payload,
+  };
+};
+
+const collectRecentPublicationCompletions = (dispatchRaw) => {
+  const dispatch = dispatchRaw && typeof dispatchRaw === "object" ? dispatchRaw : {};
+  const candidates = [];
+  const current = completedPublicationRecord(dispatch);
+  if (current) candidates.push(current);
+  if (Array.isArray(dispatch.recentCompleted)) candidates.push(...dispatch.recentCompleted);
+  const seen = new Set();
+  const recent = [];
+  for (const candidateRaw of candidates) {
+    const candidate = candidateRaw && typeof candidateRaw === "object" ? candidateRaw : {};
+    const generation = Math.max(0, Math.floor(Number(candidate.generation) || 0));
+    const batchId = String(candidate.batchId || "").trim();
+    if (!generation || !batchId || !candidate.payload || candidate.payload.ok !== true) continue;
+    const key = generation + "\n" + batchId;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    recent.push({
+      generation,
+      batchId,
+      status: Math.max(200, Number(candidate.status) || 200),
+      completedAt: String(candidate.completedAt || ""),
+      payload: candidate.payload,
+    });
+    if (recent.length >= PUBLICATION_COMPLETION_HISTORY_LIMIT) break;
+  }
+  return recent;
+};
+
+const findCompletedPublication = (dispatchRaw, expected) => {
+  const current = completedPublicationRecord(dispatchRaw);
+  if (current && current.generation === expected.generation && current.batchId === expected.batchId) return current;
+  const recent = dispatchRaw && Array.isArray(dispatchRaw.recentCompleted) ? dispatchRaw.recentCompleted : [];
+  return recent.find((entry) => Number(entry && entry.generation) === expected.generation && String(entry && entry.batchId || "") === expected.batchId && entry.payload && entry.payload.ok === true) || null;
+};
+
+const buildEffectiveStoragePlan = (itemsRaw, phaseRaw) => {
+  const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+  const phase = String(phaseRaw || "object");
+  const effective = [];
+  const byKey = new Map();
+  let canonicalizedCount = 0;
+  let virtualizedCount = 0;
+  let deduplicatedCount = 0;
+  for (let i = 0; i < items.length; i++) {
+    const source = items[i] && typeof items[i] === "object" ? items[i] : {};
+    const operation = String(source.operation || (phase === "delete" ? "delete" : "put"));
+    const isPut = operation !== "delete";
+    if (
+      isPut && source.scope === "bot" &&
+      (parseVirtualBotActivePath(source.path) || isVirtualBotPointerPath(source.path))
+    ) {
+      virtualizedCount += 1;
+      continue;
+    }
+    let item = source;
+    if (source.scope === "bot" && isCanonicalPublicMutablePath(source.path)) {
+      item = Object.assign({}, source, {
+        scope: "public",
+        key: buildDataObjectKey("public", source.path),
+        cacheControl: getDataObjectCacheControl("public", source.path),
+      });
+      canonicalizedCount += 1;
+    }
+    const signature = operation + "\n" + String(item.payloadText || "");
+    const existing = byKey.get(item.key);
+    if (existing) {
+      if (existing.signature !== signature) {
+        throw new Error("Conflicting publication operations target " + item.key + ".");
+      }
+      existing.item.logicalCount += 1;
+      deduplicatedCount += 1;
+      continue;
+    }
+    const planned = Object.assign({}, item, { logicalCount: 1 });
+    const record = { signature, item: planned };
+    byKey.set(item.key, record);
+    effective.push(planned);
+  }
+  return { items: effective, canonicalizedCount, virtualizedCount, deduplicatedCount };
+};
+
+const mergeStoragePlanCounts = (...plans) => plans.reduce((out, planRaw) => {
+  const plan = planRaw && typeof planRaw === "object" ? planRaw : {};
+  out.canonicalizedCount += Math.max(0, Number(plan.canonicalizedCount) || 0);
+  out.virtualizedCount += Math.max(0, Number(plan.virtualizedCount) || 0);
+  out.deduplicatedCount += Math.max(0, Number(plan.deduplicatedCount) || 0);
+  return out;
+}, { canonicalizedCount: 0, virtualizedCount: 0, deduplicatedCount: 0 });
+
 // Execute a fully normalized v2 publication batch. The Durable Object path
 // supplies strongly serialized generation claims; the direct path is retained
 // for manual repair/backward-compatible callers that do not send dispatchGuard.
@@ -2028,6 +2290,41 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
   const derivations = Array.isArray(batch.derivations) ? batch.derivations : [];
   const commitGuard = batch.commitGuard || null;
   const retention = normalizeDataRetentionRequest(batch.retention);
+  let objectPlan;
+  let deletePlan;
+  let commitPlan;
+  try {
+    objectPlan = buildEffectiveStoragePlan(objects, "object");
+    deletePlan = buildEffectiveStoragePlan(deletes, "delete");
+    commitPlan = buildEffectiveStoragePlan(commits, "commit");
+  } catch (err) {
+    return {
+      status: 400,
+      payload: {
+        ok: false,
+        requestId,
+        batchId,
+        objectCount: objects.length,
+        deleteCount: deletes.length,
+        commitCount: commits.length,
+        derivationCount: derivations.length,
+        error: err && err.message ? err.message : String(err),
+      },
+    };
+  }
+  const planCounts = mergeStoragePlanCounts(objectPlan, deletePlan, commitPlan);
+  const requestedPutCount = objects.length + commits.filter((item) => item.operation !== "delete").length + derivations.length * 2;
+  const requestedDeleteCount = deletes.length + commits.filter((item) => item.operation === "delete").length;
+  const mutationCounts = (actualPutCountRaw, actualDeleteCountRaw, internalPutCountRaw) => {
+    const internalPutCount = Math.max(0, Number(internalPutCountRaw) || 0);
+    return Object.assign({
+      requestedPutCount,
+      requestedDeleteCount,
+      actualPutCount: Math.max(0, Number(actualPutCountRaw) || 0) + internalPutCount,
+      actualDeleteCount: Math.max(0, Number(actualDeleteCountRaw) || 0),
+      internalPutCount,
+    }, planCounts);
+  };
   const baseCounts = {
     objectCount: objects.length,
     deleteCount: deletes.length,
@@ -2052,13 +2349,14 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
         payload: Object.assign({
           ok: false, requestId, batchId, error: err && err.message ? err.message : String(err),
           failed: { phase: "retention", scope: "internal", path: "activeVersions", error: err && err.message ? err.message : String(err) },
+          mutationCounts: mutationCounts(0, err && err.actualDeleteCount, 0),
         }, baseCounts),
       };
     }
   }
 
   const writeStartedAt = Date.now();
-  const putResult = await runBoundedDataOperations(objects, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
+  const putResult = await runBoundedDataOperations(objectPlan.items, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
     await putDataStoreObject(store, item.key, item.payloadText, {
       contentType: item.contentType,
       cacheControl: item.cacheControl,
@@ -2072,12 +2370,13 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
         ok: false, requestId, batchId, publishedAt, payloadBytes,
         completedObjectCount: putResult.completed, completedDeleteCount: 0, completedCommitCount: 0,
         writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0, failed: putResult.failure,
+        mutationCounts: mutationCounts(putResult.completed, retentionResult && retentionResult.deletedCount, 0),
         error: "Ordinary object publication failed; commit objects were not written.",
       }, baseCounts),
     };
   }
 
-  const deleteResult = await runBoundedDataOperations(deletes, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
+  const deleteResult = await runBoundedDataOperations(deletePlan.items, DATA_PUBLISH_V2_CONCURRENCY, async (item) => {
     await deleteDataStoreObject(store, item.key);
   }, "delete");
   if (!deleteResult.ok) {
@@ -2087,6 +2386,7 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
         ok: false, requestId, batchId, publishedAt, payloadBytes,
         completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount: 0,
         writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0, failed: deleteResult.failure,
+        mutationCounts: mutationCounts(putResult.completed, deleteResult.completed + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0), 0),
         error: "Delete publication failed; commit objects were not written.",
       }, baseCounts),
     };
@@ -2107,6 +2407,11 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
           completedDerivationCount, completedDerivedObjectCount, completedCommitCount: 0,
           writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0,
           failed: { phase: "derivation", index: i, scope: "bot", path: "activeVersions/" + String(derivations[i] && derivations[i].versionId || ""), error: err && err.message ? err.message : String(err) },
+          mutationCounts: mutationCounts(
+            putResult.completed + completedDerivedObjectCount,
+            deleteResult.completed + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+            0
+          ),
           error: "Derived object publication failed; commit objects were not written.",
         }, baseCounts),
       };
@@ -2127,6 +2432,11 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
           completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed,
           completedDerivationCount, completedDerivedObjectCount, completedCommitCount: 0,
           writeDurationMs: Date.now() - writeStartedAt, commitDurationMs: 0, failed: derivedResult.failure,
+          mutationCounts: mutationCounts(
+            putResult.completed + completedDerivedObjectCount,
+            deleteResult.completed + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+            0
+          ),
           error: "Derived object publication failed; commit objects were not written.",
         }, baseCounts),
       };
@@ -2136,10 +2446,32 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
 
   const writeDurationMs = Date.now() - writeStartedAt;
   const commitStartedAt = Date.now();
+  let internalKvPutCount = 0;
   if (commitGuard) {
-    const claimed = typeof options.claimActiveCommitGuard === "function"
-      ? await options.claimActiveCommitGuard(commitGuard, publishedAt)
-      : await claimActiveCommitGuard(store, commitGuard, publishedAt);
+    let claimed = null;
+    try {
+      claimed = typeof options.claimActiveCommitGuard === "function"
+        ? await options.claimActiveCommitGuard(commitGuard, publishedAt)
+        : await claimActiveCommitGuard(store, commitGuard, publishedAt);
+    } catch (err) {
+      internalKvPutCount = Math.max(0, Number(err && err.kvPutCount) || 0);
+      return {
+        status: 502,
+        payload: Object.assign({
+          ok: false, requestId, batchId, publishedAt, payloadBytes,
+          completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount: 0,
+          writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
+          failed: { phase: "commit-guard", scope: "internal", path: ACTIVE_COMMIT_GUARD_KEY, error: err && err.message ? err.message : String(err) },
+          mutationCounts: mutationCounts(
+            putResult.completed + completedDerivedObjectCount,
+            deleteResult.completed + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+            internalKvPutCount
+          ),
+          error: "Active commit generation could not be claimed.",
+        }, baseCounts),
+      };
+    }
+    internalKvPutCount = Math.max(0, Number(claimed && claimed.kvPutCount) || 0);
     if (!claimed.ok) {
       return {
         status: 409,
@@ -2148,6 +2480,11 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
           completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount: 0,
           writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
           failed: { phase: "commit-guard", scope: "internal", path: ACTIVE_COMMIT_GUARD_KEY, error: "Active commit was superseded by a newer generation." },
+          mutationCounts: mutationCounts(
+            putResult.completed + completedDerivedObjectCount,
+            deleteResult.completed + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+            internalKvPutCount
+          ),
           error: "Active commit generation is stale.",
         }, baseCounts),
       };
@@ -2155,9 +2492,30 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
   }
 
   let completedCommitCount = 0;
-  for (let i = 0; i < commits.length; i++) {
+  let actualCommitPutCount = 0;
+  let actualCommitDeleteCount = 0;
+  for (let i = 0; i < commitPlan.items.length; i++) {
     if (commitGuard && options.recheckActiveCommitGuard !== false) {
-      const currentGuard = await readActiveCommitGuard(store);
+      let currentGuard = null;
+      try {
+        currentGuard = await readActiveCommitGuard(store);
+      } catch (err) {
+        return {
+          status: 502,
+          payload: Object.assign({
+            ok: false, requestId, batchId, publishedAt, payloadBytes,
+            completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
+            writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
+            failed: { phase: "commit-guard", index: i, scope: "internal", path: ACTIVE_COMMIT_GUARD_KEY, error: err && err.message ? err.message : String(err) },
+            mutationCounts: mutationCounts(
+              putResult.completed + completedDerivedObjectCount + actualCommitPutCount,
+              deleteResult.completed + actualCommitDeleteCount + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+              internalKvPutCount
+            ),
+            error: "Active commit generation could not be revalidated.",
+          }, baseCounts),
+        };
+      }
       if (!activeCommitGuardMatches(currentGuard, commitGuard)) {
         return {
           status: 409,
@@ -2166,21 +2524,28 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
             completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
             writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
             failed: { phase: "commit-guard", index: i, scope: "internal", path: ACTIVE_COMMIT_GUARD_KEY, error: "Active commit was superseded while committing." },
+            mutationCounts: mutationCounts(
+              putResult.completed + completedDerivedObjectCount + actualCommitPutCount,
+              deleteResult.completed + actualCommitDeleteCount + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+              internalKvPutCount
+            ),
             error: "Active commit generation was superseded.",
           }, baseCounts),
         };
       }
     }
-    const item = commits[i];
+    const item = commitPlan.items[i];
     try {
       if (item.operation === "delete") {
         await deleteDataStoreObject(store, item.key);
+        actualCommitDeleteCount += 1;
       } else {
         await putDataStoreObject(store, item.key, item.payloadText, {
           contentType: item.contentType,
           cacheControl: item.cacheControl,
           customMetadata: { publishedAt: item.publishedAt, scope: item.scope, schema: "roster-public-data-v2-commit" },
         });
+        actualCommitPutCount += 1;
       }
       completedCommitCount += 1;
     } catch (err) {
@@ -2191,6 +2556,11 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
           completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
           writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
           failed: { phase: "commit", index: i, scope: item.scope, path: item.path.replace(/\.json$/i, ""), error: err && err.message ? err.message : String(err) },
+          mutationCounts: mutationCounts(
+            putResult.completed + completedDerivedObjectCount + actualCommitPutCount,
+            deleteResult.completed + actualCommitDeleteCount + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+            internalKvPutCount
+          ),
           error: "Commit object publication failed.",
         }, baseCounts),
       };
@@ -2201,12 +2571,17 @@ const executeNormalizedDataPublishV2Batch = async (batchRaw, env, optionsRaw) =>
     status: 200,
     payload: Object.assign({
       ok: true, requestId, batchId, publishedAt, payloadBytes,
-      completedObjectCount: putResult.completed, completedDeleteCount: deleteResult.completed, completedCommitCount,
+      completedObjectCount: objects.length, completedDeleteCount: deletes.length, completedCommitCount: commits.length,
       completedDerivationCount, completedDerivedObjectCount,
       commitGuard: commitGuard || null,
       writeDurationMs, commitDurationMs: Date.now() - commitStartedAt,
       scopes: Array.from(new Set(objects.concat(deletes, commits).map((item) => item.scope).concat(derivations.length ? ["bot"] : []))).sort(),
       retention: retentionResult,
+      mutationCounts: mutationCounts(
+        putResult.completed + completedDerivedObjectCount + actualCommitPutCount,
+        deleteResult.completed + actualCommitDeleteCount + Math.max(0, Number(retentionResult && retentionResult.deletedCount) || 0),
+        internalKvPutCount
+      ),
     }, baseCounts),
   };
 };
@@ -2245,6 +2620,17 @@ class CloudflarePublicationCoordinator {
     }
 
     const currentDispatch = await this.state.storage.get("dispatchGuard");
+    const completedDispatch = findCompletedPublication(currentDispatch, dispatchGuard);
+    if (completedDispatch) {
+      const replayPayload = JSON.parse(JSON.stringify(completedDispatch.payload));
+      replayPayload.replayed = true;
+      if (replayPayload.mutationCounts && typeof replayPayload.mutationCounts === "object") {
+        replayPayload.mutationCounts.actualPutCount = 0;
+        replayPayload.mutationCounts.actualDeleteCount = 0;
+        replayPayload.mutationCounts.internalPutCount = 0;
+      }
+      return jsonResponse(Math.max(200, Number(completedDispatch.status) || 200), replayPayload);
+    }
     if (publicationGuardIsStale(currentDispatch, dispatchGuard)) {
       return jsonResponse(409, {
         ok: false,
@@ -2260,12 +2646,13 @@ class CloudflarePublicationCoordinator {
         error: "Publication dispatch generation is stale.",
       });
     }
-
+    const recentCompleted = collectRecentPublicationCompletions(currentDispatch);
     await this.state.storage.put("dispatchGuard", {
-      schemaVersion: 1,
+      schemaVersion: 3,
       generation: dispatchGuard.generation,
       batchId: dispatchGuard.batchId,
       claimedAt: String(body.publishedAt || new Date().toISOString()),
+      recentCompleted,
     });
 
     const claimActiveCommitGuardDurably = async (guard, publishedAt) => {
@@ -2305,6 +2692,20 @@ class CloudflarePublicationCoordinator {
       await this.state.storage.put("acceptedActiveCommit", acceptedCommit);
     }
     if (acceptedCommit && result.payload && typeof result.payload === "object") result.payload.acceptedCommit = acceptedCommit;
+    if (result.status >= 200 && result.status < 300 && result.payload && result.payload.ok === true) {
+      await this.state.storage.put("dispatchGuard", {
+        schemaVersion: 3,
+        generation: dispatchGuard.generation,
+        batchId: dispatchGuard.batchId,
+        claimedAt: String(body.publishedAt || new Date().toISOString()),
+        recentCompleted,
+        completed: {
+          status: result.status,
+          completedAt: new Date().toISOString(),
+          payload: result.payload,
+        },
+      });
+    }
     return jsonResponse(result.status, result.payload);
   }
 }
@@ -2403,11 +2804,31 @@ const handleDataPublishV2 = async (request, env) => {
     return jsonResponse(413, { ok: false, requestId, batchId, error: `Cloudflare request exceeds payload limit bytes=${normalizedEnvelopeBytes}.` }, publishCorsHeaders());
   }
 
+  let dryObjectPlan;
+  let dryDeletePlan;
+  let dryCommitPlan;
+  try {
+    dryObjectPlan = buildEffectiveStoragePlan(objects, "object");
+    dryDeletePlan = buildEffectiveStoragePlan(deletes, "delete");
+    dryCommitPlan = buildEffectiveStoragePlan(commits, "commit");
+  } catch (err) {
+    return jsonResponse(400, { ok: false, requestId, batchId, error: err && err.message ? err.message : "Conflicting publication operations." }, publishCorsHeaders());
+  }
+
   if (dryRun) {
+    const dryPlanCounts = mergeStoragePlanCounts(dryObjectPlan, dryDeletePlan, dryCommitPlan);
+    const dryCommitPutCount = dryCommitPlan.items.filter((item) => item.operation !== "delete").length;
+    const dryCommitDeleteCount = dryCommitPlan.items.filter((item) => item.operation === "delete").length;
     return jsonResponse(200, {
       ok: true, dryRun: true, requestId, batchId, publishedAt, payloadBytes,
       objectCount: objects.length, deleteCount: deletes.length, commitCount: commits.length, derivationCount: derivations.length,
       commitGuard: commitGuard || null, dispatchGuard: dispatchGuard || null, retention: retention || null,
+      mutationCounts: Object.assign({
+        requestedPutCount: objects.length + commits.filter((item) => item.operation !== "delete").length + derivations.length * 2,
+        requestedDeleteCount: deletes.length + commits.filter((item) => item.operation === "delete").length,
+        actualPutCount: dryObjectPlan.items.length + dryCommitPutCount + derivations.length * 2,
+        actualDeleteCount: dryDeletePlan.items.length + dryCommitDeleteCount,
+      }, dryPlanCounts),
       writeDurationMs: 0, commitDurationMs: 0,
     });
   }

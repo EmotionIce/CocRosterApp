@@ -798,30 +798,12 @@ function addCloudflareDeletePath_(deletePaths, pathRaw) {
 function buildCloudflareBotScopeMirroredPublishBatch_(objectsRaw, deletePathsRaw) {
 	const objectsIn = Array.isArray(objectsRaw) ? objectsRaw : [];
 	const deletePathsIn = Array.isArray(deletePathsRaw) ? deletePathsRaw : [];
-	const objects = objectsIn.slice();
-	const deletePaths = deletePathsIn.slice();
-	for (let i = 0; i < objectsIn.length; i++) {
-		const item = objectsIn[i] && typeof objectsIn[i] === "object" ? objectsIn[i] : null;
-		if (!item || normalizeCloudflareDataScope_(item.scope || "public") === "bot") continue;
-		objects.push({
-			path: item.path,
-			payload: item.payload,
-			scope: "bot",
-		});
-	}
-	for (let i = 0; i < deletePathsIn.length; i++) {
-		const item = deletePathsIn[i] && typeof deletePathsIn[i] === "object"
-			? deletePathsIn[i]
-			: { path: deletePathsIn[i] };
-		if (!item.path || normalizeCloudflareDataScope_(item.scope || "public") === "bot") continue;
-		deletePaths.push({
-			path: item.path,
-			scope: "bot",
-		});
-	}
+	// These season/donation payloads are public by contract. The Worker serves
+	// authenticated bot aliases from the same canonical object, so the legacy
+	// publisher must not recreate duplicate bot-scoped copies.
 	return {
-		objects: objects,
-		deletePaths: deletePaths,
+		objects: objectsIn.slice(),
+		deletePaths: deletePathsIn.slice(),
 	};
 }
 

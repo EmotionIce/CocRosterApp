@@ -54,7 +54,7 @@ test("public bootstrap stays compact and carries explicit current and previous c
   assert.equal(JSON.stringify(payload).includes("largeUnneededField"), false);
 });
 
-test("public event publish batches are mirrored into bot scope", () => {
+test("public event publish batches remain canonical instead of duplicating bot scope", () => {
   const backend = loadPublisher();
   const batch = backend.buildCloudflareBotScopeMirroredPublishBatch_([
     { path: "events/seasonEvents/current", payload: { push: { eventId: "push-1" } } },
@@ -66,12 +66,9 @@ test("public event publish batches are mirrored into bot scope", () => {
   assert.deepEqual(plain(batch.objects), [
     { path: "events/seasonEvents/current", payload: { push: { eventId: "push-1" } } },
     { path: "events/seasonEvents/seasonState/current", payload: { seasonId: "season-1" } },
-    { path: "events/seasonEvents/current", payload: { push: { eventId: "push-1" } }, scope: "bot" },
-    { path: "events/seasonEvents/seasonState/current", payload: { seasonId: "season-1" }, scope: "bot" },
   ]);
   assert.deepEqual(plain(batch.deletePaths), [
     "events/seasonEvents/latestCompletedCwl",
-    { path: "events/seasonEvents/latestCompletedCwl", scope: "bot" },
   ]);
 });
 
@@ -91,7 +88,7 @@ test("bot-scoped entries are not mirrored a second time", () => {
   ]);
 });
 
-test("season-event publication writes detailed CWL objects to public and bot scopes", () => {
+test("season-event publication writes detailed CWL objects once in public scope", () => {
   const backend = loadPublisher();
   backend.Logger = { log() {} };
   backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
@@ -167,26 +164,26 @@ test("season-event publication writes detailed CWL objects to public and bot sco
   assert.ok(objectPaths.includes("public:bootstrap/current"));
   assert.ok(!objectPaths.includes("bot:bootstrap/current"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/current"));
-  assert.ok(objectPaths.includes("bot:events/seasonEvents/current"));
+  assert.ok(!objectPaths.includes("bot:events/seasonEvents/current"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/currentCwl"));
-  assert.ok(objectPaths.includes("bot:events/seasonEvents/currentCwl"));
+  assert.ok(!objectPaths.includes("bot:events/seasonEvents/currentCwl"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/byId/cwl-1"));
-  assert.ok(objectPaths.includes("bot:events/seasonEvents/byId/cwl-1"));
+  assert.ok(!objectPaths.includes("bot:events/seasonEvents/byId/cwl-1"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
-  assert.ok(objectPaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
+  assert.ok(!objectPaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
   assert.ok(objectPaths.includes("public:donationRefresh/current"));
-  assert.ok(objectPaths.includes("bot:donationRefresh/current"));
+  assert.ok(!objectPaths.includes("bot:donationRefresh/current"));
   const deletePaths = publishCalls[0].deletePaths.map((item) => {
     const entry = item && typeof item === "object" ? item : { path: item };
     return `${entry.scope || publishCalls[0].scope}:${entry.path}`;
   }).sort();
   assert.ok(deletePaths.includes("public:events/seasonEvents/latestCompletedCwl"));
-  assert.ok(deletePaths.includes("bot:events/seasonEvents/latestCompletedCwl"));
+  assert.ok(!deletePaths.includes("bot:events/seasonEvents/latestCompletedCwl"));
   assert.ok(deletePaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));
-  assert.ok(deletePaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));
+  assert.ok(!deletePaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));
 });
 
-test("donation refresh publication writes detailed objects to public and bot scopes", () => {
+test("donation refresh publication writes detailed objects once in public scope", () => {
   const backend = loadPublisher();
   backend.Logger = { log() {} };
   backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
@@ -221,9 +218,9 @@ test("donation refresh publication writes detailed objects to public and bot sco
   assert.ok(objectPaths.includes("public:bootstrap/current"));
   assert.ok(!objectPaths.includes("bot:bootstrap/current"));
   assert.ok(objectPaths.includes("public:donationRefresh/current"));
-  assert.ok(objectPaths.includes("bot:donationRefresh/current"));
+  assert.ok(!objectPaths.includes("bot:donationRefresh/current"));
   assert.ok(objectPaths.includes("public:donationRefresh/bySeason/season-1"));
-  assert.ok(objectPaths.includes("bot:donationRefresh/bySeason/season-1"));
+  assert.ok(!objectPaths.includes("bot:donationRefresh/bySeason/season-1"));
 });
 
 test("Cloudflare CWL aggregate projection refreshes ranked tags from current registrations", () => {

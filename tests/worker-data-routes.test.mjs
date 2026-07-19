@@ -73,7 +73,7 @@ const createObservedKv = (entriesRaw, optionsRaw = {}) => {
   };
 };
 
-test("bot data route reads bot-scoped event data", async () => {
+test("bot data route does not resurrect a stale bot-scoped event mirror", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_BOT_SECRET: "secret",
@@ -89,15 +89,11 @@ test("bot data route reads bot-scoped event data", async () => {
     headers: { authorization: "Bearer secret" },
   }), env, {});
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "private, max-age=30");
-  assert.deepEqual(await response.json(), {
-    donation: { eventId: "donation-current" },
-    push: { eventId: "push-current" },
-  });
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error, "Data object not found.");
 });
 
-test("bot data route does not fall back to public shards", async () => {
+test("bot data route reads the canonical public-safe event object privately", async () => {
   const worker = loadWorker();
   const env = {
     ROSTER_BOT_SECRET: "secret",
@@ -112,8 +108,11 @@ test("bot data route does not fall back to public shards", async () => {
     headers: { authorization: "Bearer secret" },
   }), env, {});
 
-  assert.equal(response.status, 404);
-  assert.equal((await response.json()).error, "Data object not found.");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, max-age=30");
+  assert.deepEqual(await response.json(), {
+    donation: { eventId: "donation-current" },
+  });
 });
 
 test("bot active routes resolve immutable versioned objects with the existing schemas", async () => {
@@ -149,9 +148,9 @@ test("sharded bot-active publication reconstructs the unchanged active route con
     ROSTER_BOT_SECRET: "secret",
     ROSTER_DATA_KV: createKv({
       "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
-      "public-data/activeVersions/version-sharded/manifest.json": JSON.stringify({ versionId: "version-sharded", rosterIds: ["main"] }),
+      "public-data/activeVersions/version-sharded/manifest.json": JSON.stringify({ versionId: "version-sharded", rosterIds: ["main"], pageTitle: "Roster", rosterOrder: ["main"] }),
       "public-data/activeVersions/version-sharded/rosters.json": JSON.stringify({ main: rosters[0] }),
-      "public-data/activeVersions/version-sharded/playerMetrics.json": JSON.stringify({ schemaVersion: 1, byTag }),
+      "public-data/activeVersions/version-sharded/playerMetrics.json": JSON.stringify({ schemaVersion: 1, updatedAt: "now", byTag }),
       "bot-data/activeVersions/version-sharded/active.json": JSON.stringify({ shardedActive: true, activeMeta: { schemaVersion: 1, pageTitle: "Roster", rosterOrder: ["main"] } }),
       "bot-data/activeVersions/version-sharded/rosters.json": JSON.stringify(rosters),
       "bot-data/activeVersions/version-sharded/playerMetrics/meta.json": JSON.stringify({ schemaVersion: 1, updatedAt: "now" }),
@@ -182,13 +181,14 @@ test("committed public pointer and shared selector expose the same version", asy
     "public-data/activeVersions/version-current/rosters.json": JSON.stringify({ main: { id: "main" } }),
     "public-data/activeVersions/version-current/playerMetrics.json": JSON.stringify({ byTag: {} }),
   };
-  const botPayload = { activeVersionId: "version-current", rosters: [{ id: "main" }], playerMetrics: { byTag: {} } };
+  const botPayload = { schemaVersion: 1, pageTitle: "", rosterOrder: ["main"], activeVersionId: "version-current", rosters: [{ id: "main" }], playerMetrics: { byTag: {} } };
   const env = {
     ROSTER_BOT_SECRET: "secret",
     ROSTER_DATA_KV: createKv(Object.assign(publicObjects, {
       "bot-data/activeVersions/version-current/active.json": JSON.stringify(botPayload),
       "bot-data/activeVersions/version-current/playerMetrics/byTag.json": JSON.stringify({}),
       "bot-data/activeVersions/version-current/indexes/linkedAccountsByDiscordId.json": JSON.stringify({}),
+      "bot-data/activeVersions/version-current/indexes/linkedAccountsByDiscordUsername.json": JSON.stringify({}),
     })),
   };
   const auth = { authorization: "Bearer secret" };
