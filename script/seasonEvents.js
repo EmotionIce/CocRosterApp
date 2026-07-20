@@ -20,6 +20,11 @@ const CWL_LIFECYCLE_EVIDENCE_MAX_AGE_MS = 15 * 60 * 1000;
 const CWL_LIFECYCLE_RECENTLY_ENDED_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 const SEASON_EVENT_SEASON_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const SEASON_EVENT_LOCK_WAIT_MS = 30 * 1000;
+const SEASON_EVENT_LINK_CACHE_SCHEMA_VERSION = 1;
+const SEASON_EVENT_LINK_CACHE_BUCKET_COUNT = 16;
+const SEASON_EVENT_LINK_CACHE_TTL_SECONDS = 60 * 60;
+const SEASON_EVENT_LINK_CACHE_MAX_CHARS = 90 * 1024;
+const SEASON_EVENT_LINK_CACHE_KEY_PREFIX = "season-event-links-v1:";
 const SEASON_EVENT_CWL_GROUP_BIND_TOLERANCE_MS = 72 * 60 * 60 * 1000;
 const SEASON_EVENT_RANKED_LEGEND_ANCHOR_ISO = "2026-05-18T05:00:00.000Z";
 const SEASON_EVENT_RANKED_LEGEND_CYCLE_MS = 28 * 24 * 60 * 60 * 1000;
@@ -2541,9 +2546,7 @@ function getSeasonEventMutationContext(payloadRaw, botSecret) {
 		if (requestedEvent && normalizeSeasonEventType_(requestedEvent.type) === eventType) event = requestedEvent;
 	}
 	if (!event) return { ok: true, status: "event-not-found", event: null, participant: null, linkedAccounts: [], eligibleAccounts: [] };
-	const snapshot = readActivePlayerMetricsSnapshot_();
-	const rosterData = { playerMetrics: snapshot && snapshot.playerMetrics ? snapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
-	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
+	const linkedAccounts = readSeasonEventLinkedAccountsForDiscordUser_(discordUser);
 	const eligibleAccounts = eventType === "cwl" ? filterCwlSeasonEventAccountsForTarget_(event, linkedAccounts) : linkedAccounts;
 	const participantsByDiscordId = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object" ? event.participantsByDiscordId : {};
 	const participantRaw = participantsByDiscordId[discordUser.id];
@@ -2634,6 +2637,250 @@ function sanitizeSeasonEventDiscordUser_(discordUserRaw) {
 	};
 }
 
+// Build the exact compact account shape needed by seasonal signup identity
+// resolution. Trophy histories and donation ledgers remain outside the cache.
+function buildSeasonEventLinkedAccountFromMetricsEntry_(tagRaw, entryRaw) {
+	const tag = normalizeTag_(tagRaw);
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	if (!tag) return null;
+	const identity = sanitizePlayerMetricsIdentity_(entry.identity, tag, entry.identity && entry.identity.name);
+	if (!identity || !hasCanonicalDiscordIdentity_(identity)) return null;
+	const identityDiscordId = sanitizeDiscordIdValue_(identity.discordId);
+	const identityUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
+	const latest = entry.latestSnapshot && typeof entry.latestSnapshot === "object" ? entry.latestSnapshot : {};
+	const leagueName =
+		(latest.league && typeof latest.league === "object" && latest.league.name) ||
+		(latest.leagueTier && typeof latest.leagueTier === "object" && latest.leagueTier.name) ||
+		"";
+	return {
+		identityDiscordId: identityDiscordId,
+		identityUsername: identityUsername,
+		account: {
+			tag: tag,
+			name: sanitizeSeasonEventText_(identity.name || latest.name, 120),
+			townHallLevel: toNonNegativeInt_(latest.townHallLevel != null ? latest.townHallLevel : latest.th),
+			trophies: toNonNegativeInt_(latest.trophies),
+			leagueName: sanitizeSeasonEventText_(leagueName, 120),
+			discordId: identityDiscordId,
+			discordUsername: identityUsername,
+			matchType: identityDiscordId ? "discordId" : "discordUsername",
+		},
+	};
+}
+
+function sanitizeSeasonEventCachedLinkedAccount_(accountRaw) {
+	const account = sanitizeSeasonEventParticipantAccount_(accountRaw);
+	if (!account) return null;
+	return Object.assign({}, account, {
+		discordId: sanitizeDiscordIdValue_(accountRaw && accountRaw.discordId),
+		discordUsername: sanitizeDiscordUsernameValue_(accountRaw && accountRaw.discordUsername),
+	});
+}
+
+function getSeasonEventLinkCacheLookupKey_(valueRaw) {
+	return base64UrlEncodeUtf8_(String(valueRaw == null ? "" : valueRaw));
+}
+
+function getSeasonEventLinkCacheBucket_(kindRaw, valueRaw) {
+	const text = String(kindRaw || "") + "|" + String(valueRaw == null ? "" : valueRaw);
+	let hash = 2166136261;
+	for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+	return (hash >>> 0) % SEASON_EVENT_LINK_CACHE_BUCKET_COUNT;
+}
+
+function buildSeasonEventLinkCacheBucketKey_(versionIdRaw, bucketRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const bucket = Math.max(0, Math.min(SEASON_EVENT_LINK_CACHE_BUCKET_COUNT - 1, toNonNegativeInt_(bucketRaw)));
+	return versionId ? SEASON_EVENT_LINK_CACHE_KEY_PREFIX + versionId + ":" + bucket : "";
+}
+
+function buildSeasonEventLinkCacheCompleteKey_(versionIdRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	return versionId ? SEASON_EVENT_LINK_CACHE_KEY_PREFIX + versionId + ":complete" : "";
+}
+
+function readSeasonEventLinkCacheBucket_(cache, versionIdRaw, bucketRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const bucket = Math.max(0, Math.min(SEASON_EVENT_LINK_CACHE_BUCKET_COUNT - 1, toNonNegativeInt_(bucketRaw)));
+	const key = buildSeasonEventLinkCacheBucketKey_(versionId, bucket);
+	const text = readStringFromCache_(cache, key);
+	if (!text) return null;
+	try {
+		const payload = JSON.parse(text);
+		if (
+			!payload || typeof payload !== "object" ||
+			payload.schemaVersion !== SEASON_EVENT_LINK_CACHE_SCHEMA_VERSION ||
+			normalizeActiveVersionId_(payload.versionId) !== versionId ||
+			toNonNegativeInt_(payload.bucket) !== bucket ||
+			!payload.byDiscordId || typeof payload.byDiscordId !== "object" || Array.isArray(payload.byDiscordId) ||
+			!payload.byLegacyUsername || typeof payload.byLegacyUsername !== "object" || Array.isArray(payload.byLegacyUsername)
+		) return null;
+		return payload;
+	} catch (err) {
+		return null;
+	}
+}
+
+function readSeasonEventLinkCacheAccounts_(payloadRaw, mapNameRaw, lookupValueRaw, expectedRaw) {
+	const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+	const map = payload[mapNameRaw] && typeof payload[mapNameRaw] === "object" && !Array.isArray(payload[mapNameRaw]) ? payload[mapNameRaw] : null;
+	if (!map) return { valid: false, accounts: [] };
+	const lookupKey = getSeasonEventLinkCacheLookupKey_(lookupValueRaw);
+	if (!Object.prototype.hasOwnProperty.call(map, lookupKey)) return { valid: true, accounts: [] };
+	const rawAccounts = map[lookupKey];
+	if (!Array.isArray(rawAccounts)) return { valid: false, accounts: [] };
+	const expected = expectedRaw && typeof expectedRaw === "object" ? expectedRaw : {};
+	const accounts = [];
+	for (let i = 0; i < rawAccounts.length; i++) {
+		const account = sanitizeSeasonEventCachedLinkedAccount_(rawAccounts[i]);
+		if (!account) return { valid: false, accounts: [] };
+		if (expected.discordId && (account.discordId !== expected.discordId || account.matchType !== "discordId")) return { valid: false, accounts: [] };
+		if (expected.discordUsername && (account.discordId || account.discordUsername !== expected.discordUsername || account.matchType !== "discordUsername")) return { valid: false, accounts: [] };
+		accounts.push(account);
+	}
+	return { valid: true, accounts: accounts };
+}
+
+// Warm a bounded, version-scoped cache. Every bucket is self-contained: if
+// CacheService evicts one bucket, only lookups for that bucket fall back to the
+// immutable Firebase metrics shard and rebuild the cache.
+function warmSeasonEventLinkedAccountCache_(versionIdRaw, playerMetricsRaw, forceRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const playerMetrics = playerMetricsRaw && typeof playerMetricsRaw === "object" ? playerMetricsRaw : null;
+	if (!versionId || !playerMetrics) return { ok: true, skipped: true, reason: "missing-version-or-metrics" };
+	assertCanonicalPlayerMetricsStore_(playerMetrics, "season event linked-account cache");
+	const cache = getScriptCacheSafe_();
+	if (!cache) return { ok: true, skipped: true, reason: "cache-unavailable" };
+	const completeKey = buildSeasonEventLinkCacheCompleteKey_(versionId);
+	if (forceRaw !== true) {
+		const completeText = readStringFromCache_(cache, completeKey);
+		if (completeText) {
+			try {
+				const complete = JSON.parse(completeText);
+				if (complete && complete.schemaVersion === SEASON_EVENT_LINK_CACHE_SCHEMA_VERSION && normalizeActiveVersionId_(complete.versionId) === versionId) {
+					return { ok: true, skipped: true, reason: "already-warm", versionId: versionId };
+				}
+			} catch (err) {}
+		}
+	}
+
+	const buckets = [];
+	for (let i = 0; i < SEASON_EVENT_LINK_CACHE_BUCKET_COUNT; i++) {
+		buckets.push({
+			schemaVersion: SEASON_EVENT_LINK_CACHE_SCHEMA_VERSION,
+			versionId: versionId,
+			bucket: i,
+			byDiscordId: {},
+			byLegacyUsername: {},
+		});
+	}
+	const byTag = playerMetrics.byTag && typeof playerMetrics.byTag === "object" ? playerMetrics.byTag : {};
+	const tags = Object.keys(byTag).sort();
+	let linkedAccountCount = 0;
+	for (let i = 0; i < tags.length; i++) {
+		const linked = buildSeasonEventLinkedAccountFromMetricsEntry_(tags[i], byTag[tags[i]]);
+		if (!linked) continue;
+		if (linked.identityDiscordId) {
+			const bucket = buckets[getSeasonEventLinkCacheBucket_("id", linked.identityDiscordId)];
+			const key = getSeasonEventLinkCacheLookupKey_(linked.identityDiscordId);
+			if (!Array.isArray(bucket.byDiscordId[key])) bucket.byDiscordId[key] = [];
+			bucket.byDiscordId[key].push(linked.account);
+			linkedAccountCount++;
+		} else if (linked.identityUsername) {
+			const bucket = buckets[getSeasonEventLinkCacheBucket_("username", linked.identityUsername)];
+			const key = getSeasonEventLinkCacheLookupKey_(linked.identityUsername);
+			if (!Array.isArray(bucket.byLegacyUsername[key])) bucket.byLegacyUsername[key] = [];
+			bucket.byLegacyUsername[key].push(Object.assign({}, linked.account, { matchType: "discordUsername" }));
+			linkedAccountCount++;
+		}
+	}
+
+	const values = {};
+	let complete = true;
+	for (let i = 0; i < buckets.length; i++) {
+		const text = JSON.stringify(buckets[i]);
+		if (text.length > SEASON_EVENT_LINK_CACHE_MAX_CHARS) {
+			complete = false;
+			continue;
+		}
+		values[buildSeasonEventLinkCacheBucketKey_(versionId, i)] = text;
+	}
+	const keys = Object.keys(values);
+	let wroteAllBuckets = complete && keys.length === SEASON_EVENT_LINK_CACHE_BUCKET_COUNT;
+	if (keys.length) {
+		try {
+			if (typeof cache.putAll === "function") cache.putAll(values, SEASON_EVENT_LINK_CACHE_TTL_SECONDS);
+			else {
+				for (let i = 0; i < keys.length; i++) {
+					if (!maybeCacheText_(cache, keys[i], values[keys[i]], SEASON_EVENT_LINK_CACHE_TTL_SECONDS, { maxChars: SEASON_EVENT_LINK_CACHE_MAX_CHARS, logOversize: false })) wroteAllBuckets = false;
+				}
+			}
+		} catch (err) {
+			let wroteAllFallbackBuckets = complete && keys.length === SEASON_EVENT_LINK_CACHE_BUCKET_COUNT;
+			for (let i = 0; i < keys.length; i++) {
+				if (!maybeCacheText_(cache, keys[i], values[keys[i]], SEASON_EVENT_LINK_CACHE_TTL_SECONDS, { maxChars: SEASON_EVENT_LINK_CACHE_MAX_CHARS, logOversize: false })) wroteAllFallbackBuckets = false;
+			}
+			wroteAllBuckets = wroteAllFallbackBuckets;
+		}
+	}
+	if (wroteAllBuckets) {
+		writeStringToCache_(cache, completeKey, JSON.stringify({
+			schemaVersion: SEASON_EVENT_LINK_CACHE_SCHEMA_VERSION,
+			versionId: versionId,
+			bucketCount: SEASON_EVENT_LINK_CACHE_BUCKET_COUNT,
+			warmedAt: new Date().toISOString(),
+		}), SEASON_EVENT_LINK_CACHE_TTL_SECONDS);
+	}
+	return { ok: true, versionId: versionId, bucketCount: keys.length, complete: wroteAllBuckets, linkedAccountCount: linkedAccountCount };
+}
+
+function warmSeasonEventLinkedAccountCacheBestEffort_(versionIdRaw, playerMetricsRaw, forceRaw) {
+	try {
+		return warmSeasonEventLinkedAccountCache_(versionIdRaw, playerMetricsRaw, forceRaw);
+	} catch (err) {
+		Logger.log("Season-event linked-account cache warm failed for '%s': %s", String(versionIdRaw || ""), errorMessage_(err));
+		return { ok: false, skipped: true, reason: "cache-warm-failed", error: errorMessage_(err) };
+	}
+}
+
+// Resolve linked accounts from a cache keyed by the immutable active version.
+// A missing or malformed bucket always falls back to canonical Firebase data.
+function readSeasonEventLinkedAccountsForDiscordUser_(discordUserRaw) {
+	const user = discordUserRaw && typeof discordUserRaw === "object" ? discordUserRaw : {};
+	const wantedDiscordId = sanitizeDiscordIdValue_(user.id || user.discordId);
+	const wantedUsername = sanitizeDiscordUsernameValue_(user.username || user.discordUsername);
+	const versionId = readPublishedActiveVersionId_();
+	if (versionId) {
+		const cache = getScriptCacheSafe_();
+		if (cache) {
+			const idBucket = getSeasonEventLinkCacheBucket_("id", wantedDiscordId);
+			const idPayload = readSeasonEventLinkCacheBucket_(cache, versionId, idBucket);
+			if (idPayload) {
+				const cachedId = readSeasonEventLinkCacheAccounts_(idPayload, "byDiscordId", wantedDiscordId, { discordId: wantedDiscordId });
+				if (!cachedId.valid) {
+					// Corrupt cache data falls through to the canonical snapshot.
+				} else if (cachedId.accounts.length) {
+					return cachedId.accounts;
+				} else if (!wantedUsername) {
+					return [];
+				} else {
+					const usernameBucket = getSeasonEventLinkCacheBucket_("username", wantedUsername);
+					const usernamePayload = usernameBucket === idBucket ? idPayload : readSeasonEventLinkCacheBucket_(cache, versionId, usernameBucket);
+					if (usernamePayload) {
+						const cachedUsername = readSeasonEventLinkCacheAccounts_(usernamePayload, "byLegacyUsername", wantedUsername, { discordUsername: wantedUsername });
+						if (cachedUsername.valid) return cachedUsername.accounts.length === 1 ? cachedUsername.accounts : [];
+					}
+				}
+			}
+		}
+	}
+
+	const snapshot = readActivePlayerMetricsSnapshot_(versionId || undefined);
+	const playerMetrics = snapshot && snapshot.playerMetrics ? snapshot.playerMetrics : createEmptyPlayerMetricsStore_();
+	if (versionId && !(snapshot && snapshot.fallback)) warmSeasonEventLinkedAccountCacheBestEffort_(versionId, playerMetrics, true);
+	return findLinkedAccountsForDiscordUser_({ playerMetrics: playerMetrics }, user);
+}
+
 // Find linked accounts for Discord user from canonical playerMetrics identity.
 function findLinkedAccountsForDiscordUser_(rosterDataRaw, discordUserRaw) {
 	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
@@ -2647,35 +2894,14 @@ function findLinkedAccountsForDiscordUser_(rosterDataRaw, discordUserRaw) {
 	const usernameMatches = [];
 
 	for (let i = 0; i < keys.length; i++) {
-		const tag = normalizeTag_(keys[i]);
-		if (!tag) continue;
-		const entry = byTag[keys[i]] && typeof byTag[keys[i]] === "object" ? byTag[keys[i]] : {};
-		const identity = sanitizePlayerMetricsIdentity_(entry.identity, tag, entry.identity && entry.identity.name);
-		if (!identity || !hasCanonicalDiscordIdentity_(identity)) continue;
-		const identityDiscordId = sanitizeDiscordIdValue_(identity.discordId);
-		const identityUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
-		const latest = entry.latestSnapshot && typeof entry.latestSnapshot === "object" ? entry.latestSnapshot : {};
-		const leagueName =
-			(latest.league && typeof latest.league === "object" && latest.league.name) ||
-			(latest.leagueTier && typeof latest.leagueTier === "object" && latest.leagueTier.name) ||
-			"";
-		const account = {
-			tag: tag,
-			name: sanitizeSeasonEventText_(identity.name || latest.name, 120),
-			townHallLevel: toNonNegativeInt_(latest.townHallLevel != null ? latest.townHallLevel : latest.th),
-			trophies: toNonNegativeInt_(latest.trophies),
-			leagueName: sanitizeSeasonEventText_(leagueName, 120),
-			discordId: identityDiscordId,
-			discordUsername: identityUsername,
-			matchType: "discordId",
-		};
-		if (wantedDiscordId && identityDiscordId && identityDiscordId === wantedDiscordId) {
-			idMatches.push(account);
+		const linked = buildSeasonEventLinkedAccountFromMetricsEntry_(keys[i], byTag[keys[i]]);
+		if (!linked) continue;
+		if (wantedDiscordId && linked.identityDiscordId && linked.identityDiscordId === wantedDiscordId) {
+			idMatches.push(linked.account);
 			continue;
 		}
-		if (wantedUsername && !identityDiscordId && identityUsername && identityUsername === wantedUsername) {
-			const usernameAccount = Object.assign({}, account, { matchType: "discordUsername" });
-			usernameMatches.push(usernameAccount);
+		if (wantedUsername && !linked.identityDiscordId && linked.identityUsername && linked.identityUsername === wantedUsername) {
+			usernameMatches.push(Object.assign({}, linked.account, { matchType: "discordUsername" }));
 		}
 	}
 
@@ -3039,9 +3265,7 @@ function registerSeasonEventSignup(payloadRaw, botSecret) {
 		});
 	}
 
-	const activeSnapshot = readActivePlayerMetricsSnapshot_();
-	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
-	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
+	const linkedAccounts = readSeasonEventLinkedAccountsForDiscordUser_(discordUser);
 	const selected = selectSeasonEventAccountsForDiscordUser_(eventBeforeLock, linkedAccounts, payload.playerTags);
 	if (!selected.ok) {
 		return buildSeasonEventStatusResponse_(selected.status, {
@@ -3132,9 +3356,7 @@ function updateSeasonEventParticipantAccounts(payloadRaw, botSecret) {
 	const eventBeforeLock = readSeasonEventById_(eventId);
 	if (!eventBeforeLock) return buildSeasonEventStatusResponse_("event-not-found", { event: null });
 
-	const activeSnapshot = readActivePlayerMetricsSnapshot_();
-	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
-	const linkedAccounts = findLinkedAccountsForDiscordUser_(rosterData, discordUser);
+	const linkedAccounts = readSeasonEventLinkedAccountsForDiscordUser_(discordUser);
 	const selected = selectSeasonEventAccountsForDiscordUser_(eventBeforeLock, linkedAccounts, payload.playerTags);
 	if (!selected.ok) {
 		return buildSeasonEventStatusResponse_(selected.status, {
@@ -6603,6 +6825,7 @@ function getSeasonEventLeaderboard(payloadRaw, secretOrPassword) {
 	const event = readSeasonEventById_(eventId);
 	if (!event) return buildSeasonEventLeaderboard_(null, {}, { now: payload.now || payload.nowIso });
 	const activeSnapshot = readActivePlayerMetricsSnapshot_();
+	if (!(activeSnapshot && activeSnapshot.fallback)) warmSeasonEventLinkedAccountCacheBestEffort_(activeSnapshot && activeSnapshot.versionId, activeSnapshot && activeSnapshot.playerMetrics, false);
 	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	return buildSeasonEventLeaderboard_(event, rosterData, {
 		limit: payload.limit,
@@ -6627,6 +6850,7 @@ function getCurrentSeasonEventLeaderboards(payloadRaw, secretOrPassword) {
 		reconcile.cloudflarePublish = enqueueCloudflareSeasonEventReconciliation_(reconcile.publicationMutations, "leaderboard-local-season-metadata");
 	}
 	const activeSnapshot = readActivePlayerMetricsSnapshot_();
+	if (!(activeSnapshot && activeSnapshot.fallback)) warmSeasonEventLinkedAccountCacheBestEffort_(activeSnapshot && activeSnapshot.versionId, activeSnapshot && activeSnapshot.playerMetrics, false);
 	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(payload.now || payload.nowIso) || new Date().toISOString();
 	const pushEvent = reconcile.events && reconcile.events.push && reconcile.events.push.eventId ? readSeasonEventById_(reconcile.events.push.eventId) : null;

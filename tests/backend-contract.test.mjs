@@ -2019,6 +2019,66 @@ test("direct current CWL signup reports unresolved target before existing partic
   assert.equal(result.status, "cwl-target-unresolved");
 });
 
+test("direct current push and resolved CWL seasonal signups use the optimized mutation contract", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSeasonEventRosterData(), text: "" });
+  const publications = [];
+  backend.enqueueCloudflareSeasonEventPublication_ = (eventId, reason, options) => {
+    publications.push({ eventId, reason, options: clone(options || {}) });
+    return { ok: true, queued: true };
+  };
+
+  const push = backend.registerSeasonEventSignup({
+    eventType: "push",
+    discordUser: { id: "111", username: "alpha", globalName: "Alpha", displayName: "Alpha" },
+    source: { type: "discord-button" },
+  }, "secret");
+
+  const cwlEvent = {
+    eventId: "cwl-direct-optimized",
+    type: "cwl",
+    title: "CWL",
+    status: "open",
+    visibility: "public",
+    signupsOpen: true,
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        rosterId: "main",
+        clanTag: "#2LUCULP",
+        leagueName: "Champion I",
+        leagueRank: 0,
+        eligibleAccountTags: ["#2LUCULP"],
+      },
+    },
+    participantsByDiscordId: {},
+    participantsByTag: {},
+  };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(cwlEvent.eventId), "PUT", cwlEvent);
+  backend.writeSeasonEventFirebasePayload_("events/seasonEvents/currentCwl", "PUT", { eventId: cwlEvent.eventId, type: "cwl" });
+
+  const cwl = backend.registerSeasonEventSignup({
+    eventType: "cwl",
+    discordUser: { id: "111", username: "alpha", globalName: "Alpha", displayName: "Alpha" },
+    source: { type: "discord-button" },
+  }, "secret");
+
+  assert.equal(push.status, "signed-up");
+  assert.equal(push.event.type, "push");
+  assert.equal(cwl.status, "signed-up");
+  assert.equal(cwl.event.type, "cwl");
+  assert.equal(publications.length, 2);
+  assert.equal(publications[0].eventId, push.event.eventId);
+  assert.deepEqual(publications[0].options, {});
+  assert.equal(publications[1].eventId, cwlEvent.eventId);
+  assert.equal(publications[1].options.cwlLifecycle.liveAggregateAction, "put");
+  assert.equal(publications[1].options.cwlLifecycle.finalAggregateAction, "none");
+  assert.equal(publications[1].options.cwlLifecycle.pointerAction, "none");
+});
+
 test("season event signup commits participant state with one atomic Firebase batch", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
@@ -2157,6 +2217,72 @@ test("active player metrics snapshot recovers a missing selected shard from vali
   assert.equal(snapshot.fallback, true);
   assert.equal(snapshot.source, "firebase:/active");
   assert.equal(snapshot.playerMetrics.byTag["#PLAYER"].identity.name, "Fallback Identity");
+});
+
+test("season event linked-account cache avoids repeated full metrics downloads and is version scoped", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const cacheValues = new Map();
+  const cacheWrites = [];
+  const cache = {
+    get: key => cacheValues.has(key) ? cacheValues.get(key) : null,
+    put(key, value, ttl) {
+      cacheValues.set(String(key), String(value));
+      cacheWrites.push({ kind: "put", key: String(key), ttl: Number(ttl), chars: String(value).length });
+    },
+    putAll(values, ttl) {
+      for (const [key, value] of Object.entries(values || {})) cacheValues.set(String(key), String(value));
+      cacheWrites.push({ kind: "putAll", keys: Object.keys(values || {}).length, ttl: Number(ttl), maxChars: Math.max(0, ...Object.values(values || {}).map(value => String(value).length)) });
+    },
+  };
+  backend.CacheService = { getScriptCache: () => cache };
+  const rosterDataRaw = buildSeasonEventRosterData();
+  rosterDataRaw.playerMetrics.byTag["#2PPYQQ"] = {
+    identity: { tag: "#2PPYQQ", name: "Legacy", discordUsername: "legacy_user" },
+    latestSnapshot: { tag: "#2PPYQQ", name: "Legacy", townHallLevel: 14, trophies: 4800 },
+    trophyHistoryDaily: [],
+  };
+  const rosterData = backend.validateRosterData_(rosterDataRaw);
+  backend.writeActiveRosterVersionShards_("link-cache-v1", rosterData, { publish: true, source: "test" });
+  const originalRequest = backend.firebaseRequestJson_;
+  let metricsReads = 0;
+  backend.firebaseRequestJson_ = (path, method, payload, query) => {
+    if (String(method || "GET").toUpperCase() === "GET" && /activeVersions\/[^/]+\/playerMetrics$/.test(String(path || ""))) metricsReads += 1;
+    return originalRequest(path, method, payload, query);
+  };
+
+  const bravo = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "222", username: "bravo" });
+  const alpha = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
+  const legacy = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "legacy-discord-id", username: "legacy_user" });
+  const missing = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "unknown", username: "unknown" });
+
+  assert.deepEqual(Array.from(bravo, account => account.tag), ["#8CCVV", "#9PYLQG"]);
+  assert.deepEqual(Array.from(alpha, account => account.tag), ["#2LUCULP"]);
+  assert.deepEqual(Array.from(legacy, account => [account.tag, account.matchType]), [["#2PPYQQ", "discordUsername"]]);
+  assert.equal(missing.length, 0);
+  assert.equal(metricsReads, 1);
+  assert.equal(cacheWrites.filter(write => write.kind === "putAll").length, 1);
+  assert.equal(cacheWrites.find(write => write.kind === "putAll").keys, 16);
+  assert.ok(cacheWrites.find(write => write.kind === "putAll").maxChars <= 90 * 1024);
+
+  backend.writeActiveRosterVersionShards_("link-cache-v2", rosterData, { publish: true, source: "test" });
+  const nextVersion = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
+  assert.deepEqual(Array.from(nextVersion, account => account.tag), ["#2LUCULP"]);
+  assert.equal(metricsReads, 2);
+
+  const alphaBucket = backend.getSeasonEventLinkCacheBucket_("id", "111");
+  cacheValues.set(backend.buildSeasonEventLinkCacheBucketKey_("link-cache-v2", alphaBucket), "{broken");
+  const repaired = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
+  assert.deepEqual(Array.from(repaired, account => account.tag), ["#2LUCULP"]);
+  assert.equal(metricsReads, 3);
+
+  const successfulPutAll = cache.putAll;
+  cache.putAll = () => { throw new Error("bulk cache write unavailable"); };
+  backend.writeActiveRosterVersionShards_("link-cache-v3", rosterData, { publish: true, source: "test" });
+  const retried = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
+  cache.putAll = successfulPutAll;
+  assert.deepEqual(Array.from(retried, account => account.tag), ["#2LUCULP"]);
+  assert.equal(metricsReads, 4);
+  assert.ok(cacheValues.has(backend.buildSeasonEventLinkCacheCompleteKey_("link-cache-v3")));
 });
 
 test("season event signup does not match an ID-linked account by username collision", () => {

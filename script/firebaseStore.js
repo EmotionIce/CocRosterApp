@@ -1144,11 +1144,13 @@ function readActiveRosterSnapshotFromFirebase_() {
 }
 
 // Read only the canonical player-metrics shard selected by the active-version
-// pointer. Season-event identity checks and leaderboards do not need roster
-// layout shards, so reconstructing the complete active payload adds unrelated
-// Firebase downloads and network round trips to every Discord interaction.
-function readActivePlayerMetricsSnapshot_() {
-	const versionId = readPublishedActiveVersionId_();
+// pointer. A caller that already read the immutable version pointer may pass it
+// to avoid repeating that Firebase request. Season-event identity checks and
+// leaderboards do not need roster layout shards, so reconstructing the complete
+// active payload adds unrelated downloads and network round trips.
+function readActivePlayerMetricsSnapshot_(versionIdRaw) {
+	const requestedVersionId = normalizeActiveVersionId_(versionIdRaw);
+	const versionId = requestedVersionId || readPublishedActiveVersionId_();
 	if (versionId) {
 		try {
 			const path = buildActiveVersionPath_(versionId, "playerMetrics");
