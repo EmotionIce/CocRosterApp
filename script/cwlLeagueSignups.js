@@ -524,16 +524,22 @@ function assertCwlPreferencePlayerLinkedToDiscord_(playerTagRaw, discordUserRaw)
 	const discordUser = discordUserRaw && typeof discordUserRaw === "object" ? discordUserRaw : { id: discordUserRaw };
 	const discordId = sanitizeDiscordIdValue_(discordUser.id || discordUser.discordId);
 	if (!discordId) throw createRosterBackendError_("DISCORD_ID_REQUIRED", "Discord ID is required.");
-	const snapshot = readActiveRosterSnapshot_();
-	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
-	const linkedAccounts = typeof findLinkedAccountsForDiscordUser_ === "function"
-		? findLinkedAccountsForDiscordUser_(rosterData, {
-			id: discordId,
-			username: sanitizeDiscordUsernameValue_(discordUser.username || discordUser.discordUsername),
-			globalName: sanitizeCwlSignupText_(discordUser.globalName || discordUser.discordGlobalName, 120),
-			displayName: sanitizeCwlSignupText_(discordUser.displayName || discordUser.discordDisplayName, 120),
-		})
-		: [];
+	const normalizedDiscordUser = {
+		id: discordId,
+		username: sanitizeDiscordUsernameValue_(discordUser.username || discordUser.discordUsername),
+		globalName: sanitizeCwlSignupText_(discordUser.globalName || discordUser.discordGlobalName, 120),
+		displayName: sanitizeCwlSignupText_(discordUser.displayName || discordUser.discordDisplayName, 120),
+	};
+	let linkedAccounts = [];
+	if (typeof readSeasonEventLinkedAccountsForDiscordUser_ === "function") {
+		linkedAccounts = readSeasonEventLinkedAccountsForDiscordUser_(normalizedDiscordUser);
+	} else {
+		const snapshot = readActiveRosterSnapshot_();
+		const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+		linkedAccounts = typeof findLinkedAccountsForDiscordUser_ === "function"
+			? findLinkedAccountsForDiscordUser_(rosterData, normalizedDiscordUser)
+			: [];
+	}
 	const linked = Array.isArray(linkedAccounts) && linkedAccounts.some(function (account) {
 		return normalizeTag_(account && account.tag) === playerTag;
 	});
@@ -612,7 +618,7 @@ function cwlSignupPreferenceMatchesOption_(preferenceRaw, optionRaw) {
 function getCwlLeagueSignupOptions(payloadRaw, secretOrPasswordRaw) {
 	const parsed = parseSeasonEventOptionalPayloadAndSecret_(payloadRaw, secretOrPasswordRaw);
 	assertSeasonEventSecretOrAdmin_(parsed.secretOrPassword);
-	const snapshot = readActiveRosterSnapshot_();
+	const snapshot = readActiveRosterLayoutSnapshot_();
 	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
 	const signupOptionsResult = buildCwlLeagueSignupOptionsResultFromRosterData_(rosterData, { fetchMissing: parsed.payload.fetchMissing !== false });
 	const signups = withCwlLeagueSignupWriteLock_(function () {
@@ -683,7 +689,7 @@ function setCwlLeaguePreference(payloadRaw, secretOrPasswordRaw) {
 		const selectedLeagueKey = payload.leagueKey || payload.leagueName;
 		let selected = findCwlSignupOptionBySelection_(storedOptions, selectedOptionKey, selectedLeagueKey);
 		if (!selected) {
-			const snapshot = readActiveRosterSnapshot_();
+			const snapshot = readActiveRosterLayoutSnapshot_();
 			const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
 			const options = buildCwlLeagueSignupOptionsFromRosterData_(rosterData, { fetchMissing: true });
 			selected = findCwlSignupOptionBySelection_(options, selectedOptionKey, selectedLeagueKey);
@@ -826,9 +832,12 @@ function getCwlLeagueSignupContextForDiscordUser(payloadRaw, secretOrPasswordRaw
 	if (signupId && signupId !== signups.signupId) {
 		throw createRosterBackendError_("CWL_SIGNUP_NOT_ACTIVE", "This CWL league signup message is no longer active. Please use the latest signup message.");
 	}
-	const snapshot = readActiveRosterSnapshot_();
-	const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
-	const optionsResult = buildCwlLeagueSignupOptionsResultFromRosterData_(rosterData, { fetchMissing: false });
+	let options = buildCwlLeagueSignupOptionList_(signups.optionsByKey);
+	if (!options.length) {
+		const snapshot = readActiveRosterLayoutSnapshot_();
+		const rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : {};
+		options = buildCwlLeagueSignupOptionsResultFromRosterData_(rosterData, { fetchMissing: false }).options;
+	}
 	const discordUser = {
 		id: discordId,
 		username: payload.discordUsername,
@@ -839,8 +848,8 @@ function getCwlLeagueSignupContextForDiscordUser(payloadRaw, secretOrPasswordRaw
 	return {
 		ok: true,
 		signupId: signups.signupId,
-		options: optionsResult.options,
-		linkedAccounts: findLinkedAccountsForDiscordUser_(rosterData, discordUser),
+		options: options,
+		linkedAccounts: readSeasonEventLinkedAccountsForDiscordUser_(discordUser),
 		preferences: preferences,
 		preferenceCount: preferences.length,
 		updatedAt: signups.updatedAt || "",

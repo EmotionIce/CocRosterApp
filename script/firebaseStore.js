@@ -967,6 +967,7 @@ function buildActiveVersionManifestFromValidatedData_(versionIdRaw, validatedRos
 		rosterOrder: Array.isArray(rosterData.rosterOrder) ? rosterData.rosterOrder.slice() : rosterIds.slice(),
 		rosterIds: rosterIds,
 		connectedClanTags: connectedClanTags,
+		rosterPlayerTags: collectActiveVersionRosterPlayerTags_(rosters),
 		lastUpdatedAt: String(rosterData.lastUpdatedAt || ""),
 		playerMetricsSchemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
 		playerMetricEntryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
@@ -1013,6 +1014,9 @@ function writeActiveRosterVersionShards_(versionIdRaw, validatedRosterData, opti
 	}
 	const playerMetrics = sanitizePlayerMetricsStore_(validated.playerMetrics, validated.lastUpdatedAt || new Date().toISOString());
 	firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerMetrics"), "PUT", encodeFirebaseObjectKeysRecursive_(playerMetrics));
+	writeActiveVersionLinkedAccountTagIndex_(versionId, playerMetrics, {
+		builtAt: validated.lastUpdatedAt || new Date().toISOString(),
+	});
 	const manifest = buildActiveVersionManifestFromValidatedData_(versionId, validated, options);
 	firebaseRequestJson_(buildActiveVersionPath_(versionId, "manifest"), "PUT", encodeFirebaseObjectKeysRecursive_(manifest));
 	if (options.publish === true) publishActiveRosterVersionPointer_(versionId, manifest);
@@ -1115,6 +1119,53 @@ function readActiveRosterSnapshotFromVersion_(versionIdRaw) {
 	};
 }
 
+// Reconstruct only roster layout from immutable shards. Several control-plane
+// callers need clan/roster membership but never inspect player history. Keeping
+// playerMetrics empty avoids downloading the dominant active-version object.
+function readActiveRosterLayoutSnapshotFromVersion_(versionIdRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	if (!versionId) throw new Error("Active version id is required.");
+	const encodedManifest = firebaseRequestJson_(buildActiveVersionPath_(versionId, "manifest"), "GET");
+	if (!encodedManifest || typeof encodedManifest !== "object" || Array.isArray(encodedManifest)) {
+		throw new Error("Missing active version manifest for " + versionId + ".");
+	}
+	const manifest = decodeFirebaseObjectKeysRecursive_(encodedManifest);
+	const rosterShardResult = readActiveVersionRosterShards_(versionId, manifest);
+	const payload = {
+		schemaVersion: typeof manifest.schemaVersion === "number" && isFinite(manifest.schemaVersion) ? manifest.schemaVersion : 1,
+		pageTitle: typeof manifest.pageTitle === "string" ? manifest.pageTitle : "",
+		rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder : rosterShardResult.rosterIds,
+		rosters: rosterShardResult.rosters,
+		playerMetrics: createEmptyPlayerMetricsStore_(),
+	};
+	if (manifest.lastUpdatedAt) payload.lastUpdatedAt = String(manifest.lastUpdatedAt || "");
+	if (manifest.publicConfig && typeof manifest.publicConfig === "object") payload.publicConfig = manifest.publicConfig;
+	const rosterData = validateRosterData_(payload);
+	return {
+		text: JSON.stringify(rosterData),
+		rosterData: rosterData,
+		source: "firebase:/activeVersions/" + versionId + " (roster-layout)",
+		versionId: versionId,
+		manifest: manifest,
+		layoutOnly: true,
+	};
+}
+
+// Read the published roster layout with the complete active snapshot retained
+// as a compatibility fallback for legacy or partially-published generations.
+function readActiveRosterLayoutSnapshot_() {
+	const versionId = readPublishedActiveVersionId_();
+	if (versionId) {
+		try {
+			return readActiveRosterLayoutSnapshotFromVersion_(versionId);
+		} catch (err) {
+			Logger.log("Unable to read published roster layout '%s'; falling back to the validated active snapshot: %s", versionId, errorMessage_(err));
+		}
+	}
+	const snapshot = readActiveRosterSnapshot_();
+	return Object.assign({}, snapshot, { layoutFallback: true });
+}
+
 // Handle read legacy root active roster snapshot or null.
 function readLegacyRootActiveRosterSnapshotOrNull_() {
 	const encodedRoot = firebaseRootRequestJson_("GET");
@@ -1141,6 +1192,294 @@ function readActiveRosterSnapshotFromFirebase_() {
 		return decodeAndValidateActiveRosterPayload_(encodedPayload, "firebase:/active");
 	}
 	throw new Error("Missing active roster payload at /active. Run migrateLegacyFirebaseRootToNamespacedLayout_() if this database still uses the old root layout.");
+}
+
+// Collect the exact public roster membership represented by immutable roster
+// shards. Keeping this compact list in the manifest lets request-time
+// authorization avoid reconstructing the much larger playerMetrics shard.
+function collectActiveVersionRosterPlayerTags_(rostersRaw) {
+	const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
+	const seen = {};
+	const tags = [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const players = []
+			.concat(Array.isArray(roster.main) ? roster.main : [])
+			.concat(Array.isArray(roster.subs) ? roster.subs : [])
+			.concat(Array.isArray(roster.missing) ? roster.missing : []);
+		for (let j = 0; j < players.length; j++) {
+			const tag = normalizeTag_(players[j] && players[j].tag);
+			if (!tag || seen[tag]) continue;
+			seen[tag] = true;
+			tags.push(tag);
+		}
+	}
+	tags.sort();
+	return tags;
+}
+
+// Normalize and deduplicate the small set of player tags a request actually
+// needs. Event leaderboards typically contain only a handful of accounts.
+function normalizeActivePlayerMetricsSubsetTags_(tagsRaw) {
+	const input = Array.isArray(tagsRaw) ? tagsRaw : [];
+	const seen = {};
+	const tags = [];
+	for (let i = 0; i < input.length; i++) {
+		const tag = normalizeTag_(input[i]);
+		if (!tag || seen[tag]) continue;
+		seen[tag] = true;
+		tags.push(tag);
+	}
+	tags.sort();
+	return tags;
+}
+
+// Build a compact, derived identity index for an immutable active version. The
+// index stores only candidate player tags; request-time callers still verify
+// every candidate against the canonical metric entry before granting access.
+function buildActiveVersionLinkedAccountTagIndexManifest_(versionIdRaw, optionsRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (!versionId) throw new Error("Active version id is required.");
+	const manifest = {
+		schemaVersion: FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_SCHEMA_VERSION,
+		versionId: versionId,
+		complete: true,
+		builtAt: String(options.builtAt || new Date().toISOString()),
+	};
+	if (options.metricEntryCount != null) manifest.metricEntryCount = toNonNegativeInt_(options.metricEntryCount);
+	if (options.linkedTagCount != null) manifest.linkedTagCount = toNonNegativeInt_(options.linkedTagCount);
+	return manifest;
+}
+
+function buildActiveVersionLinkedAccountTagIndexEntryWrites_(versionIdRaw, tagRaw, metricEntryRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const tag = normalizeTag_(tagRaw);
+	const entry = metricEntryRaw && typeof metricEntryRaw === "object" && !Array.isArray(metricEntryRaw) ? metricEntryRaw : {};
+	if (!versionId || !tag) return [];
+	const identity = sanitizePlayerMetricsIdentity_(entry.identity, tag, entry.identity && entry.identity.name);
+	if (!identity || !hasCanonicalDiscordIdentity_(identity)) return [];
+	const discordId = sanitizeDiscordIdValue_(identity.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
+	let lookupPath = "";
+	if (discordId) {
+		lookupPath = "byDiscordId/" + encodeFirebaseObjectKey_(discordId);
+	} else if (discordUsername) {
+		lookupPath = "byLegacyUsername/" + encodeFirebaseObjectKey_(discordUsername);
+	}
+	if (!lookupPath) return [];
+	return [{
+		path: buildActiveVersionPath_(
+			versionId,
+			FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_CHILD_PATH + "/" + lookupPath + "/" + encodeFirebaseObjectKey_(tag),
+		),
+		method: "PUT",
+		payload: true,
+	}];
+}
+
+function buildActiveVersionLinkedAccountTagIndex_(versionIdRaw, playerMetricsRaw, optionsRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	if (!versionId) throw new Error("Active version id is required.");
+	const playerMetrics = playerMetricsRaw && typeof playerMetricsRaw === "object" ? playerMetricsRaw : createEmptyPlayerMetricsStore_();
+	assertCanonicalPlayerMetricsStore_(playerMetrics, "active linked-account tag index");
+	const byTag = playerMetrics.byTag && typeof playerMetrics.byTag === "object" && !Array.isArray(playerMetrics.byTag)
+		? playerMetrics.byTag
+		: {};
+	const byDiscordId = {};
+	const byLegacyUsername = {};
+	const tags = Object.keys(byTag).sort();
+	let linkedTagCount = 0;
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		const entry = byTag[tags[i]] && typeof byTag[tags[i]] === "object" ? byTag[tags[i]] : {};
+		const identity = sanitizePlayerMetricsIdentity_(entry.identity, tag, entry.identity && entry.identity.name);
+		if (!tag || !identity || !hasCanonicalDiscordIdentity_(identity)) continue;
+		const discordId = sanitizeDiscordIdValue_(identity.discordId);
+		const discordUsername = sanitizeDiscordUsernameValue_(identity.discordUsername);
+		let target = null;
+		let lookup = "";
+		if (discordId) {
+			target = byDiscordId;
+			lookup = discordId;
+		} else if (discordUsername) {
+			target = byLegacyUsername;
+			lookup = discordUsername;
+		}
+		if (!target || !lookup) continue;
+		if (!target[lookup] || typeof target[lookup] !== "object") target[lookup] = {};
+		target[lookup][tag] = true;
+		linkedTagCount++;
+	}
+	return {
+		manifest: buildActiveVersionLinkedAccountTagIndexManifest_(versionId, {
+			metricEntryCount: tags.length,
+			linkedTagCount: linkedTagCount,
+			builtAt: options.builtAt,
+		}),
+		byDiscordId: byDiscordId,
+		byLegacyUsername: byLegacyUsername,
+	};
+}
+
+function writeActiveVersionLinkedAccountTagIndex_(versionIdRaw, playerMetricsRaw, optionsRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const index = buildActiveVersionLinkedAccountTagIndex_(versionId, playerMetricsRaw, optionsRaw);
+	firebaseRequestJson_(
+		buildActiveVersionPath_(versionId, FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_CHILD_PATH),
+		"PUT",
+		encodeFirebaseObjectKeysRecursive_(index),
+	);
+	return index.manifest;
+}
+
+function writeActiveVersionLinkedAccountTagIndexBestEffort_(versionIdRaw, playerMetricsRaw, optionsRaw) {
+	try {
+		return Object.assign({ ok: true }, writeActiveVersionLinkedAccountTagIndex_(versionIdRaw, playerMetricsRaw, optionsRaw));
+	} catch (err) {
+		Logger.log("Unable to write active linked-account tag index for '%s': %s", String(versionIdRaw || ""), errorMessage_(err));
+		return { ok: false, error: errorMessage_(err) };
+	}
+}
+
+function normalizeActiveVersionLinkedAccountIndexTags_(valueRaw) {
+	const decoded = decodeFirebaseObjectKeysRecursive_(valueRaw);
+	if (!decoded || typeof decoded !== "object") return [];
+	const rawTags = Array.isArray(decoded) ? decoded : Object.keys(decoded);
+	return normalizeActivePlayerMetricsSubsetTags_(rawTags);
+}
+
+// Read a complete versioned index using exact Firebase child paths. A null
+// return means the version predates the index or the index failed validation.
+function readActiveVersionLinkedAccountCandidateTags_(versionIdRaw, discordUserRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const user = discordUserRaw && typeof discordUserRaw === "object" ? discordUserRaw : {};
+	const discordId = sanitizeDiscordIdValue_(user.id || user.discordId);
+	const discordUsername = sanitizeDiscordUsernameValue_(user.username || user.discordUsername);
+	if (!versionId) return null;
+	const basePath = FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_CHILD_PATH;
+	const manifestPath = buildActiveVersionPath_(versionId, basePath + "/manifest");
+	const paths = [manifestPath];
+	let idPath = "";
+	let usernamePath = "";
+	if (discordId) {
+		idPath = buildActiveVersionPath_(versionId, basePath + "/byDiscordId/" + encodeFirebaseObjectKey_(discordId));
+		paths.push(idPath);
+	}
+	if (discordUsername) {
+		usernamePath = buildActiveVersionPath_(versionId, basePath + "/byLegacyUsername/" + encodeFirebaseObjectKey_(discordUsername));
+		paths.push(usernamePath);
+	}
+	const values = firebaseBatchGetJson_(paths);
+	const manifestEncoded = values[manifestPath];
+	const manifest = manifestEncoded && typeof manifestEncoded === "object" && !Array.isArray(manifestEncoded)
+		? decodeFirebaseObjectKeysRecursive_(manifestEncoded)
+		: null;
+	if (
+		!manifest || manifest.complete !== true ||
+		toNonNegativeInt_(manifest.schemaVersion) !== FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_SCHEMA_VERSION ||
+		normalizeActiveVersionId_(manifest.versionId) !== versionId
+	) return null;
+	const idTags = idPath ? normalizeActiveVersionLinkedAccountIndexTags_(values[idPath]) : [];
+	const usernameTags = usernamePath ? normalizeActiveVersionLinkedAccountIndexTags_(values[usernamePath]) : [];
+	const tags = normalizeActivePlayerMetricsSubsetTags_(idTags.concat(usernameTags));
+	if (tags.length > 100) return null;
+	return {
+		complete: true,
+		versionId: versionId,
+		tags: tags,
+		matchType: idTags.length ? "discordId" : usernameTags.length ? "discordUsername" : "none",
+	};
+}
+
+// Project a complete metrics store down to requested entries. This is used only
+// by the failure fallback so callers retain exactly the same result shape.
+function projectActivePlayerMetricsSubset_(playerMetricsRaw, tagsRaw) {
+	const playerMetrics = playerMetricsRaw && typeof playerMetricsRaw === "object" ? playerMetricsRaw : createEmptyPlayerMetricsStore_();
+	const sourceByTag = playerMetrics.byTag && typeof playerMetrics.byTag === "object" && !Array.isArray(playerMetrics.byTag)
+		? playerMetrics.byTag
+		: {};
+	const tags = normalizeActivePlayerMetricsSubsetTags_(tagsRaw);
+	const projected = createEmptyPlayerMetricsStore_();
+	projected.schemaVersion = typeof playerMetrics.schemaVersion === "number" && isFinite(playerMetrics.schemaVersion)
+		? playerMetrics.schemaVersion
+		: PLAYER_METRICS_SCHEMA_VERSION;
+	projected.updatedAt = String(playerMetrics.updatedAt || "");
+	for (let i = 0; i < tags.length; i++) {
+		if (sourceByTag[tags[i]] && typeof sourceByTag[tags[i]] === "object" && !Array.isArray(sourceByTag[tags[i]])) {
+			projected.byTag[tags[i]] = sourceByTag[tags[i]];
+		}
+	}
+	assertCanonicalPlayerMetricsStore_(projected, "active playerMetrics subset");
+	return projected;
+}
+
+// Read only exact playerMetrics/byTag children for a request. Firebase REST has
+// no efficient multi-key IN query, so bounded parallel exact reads provide the
+// smallest transfer while preserving the immutable-version consistency model.
+function readActivePlayerMetricsSubsetSnapshot_(tagsRaw, versionIdRaw) {
+	const tags = normalizeActivePlayerMetricsSubsetTags_(tagsRaw);
+	if (!tags.length) {
+		return {
+			playerMetrics: createEmptyPlayerMetricsStore_(),
+			source: "empty-requested-playerMetrics-subset",
+			versionId: normalizeActiveVersionId_(versionIdRaw),
+			requestedTagCount: 0,
+			foundTagCount: 0,
+			subset: true,
+		};
+	}
+	const requestedVersionId = normalizeActiveVersionId_(versionIdRaw);
+	const versionId = requestedVersionId || readPublishedActiveVersionId_();
+	if (versionId) {
+		try {
+			const playerMetrics = createEmptyPlayerMetricsStore_();
+			const batchSize = 100;
+			for (let offset = 0; offset < tags.length; offset += batchSize) {
+				const batchTags = tags.slice(offset, offset + batchSize);
+				const paths = [];
+				const tagByPath = {};
+				for (let i = 0; i < batchTags.length; i++) {
+					const path = buildActiveVersionPath_(versionId, "playerMetrics/byTag/" + encodeFirebaseObjectKey_(batchTags[i]));
+					paths.push(path);
+					tagByPath[path] = batchTags[i];
+				}
+				const encodedByPath = firebaseBatchGetJson_(paths);
+				for (let i = 0; i < paths.length; i++) {
+					const path = paths[i];
+					const encodedEntry = encodedByPath[path];
+					if (encodedEntry == null) continue;
+					if (typeof encodedEntry !== "object" || Array.isArray(encodedEntry)) {
+						throw new Error("Invalid active player metric entry for " + tagByPath[path] + ".");
+					}
+					playerMetrics.byTag[tagByPath[path]] = decodeFirebaseObjectKeysRecursive_(encodedEntry);
+				}
+			}
+			assertCanonicalPlayerMetricsStore_(playerMetrics, "active version playerMetrics subset");
+			return {
+				playerMetrics: playerMetrics,
+				source: "firebase:/activeVersions/" + versionId + "/playerMetrics/byTag (subset)",
+				versionId: versionId,
+				requestedTagCount: tags.length,
+				foundTagCount: Object.keys(playerMetrics.byTag).length,
+				subset: true,
+			};
+		} catch (err) {
+			Logger.log("Unable to read targeted active player metrics '%s'; falling back to the complete metrics snapshot: %s", versionId, errorMessage_(err));
+		}
+	}
+	const fullSnapshot = readActivePlayerMetricsSnapshot_(versionId || undefined);
+	const playerMetrics = projectActivePlayerMetricsSubset_(fullSnapshot && fullSnapshot.playerMetrics, tags);
+	return {
+		playerMetrics: playerMetrics,
+		source: String(fullSnapshot && fullSnapshot.source || "firebase:/active"),
+		versionId: String(fullSnapshot && fullSnapshot.versionId || versionId || ""),
+		requestedTagCount: tags.length,
+		foundTagCount: Object.keys(playerMetrics.byTag).length,
+		subset: true,
+		fallback: true,
+	};
 }
 
 // Read only the canonical player-metrics shard selected by the active-version

@@ -2165,6 +2165,85 @@ test("active player metrics snapshot reads only the selected immutable metrics s
   ]);
 });
 
+test("active player metrics subset reads only exact requested tag children", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = backend.validateRosterData_(buildSeasonEventRosterData());
+  backend.writeActiveRosterVersionShards_("subset-version", rosterData, { publish: true, source: "test" });
+  const requestedPaths = [];
+  const realBatchGet = backend.firebaseBatchGetJson_;
+  backend.firebaseBatchGetJson_ = (paths, options) => {
+    requestedPaths.push(...Array.from(paths || [], path => String(path)));
+    return realBatchGet(paths, options);
+  };
+  backend.readActivePlayerMetricsSnapshot_ = () => {
+    throw new Error("complete metrics snapshot must not be used for a valid subset read");
+  };
+
+  const snapshot = backend.readActivePlayerMetricsSubsetSnapshot_([
+    "#9PYLQG",
+    "#2LUCULP",
+    "#9PYLQG",
+    "#NOTTHERE",
+  ]);
+
+  assert.equal(snapshot.versionId, "subset-version");
+  assert.equal(snapshot.requestedTagCount, 3);
+  assert.equal(snapshot.foundTagCount, 2);
+  assert.deepEqual(Object.keys(snapshot.playerMetrics.byTag).sort(), ["#2LUCULP", "#9PYLQG"]);
+  assert.deepEqual(requestedPaths.sort(), ["#2LUCULP", "#9PYLQG", "#NOTTHERE"].map(tag =>
+    backend.buildActiveVersionPath_("subset-version", "playerMetrics/byTag/" + backend.encodeFirebaseObjectKey_(tag))
+  ).sort());
+  assert.equal(requestedPaths.some(path => /\/playerMetrics$/.test(path)), false);
+});
+
+test("active roster layout reconstruction never reads player metrics", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = backend.validateRosterData_(buildCwlLeagueSignupRosterData());
+  backend.writeActiveRosterVersionShards_("layout-version", rosterData, { publish: true, source: "test" });
+  const reads = [];
+  const realRequest = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (path, method, payload, options) => {
+    if (String(method || "GET").toUpperCase() === "GET") reads.push(String(path || ""));
+    return realRequest(path, method, payload, options);
+  };
+
+  const snapshot = backend.readActiveRosterLayoutSnapshot_();
+
+  assert.equal(snapshot.versionId, "layout-version");
+  assert.equal(snapshot.layoutOnly, true);
+  assert.equal(snapshot.rosterData.rosters.length, rosterData.rosters.length);
+  assert.deepEqual(Object.keys(snapshot.rosterData.playerMetrics.byTag), []);
+  assert.equal(reads.some(path => /\/playerMetrics(?:\/|$)/.test(path)), false);
+});
+
+test("published roster authorization uses compact immutable manifest membership", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = backend.validateRosterData_(buildCwlLeagueSignupRosterData());
+  backend.writeActiveRosterVersionShards_("membership-version", rosterData, { publish: true, source: "test" });
+  const cacheValues = new Map();
+  backend.CacheService = {
+    getScriptCache: () => ({
+      get: key => cacheValues.has(key) ? cacheValues.get(key) : null,
+      put: (key, value) => cacheValues.set(String(key), String(value)),
+    }),
+  };
+  const reads = [];
+  const realRequest = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (path, method, payload, options) => {
+    if (String(method || "GET").toUpperCase() === "GET") reads.push(String(path || ""));
+    return realRequest(path, method, payload, options);
+  };
+  backend.getRosterData = () => {
+    throw new Error("complete active roster must not be used for manifest membership");
+  };
+
+  assert.equal(backend.isPublishedRosterTag_("#2LUCULP"), true);
+  assert.equal(backend.isPublishedRosterTag_("#PYYQQ"), false);
+  assert.equal(reads.filter(path => /\/manifest$/.test(path)).length, 1);
+  assert.equal(reads.some(path => /\/playerMetrics(?:\/|$)/.test(path)), false);
+  assert.ok(cacheValues.has("published-roster-tags-v1:membership-version"));
+});
+
 test("active player metrics snapshot rejects noncanonical identities and uses the validated fallback", () => {
   const backend = loadBackend();
   const fallbackMetrics = buildSeasonEventRosterData().playerMetrics;
@@ -2219,22 +2298,8 @@ test("active player metrics snapshot recovers a missing selected shard from vali
   assert.equal(snapshot.playerMetrics.byTag["#PLAYER"].identity.name, "Fallback Identity");
 });
 
-test("season event linked-account cache avoids repeated full metrics downloads and is version scoped", () => {
+test("legacy active version linked-account lookup builds its persistent index once", () => {
   const backend = installMemoryFirebase(loadBackend());
-  const cacheValues = new Map();
-  const cacheWrites = [];
-  const cache = {
-    get: key => cacheValues.has(key) ? cacheValues.get(key) : null,
-    put(key, value, ttl) {
-      cacheValues.set(String(key), String(value));
-      cacheWrites.push({ kind: "put", key: String(key), ttl: Number(ttl), chars: String(value).length });
-    },
-    putAll(values, ttl) {
-      for (const [key, value] of Object.entries(values || {})) cacheValues.set(String(key), String(value));
-      cacheWrites.push({ kind: "putAll", keys: Object.keys(values || {}).length, ttl: Number(ttl), maxChars: Math.max(0, ...Object.values(values || {}).map(value => String(value).length)) });
-    },
-  };
-  backend.CacheService = { getScriptCache: () => cache };
   const rosterDataRaw = buildSeasonEventRosterData();
   rosterDataRaw.playerMetrics.byTag["#2PPYQQ"] = {
     identity: { tag: "#2PPYQQ", name: "Legacy", discordUsername: "legacy_user" },
@@ -2243,6 +2308,10 @@ test("season event linked-account cache avoids repeated full metrics downloads a
   };
   const rosterData = backend.validateRosterData_(rosterDataRaw);
   backend.writeActiveRosterVersionShards_("link-cache-v1", rosterData, { publish: true, source: "test" });
+  backend.firebaseRequestJson_(
+    backend.buildActiveVersionPath_("link-cache-v1", "indexes/linkedAccountTags"),
+    "DELETE",
+  );
   const originalRequest = backend.firebaseRequestJson_;
   let metricsReads = 0;
   backend.firebaseRequestJson_ = (path, method, payload, query) => {
@@ -2260,29 +2329,58 @@ test("season event linked-account cache avoids repeated full metrics downloads a
   assert.deepEqual(Array.from(legacy, account => [account.tag, account.matchType]), [["#2PPYQQ", "discordUsername"]]);
   assert.equal(missing.length, 0);
   assert.equal(metricsReads, 1);
-  assert.equal(cacheWrites.filter(write => write.kind === "putAll").length, 1);
-  assert.equal(cacheWrites.find(write => write.kind === "putAll").keys, 16);
-  assert.ok(cacheWrites.find(write => write.kind === "putAll").maxChars <= 90 * 1024);
+  const storedManifest = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_(
+    backend.buildActiveVersionPath_("link-cache-v1", "indexes/linkedAccountTags/manifest"),
+    "GET",
+  ));
+  assert.equal(storedManifest.complete, true);
+  assert.equal(storedManifest.versionId, "link-cache-v1");
+});
 
-  backend.writeActiveRosterVersionShards_("link-cache-v2", rosterData, { publish: true, source: "test" });
-  const nextVersion = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
-  assert.deepEqual(Array.from(nextVersion, account => account.tag), ["#2LUCULP"]);
-  assert.equal(metricsReads, 2);
+test("season event linked-account index reads and verifies only exact metric entries", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = backend.validateRosterData_(buildSeasonEventRosterData());
+  backend.writeActiveRosterVersionShards_("indexed-links-v1", rosterData, { publish: true, source: "test" });
+  const requestedPaths = [];
+  const realBatchGet = backend.firebaseBatchGetJson_;
+  backend.firebaseBatchGetJson_ = (paths, options) => {
+    requestedPaths.push(...Array.from(paths || [], path => String(path)));
+    return realBatchGet(paths, options);
+  };
+  backend.readActivePlayerMetricsSnapshot_ = () => {
+    throw new Error("full Firebase playerMetrics must not be downloaded for an indexed lookup");
+  };
 
-  const alphaBucket = backend.getSeasonEventLinkCacheBucket_("id", "111");
-  cacheValues.set(backend.buildSeasonEventLinkCacheBucketKey_("link-cache-v2", alphaBucket), "{broken");
-  const repaired = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
-  assert.deepEqual(Array.from(repaired, account => account.tag), ["#2LUCULP"]);
-  assert.equal(metricsReads, 3);
+  const accounts = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
 
-  const successfulPutAll = cache.putAll;
-  cache.putAll = () => { throw new Error("bulk cache write unavailable"); };
-  backend.writeActiveRosterVersionShards_("link-cache-v3", rosterData, { publish: true, source: "test" });
-  const retried = backend.readSeasonEventLinkedAccountsForDiscordUser_({ id: "111", username: "alpha" });
-  cache.putAll = successfulPutAll;
-  assert.deepEqual(Array.from(retried, account => account.tag), ["#2LUCULP"]);
-  assert.equal(metricsReads, 4);
-  assert.ok(cacheValues.has(backend.buildSeasonEventLinkCacheCompleteKey_("link-cache-v3")));
+  assert.deepEqual(Array.from(accounts, account => account.tag), ["#2LUCULP"]);
+  assert.equal(accounts[0].matchType, "discordId");
+  assert.equal(requestedPaths.some(path => /\/playerMetrics$/.test(path)), false);
+  assert.deepEqual(
+    requestedPaths.filter(path => /\/playerMetrics\/byTag\//.test(path)),
+    [backend.buildActiveVersionPath_("indexed-links-v1", "playerMetrics/byTag/" + backend.encodeFirebaseObjectKey_("#2LUCULP"))],
+  );
+  assert.equal(requestedPaths.some(path => /\/indexes\/linkedAccountTags\/manifest$/.test(path)), true);
+  assert.equal(requestedPaths.some(path => /\/indexes\/linkedAccountTags\/byDiscordId\/111$/.test(path)), true);
+});
+
+test("admin bridge materializes a legacy linked-account index idempotently", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  const rosterData = backend.validateRosterData_(buildSeasonEventRosterData());
+  backend.writeActiveRosterVersionShards_("legacy-index-v1", rosterData, { publish: true, source: "test" });
+  backend.firebaseRequestJson_(backend.buildActiveVersionPath_("legacy-index-v1", "indexes/linkedAccountTags"), "DELETE");
+
+  const first = backend.runAdminApiMethod_("ensureActiveLinkedAccountTagIndex", ["secret"]);
+  const second = backend.runAdminApiMethod_("ensureActiveLinkedAccountTagIndex", ["secret"]);
+
+  assert.equal(first.ok, true);
+  assert.equal(first.created, true);
+  assert.equal(first.versionId, "legacy-index-v1");
+  assert.equal(first.linkedTagCount, 4);
+  assert.equal(second.ok, true);
+  assert.equal(second.created, false);
+  assert.equal(second.reason, "already-complete");
 });
 
 test("season event signup does not match an ID-linked account by username collision", () => {
@@ -2983,6 +3081,34 @@ test("CWL league signup options store the active message snapshot", () => {
   assert.ok(signups.optionSnapshotUpdatedAt);
 });
 
+test("CWL signup context reuses stored options and compact linked-account lookup", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
+  const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
+  backend.readActiveRosterLayoutSnapshot_ = () => {
+    throw new Error("stored signup options must not rebuild roster layout");
+  };
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("signup context must not reconstruct the complete active roster");
+  };
+  backend.readSeasonEventLinkedAccountsForDiscordUser_ = () => [{
+    tag: "#2LUCULP",
+    name: "Alpha",
+    discordId: "111",
+    matchType: "discordId",
+  }];
+
+  const result = backend.getCwlLeagueSignupContextForDiscordUser({
+    signupId: signup.signupId,
+    discordId: "111",
+    discordUsername: "alpha",
+  }, "secret");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.options.length, 2);
+  assert.deepEqual(Array.from(result.linkedAccounts, account => account.tag), ["#2LUCULP"]);
+});
+
 test("CWL signup options keep same-league rosters distinct", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildSameLeagueCwlSignupRosterData(), text: "" });
@@ -3032,11 +3158,18 @@ test("CWL league preference saves from the message snapshot while revalidating t
   const backend = installMemoryFirebase(loadBackend());
   backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildCwlLeagueSignupRosterData(), text: "" });
   const signup = backend.getCwlLeagueSignupOptions({ fetchMissing: false }, "secret");
-  let rosterSnapshotReads = 0;
   backend.readActiveRosterSnapshot_ = () => {
-    rosterSnapshotReads += 1;
-    return { rosterData: buildCwlLeagueSignupRosterData(), text: "" };
+	throw new Error("snapshotted preference save must not reconstruct the complete active roster");
   };
+	backend.readActiveRosterLayoutSnapshot_ = () => {
+		throw new Error("snapshotted preference save must not rebuild roster layout");
+	};
+	backend.readSeasonEventLinkedAccountsForDiscordUser_ = () => [{
+		tag: "#2LUCULP",
+		name: "Alpha",
+		discordId: "111",
+		matchType: "discordId",
+	}];
   backend.cocFetch_ = () => {
     throw new Error("Clash should not be fetched for a snapshotted signup");
   };
@@ -3059,7 +3192,6 @@ test("CWL league preference saves from the message snapshot while revalidating t
   assert.equal(result.created, true);
   assert.equal(result.preference.leagueName, "Champion I");
   assert.equal(result.preferenceCount, 1);
-  assert.equal(rosterSnapshotReads, 1);
 });
 
 test("CWL league preference changes require owner confirmation", () => {

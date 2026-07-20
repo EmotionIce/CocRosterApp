@@ -95,6 +95,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return debugFirebasePrivateKeySigning(args[0]);
 		case "cleanupFirebaseStorageRetention":
 			return cleanupFirebaseStorageRetention(args[0]);
+		case "ensureActiveLinkedAccountTagIndex":
+			return ensureActiveLinkedAccountTagIndex(args[0]);
 		case "migrateCwlSeasonEventDefenseStarsStorage":
 			return migrateCwlSeasonEventDefenseStarsStorage(args[0], args[1]);
 		case "publishCloudflarePublicDataSnapshot":
@@ -271,6 +273,33 @@ function debugFirebaseAuthForDiscordSync(botSecret, forceRefreshRaw) {
 function cleanupFirebaseStorageRetention(password) {
 	assertAdminPassword_(password);
 	return cleanupFirebaseStorageRetention_({ reason: "admin-api" });
+}
+
+// Materialize the compact derived linked-account index for the currently
+// published immutable version. This is idempotent and lets a legacy version be
+// upgraded once without publishing or changing its canonical roster payload.
+function ensureActiveLinkedAccountTagIndex(password) {
+	assertAdminPassword_(password);
+	const versionId = readPublishedActiveVersionId_();
+	if (!versionId) throw new Error("No published active version is available.");
+	const existing = readActiveVersionLinkedAccountCandidateTags_(versionId, {});
+	if (existing && existing.complete === true) {
+		return { ok: true, created: false, versionId: versionId, reason: "already-complete" };
+	}
+	const snapshot = readActivePlayerMetricsSnapshot_(versionId);
+	if (!snapshot || snapshot.fallback === true || normalizeActiveVersionId_(snapshot.versionId) !== versionId) {
+		throw new Error("Unable to read canonical player metrics for active version " + versionId + ".");
+	}
+	const manifest = writeActiveVersionLinkedAccountTagIndex_(versionId, snapshot.playerMetrics, {
+		builtAt: new Date().toISOString(),
+	});
+	return {
+		ok: true,
+		created: true,
+		versionId: versionId,
+		metricEntryCount: toNonNegativeInt_(manifest.metricEntryCount),
+		linkedTagCount: toNonNegativeInt_(manifest.linkedTagCount),
+	};
 }
 
 // Parse old and new Discord bot sync argument shapes.

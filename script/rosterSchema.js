@@ -8,6 +8,9 @@
 // - /activeVersions/{versionId}/rosters/{rosterId}: versioned roster shards.
 // - /activeVersions/{versionId}/playerMetrics/byTag[normalizedPlayerTag]: the
 //   versioned global player metrics store.
+// - /activeVersions/{versionId}/indexes/linkedAccountTags: a complete derived
+//   Discord-user-to-player-tag candidate index. Callers must verify candidates
+//   against the versioned playerMetrics identity before authorizing them.
 // - /activeVersions/{versionId}/manifest: small version manifest.
 // - /activePublished/currentVersionId: small pointer that atomically publishes
 //   a completed version.

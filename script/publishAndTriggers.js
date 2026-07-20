@@ -991,6 +991,7 @@ function buildAutoRefreshRunSourceMeta_(runIdRaw, rosterDataRaw, sourceFingerpri
 		metricCopyMode: sourceVersionId ? "sourceVersionChunks" : "runSourceCopy",
 		metricCopyKeyCount: toNonNegativeInt_(runPlan.metricCopyKeyCount),
 		playerMetricsStagedVersionId: runId,
+		linkedAccountTagIndexSchemaVersion: FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_SCHEMA_VERSION,
 		sourceLastUpdatedAt: String(rosterData.lastUpdatedAt || ""),
 		sourceRosterCount: rosters.length,
 		sourcePlayerCount: sourceCounts.playerCount,
@@ -1363,6 +1364,11 @@ function executeAutoRefreshMetricCopyTask_(currentRaw, taskRaw, executionStartMs
 			method: "PUT",
 			payload: payload,
 		});
+		const decodedEntry = decodeFirebaseObjectKeysRecursive_(payload);
+		let decodedTag = "";
+		try { decodedTag = decodeFirebaseObjectKey_(key); } catch (err) { decodedTag = key; }
+		const indexWrites = buildActiveVersionLinkedAccountTagIndexEntryWrites_(runId, decodedTag, decodedEntry);
+		for (let j = 0; j < indexWrites.length; j++) writes.push(indexWrites[j]);
 		copiedCount++;
 	}
 	if (missingCount > 0) {
@@ -1536,6 +1542,8 @@ function buildActiveVersionPlayerMetricEntryWrites_(runIdRaw, metricResultRaw, w
 			method: "PUT",
 			payload: encodeFirebaseObjectKeysRecursive_(byTag[keys[i]]),
 		});
+		const indexWrites = buildActiveVersionLinkedAccountTagIndexEntryWrites_(runIdRaw, tag, byTag[keys[i]]);
+		for (let j = 0; j < indexWrites.length; j++) writes.push(indexWrites[j]);
 	}
 	return {
 		writes: writes,
@@ -3691,7 +3699,8 @@ function verifyAutoRefreshFinalizeResultMarkers_(runIdRaw, rosterIdsRaw, options
 }
 
 // Assert that completed roster outputs do not duplicate a player tag across any
-// roster. Returns false when old in-progress tasks do not have tag summaries.
+// roster. Returns null when old in-progress tasks do not have tag summaries;
+// otherwise returns the exact final roster membership represented by markers.
 function assertAutoRefreshRosterWriteTagsUnique_(rosterWriteByRosterIdRaw, rosterIdsRaw) {
 	const rosterWriteByRosterId = rosterWriteByRosterIdRaw && typeof rosterWriteByRosterIdRaw === "object" ? rosterWriteByRosterIdRaw : {};
 	const rosterIds = Array.isArray(rosterIdsRaw) ? rosterIdsRaw : [];
@@ -3700,7 +3709,7 @@ function assertAutoRefreshRosterWriteTagsUnique_(rosterWriteByRosterIdRaw, roste
 		const rosterId = String(rosterIds[i] == null ? "" : rosterIds[i]).trim();
 		if (!rosterId) continue;
 		const marker = rosterWriteByRosterId[rosterId] && typeof rosterWriteByRosterId[rosterId] === "object" ? rosterWriteByRosterId[rosterId] : null;
-		if (!marker || !Array.isArray(marker.playerTags)) return false;
+		if (!marker || !Array.isArray(marker.playerTags)) return null;
 		for (let j = 0; j < marker.playerTags.length; j++) {
 			const tag = normalizeTag_(marker.playerTags[j]);
 			if (!tag) continue;
@@ -3708,7 +3717,7 @@ function assertAutoRefreshRosterWriteTagsUnique_(rosterWriteByRosterIdRaw, roste
 			seen[tag] = true;
 		}
 	}
-	return true;
+	return Object.keys(seen).sort();
 }
 
 // Fallback duplicate guard for runs whose roster write markers were created by
@@ -3742,7 +3751,7 @@ function assertAutoRefreshActiveRosterShardTagsUnique_(runIdRaw, rosterIdsRaw) {
 			seen[tag] = true;
 		}
 	}
-	return true;
+	return Object.keys(seen).sort();
 }
 
 // Count active-version metric entries using a shallow byTag read.
@@ -3777,6 +3786,9 @@ function buildAutoRefreshActiveVersionManifestFromSourceMeta_(runIdRaw, sourceMe
 		playerMetricEntryCount: toNonNegativeInt_(options.playerMetricEntryCount),
 		layoutVersion: FIREBASE_LAYOUT_VERSION,
 	};
+	if (Array.isArray(options.rosterPlayerTags)) {
+		manifest.rosterPlayerTags = normalizeActivePlayerMetricsSubsetTags_(options.rosterPlayerTags);
+	}
 	if (sourceMeta.publicConfig && typeof sourceMeta.publicConfig === "object") manifest.publicConfig = sourceMeta.publicConfig;
 	if (options.sourceFingerprint) manifest.sourceFingerprint = String(options.sourceFingerprint || "");
 	return manifest;
@@ -4803,9 +4815,8 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	if (stagedMetricsMode) {
 		verifyAutoRefreshMetricCopyTasksComplete_(runId, current.taskIds);
 		const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: false });
-		if (!assertAutoRefreshRosterWriteTagsUnique_(verifiedResults.rosterWriteByRosterId, rosterIds)) {
-			assertAutoRefreshActiveRosterShardTagsUnique_(runId, rosterIds);
-		}
+		let rosterPlayerTags = assertAutoRefreshRosterWriteTagsUnique_(verifiedResults.rosterWriteByRosterId, rosterIds);
+		if (!rosterPlayerTags) rosterPlayerTags = assertAutoRefreshActiveRosterShardTagsUnique_(runId, rosterIds);
 		const writeStartMs = Date.now();
 		const writtenAt = new Date().toISOString();
 		const playerMetricEntryCount = countActiveVersionPlayerMetricEntriesShallow_(runId);
@@ -4815,9 +4826,10 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			publishedAt: writtenAt,
 			lastUpdatedAt: writtenAt,
 			playerMetricEntryCount: playerMetricEntryCount,
+			rosterPlayerTags: rosterPlayerTags,
 			sourceFingerprint: current.sourceFingerprint,
 		});
-		firebaseBatchPutJson_([
+		const finalizeWrites = [
 			{
 				path: buildActiveVersionPath_(runId, "playerMetrics/schemaVersion"),
 				method: "PUT",
@@ -4833,7 +4845,18 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 				method: "PUT",
 				payload: encodeFirebaseObjectKeysRecursive_(manifest),
 			},
-		], { disableFallback: true });
+		];
+		if (toNonNegativeInt_(sourceMeta.linkedAccountTagIndexSchemaVersion) === FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_SCHEMA_VERSION) {
+			finalizeWrites.push({
+				path: buildActiveVersionPath_(runId, FIREBASE_ACTIVE_LINKED_ACCOUNT_TAG_INDEX_CHILD_PATH + "/manifest"),
+				method: "PUT",
+				payload: encodeFirebaseObjectKeysRecursive_(buildActiveVersionLinkedAccountTagIndexManifest_(runId, {
+					metricEntryCount: playerMetricEntryCount,
+					builtAt: writtenAt,
+				})),
+			});
+		}
+		firebaseBatchPutJson_(finalizeWrites, { disableFallback: true });
 		publishActiveRosterVersionPointer_(runId, manifest);
 		clearActiveRosterDataCache_();
 		markActiveDataWriteSuccess_(writtenAt, ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH);
@@ -4949,6 +4972,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	}
 	const playerMetrics = sanitizePlayerMetricsStore_(finalRosterData.playerMetrics, writtenAt);
 	firebaseRequestJson_(buildActiveVersionPath_(runId, "playerMetrics"), "PUT", encodeFirebaseObjectKeysRecursive_(playerMetrics));
+	writeActiveVersionLinkedAccountTagIndex_(runId, playerMetrics, { builtAt: writtenAt });
 	const manifest = buildActiveVersionManifestFromValidatedData_(runId, finalRosterData, {
 		source: ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH,
 		runId: runId,
@@ -6509,7 +6533,7 @@ function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payload
 
 	let rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 	if (!rosterData) {
-		const snapshot = readActiveRosterSnapshot_();
+		const snapshot = readActiveRosterLayoutSnapshot_();
 		rosterData = snapshot && snapshot.rosterData ? snapshot.rosterData : null;
 	}
 	const nextDueAt = rosterData

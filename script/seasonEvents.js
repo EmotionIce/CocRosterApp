@@ -2843,14 +2843,28 @@ function warmSeasonEventLinkedAccountCacheBestEffort_(versionIdRaw, playerMetric
 	}
 }
 
-// Resolve linked accounts from a cache keyed by the immutable active version.
-// A missing or malformed bucket always falls back to canonical Firebase data.
+// Resolve linked accounts from the compact index stored with the immutable
+// active version, then verify only those exact canonical metric entries. Older
+// versions fall back once to the complete metrics shard and persist the index.
 function readSeasonEventLinkedAccountsForDiscordUser_(discordUserRaw) {
 	const user = discordUserRaw && typeof discordUserRaw === "object" ? discordUserRaw : {};
 	const wantedDiscordId = sanitizeDiscordIdValue_(user.id || user.discordId);
 	const wantedUsername = sanitizeDiscordUsernameValue_(user.username || user.discordUsername);
 	const versionId = readPublishedActiveVersionId_();
 	if (versionId) {
+		try {
+			const indexed = readActiveVersionLinkedAccountCandidateTags_(versionId, user);
+			if (indexed && indexed.complete === true) {
+				const candidateSnapshot = readActivePlayerMetricsSubsetSnapshot_(indexed.tags, versionId);
+				return findLinkedAccountsForDiscordUser_({
+					playerMetrics: candidateSnapshot && candidateSnapshot.playerMetrics
+						? candidateSnapshot.playerMetrics
+						: createEmptyPlayerMetricsStore_(),
+				}, user);
+			}
+		} catch (err) {
+			Logger.log("Unable to read active linked-account tag index for '%s'; using compatibility fallback: %s", versionId, errorMessage_(err));
+		}
 		const cache = getScriptCacheSafe_();
 		if (cache) {
 			const idBucket = getSeasonEventLinkCacheBucket_("id", wantedDiscordId);
@@ -2877,7 +2891,10 @@ function readSeasonEventLinkedAccountsForDiscordUser_(discordUserRaw) {
 
 	const snapshot = readActivePlayerMetricsSnapshot_(versionId || undefined);
 	const playerMetrics = snapshot && snapshot.playerMetrics ? snapshot.playerMetrics : createEmptyPlayerMetricsStore_();
-	if (versionId && !(snapshot && snapshot.fallback)) warmSeasonEventLinkedAccountCacheBestEffort_(versionId, playerMetrics, true);
+	if (versionId && !(snapshot && snapshot.fallback)) {
+		writeActiveVersionLinkedAccountTagIndexBestEffort_(versionId, playerMetrics, { builtAt: new Date().toISOString() });
+		warmSeasonEventLinkedAccountCacheBestEffort_(versionId, playerMetrics, true);
+	}
 	return findLinkedAccountsForDiscordUser_({ playerMetrics: playerMetrics }, user);
 }
 
@@ -6816,6 +6833,41 @@ function buildSeasonEventLeaderboard_(eventRaw, rosterDataRaw, optionsRaw) {
 	};
 }
 
+// Collect only active signup account tags required to render a leaderboard.
+// Event scoring never needs unrelated players' multi-season history.
+function listSeasonEventLeaderboardMetricTags_(eventRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const participants = event.participantsByDiscordId && typeof event.participantsByDiscordId === "object"
+		? event.participantsByDiscordId
+		: {};
+	const ids = Object.keys(participants);
+	const seen = {};
+	const tags = [];
+	for (let i = 0; i < ids.length; i++) {
+		const participant = sanitizeSeasonEventParticipant_(participants[ids[i]]);
+		if (participant.status !== "signed_up") continue;
+		const accounts = Array.isArray(participant.accounts) ? participant.accounts : [];
+		for (let j = 0; j < accounts.length; j++) {
+			const tag = normalizeTag_(accounts[j] && accounts[j].tag);
+			if (!tag || seen[tag]) continue;
+			seen[tag] = true;
+			tags.push(tag);
+		}
+	}
+	tags.sort();
+	return tags;
+}
+
+function listSeasonEventLeaderboardMetricTagsForEvents_(eventsRaw) {
+	const events = Array.isArray(eventsRaw) ? eventsRaw : [];
+	const tags = [];
+	for (let i = 0; i < events.length; i++) {
+		const eventTags = listSeasonEventLeaderboardMetricTags_(events[i]);
+		for (let j = 0; j < eventTags.length; j++) tags.push(eventTags[j]);
+	}
+	return normalizeActivePlayerMetricsSubsetTags_(tags);
+}
+
 // Public event leaderboard callable.
 function getSeasonEventLeaderboard(payloadRaw, secretOrPassword) {
 	assertSeasonEventSecretOrAdmin_(secretOrPassword);
@@ -6824,8 +6876,7 @@ function getSeasonEventLeaderboard(payloadRaw, secretOrPassword) {
 	if (!eventId) throw new Error("Event ID is required.");
 	const event = readSeasonEventById_(eventId);
 	if (!event) return buildSeasonEventLeaderboard_(null, {}, { now: payload.now || payload.nowIso });
-	const activeSnapshot = readActivePlayerMetricsSnapshot_();
-	if (!(activeSnapshot && activeSnapshot.fallback)) warmSeasonEventLinkedAccountCacheBestEffort_(activeSnapshot && activeSnapshot.versionId, activeSnapshot && activeSnapshot.playerMetrics, false);
+	const activeSnapshot = readActivePlayerMetricsSubsetSnapshot_(listSeasonEventLeaderboardMetricTags_(event));
 	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	return buildSeasonEventLeaderboard_(event, rosterData, {
 		limit: payload.limit,
@@ -6849,13 +6900,14 @@ function getCurrentSeasonEventLeaderboards(payloadRaw, secretOrPassword) {
 	if (typeof enqueueCloudflareSeasonEventReconciliation_ === "function") {
 		reconcile.cloudflarePublish = enqueueCloudflareSeasonEventReconciliation_(reconcile.publicationMutations, "leaderboard-local-season-metadata");
 	}
-	const activeSnapshot = readActivePlayerMetricsSnapshot_();
-	if (!(activeSnapshot && activeSnapshot.fallback)) warmSeasonEventLinkedAccountCacheBestEffort_(activeSnapshot && activeSnapshot.versionId, activeSnapshot && activeSnapshot.playerMetrics, false);
-	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(payload.now || payload.nowIso) || new Date().toISOString();
 	const pushEvent = reconcile.events && reconcile.events.push && reconcile.events.push.eventId ? readSeasonEventById_(reconcile.events.push.eventId) : null;
 	const donationEvent = reconcile.events && reconcile.events.donation && reconcile.events.donation.eventId ? readSeasonEventById_(reconcile.events.donation.eventId) : null;
 	const cwlEvent = readCurrentCwlSeasonEvent_();
+	const activeSnapshot = readActivePlayerMetricsSubsetSnapshot_(
+		listSeasonEventLeaderboardMetricTagsForEvents_([pushEvent, donationEvent, cwlEvent]),
+	);
+	const rosterData = { playerMetrics: activeSnapshot && activeSnapshot.playerMetrics ? activeSnapshot.playerMetrics : createEmptyPlayerMetricsStore_() };
 	return {
 		ok: true,
 		season: reconcile.season,

@@ -46,13 +46,9 @@ function encodeTagForPath_(tagRaw) {
 	return encodeURIComponent(normalized);
 }
 
-// Return whether published roster tag.
-function isPublishedRosterTag_(tagRaw) {
-	const wantedTag = normalizeTag_(tagRaw);
-	if (!wantedTag) return false;
-
-	const rosterData = getRosterData();
-	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+function publishedRosterCollectionContainsTag_(rostersRaw, wantedTagRaw) {
+	const wantedTag = normalizeTag_(wantedTagRaw);
+	const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
 	for (let i = 0; i < rosters.length; i++) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 		const players = []
@@ -66,6 +62,63 @@ function isPublishedRosterTag_(tagRaw) {
 		}
 	}
 	return false;
+}
+
+// Read a compact immutable membership list. New manifests contain it directly;
+// older active versions derive it once from roster shards and cache the result.
+function readPublishedRosterPlayerTagsForVersion_(versionIdRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	if (!versionId) throw new Error("Active version id is required.");
+	const cacheKey = "published-roster-tags-v1:" + versionId;
+	const cache = typeof getScriptCacheSafe_ === "function" ? getScriptCacheSafe_() : null;
+	if (cache && typeof readStringFromCache_ === "function") {
+		const cachedText = readStringFromCache_(cache, cacheKey);
+		if (cachedText) {
+			try {
+				const cachedTags = JSON.parse(cachedText);
+				if (Array.isArray(cachedTags)) return normalizeActivePlayerMetricsSubsetTags_(cachedTags);
+			} catch (err) {
+				// Rebuild a malformed cache entry from immutable source data.
+			}
+		}
+	}
+	const encodedManifest = firebaseRequestJson_(buildActiveVersionPath_(versionId, "manifest"), "GET");
+	if (!encodedManifest || typeof encodedManifest !== "object" || Array.isArray(encodedManifest)) {
+		throw new Error("Missing active version manifest for " + versionId + ".");
+	}
+	const manifest = decodeFirebaseObjectKeysRecursive_(encodedManifest);
+	let tags = null;
+	if (Array.isArray(manifest.rosterPlayerTags)) {
+		tags = normalizeActivePlayerMetricsSubsetTags_(manifest.rosterPlayerTags);
+	} else {
+		const rosterShards = readActiveVersionRosterShards_(versionId, manifest);
+		tags = collectActiveVersionRosterPlayerTags_(rosterShards.rosters);
+	}
+	if (cache && typeof maybeCacheText_ === "function") {
+		maybeCacheText_(cache, cacheKey, JSON.stringify(tags), 60 * 60, { maxChars: 90 * 1024, logOversize: false });
+	}
+	return tags;
+}
+
+// Return whether published roster tag.
+function isPublishedRosterTag_(tagRaw) {
+	const wantedTag = normalizeTag_(tagRaw);
+	if (!wantedTag) return false;
+	let versionId = "";
+	try {
+		versionId = readPublishedActiveVersionId_();
+		if (versionId) {
+			const publishedTags = readPublishedRosterPlayerTagsForVersion_(versionId);
+			for (let i = 0; i < publishedTags.length; i++) {
+				if (normalizeTag_(publishedTags[i]) === wantedTag) return true;
+			}
+			return false;
+		}
+	} catch (err) {
+		Logger.log("Unable to read compact published roster membership for '%s'; falling back to active roster data: %s", versionId, errorMessage_(err));
+	}
+	const rosterData = getRosterData();
+	return publishedRosterCollectionContainsTag_(rosterData && rosterData.rosters, wantedTag);
 }
 
 // Normalize player profile error.

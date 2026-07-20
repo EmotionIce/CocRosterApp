@@ -2103,7 +2103,7 @@ test("metric copy queue task stages source metric entries in the target active v
   const backend = installMemoryFirebase(loadBackend());
   const encodedTag = backend.encodeFirebaseObjectKey_("#PLAYER");
   backend.firebaseRequestJson_("activeVersions/source-1/playerMetrics/byTag/" + encodedTag, "PUT", backend.encodeFirebaseObjectKeysRecursive_({
-    identity: { tag: "#PLAYER", name: "Player" },
+    identity: { tag: "#PLAYER", name: "Player", discordId: "111" },
     latestSnapshot: { tag: "#PLAYER", name: "Player", trophies: 5000 },
     trophyHistoryDaily: [],
     donationCycles: [],
@@ -2125,10 +2125,15 @@ test("metric copy queue task stages source metric entries in the target active v
     backend.firebaseRequestJson_("activeVersions/run-1/playerMetrics/byTag/" + encodedTag, "GET"),
   );
   const marker = backend.readAutoRefreshRunShard_("run-1", "metricCopies/" + tasks[0].taskId);
+  const linkedIndexEntry = backend.firebaseRequestJson_(
+    "activeVersions/run-1/indexes/linkedAccountTags/byDiscordId/111/" + encodedTag,
+    "GET",
+  );
 
   assert.equal(result.copiedCount, 1);
   assert.equal(result.missingCount, 0);
   assert.equal(copiedEntry.latestSnapshot.trophies, 5000);
+  assert.equal(linkedIndexEntry, true);
   assert.equal(marker.copiedCount, 1);
 });
 
@@ -3340,6 +3345,7 @@ test("roster queue task writes war and metric shards from clan member data", () 
     assert.equal(rosterData.rosters.length, 1);
     const processed = clone(rosterData);
     processed.playerMetrics.byTag["#PLAYER"] = {
+      identity: { tag: "#PLAYER", name: "Player", discordId: "111" },
       latestSnapshot: { tag: "#PLAYER", name: "Player", trophies: 5000 },
       trophyHistoryDaily: [],
       donationCycles: [],
@@ -3358,6 +3364,10 @@ test("roster queue task writes war and metric shards from clan member data", () 
   const activeMetricEntry = backend.decodeFirebaseObjectKeysRecursive_(
     backend.firebaseRequestJson_("activeVersions/run-1/playerMetrics/byTag/" + backend.encodeFirebaseObjectKey_("#PLAYER"), "GET"),
   );
+  const linkedIndexEntry = backend.firebaseRequestJson_(
+    "activeVersions/run-1/indexes/linkedAccountTags/byDiscordId/111/" + backend.encodeFirebaseObjectKey_("#PLAYER"),
+    "GET",
+  );
 
   assert.equal(result.rosterId, "main");
   assert.equal(fetchCalls, 1);
@@ -3370,6 +3380,7 @@ test("roster queue task writes war and metric shards from clan member data", () 
   assert.equal(metricResult.tags.join(","), "#PLAYER");
   assert.equal(backend.readAutoRefreshRunShard_(runId, "rosterWrites/main").playerTags.join(","), "#PLAYER");
   assert.equal(activeMetricEntry.latestSnapshot.trophies, 5000);
+  assert.equal(linkedIndexEntry, true);
   assert.equal(activeRosterShard.title, "Main Processed");
 });
 
@@ -4076,8 +4087,14 @@ test("queue finalization publishes completed shards through the active version p
     processedRosters: 2,
   });
   for (const roster of data.rosters) {
-    backend.firebaseRequestJson_("activeVersions/run-1/rosters/" + roster.id, "PUT", backend.encodeFirebaseObjectKeysRecursive_(roster));
-    backend.writeAutoRefreshRunShard_(runId, "rosterWrites/" + roster.id, { rosterId: roster.id, versionId: runId }, "PUT");
+    const stagedRoster = clone(roster);
+    if (stagedRoster.id === "main") stagedRoster.main[0].tag = "#8CCVV";
+    backend.firebaseRequestJson_("activeVersions/run-1/rosters/" + roster.id, "PUT", backend.encodeFirebaseObjectKeysRecursive_(stagedRoster));
+    backend.writeAutoRefreshRunShard_(runId, "rosterWrites/" + roster.id, {
+      rosterId: roster.id,
+      versionId: runId,
+      playerTags: backend.collectAutoRefreshRosterPlayerTags_(stagedRoster),
+    }, "PUT");
     backend.writeAutoRefreshRunShard_(runId, "warResults/" + roster.id, { rosterId: roster.id, rosterShardWritten: true, issues: [] }, "PUT");
     backend.writeAutoRefreshRunShard_(runId, "metricResults/" + roster.id, { byTag: {}, tags: [] }, "PUT");
   }
@@ -4092,11 +4109,15 @@ test("queue finalization publishes completed shards through the active version p
   const publishedVersion = backend.readPublishedActiveVersionId_();
   const manifest = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("activeVersions/run-1/manifest", "GET"));
   const activeRosterShard = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "GET"));
+  const linkedIndexManifest = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("activeVersions/run-1/indexes/linkedAccountTags/manifest", "GET"));
   const lastJob = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_("internal/autoRefresh/lastJob", "GET"));
 
   assert.equal(result.status, "completed");
   assert.equal(publishedVersion, runId);
   assert.equal(manifest.rosterIds.length, 2);
+  assert.deepEqual(Array.from(manifest.rosterPlayerTags), ["#8CCVV"]);
+  assert.equal(linkedIndexManifest.complete, true);
+  assert.equal(linkedIndexManifest.versionId, runId);
   assert.equal(activeRosterShard.id, "main");
   assert.equal(lastJob.status, "completed");
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
