@@ -5,8 +5,8 @@
  * - ROSTER_PUBLIC_DATA_BASE_URL: public JSON data route served by the Worker.
  * - ROSTER_BASE_URL: Apps Script web app URL used as backend source.
  * - ROSTER_ADMIN_URL (optional): absolute or root-relative admin page URL.
- * - ROSTER_ADMIN_API_BASE (optional): admin API base. Defaults to the Apps Script URL;
- *   set it to /api/admin only when the Cloudflare worker API route is deployed.
+ * - ROSTER_ADMIN_API_BASE (optional): admin API base. Defaults to the same-origin
+ *   Cloudflare Worker route; the Apps Script URL remains the client fallback.
  * - ROSTER_PUBLIC_CONFIG_OVERRIDES (optional): static public/branding overrides.
  *
  * `ROSTER_PUBLIC_CONFIG_OVERRIDES` supports these optional keys:
@@ -74,7 +74,7 @@
     globalScope.ROSTER_BASE_URL = configuredRosterBaseUrl || defaultRosterBaseUrl;
 
     var configuredAdminApiBase = normalizeAdminApiBaseUrl(globalScope.ROSTER_ADMIN_API_BASE);
-    globalScope.ROSTER_ADMIN_API_BASE = configuredAdminApiBase || globalScope.ROSTER_BASE_URL || "/api/admin";
+    globalScope.ROSTER_ADMIN_API_BASE = configuredAdminApiBase || "/api/admin";
 
     var configuredPublicOverrides = globalScope.ROSTER_PUBLIC_CONFIG_OVERRIDES;
     if (!configuredPublicOverrides || typeof configuredPublicOverrides !== "object" || Array.isArray(configuredPublicOverrides)) {

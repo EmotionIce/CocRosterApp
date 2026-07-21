@@ -6391,7 +6391,9 @@
       const errMsg = payload && payload.error
         ? toStr(payload.error).trim()
         : (inferUpstreamError() || ("HTTP " + response.status + " while calling " + methodName + "."));
-      const retryable = endpointIsProxy && (response.status === 404 || response.status === 405 || response.status >= 500);
+      const upstreamNeedsAuthorization = payload && payload.code === "APPS_SCRIPT_AUTHORIZATION_REQUIRED";
+      const retryable = endpointIsProxy && !upstreamNeedsAuthorization &&
+        (response.status === 404 || response.status === 405 || response.status >= 500);
       throw createAdminApiError(errMsg, retryable);
     }
     if (!payload || payload.ok !== true) {

@@ -22,3 +22,16 @@ test("admin shells both expose the CWL preference apply controls", () => {
     assert.equal((html.match(/id="cwlPreferenceApplySummary"/g) || []).length, 1);
   }
 });
+
+test("admin shells prefer the same-origin Worker API and retain Apps Script as fallback", () => {
+  const publicConfig = readShell("public-config.js");
+  assert.match(publicConfig, /ROSTER_ADMIN_API_BASE\s*=\s*configuredAdminApiBase\s*\|\|\s*"\/api\/admin"/);
+
+  for (const shellName of ["admin.html", "console.html"]) {
+    const html = readShell(shellName);
+    assert.match(html, /ROSTER_ADMIN_API_BASE\s*=\s*window\.ROSTER_ADMIN_API_BASE\s*\|\|\s*"\/api\/admin"/);
+  }
+
+  const adminClient = readShell("admin.js");
+  assert.match(adminClient, /pushUnique\(resolveScriptServerBaseUrl\(\)\)/);
+});

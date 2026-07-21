@@ -6073,7 +6073,9 @@ function buildProductionTriggerAuthorizationDiagnostics_() {
 	catch (err) { triggerReadError = errorMessage_(err); }
 	const describe = function (name, handler, idProperty, atProperty) {
 		const configuredId = String(props.getProperty(idProperty) || "").trim();
-		const configuredAtMs = atProperty ? Math.max(0, Number(props.getProperty(atProperty) || 0)) : 0;
+		const configuredAtRaw = atProperty ? String(props.getProperty(atProperty) || "").trim() : "";
+		let configuredAtMs = configuredAtRaw ? Math.max(0, Number(configuredAtRaw) || 0) : 0;
+		if (!configuredAtMs && configuredAtRaw) configuredAtMs = Math.max(0, Date.parse(configuredAtRaw) || 0);
 		const matching = allTriggers.filter(function (trigger) {
 			try { return String(trigger.getHandlerFunction() || "") === handler; } catch (err) { return false; }
 		});
@@ -6108,6 +6110,7 @@ function buildProductionTriggerAuthorizationDiagnostics_() {
 			autoRefresh: describe("autoRefresh", AUTO_REFRESH_HANDLER_NAME, AUTO_REFRESH_TRIGGER_ID_PROPERTY, ""),
 			autoRefreshContinuation: describe("autoRefreshContinuation", AUTO_REFRESH_JOB_HANDLER_NAME, AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY, AUTO_REFRESH_JOB_TRIGGER_AT_PROPERTY),
 			autoRefreshWatchdog: describe("autoRefreshWatchdog", AUTO_REFRESH_JOB_HANDLER_NAME, AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY, AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT_PROPERTY),
+			regularWarFinalization: describe("regularWarFinalization", REGULAR_WAR_FINALIZATION_HANDLER_NAME, REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY, REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY),
 			donationRefresh: describe("donationRefresh", DONATION_REFRESH_HANDLER_NAME, DONATION_REFRESH_TRIGGER_ID_PROPERTY, ""),
 			cwlRecovery: describe("cwlRecovery", CWL_RECOVERY_HANDLER_NAME, CWL_RECOVERY_TRIGGER_ID_PROPERTY, CWL_RECOVERY_TRIGGER_AT_PROPERTY),
 			cloudflare: cloudflareTriggers,
@@ -6127,7 +6130,7 @@ function buildProductionTriggerAuthorizationDiagnostics_() {
 
 function repairProductionTriggerSchedulingAfterAuthorization_() {
 	const cooldownUntilMs = getRuntimeUrlFetchQuotaCooldownUntilMs_();
-	const result = { ok: true, permanent: null, autoRefresh: null, donationRefresh: null, cwlRecovery: null, cloudflare: null };
+	const result = { ok: true, permanent: null, autoRefresh: null, regularWarFinalization: null, donationRefresh: null, cwlRecovery: null, cloudflare: null };
 	const capture = function (key, callback) {
 		try {
 			result[key] = callback();
@@ -6138,6 +6141,7 @@ function repairProductionTriggerSchedulingAfterAuthorization_() {
 	capture("autoRefresh", function () {
 		return cooldownUntilMs > Date.now() ? reconcileAutoRefreshTriggerState_() : repairAutoRefreshSchedulingFromPermanentWatchdog_();
 	});
+	capture("regularWarFinalization", function () { return reconcileRegularWarFinalizationTriggerState_(); });
 	capture("donationRefresh", function () { return reconcileDonationRefreshTriggerState_(); });
 	capture("cwlRecovery", function () { return repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_(); });
 	if (typeof repairCloudflarePublishSchedulingFromPermanentWatchdog_ === "function") {

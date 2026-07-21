@@ -61,6 +61,37 @@ const shouldRetryAppsScriptFallback = (response, textRaw, contentTypeRaw) => {
   return contentType.includes("text/html") || /^<!doctype\b/i.test(text) || /^<html[\s>]/i.test(text);
 };
 
+// Return whether Google blocked Apps Script before application code could run.
+const isAppsScriptAuthorizationRequiredHtml = (response, textRaw, contentTypeRaw) => {
+  const status = Number(response && response.status);
+  if (status !== 401 && status !== 403) return false;
+  const contentType = String(contentTypeRaw || "").toLowerCase();
+  const text = String(textRaw || "").trim();
+  const isHtml = contentType.includes("text/html") || /^<!doctype\b/i.test(text) || /^<html[\s>]/i.test(text);
+  if (!isHtml) return false;
+  const normalized = text
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return normalized.includes("authorization is required") ||
+    normalized.includes("authorization required") ||
+    normalized.includes("authorization needed") ||
+    normalized.includes("access denied") ||
+    normalized.includes("you need access") ||
+    normalized.includes("zugriff verweigert") ||
+    normalized.includes("sie ben\u00f6tigen zugriff") ||
+    normalized.includes("autorisierung erforderlich") ||
+    normalized.includes("berechtigung erforderlich");
+};
+
+// Return a stable response without forwarding Google's HTML error page.
+const appsScriptAuthorizationRequiredResponse = () => jsonResponse(503, {
+  ok: false,
+  code: "APPS_SCRIPT_AUTHORIZATION_REQUIRED",
+  error: "Apps Script authorization is required. The deployment owner must reauthorize the production script.",
+});
+
 // Build JSON response.
 const jsonResponse = (status, payload, headersRaw) => {
   const headers = new Headers(headersRaw || {});
@@ -175,6 +206,10 @@ const handleAdminApi = async (request, env) => {
       upstream = await buildUpstreamRequest(fallbackExecUrl);
       text = await upstream.text();
       contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    }
+
+    if (isAppsScriptAuthorizationRequiredHtml(upstream, text, contentType)) {
+      return appsScriptAuthorizationRequiredResponse();
     }
 
     return new Response(text, {
@@ -508,6 +543,10 @@ const handleDiscordBotSyncApi = async (request, env) => {
       upstream = await buildUpstreamRequest(fallbackExecUrl);
       text = await upstream.text();
       contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    }
+
+    if (isAppsScriptAuthorizationRequiredHtml(upstream, text, contentType)) {
+      return appsScriptAuthorizationRequiredResponse();
     }
 
     return new Response(text, {

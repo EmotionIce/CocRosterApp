@@ -1443,6 +1443,8 @@ test("authorization diagnostics are authenticated and manual bootstrap requires 
   backend.__properties.set("ADMIN_PW", "secret");
   backend.ScriptApp.AuthMode = { FULL: "FULL" };
   backend.ScriptApp.AuthorizationStatus = { REQUIRED: "REQUIRED", NOT_REQUIRED: "NOT_REQUIRED" };
+  const regularWarFinalizationAt = "2026-07-21T21:30:00.000Z";
+  backend.__properties.set("REGULAR_WAR_FINALIZATION_TRIGGER_AT", regularWarFinalizationAt);
   let authorizationStatus = backend.ScriptApp.AuthorizationStatus.REQUIRED;
   let requiredMode = "";
   backend.ScriptApp.getAuthorizationInfo = (mode) => {
@@ -1451,7 +1453,7 @@ test("authorization diagnostics are authenticated and manual bootstrap requires 
   };
   backend.ScriptApp.requireAllScopes = (mode) => {
     requiredMode = mode;
-    authorizationStatus = backend.ScriptApp.AuthorizationStatus.NOT_REQUIRED;
+    throw new Error("Authorization required");
   };
 
   const getProjectTriggers = backend.ScriptApp.getProjectTriggers;
@@ -1462,6 +1464,9 @@ test("authorization diagnostics are authenticated and manual bootstrap requires 
   assert.equal(missing.authorization.authorized, false);
   assert.equal(missing.triggerRead.available, false);
   assert.match(missing.triggerRead.error, /Authorization required/);
+  assert.equal(missing.triggers.regularWarFinalization.handler, "regularWarFinalizationTick");
+  assert.equal(missing.triggers.regularWarFinalization.configuredAt, regularWarFinalizationAt);
+  assert.equal(missing.triggers.regularWarFinalization.configuredAtMs, Date.parse(regularWarFinalizationAt));
   assert.equal(missing.triggers.cloudflare.unavailable, true);
   assert.equal(JSON.stringify(missing).toLowerCase().includes("authorizationurl"), false);
   backend.ScriptApp.getProjectTriggers = getProjectTriggers;
@@ -1477,14 +1482,26 @@ test("authorization diagnostics are authenticated and manual bootstrap requires 
   const repaired = [];
   backend.ensurePermanentSchedulerWatchdogTrigger_ = () => { repaired.push("permanent"); return { scheduled: true }; };
   backend.repairAutoRefreshSchedulingFromPermanentWatchdog_ = () => { repaired.push("auto"); return { ok: true }; };
+  backend.reconcileRegularWarFinalizationTriggerState_ = () => { repaired.push("regular-war"); return { enabled: true, hasTrigger: true }; };
   backend.reconcileDonationRefreshTriggerState_ = () => { repaired.push("donation"); return { enabled: true, hasTrigger: true }; };
   backend.repairCwlSeasonEventRecoverySchedulingFromPermanentWatchdog_ = () => { repaired.push("cwl"); return { ok: true, pending: false }; };
   backend.repairCloudflarePublishSchedulingFromPermanentWatchdog_ = () => { repaired.push("cloudflare"); return { ok: true, pending: false }; };
   backend.getCloudflareDynamicTriggerDiagnostics_ = () => ({ continuation: { health: "missing" }, recovery: { health: "missing" } });
 
+  assert.throws(
+    () => backend.authorizeAndRepairProductionTriggers(),
+    /Authorization required/,
+  );
+  assert.equal(requiredMode, backend.ScriptApp.AuthMode.FULL);
+  assert.deepEqual(repaired, []);
+
+  backend.ScriptApp.requireAllScopes = (mode) => {
+    requiredMode = mode;
+    authorizationStatus = backend.ScriptApp.AuthorizationStatus.NOT_REQUIRED;
+  };
   const result = backend.authorizeAndRepairProductionTriggers();
   assert.equal(requiredMode, backend.ScriptApp.AuthMode.FULL);
-  assert.deepEqual(repaired, ["permanent", "auto", "donation", "cwl", "cloudflare"]);
+  assert.deepEqual(repaired, ["permanent", "auto", "regular-war", "donation", "cwl", "cloudflare"]);
   assert.equal(result.diagnostics.authorization.authorized, true);
 });
 

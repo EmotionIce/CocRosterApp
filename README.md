@@ -190,6 +190,13 @@ The project now supports config-driven family branding without backend changes.
 Deploy `script/` as a web app and set Script Properties.
 Recommended web app settings: execute as owner account, access allowed for the users who need to call it (the worker forwards requests to this endpoint).
 
+The Google Auth Platform audience for the Apps Script Cloud project must be
+**In production**. Testing-mode grants for these non-profile scopes expire after
+seven days and stop the web app and every installable trigger before application
+code can run. After the initial deployment or any authorization loss, run
+`authorizeAndRepairProductionTriggers()` interactively in the Apps Script editor,
+approve every requested scope, and run it once more to repair all trigger families.
+
 Required Script Properties:
 - `ADMIN_PW`
 - `COC_API_TOKEN`
@@ -215,10 +222,15 @@ In `cloudflarePages/public-config.js`, confirm:
 
 ### 4) Smoke test
 
-1. Open `/console`, unlock, confirm active snapshot auto-loads.
-2. Run refresh-all.
-3. Validate roster/website changes in UI.
-4. Publish and re-check public site (`/`).
+1. POST a harmless authenticated diagnostic to the production Apps Script URL and
+   confirm it returns the application's JSON envelope rather than a Google HTML
+   access or authorization page.
+2. Confirm production authorization diagnostics report full authorization and the
+   expected auto-refresh, donation-refresh, and watchdog triggers.
+3. Open `/console`, unlock, confirm active snapshot auto-loads.
+4. Run refresh-all.
+5. Validate roster/website changes in UI.
+6. Publish and re-check public site (`/`).
 
 ## Operational Notes
 

@@ -7,7 +7,7 @@ import vm from "node:vm";
 
 const repoRoot = new URL("../", import.meta.url);
 
-const loadWorker = () => {
+const loadWorker = (options = {}) => {
   const source = fs
     .readFileSync(new URL("cloudflarePages/worker-core.js", repoRoot), "utf8")
     .replace(/export\s+default\s+\{/, "globalThis.workerDefault = {")
@@ -22,6 +22,7 @@ const loadWorker = () => {
     Uint8Array,
     crypto: webcrypto,
     console,
+    fetch: options.fetch || globalThis.fetch,
   };
   vm.createContext(context);
   vm.runInContext(source, context);
@@ -46,6 +47,64 @@ const createKv = (entriesRaw) => {
     },
   };
 };
+
+const googleAuthorizationHtml = `<!doctype html><html lang="de"><head><title>Zugriff verweigert</title></head><body>Sie ben\u00f6tigen Zugriff.</body></html>`;
+
+test("admin proxy converts Apps Script authorization HTML into a stable JSON error", async () => {
+  let attempts = 0;
+  const worker = loadWorker({
+    fetch: async () => {
+      attempts += 1;
+      return new Response(googleAuthorizationHtml, {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    },
+  });
+
+  const response = await worker.fetch(new Request("https://worker.test/api/admin", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method: "getAutoRefreshDiagnostics", args: [] }),
+  }), {}, {});
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    code: "APPS_SCRIPT_AUTHORIZATION_REQUIRED",
+    error: "Apps Script authorization is required. The deployment owner must reauthorize the production script.",
+  });
+  assert.equal(attempts, 1);
+});
+
+test("Discord sync proxy converts Apps Script authorization HTML into a stable JSON error", async () => {
+  const worker = loadWorker({
+    fetch: async () => new Response(googleAuthorizationHtml, {
+      status: 403,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    }),
+  });
+
+  const response = await worker.fetch(new Request("https://worker.test/api/bot/discord-sync", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer test-secret",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      playerTag: "#PLAYER",
+      discordId: "123456789012345678",
+    }),
+  }), {}, {});
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    code: "APPS_SCRIPT_AUTHORIZATION_REQUIRED",
+    error: "Apps Script authorization is required. The deployment owner must reauthorize the production script.",
+  });
+});
 
 const createObservedKv = (entriesRaw, optionsRaw = {}) => {
   const entries = new Map(Object.entries(entriesRaw || {}));
