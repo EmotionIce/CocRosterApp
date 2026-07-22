@@ -91,6 +91,9 @@ test("landing selling points use visitor-visible scroll stories instead of crawl
   assert.match(clientCode, /querySelectorAll\("\.landing-extra-event"\)\.length > 3/);
   assert.match(memberJourneyStyles, /min-height:290svh/);
   assert.match(memberJourneyStyles, /aspect-ratio:16 \/ 10/);
+  assert.match(memberJourneyStyles, /--landing-rhythm-detail-duration:\.34s/);
+  assert.match(memberJourneyStyles, /--landing-rhythm-line-duration:\.38s/);
+  assert.match(memberJourneyStyles, /transition:width var\(--landing-rhythm-line-duration\)/);
   assert.match(memberJourneyStyles, /prefers-reduced-motion: reduce/);
   assert.doesNotMatch(indexHtml, /class="[^"]*(?:crawler|robot|seo-only|visually-hidden)[^"]*"/i);
   assert.doesNotMatch(indexHtml, /landing-escalation__act/);

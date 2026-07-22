@@ -11279,6 +11279,8 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
 .landing-rhythm{
   --landing-rhythm-track-progress:0;
   --landing-rhythm-transition-progress:0;
+  --landing-rhythm-detail-duration:.34s;
+  --landing-rhythm-line-duration:.38s;
 }
 
 .landing-rhythm__stage{
@@ -11849,7 +11851,7 @@ html:not(.landing-motion-ready) .landing-progress-path,
   background:linear-gradient(90deg, #cdf469, #ffb13d 38%, #ff79d6 68%, #2de6b8);
   box-shadow:0 0 10px rgba(205,244,105,.38);
   will-change:width;
-  transition:width .1s linear;
+  transition:width .28s cubic-bezier(.2,.72,.2,1);
 }
 
 .landing-rhythm__member{
@@ -11868,7 +11870,7 @@ html:not(.landing-motion-ready) .landing-progress-path,
   transform:translate(-50%, -50%);
   box-shadow:0 0 16px rgba(205,244,105,.18);
   will-change:left;
-  transition:left .1s linear;
+  transition:left .28s cubic-bezier(.2,.72,.2,1);
 }
 
 .landing-rhythm__member small{
@@ -12037,7 +12039,32 @@ html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-step,
 html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-extra-event,
 html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-progress-node{
   will-change:opacity, transform;
-  transition:opacity .12s linear, transform .16s cubic-bezier(.2,.72,.2,1), border-color .16s ease, box-shadow .16s ease;
+  transition:
+    opacity var(--landing-rhythm-detail-duration) cubic-bezier(.2,.72,.2,1),
+    transform var(--landing-rhythm-detail-duration) cubic-bezier(.2,.72,.2,1),
+    border-color var(--landing-rhythm-detail-duration) ease,
+    box-shadow var(--landing-rhythm-detail-duration) ease;
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-war-plan__link{
+  transition:transform var(--landing-rhythm-line-duration) cubic-bezier(.2,.72,.2,1);
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-war-attack strong,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-war-attack::after,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-war-cycle,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-step__status,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-side-lane,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-progress-outcome{
+  transition:opacity var(--landing-rhythm-detail-duration) cubic-bezier(.2,.72,.2,1);
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-flow__link i,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-rewards i,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-side-lane > i b,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-extra-timeline__line i,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-progress-path i{
+  transition:width var(--landing-rhythm-line-duration) cubic-bezier(.2,.72,.2,1);
 }
 
 html:not(.landing-motion-ready) .landing-rhythm__journey,
@@ -12298,10 +12325,22 @@ html:not(.landing-motion-ready) .landing-progress-route.is-dense .landing-progre
   .landing-war-plan__brief,
   .landing-war-plan__link,
   .landing-war-attack,
+  .landing-war-attack strong,
+  .landing-war-attack::after,
+  .landing-war-cycle,
   .landing-cwl-source,
   .landing-cwl-assignment,
+  .landing-cwl-step,
+  .landing-cwl-step__status,
+  .landing-cwl-flow__link i,
+  .landing-cwl-rewards i,
+  .landing-cwl-side-lane,
+  .landing-cwl-side-lane > i b,
   .landing-extra-event,
+  .landing-extra-timeline__line i,
   .landing-progress-node,
+  .landing-progress-path i,
+  .landing-progress-outcome,
   .landing-rhythm__rail-fill,
   .landing-rhythm__member,
   .landing-rhythm__nav button{
