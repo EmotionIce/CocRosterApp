@@ -83,7 +83,7 @@
 
   cwl: {
 
-    body: "Set before league week. Side wars keep running.",
+    body: "Side wars keep running during CWL.",
 
     eyebrow: "CWL",
 
@@ -91,9 +91,9 @@
 
       {
 
-        label: "Placement",
+        label: "Participating",
 
-        value: "Active",
+        value: "Open to everyone",
 
       },
 
@@ -101,29 +101,21 @@
 
         label: "Rosters",
 
-        value: "Pre-set",
+        value: "Organized on Discord",
 
       },
 
       {
 
-        label: "Rewards",
+        label: "Regular Wars",
 
-        value: "Full path",
-
-      },
-
-      {
-
-        label: "Wars",
-
-        value: "Still running",
+        value: "ALWAYS running",
 
       },
 
     ],
 
-    title: "Planned lineups. Clear rewards.",
+    title: "Planned lineups. Fair rewards.",
 
   },
 
@@ -141,7 +133,7 @@
 
     regularWarLabel: "War status",
 
-    title: "Real rosters. Clear path.",
+    title: "Strong rosters",
 
   },
 
@@ -163,13 +155,13 @@
 
     ],
 
-    title: "Enter the shell.",
+    title: "Enter the TURTLE-family.",
 
   },
 
   hero: {
 
-    body: "Join Discord. Send your tag. Get matched.",
+    body: "Join Discord. Share your #Tag. Join the Clan.",
 
     eyebrow: "Join \u2022 Match \u2022 War",
 
@@ -189,7 +181,7 @@
 
       {
 
-        body: "Open a ticket with your tag.",
+        body: "Open a ticket and fill out the 'Introduction'.",
 
         label: "01",
 
@@ -199,17 +191,17 @@
 
       {
 
-        body: "Placed by TH, activity, and goals.",
+        body: "Based on TH, skills, and goals.",
 
         label: "02",
 
-        title: "Get matched",
+        title: "Get matched to a clan",
 
       },
 
       {
 
-        body: "War, CWL, stronger lineups.",
+        body: "Join the higher clans as you progress.",
 
         label: "03",
 
@@ -219,7 +211,7 @@
 
     ],
 
-    title: "Send tag. Get matched. Climb.",
+    title: "Join the clan that fits and progress within the clan family.",
 
   },
 
@@ -259,9 +251,9 @@
 
       {
 
-        label: "Signal",
+        label: "This website",
 
-        value: "Results",
+        value: "Tracks all Results",
 
       },
 
@@ -269,7 +261,7 @@
 
         label: "Lineups",
 
-        value: "Higher CWL",
+        value: "High CWL Leagues",
 
       },
 
@@ -277,7 +269,7 @@
 
         label: "Practice",
 
-        value: "Wars",
+        value: "Friendly Challenge Hub",
 
       },
 
@@ -285,23 +277,23 @@
 
         label: "Path",
 
-        value: "Move up",
+        value: "Move up in our clans",
 
       },
 
     ],
 
-    title: "Strong hits. Stronger lineups.",
+    title: "Prove yourself and move up.",
 
   },
 
   proof: {
 
-    body: "Be reachable. Use attacks. Communicate early.",
+    body: "Be reachable. Use attacks. No Toxicity.",
 
     eyebrow: "Standards",
 
-    title: "Discord on.\nHits used.\nProgress earned.",
+    title: "Discord is mandatory.\nSuccessful community.\nEarn progress.",
 
   },
 
@@ -317,23 +309,15 @@
 
         label: "Rhythm",
 
-        value: "Back-to-back",
+        value: "Back-to-back Wars",
 
       },
 
       {
 
-        label: "Hits",
+        label: "Reliability",
 
-        value: "Both expected",
-
-      },
-
-      {
-
-        label: "Record",
-
-        value: "Misses tracked",
+        value: "Both hits expected",
 
       },
 

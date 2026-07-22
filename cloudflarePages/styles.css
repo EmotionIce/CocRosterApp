@@ -1703,6 +1703,113 @@ body::before{
   margin: 0 auto;
 }
 
+.landing-discovery{
+  position:relative;
+  display:grid;
+  grid-template-columns:minmax(0, 1.1fr) minmax(300px, .9fr);
+  gap:clamp(30px, 5vw, 76px);
+  padding:clamp(28px, 5vw, 64px);
+  border:1px solid rgba(205,244,105,.24);
+  background:
+    linear-gradient(115deg, rgba(205,244,105,.08), transparent 42%),
+    linear-gradient(300deg, rgba(255,121,214,.08), transparent 40%),
+    rgba(5,10,13,.86);
+  box-shadow:0 28px 70px rgba(0,0,0,.28);
+  isolation:isolate;
+}
+
+.landing-discovery::before{
+  content:"";
+  position:absolute;
+  inset:10px;
+  border:1px solid rgba(255,255,255,.06);
+  pointer-events:none;
+  z-index:-1;
+}
+
+.landing-discovery__intro{
+  display:grid;
+  align-content:start;
+  gap:14px;
+}
+
+.landing-discovery__intro h2{
+  margin:0;
+  max-width:17ch;
+  color:#fff7d6;
+  font-size:clamp(32px, 5vw, 66px);
+  line-height:1;
+  font-weight:850;
+  text-wrap:balance;
+}
+
+.landing-discovery__intro > p:not(.landing-eyebrow){
+  margin:0;
+  max-width:68ch;
+  color:#cbd8c8;
+  font-size:clamp(15px, 1.25vw, 18px);
+  line-height:1.65;
+}
+
+.landing-discovery__highlights{
+  margin:0;
+  padding:0;
+  list-style:none;
+  display:grid;
+  align-self:start;
+  align-content:start;
+  gap:1px;
+  background:rgba(205,244,105,.2);
+}
+
+.landing-discovery__highlights li{
+  display:grid;
+  gap:5px;
+  padding:16px 18px;
+  background:rgba(5,10,13,.94);
+}
+
+.landing-discovery__highlights strong{
+  color:#cdf469;
+  font-size:12px;
+  font-weight:850;
+  letter-spacing:.09em;
+  text-transform:uppercase;
+}
+
+.landing-discovery__highlights span{
+  color:#eef4e2;
+  font-size:14px;
+  line-height:1.5;
+}
+
+.landing-discovery__disclaimer{
+  grid-column:1 / -1;
+  margin:0;
+  padding-top:16px;
+  border-top:1px solid rgba(255,255,255,.08);
+  color:#879487;
+  font-size:11px;
+  line-height:1.5;
+}
+
+@media (max-width: 820px){
+  .landing-discovery{
+    grid-template-columns:1fr;
+    gap:24px;
+    padding:clamp(24px, 7vw, 42px);
+  }
+
+  .landing-discovery__intro h2{
+    max-width:20ch;
+    font-size:clamp(30px, 9vw, 48px);
+  }
+
+  .landing-discovery__disclaimer{
+    grid-column:1;
+  }
+}
+
 .landing-eyebrow{
   color: #cdf469;
   font-size: 10px;

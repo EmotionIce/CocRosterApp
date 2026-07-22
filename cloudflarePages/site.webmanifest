@@ -1,0 +1,24 @@
+{
+  "name": "TURTLE Clash of Clans Clan Family",
+  "short_name": "TURTLE",
+  "description": "A managed Clash of Clans clan family with a clan and progression path for every player.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#050a0d",
+  "theme_color": "#050a0d",
+  "icons": [
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
