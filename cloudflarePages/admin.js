@@ -122,7 +122,7 @@
     },
     war: {
       eyebrow: "War",
-      title: "Plan together. Finish both attacks.",
+      title: "Plan and finish both attacks.",
       body: "Opt in when you can play. The clan helps before battle day.",
       highlights: [
         { label: "Rhythm", value: "Back-to-back Wars" },
@@ -140,7 +140,7 @@
     },
     extras: {
       eyebrow: "Beyond attacks",
-      title: "The clan stays active between wars.",
+      title: "Extras.",
       highlights: [
         { label: "Gold Pass", value: "Giveaways" },
         { label: "FC Hub", value: "Friendly challenges" },
@@ -149,14 +149,11 @@
     },
     network: {
       eyebrow: "Progression",
-      title: "Reliable attacks open stronger lineups.",
+      title: "Progress and move up.",
       path: [
         "Results tracked",
         "Reliability proven",
         "Higher CWL",
-      ],
-      highlights: [
-        { label: "Practice", value: "Friendly Challenge Hub" },
       ],
     },
     proof: {
@@ -334,7 +331,7 @@
     {
       id: "network",
       label: "Progression",
-      description: "Tracked growth, practice, and movement through the clan family.",
+      description: "Tracked growth and movement through the clan family.",
       fields: [
         { key: "network.eyebrow", source: "profile", type: "text", path: "network.eyebrow", label: "Network eyebrow" },
         { key: "network.title", source: "profile", type: "textarea", path: "network.title", label: "Network title" },
@@ -348,20 +345,6 @@
           itemType: "string",
           itemLabel: "Stage",
           defaultItem: "",
-        },
-        {
-          key: "network.highlights",
-          source: "profile",
-          type: "repeater",
-          path: "network.highlights",
-          label: "Network highlights",
-          itemType: "object",
-          itemLabel: "Highlight",
-          defaultItem: { label: "", value: "" },
-          itemFields: [
-            { key: "label", type: "text", label: "Label" },
-            { key: "value", type: "text", label: "Value" },
-          ],
         },
       ],
     },
@@ -654,6 +637,9 @@
     replaceExactText("cwl", "title", "Every opted-in player gets a clear plan.");
     replaceExactText("extras", "title", "The good stuff between wars.");
     replaceExactText("network", "title", "Your results have somewhere to go.");
+    replaceExactText("war", "title", "Plan together. Finish both attacks.");
+    replaceExactText("extras", "title", "The clan stays active between wars.");
+    replaceExactText("network", "title", "Reliable attacks open stronger lineups.");
     replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
     replaceExactText("finalCta", "eyebrow", "Ready");
     replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
@@ -677,7 +663,6 @@
 
     replaceLegacyHighlights("war", ["Back-to-back Wars", "Both hits expected", "Planning support"]);
     replaceLegacyHighlights("cwl", ["Open to everyone", "Organized on Discord", "ALWAYS running"]);
-    replaceLegacyHighlights("network", ["Tracks all Results", "High CWL Leagues", "Friendly Challenge Hub", "Move up in our clans"]);
     deleteExactText("cwl", "body", "Side wars keep running during CWL.");
     deleteExactText("network", "body", "Reliability moves you up.");
     deleteExactText("proof", "body", "Be reachable. Use attacks. No Toxicity.");

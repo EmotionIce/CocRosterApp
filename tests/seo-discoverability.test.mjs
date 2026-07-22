@@ -95,10 +95,10 @@ test("crawlable landing fallbacks match the compact managed profile copy", () =>
   for (const phrase of [
     "One Discord. Every way to play.",
     "The whole clan family, at a glance.",
-    "Plan together. Finish both attacks.",
+    "Plan and finish both attacks.",
     "Your league. Your spot. Full rewards.",
-    "The clan stays active between wars.",
-    "Reliable attacks open stronger lineups.",
+    "Extras.",
+    "Progress and move up.",
     "Stay on Discord.",
     "Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.",
   ]) {
@@ -107,6 +107,9 @@ test("crawlable landing fallbacks match the compact managed profile copy", () =>
     assert.match(clientCode, exactPhrase);
     assert.match(adminCode, exactPhrase);
   }
+
+  assert.doesNotMatch(indexHtml, /Friendly Challenge Hub/);
+  assert.doesNotMatch(indexHtml, /id="landingNetworkHighlights"/);
 
   for (const retiredPhrase of [
     "Join Discord. Share your #Tag. Join the Clan.",

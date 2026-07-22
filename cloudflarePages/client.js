@@ -184,7 +184,7 @@
         },
         war: {
             eyebrow: "War",
-            title: "Plan together. Finish both attacks.",
+            title: "Plan and finish both attacks.",
             body: "Opt in when you can play. The clan helps before battle day.",
             highlights: [
                 { label: "Rhythm", value: "Back-to-back Wars" },
@@ -202,7 +202,7 @@
         },
         extras: {
             eyebrow: "Beyond attacks",
-            title: "The clan stays active between wars.",
+            title: "Extras.",
             highlights: [
                 { label: "Gold Pass", value: "Giveaways" },
                 { label: "FC Hub", value: "Friendly challenges" },
@@ -211,14 +211,11 @@
         },
         network: {
             eyebrow: "Progression",
-            title: "Reliable attacks open stronger lineups.",
+            title: "Progress and move up.",
             path: [
                 "Results tracked",
                 "Reliability proven",
                 "Higher CWL",
-            ],
-            highlights: [
-                { label: "Practice", value: "Friendly Challenge Hub" },
             ],
         },
         proof: {
@@ -471,6 +468,9 @@
         replaceExactText("cwl", "title", "Every opted-in player gets a clear plan.");
         replaceExactText("extras", "title", "The good stuff between wars.");
         replaceExactText("network", "title", "Your results have somewhere to go.");
+        replaceExactText("war", "title", "Plan together. Finish both attacks.");
+        replaceExactText("extras", "title", "The clan stays active between wars.");
+        replaceExactText("network", "title", "Reliable attacks open stronger lineups.");
         replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
         replaceExactText("finalCta", "eyebrow", "Ready");
         replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
@@ -494,7 +494,6 @@
 
         replaceLegacyHighlights("war", ["Back-to-back Wars", "Both hits expected", "Planning support"]);
         replaceLegacyHighlights("cwl", ["Open to everyone", "Organized on Discord", "ALWAYS running"]);
-        replaceLegacyHighlights("network", ["Tracks all Results", "High CWL Leagues", "Friendly Challenge Hub", "Move up in our clans"]);
         return profile;
     };
 
@@ -754,7 +753,6 @@
         const extrasHighlights = Array.isArray(extras.highlights) ? extras.highlights : [];
         const network = isPlainObject_(profile.network) ? profile.network : {};
         const networkPath = Array.isArray(network.path) ? network.path : [];
-        const networkHighlights = Array.isArray(network.highlights) ? network.highlights : [];
         const proof = isPlainObject_(profile.proof) ? profile.proof : {};
         const finalCta = isPlainObject_(profile.finalCta) ? profile.finalCta : {};
         const media = isPlainObject_(profile.media) ? profile.media : {};
@@ -795,7 +793,6 @@
         setElementTextIfPresent_("landingNetworkEyebrow", network.eyebrow);
         setElementTextIfPresent_("landingNetworkTitle", network.title);
         renderLandingProgressVisual_(networkPath);
-        renderLandingHighlightList_("landingNetworkHighlights", networkHighlights);
 
         setElementTextIfPresent_("landingProofEyebrow", proof.eyebrow);
         setElementTextIfPresent_("landingProofTitle", proof.title);

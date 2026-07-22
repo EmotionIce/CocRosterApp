@@ -147,8 +147,8 @@ test("landing profile upgrades only the exact legacy Home copy", () => {
     "Hero-down wars",
   ]);
   assert.deepEqual(Array.from(profile.cwl.highlights, (item) => item.value), ["Open to everyone", "Organized on Discord"]);
-  assert.deepEqual(Array.from(profile.network.highlights, (item) => item.value), ["Friendly Challenge Hub"]);
-  assert.equal(profile.network.title, "Reliable attacks open stronger lineups.");
+  assert.equal(Object.hasOwn(profile.network, "highlights"), false);
+  assert.equal(profile.network.title, "Progress and move up.");
   assert.equal(profile.proof.title, "Stay on Discord.\nUse your attacks.\nKeep it non-toxic.");
   assert.equal(profile.finalCta.eyebrow, "Your move");
   assert.equal(profile.finalCta.title, "Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.");
@@ -168,11 +168,11 @@ test("landing profile upgrades the previous decorative-story copy to the connect
     },
   }, {}, {});
 
-  assert.equal(profile.war.title, "Plan together. Finish both attacks.");
+  assert.equal(profile.war.title, "Plan and finish both attacks.");
   assert.equal(profile.war.body, "Opt in when you can play. The clan helps before battle day.");
   assert.equal(profile.cwl.title, "Your league. Your spot. Full rewards.");
-  assert.equal(profile.extras.title, "The clan stays active between wars.");
-  assert.equal(profile.network.title, "Reliable attacks open stronger lineups.");
+  assert.equal(profile.extras.title, "Extras.");
+  assert.equal(profile.network.title, "Progress and move up.");
 });
 
 test("landing profile upgrades the replaced clan overview and Life copy without touching custom text", () => {
@@ -180,14 +180,20 @@ test("landing profile upgrades the replaced clan overview and Life copy without 
   const profile = buildResolvedPublicProfile_({}, {
     profile: {
       family: { eyebrow: "Live clans", title: "Strong rosters" },
+      war: { title: "Plan together. Finish both attacks." },
       cwl: { title: "Every opted-in player gets a clear plan." },
+      extras: { title: "The clan stays active between wars." },
+      network: { title: "Reliable attacks open stronger lineups." },
       finalCta: { title: "Send your #Tag. We will find your TURTLE clan." },
     },
   }, {}, {});
 
   assert.equal(profile.family.eyebrow, "Live clan family");
   assert.equal(profile.family.title, "The whole clan family, at a glance.");
+  assert.equal(profile.war.title, "Plan and finish both attacks.");
   assert.equal(profile.cwl.title, "Your league. Your spot. Full rewards.");
+  assert.equal(profile.extras.title, "Extras.");
+  assert.equal(profile.network.title, "Progress and move up.");
   assert.equal(profile.finalCta.title, "Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.");
 });
 
