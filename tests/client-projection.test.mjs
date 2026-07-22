@@ -29,6 +29,7 @@ const loadClientInternals = (overrides = {}) => {
       "        getRosterCurrentWarPresentation,",
       "        getRosterCurrentWarStarStanding,",
       "        getRosterWarScoreState,",
+      "        buildResolvedPublicProfile_,",
       "    };",
       "    return;",
       bootMarker,
@@ -51,6 +52,107 @@ const loadClientInternals = (overrides = {}) => {
   vm.runInContext(instrumentedCode, context);
   return context.window.__ROSTER_CLIENT_TEST_INTERNALS__;
 };
+
+test("landing profile keeps additional managed repeater items", () => {
+  const { buildResolvedPublicProfile_ } = loadClientInternals();
+  const profile = buildResolvedPublicProfile_({}, {
+    profile: {
+      war: {
+        highlights: [
+          { label: "One", value: "1" },
+          { label: "Two", value: "2" },
+          { label: "Three", value: "3" },
+          { label: "Four", value: "4" },
+          { label: "Five", value: "5" },
+        ],
+      },
+      discovery: {
+        lanes: [
+          { label: "One", value: "1" },
+          { label: "Two", value: "2" },
+          { label: "Three", value: "3" },
+          { label: "Four", value: "4" },
+          { label: "Five", value: "5" },
+        ],
+      },
+      extras: {
+        highlights: [
+          { label: "One", value: "1" },
+          { label: "Two", value: "2" },
+          { label: "Three", value: "3" },
+          { label: "Four", value: "4" },
+        ],
+      },
+      network: {
+        path: ["One", "Two", "Three", "Four"],
+      },
+    },
+  }, {}, {});
+
+  assert.equal(profile.war.highlights.length, 5);
+  assert.equal(profile.war.highlights[4].value, "5");
+  assert.equal(profile.discovery.lanes.length, 5);
+  assert.equal(profile.discovery.lanes[4].value, "5");
+  assert.equal(profile.extras.highlights.length, 4);
+  assert.deepEqual(Array.from(profile.network.path), ["One", "Two", "Three", "Four"]);
+});
+
+test("landing profile upgrades only the exact legacy Home copy", () => {
+  const { buildResolvedPublicProfile_ } = loadClientInternals();
+  const profile = buildResolvedPublicProfile_({}, {
+    profile: {
+      hero: { body: "Join Discord. Share your #Tag. Join the Clan." },
+      journey: {
+        title: "Join the clan that fits and progress within the clan family.",
+        steps: [
+          { label: "01", title: "Join Discord", body: "Open a ticket and fill out the 'Introduction'." },
+          { label: "02", title: "Get matched to a clan", body: "Based on TH, skills, and goals." },
+          { label: "03", title: "Move up", body: "Join the higher clans as you progress." },
+        ],
+      },
+      war: {
+        highlights: [
+          { label: "Rhythm", value: "Back-to-back Wars" },
+          { label: "Reliability", value: "Both hits expected" },
+          { label: "Help", value: "Planning support" },
+        ],
+      },
+      cwl: {
+        highlights: [
+          { label: "Participating", value: "Open to everyone" },
+          { label: "Rosters", value: "Organized on Discord" },
+          { label: "Regular Wars", value: "ALWAYS running" },
+        ],
+      },
+      network: {
+        title: "Prove yourself and move up.",
+        highlights: [
+          { label: "This website", value: "Tracks all Results" },
+          { label: "Lineups", value: "High CWL Leagues" },
+          { label: "Practice", value: "Friendly Challenge Hub" },
+          { label: "Path", value: "Move up in our clans" },
+        ],
+      },
+      proof: { title: "Discord is mandatory.\nSuccessful community.\nEarn progress." },
+      finalCta: { eyebrow: "Ready", title: "Enter the TURTLE-family." },
+    },
+  }, {}, {});
+
+  assert.equal(profile.hero.body, "One Discord. Every way to play.");
+  assert.equal(profile.journey.title, "From #Tag to the right clan.");
+  assert.equal(profile.journey.steps[0].body, "Open an Introduction ticket.");
+  assert.deepEqual(Array.from(profile.war.highlights, (item) => item.value), [
+    "Back-to-back Wars",
+    "Planning support",
+    "Hero-down wars",
+  ]);
+  assert.deepEqual(Array.from(profile.cwl.highlights, (item) => item.value), ["Open to everyone", "Organized on Discord"]);
+  assert.deepEqual(Array.from(profile.network.highlights, (item) => item.value), ["Friendly Challenge Hub"]);
+  assert.equal(profile.network.title, "Your results have somewhere to go.");
+  assert.equal(profile.proof.title, "Stay on Discord.\nUse your attacks.\nKeep it non-toxic.");
+  assert.equal(profile.finalCta.eyebrow, "Your move");
+  assert.equal(profile.finalCta.title, "Send your #Tag. We will find your TURTLE clan.");
+});
 
 test("formats ongoing regular-war and CWL star standings only when fresh score data is available", () => {
   const { getRosterCurrentWarStarStanding } = loadClientInternals();

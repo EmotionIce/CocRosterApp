@@ -74,268 +74,108 @@
     discordInviteUrl: "https://discord.gg/turtlecoc",
   };
   const PUBLIC_PROFILE_EDITOR_DEFAULTS = {
-
-  brand: {
-
-    eyebrow: "Discord \u2022 War \u2022 CWL",
-
-  },
-
-  cwl: {
-
-    body: "Side wars keep running during CWL.",
-
-    eyebrow: "CWL",
-
-    highlights: [
-
-      {
-
-        label: "Participating",
-
-        value: "Open to everyone",
-
-      },
-
-      {
-
-        label: "Rosters",
-
-        value: "Organized on Discord",
-
-      },
-
-      {
-
-        label: "Regular Wars",
-
-        value: "ALWAYS running",
-
-      },
-
-    ],
-
-    title: "Planned lineups. Fair rewards.",
-
-  },
-
-  family: {
-
-    cwlLabel: "CWL status",
-
-    eyebrow: "Live clans",
-
-    loadingMetaText: "Syncing live rosters.",
-
-    metaTemplate: "{clanCount} clans \u2022 {playerCount} rostered players",
-
-    playersLabel: "Rostered players",
-
-    regularWarLabel: "War status",
-
-    title: "Strong rosters",
-
-  },
-
-  finalCta: {
-
-    eyebrow: "Ready",
-
-    primaryCtaLabel: "Join Discord",
-
-    secondaryCtaLabel: "View Leaderboard",
-
-    steps: [
-
-      "Join Discord.",
-
-      "Send your tag.",
-
-      "Get matched.",
-
-    ],
-
-    title: "Enter the TURTLE-family.",
-
-  },
-
-  hero: {
-
-    body: "Join Discord. Share your #Tag. Join the Clan.",
-
-    eyebrow: "Join \u2022 Match \u2022 War",
-
-    primaryCtaLabel: "Join Discord",
-
-    secondaryCtaLabel: "View Rosters",
-
-    title: "TURTLE",
-
-  },
-
-  journey: {
-
-    eyebrow: "Entry",
-
-    steps: [
-
-      {
-
-        body: "Open a ticket and fill out the 'Introduction'.",
-
-        label: "01",
-
-        title: "Join Discord",
-
-      },
-
-      {
-
-        body: "Based on TH, skills, and goals.",
-
-        label: "02",
-
-        title: "Get matched to a clan",
-
-      },
-
-      {
-
-        body: "Join the higher clans as you progress.",
-
-        label: "03",
-
-        title: "Move up",
-
-      },
-
-    ],
-
-    title: "Join the clan that fits and progress within the clan family.",
-
-  },
-
-  media: {
-
-    bannerLabel: "TURTLE banner animation",
-
-    bannerPlaceholderLabel: "TURTLE banner preview",
-
-    squareLabel: "TURTLE icon animation",
-
-    squarePlaceholderLabel: "TURTLE icon preview",
-
-  },
-
-  nav: {
-
-    adminLabel: "Admin Panel",
-
-    discordLabel: "Discord",
-
-    homeLabel: "Home",
-
-    leaderboardLabel: "Leaderboard",
-
-    rostersLabel: "Rosters",
-
-  },
-
-  network: {
-
-    body: "Reliability moves you up.",
-
-    eyebrow: "Progression",
-
-    highlights: [
-
-      {
-
-        label: "This website",
-
-        value: "Tracks all Results",
-
-      },
-
-      {
-
-        label: "Lineups",
-
-        value: "High CWL Leagues",
-
-      },
-
-      {
-
-        label: "Practice",
-
-        value: "Friendly Challenge Hub",
-
-      },
-
-      {
-
-        label: "Path",
-
-        value: "Move up in our clans",
-
-      },
-
-    ],
-
-    title: "Prove yourself and move up.",
-
-  },
-
-  proof: {
-
-    body: "Be reachable. Use attacks. No Toxicity.",
-
-    eyebrow: "Standards",
-
-    title: "Discord is mandatory.\nSuccessful community.\nEarn progress.",
-
-  },
-
-  war: {
-
-    body: "Organised wars without the noise.",
-
-    eyebrow: "War",
-
-    highlights: [
-
-      {
-
-        label: "Rhythm",
-
-        value: "Back-to-back Wars",
-
-      },
-
-      {
-
-        label: "Reliability",
-
-        value: "Both hits expected",
-
-      },
-
-      {
-
-        label: "Help",
-
-        value: "Planning support",
-
-      },
-
-    ],
-
-    title: "Opt in. Use hits. Improve.",
-
-  },
-
-};
+    brand: {
+      eyebrow: "Discord \u2022 War \u2022 CWL",
+    },
+    nav: {
+      homeLabel: "Home",
+      rostersLabel: "Rosters",
+      leaderboardLabel: "Leaderboard",
+      discordLabel: "Discord",
+      adminLabel: "Admin Panel",
+    },
+    hero: {
+      eyebrow: "Join \u2022 Match \u2022 War",
+      title: "TURTLE",
+      body: "One Discord. Every way to play.",
+      primaryCtaLabel: "Join Discord",
+      secondaryCtaLabel: "View Rosters",
+    },
+    discovery: {
+      eyebrow: "Clash of Clans clan family",
+      title: "A clan for every goal. A family to grow with.",
+      body: "TURTLE brings returning players, farmers, war attackers, and top-level competitors into one Clash of Clans clan family. Start where you fit. Move when you are ready.",
+      lanes: [
+        { label: "Returning", value: "Find your rhythm" },
+        { label: "Farming", value: "Build without pressure" },
+        { label: "War-focused", value: "Practice. Plan. Perform." },
+        { label: "Competitive", value: "Push into higher CWL" },
+      ],
+    },
+    journey: {
+      eyebrow: "Entry",
+      title: "From #Tag to the right clan.",
+      steps: [
+        { label: "01", title: "Join Discord", body: "Open an Introduction ticket." },
+        { label: "02", title: "Get matched to a clan", body: "Your TH, skill, and goals decide the fit." },
+        { label: "03", title: "Move up", body: "Your results open stronger lineups." },
+      ],
+    },
+    family: {
+      eyebrow: "Live clans",
+      title: "Strong rosters",
+      metaTemplate: "{clanCount} clans \u2022 {playerCount} rostered players",
+      loadingMetaText: "Syncing live rosters.",
+      playersLabel: "Rostered players",
+      cwlLabel: "CWL status",
+      regularWarLabel: "War status",
+    },
+    war: {
+      eyebrow: "War",
+      title: "Opt in. Use hits. Improve.",
+      body: "Organised wars without the noise.",
+      highlights: [
+        { label: "Rhythm", value: "Back-to-back Wars" },
+        { label: "Help", value: "Planning support" },
+        { label: "Options", value: "Hero-down wars" },
+      ],
+    },
+    cwl: {
+      eyebrow: "CWL",
+      title: "Planned lineups. Fair rewards.",
+      highlights: [
+        { label: "Participating", value: "Open to everyone" },
+        { label: "Rosters", value: "Organized on Discord" },
+      ],
+    },
+    extras: {
+      eyebrow: "Beyond attacks",
+      title: "The good stuff between wars.",
+      highlights: [
+        { label: "Gold Pass", value: "Giveaways" },
+        { label: "FC Hub", value: "Friendly challenges" },
+        { label: "Clan events", value: "Together" },
+      ],
+    },
+    network: {
+      eyebrow: "Progression",
+      title: "Your results have somewhere to go.",
+      path: [
+        "Results tracked",
+        "Reliability proven",
+        "Higher CWL",
+      ],
+      highlights: [
+        { label: "Practice", value: "Friendly Challenge Hub" },
+      ],
+    },
+    proof: {
+      eyebrow: "Standards",
+      title: "Stay on Discord.\nUse your attacks.\nKeep it non-toxic.",
+    },
+    finalCta: {
+      eyebrow: "Your move",
+      title: "Send your #Tag. We will find your TURTLE clan.",
+      primaryCtaLabel: "Join Discord",
+      secondaryCtaLabel: "View Leaderboard",
+    },
+    media: {
+      bannerLabel: "TURTLE banner animation",
+      squareLabel: "TURTLE icon animation",
+      bannerPlaceholderLabel: "TURTLE banner preview",
+      squarePlaceholderLabel: "TURTLE icon preview",
+    },
+  };
   const LANDING_URL_ALIASES_BY_KEY_ = {
     discordInviteUrl: ["discordInviteUrl"],
     bannerMediaUrl: ["bannerMediaUrl", "bannerUrl", "bannerGifUrl"],
@@ -397,6 +237,31 @@
         { key: "hero.body", source: "profile", type: "textarea", path: "hero.body", label: "Hero body" },
         { key: "hero.primaryCtaLabel", source: "profile", type: "text", path: "hero.primaryCtaLabel", label: "Primary CTA label" },
         { key: "hero.secondaryCtaLabel", source: "profile", type: "text", path: "hero.secondaryCtaLabel", label: "Secondary CTA label" },
+      ],
+    },
+    {
+      id: "discovery",
+      label: "Player fit",
+      description: "Concise clan-family introduction and the four player lanes shown on Home.",
+      fields: [
+        { key: "discovery.eyebrow", source: "profile", type: "text", path: "discovery.eyebrow", label: "Player-fit eyebrow" },
+        { key: "discovery.title", source: "profile", type: "textarea", path: "discovery.title", label: "Player-fit title" },
+        { key: "discovery.body", source: "profile", type: "textarea", path: "discovery.body", label: "Player-fit summary" },
+        {
+          key: "discovery.lanes",
+          source: "profile",
+          type: "repeater",
+          path: "discovery.lanes",
+          label: "Player lanes",
+          description: "Short audience labels used by the visual fit spectrum.",
+          itemType: "object",
+          itemLabel: "Lane",
+          defaultItem: { label: "", value: "" },
+          itemFields: [
+            { key: "label", type: "text", label: "Player type" },
+            { key: "value", type: "text", label: "Promise" },
+          ],
+        },
       ],
     },
     {
@@ -478,7 +343,6 @@
       fields: [
         { key: "cwl.eyebrow", source: "profile", type: "text", path: "cwl.eyebrow", label: "CWL eyebrow" },
         { key: "cwl.title", source: "profile", type: "textarea", path: "cwl.title", label: "CWL title" },
-        { key: "cwl.body", source: "profile", type: "textarea", path: "cwl.body", label: "CWL body" },
         {
           key: "cwl.highlights",
           source: "profile",
@@ -496,13 +360,47 @@
       ],
     },
     {
+      id: "extras",
+      label: "Extras",
+      description: "Community rewards and events rendered directly as visual tokens.",
+      fields: [
+        { key: "extras.eyebrow", source: "profile", type: "text", path: "extras.eyebrow", label: "Extras eyebrow" },
+        { key: "extras.title", source: "profile", type: "textarea", path: "extras.title", label: "Extras title" },
+        {
+          key: "extras.highlights",
+          source: "profile",
+          type: "repeater",
+          path: "extras.highlights",
+          label: "Visual extras",
+          description: "Three compact tokens work best in the Home visual.",
+          itemType: "object",
+          itemLabel: "Extra",
+          defaultItem: { label: "", value: "" },
+          itemFields: [
+            { key: "label", type: "text", label: "Label" },
+            { key: "value", type: "text", label: "Value" },
+          ],
+        },
+      ],
+    },
+    {
       id: "network",
-      label: "Network",
-      description: "Project-network copy and highlights.",
+      label: "Progression",
+      description: "Tracked growth, practice, and movement through the clan family.",
       fields: [
         { key: "network.eyebrow", source: "profile", type: "text", path: "network.eyebrow", label: "Network eyebrow" },
         { key: "network.title", source: "profile", type: "textarea", path: "network.title", label: "Network title" },
-        { key: "network.body", source: "profile", type: "textarea", path: "network.body", label: "Network body" },
+        {
+          key: "network.path",
+          source: "profile",
+          type: "repeater",
+          path: "network.path",
+          label: "Progression path",
+          description: "Use three short stages for the animated route.",
+          itemType: "string",
+          itemLabel: "Stage",
+          defaultItem: "",
+        },
         {
           key: "network.highlights",
           source: "profile",
@@ -521,31 +419,20 @@
     },
     {
       id: "proof",
-      label: "Proof",
-      description: "Trust, expectations, and social proof section.",
+      label: "Standards",
+      description: "The concise expectations shown before the final invitation.",
       fields: [
         { key: "proof.eyebrow", source: "profile", type: "text", path: "proof.eyebrow", label: "Proof eyebrow" },
         { key: "proof.title", source: "profile", type: "textarea", path: "proof.title", label: "Proof title" },
-        { key: "proof.body", source: "profile", type: "textarea", path: "proof.body", label: "Proof body" },
       ],
     },
     {
       id: "finalCta",
-      label: "Final CTA",
-      description: "Bottom call-to-action and onboarding checklist copy.",
+      label: "Invitation",
+      description: "One direct invitation and the two final actions.",
       fields: [
         { key: "finalCta.eyebrow", source: "profile", type: "text", path: "finalCta.eyebrow", label: "Final CTA eyebrow" },
         { key: "finalCta.title", source: "profile", type: "textarea", path: "finalCta.title", label: "Final CTA title" },
-        {
-          key: "finalCta.steps",
-          source: "profile",
-          type: "repeater",
-          path: "finalCta.steps",
-          label: "Final CTA steps",
-          itemType: "string",
-          itemLabel: "Step",
-          defaultItem: "",
-        },
         { key: "finalCta.primaryCtaLabel", source: "profile", type: "text", path: "finalCta.primaryCtaLabel", label: "Primary CTA label" },
         { key: "finalCta.secondaryCtaLabel", source: "profile", type: "text", path: "finalCta.secondaryCtaLabel", label: "Secondary CTA label" },
       ],
@@ -781,6 +668,74 @@
     if (value) landing[key] = value;
   };
 
+  // Present the exact legacy Home profile as the compact visual-story profile used by the public client.
+  const migrateLegacyProfileOverride_ = (profileRaw) => {
+    const profile = isPlainObject_(profileRaw) ? profileRaw : {};
+    const replaceExactText = (sectionNameRaw, keyRaw, legacyRaw) => {
+      const sectionName = toStr(sectionNameRaw).trim();
+      const key = toStr(keyRaw).trim();
+      const section = isPlainObject_(profile[sectionName]) ? profile[sectionName] : null;
+      const defaults = isPlainObject_(PUBLIC_PROFILE_EDITOR_DEFAULTS[sectionName]) ? PUBLIC_PROFILE_EDITOR_DEFAULTS[sectionName] : null;
+      if (!section || !defaults || toStr(section[key]).trim() !== toStr(legacyRaw).trim()) return;
+      section[key] = defaults[key];
+    };
+    const deleteExactText = (sectionNameRaw, keyRaw, legacyRaw) => {
+      const section = isPlainObject_(profile[sectionNameRaw]) ? profile[sectionNameRaw] : null;
+      if (section && toStr(section[keyRaw]).trim() === toStr(legacyRaw).trim()) delete section[keyRaw];
+    };
+    const replaceLegacyHighlights = (sectionNameRaw, legacyValuesRaw) => {
+      const section = isPlainObject_(profile[sectionNameRaw]) ? profile[sectionNameRaw] : null;
+      const highlights = section && Array.isArray(section.highlights) ? section.highlights : [];
+      const currentValues = highlights.map((itemRaw) => toStr(isPlainObject_(itemRaw) && itemRaw.value).trim().toLowerCase());
+      const legacyValues = legacyValuesRaw.map((value) => toStr(value).trim().toLowerCase());
+      if (currentValues.length !== legacyValues.length || currentValues.some((value, index) => value !== legacyValues[index])) return;
+      section.highlights = PUBLIC_PROFILE_EDITOR_DEFAULTS[sectionNameRaw].highlights.map((item) => ({
+        label: item.label,
+        value: item.value,
+      }));
+    };
+
+    replaceExactText("hero", "body", "Join Discord. Share your #Tag. Join the Clan.");
+    replaceExactText("journey", "title", "Join the clan that fits and progress within the clan family.");
+    replaceExactText("network", "title", "Prove yourself and move up.");
+    replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
+    replaceExactText("finalCta", "eyebrow", "Ready");
+    replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
+
+    const journey = isPlainObject_(profile.journey) ? profile.journey : {};
+    const steps = Array.isArray(journey.steps) ? journey.steps : [];
+    const legacyJourneyBodies = [
+      "Open a ticket and fill out the 'Introduction'.",
+      "Based on TH, skills, and goals.",
+      "Join the higher clans as you progress.",
+    ];
+    if (steps.length === legacyJourneyBodies.length && steps.every((stepRaw, index) =>
+      toStr(isPlainObject_(stepRaw) && stepRaw.body).trim() === legacyJourneyBodies[index])) {
+      journey.steps = PUBLIC_PROFILE_EDITOR_DEFAULTS.journey.steps.map((step) => ({
+        label: step.label,
+        title: step.title,
+        body: step.body,
+      }));
+    }
+
+    replaceLegacyHighlights("war", ["Back-to-back Wars", "Both hits expected", "Planning support"]);
+    replaceLegacyHighlights("cwl", ["Open to everyone", "Organized on Discord", "ALWAYS running"]);
+    replaceLegacyHighlights("network", ["Tracks all Results", "High CWL Leagues", "Friendly Challenge Hub", "Move up in our clans"]);
+    deleteExactText("cwl", "body", "Side wars keep running during CWL.");
+    deleteExactText("network", "body", "Reliability moves you up.");
+    deleteExactText("proof", "body", "Be reachable. Use attacks. No Toxicity.");
+    const finalSteps = isPlainObject_(profile.finalCta) && Array.isArray(profile.finalCta.steps)
+      ? profile.finalCta.steps.map((value) => toStr(value).trim())
+      : [];
+    if (finalSteps.length === 3
+      && finalSteps[0] === "Join Discord."
+      && finalSteps[1] === "Send your tag."
+      && finalSteps[2] === "Get matched.") {
+      delete profile.finalCta.steps;
+    }
+    return profile;
+  };
+
   // Merge current profile overrides from `profile` and legacy `landing.profile`.
   const getMergedProfileOverride_ = (rootRaw) => {
     const root = isPlainObject_(rootRaw) ? rootRaw : {};
@@ -792,7 +747,7 @@
     if (isPlainObject_(root.profile)) {
       mergePlainObjectDeep_(out, root.profile);
     }
-    return out;
+    return migrateLegacyProfileOverride_(out);
   };
 
   // Move legacy `landing.profile` into `profile`.

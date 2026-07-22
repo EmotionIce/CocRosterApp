@@ -77,7 +77,7 @@
     ]
   }
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260722a" />
+  <link rel="stylesheet" href="./styles.css?v=20260722c" />
 </head>
 <body style="margin:0;">
 <div class="container public-shell">
@@ -123,7 +123,7 @@
           <p id="landingHeroEyebrow" class="landing-eyebrow">Join &bull; Match &bull; War</p>
           <h2 id="landingHeroTitle">TURTLE</h2>
           <p id="landingHeroBody">
-            Join Discord. Share your #Tag. Join the Clan.
+            One Discord. Every way to play.
           </p>
           <div class="landing-hero__actions">
             <a id="landingHeroDiscordCta" class="landing-cta landing-cta--primary" href="#" target="_blank"
@@ -131,38 +131,21 @@
             <button id="landingHeroRostersCta" class="landing-cta landing-cta--secondary" type="button">View Rosters</button>
           </div>
         </div>
-        <div class="landing-hero__route" aria-hidden="true">
-          <span id="landingRouteDiscordLabel">Discord</span>
-          <i></i>
-          <span id="landingRouteMatchLabel">Get matched</span>
-          <i></i>
-          <span id="landingRouteWarLabel">Wars</span>
-          <i></i>
-          <span id="landingRouteCwlLabel">CWL</span>
-        </div>
       </section>
 
       <section class="landing-chapter landing-discovery" aria-labelledby="landingDiscoveryTitle" data-landing-reveal>
         <div class="landing-discovery__intro">
-          <p class="landing-eyebrow">Clash of Clans clan family</p>
+          <p id="landingDiscoveryEyebrow" class="landing-eyebrow">Clash of Clans clan family</p>
           <h2 id="landingDiscoveryTitle">A clan for every goal. A family to grow with.</h2>
-          <p>
-            TURTLE is a community-run Clash of Clans clan family built to give every player a clan that fits.
-            Returning casual players, active farmers, dedicated war attackers, and top-level competitive players
-            can join through one Discord and progress through an organized family of clans.
-          </p>
-          <p>
-            Members get clear management, planned CWL lineups, back-to-back wars, side wars during CWL,
-            hero-down wars, friendly-challenge practice, community events, and Gold Pass giveaways. Reliable
-            players can earn opportunities in stronger clans and higher CWL leagues as their skills and accounts grow.
-          </p>
+          <p id="landingDiscoveryBody">TURTLE brings returning players, farmers, war attackers, and top-level competitors
+            into one Clash of Clans clan family. Start where you fit. Move when you are ready.</p>
         </div>
-        <ul class="landing-discovery__highlights" aria-label="TURTLE clan family benefits">
-          <li><strong>Every play style</strong><span>Casual, returning, farming, war-focused, and competitive players.</span></li>
-          <li><strong>Organized competition</strong><span>Back-to-back wars, fair CWL planning, side wars, and hero-down options.</span></li>
-          <li><strong>Community rewards</strong><span>Gold Pass giveaways, events, support, and friendly challenges.</span></li>
-          <li><strong>Future opportunities</strong><span>Prove yourself, develop your account, and move into stronger clans.</span></li>
-        </ul>
+        <div id="landingDiscoveryLanes" class="landing-fit-lanes" role="list" aria-label="Ways to play in the TURTLE clan family">
+          <article class="landing-fit-lane" role="listitem"><span>01</span><strong>Returning</strong><p>Find your rhythm</p></article>
+          <article class="landing-fit-lane" role="listitem"><span>02</span><strong>Farming</strong><p>Build without pressure</p></article>
+          <article class="landing-fit-lane" role="listitem"><span>03</span><strong>War-focused</strong><p>Practice. Plan. Perform.</p></article>
+          <article class="landing-fit-lane" role="listitem"><span>04</span><strong>Competitive</strong><p>Push into higher CWL</p></article>
+        </div>
         <p class="landing-discovery__disclaimer">
           Clash of Clans is a trademark of Supercell. TURTLE is an independent community and is not endorsed by or affiliated with Supercell.
         </p>
@@ -172,7 +155,7 @@
         <div class="landing-shell-map__intro">
           <div class="landing-shell-map__copy">
             <p id="landingJourneyEyebrow" class="landing-eyebrow">Entry</p>
-            <h3 id="landingJourneyTitle">Join the clan that fits and progress within the clan family.</h3>
+            <h3 id="landingJourneyTitle">From #Tag to the right clan.</h3>
           </div>
           <div class="landing-shell-map__family">
             <p id="landingFamilyEyebrow" class="landing-eyebrow">Live clans</p>
@@ -188,109 +171,119 @@
             <figcaption id="landingSquarePlaceholderText" class="landing-media-slot__placeholder">TURTLE icon preview</figcaption>
           </figure>
           <div id="landingClanFamilyGrid" class="landing-family-grid"></div>
-          <div class="landing-shell-map__steps">
+          <div id="landingJourneySteps" class="landing-shell-map__steps">
             <article class="landing-square-step is-active" data-landing-square-step="0">
                   <p id="landingJourneyStep1Label" class="landing-square-step__label">01</p>
                   <h4 id="landingJourneyStep1Title">Join Discord</h4>
-                  <p id="landingJourneyStep1Body">Open a ticket and fill out the 'Introduction'.</p>
+                  <p id="landingJourneyStep1Body">Open an Introduction ticket.</p>
             </article>
             <article class="landing-square-step" data-landing-square-step="1">
                   <p id="landingJourneyStep2Label" class="landing-square-step__label">02</p>
                   <h4 id="landingJourneyStep2Title">Get matched to a clan</h4>
-                  <p id="landingJourneyStep2Body">Based on TH, skills, and goals.</p>
+                  <p id="landingJourneyStep2Body">Your TH, skill, and goals decide the fit.</p>
             </article>
             <article class="landing-square-step" data-landing-square-step="2">
                   <p id="landingJourneyStep3Label" class="landing-square-step__label">03</p>
                   <h4 id="landingJourneyStep3Title">Move up</h4>
-                  <p id="landingJourneyStep3Body">Join the higher clans as you progress.</p>
+                  <p id="landingJourneyStep3Body">Your results open stronger lineups.</p>
             </article>
           </div>
         </div>
       </section>
 
-      <section class="landing-chapter landing-escalation" data-landing-reveal>
-        <div class="landing-escalation__spine" aria-hidden="true"></div>
-        <article class="landing-escalation__act landing-escalation__act--war">
-          <div class="landing-escalation__number" aria-hidden="true">01</div>
-          <div class="landing-escalation__copy">
-            <p id="landingWarEyebrow" class="landing-eyebrow">War</p>
-            <h3 id="landingWarTitle">Opt in. Use hits. Improve.</h3>
-            <p id="landingWarBody">Organised wars without the noise.</p>
-          </div>
-          <aside class="landing-feature__rail" aria-label="Main clan highlights">
-            <div class="landing-feature-chip">
-              <span id="landingWarChip1Label" class="landing-feature-chip__label">Rhythm</span>
-              <strong id="landingWarChip1Value" class="landing-feature-chip__value">Back-to-back Wars</strong>
-            </div>
-            <div class="landing-feature-chip">
-              <span id="landingWarChip2Label" class="landing-feature-chip__label">Reliability</span>
-              <strong id="landingWarChip2Value" class="landing-feature-chip__value">Both hits expected</strong>
-            </div>
-          </aside>
-        </article>
+      <section class="landing-chapter landing-rhythm" data-landing-rhythm-story data-landing-reveal aria-labelledby="landingRhythmTitle">
+        <div class="landing-rhythm__stage">
+          <header class="landing-rhythm__intro">
+            <p class="landing-eyebrow">Life in TURTLE</p>
+            <h3 id="landingRhythmTitle">Why TURTLEs stay.</h3>
+          </header>
 
-        <article class="landing-escalation__act landing-escalation__act--cwl">
-          <div class="landing-escalation__number" aria-hidden="true">02</div>
-          <div class="landing-escalation__copy">
-            <p id="landingCwlEyebrow" class="landing-eyebrow">CWL</p>
-            <h3 id="landingCwlTitle">Planned lineups. Fair rewards.</h3>
-            <p id="landingCwlBody">Side wars keep running during CWL.</p>
+          <div class="landing-rhythm__visual">
+            <div class="landing-rhythm-scene landing-rhythm-scene--war is-active" data-landing-rhythm-scene="0"
+              role="img" aria-label="Back-to-back wars with both attacks used">
+              <span class="landing-war-target">WAR</span>
+              <span class="landing-war-hit landing-war-hit--one">01 <b>&check;</b></span>
+              <span class="landing-war-hit landing-war-hit--two">02 <b>&check;</b></span>
+              <span class="landing-war-loop">REPEAT &circlearrowright;</span>
+            </div>
+            <div class="landing-rhythm-scene landing-rhythm-scene--cwl" data-landing-rhythm-scene="1"
+              role="img" aria-label="A planned CWL lineup with side wars running">
+              <div class="landing-cwl-board">
+                <span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+              <span class="landing-cwl-lock">LINEUP</span>
+              <span class="landing-cwl-side">SIDE WARS</span>
+            </div>
+            <div id="landingExtrasVisual" class="landing-rhythm-scene landing-rhythm-scene--extras"
+              data-landing-rhythm-scene="2" role="img"
+              aria-label="Gold Pass giveaways, friendly challenges, and clan events">
+              <span class="landing-extra-token landing-extra-token--pass"><b>GOLD PASS</b>Giveaways</span>
+              <span class="landing-extra-token landing-extra-token--fc"><b>FC HUB</b>Friendly challenges</span>
+              <span class="landing-extra-token landing-extra-token--event"><b>CLAN EVENTS</b>Together</span>
+            </div>
+            <div id="landingProgressVisual" class="landing-rhythm-scene landing-rhythm-scene--progress"
+              data-landing-rhythm-scene="3" role="img"
+              aria-label="Results tracked, reliability proven, and higher CWL unlocked">
+              <span class="landing-progress-node landing-progress-node--one"><b>01</b>Results tracked</span>
+              <span class="landing-progress-node landing-progress-node--two"><b>02</b>Reliability proven</span>
+              <span class="landing-progress-node landing-progress-node--three"><b>03</b>Higher CWL</span>
+              <i class="landing-progress-path"></i>
+            </div>
           </div>
-          <aside class="landing-feature__rail" aria-label="CWL highlights">
-            <div class="landing-feature-chip">
-              <span id="landingCwlChip1Label" class="landing-feature-chip__label">Participating</span>
-              <strong id="landingCwlChip1Value" class="landing-feature-chip__value">Open to everyone</strong>
-            </div>
-            <div class="landing-feature-chip">
-              <span id="landingCwlChip2Label" class="landing-feature-chip__label">Rosters</span>
-              <strong id="landingCwlChip2Value" class="landing-feature-chip__value">Organized on Discord</strong>
-            </div>
-            <div class="landing-feature-chip">
-              <span id="landingCwlChip3Label" class="landing-feature-chip__label">Regular Wars</span>
-              <strong id="landingCwlChip3Value" class="landing-feature-chip__value">ALWAYS running</strong>
-            </div>
-          </aside>
-        </article>
 
-        <article class="landing-escalation__act landing-escalation__act--network">
-          <div class="landing-escalation__number" aria-hidden="true">03</div>
-          <div class="landing-escalation__copy">
-            <p id="landingNetworkEyebrow" class="landing-eyebrow">Progression</p>
-            <h3 id="landingNetworkTitle">Prove yourself and move up.</h3>
-            <p id="landingNetworkBody">Reliability moves you up.</p>
+          <div class="landing-rhythm__beats">
+            <article class="landing-rhythm-beat is-active" data-landing-rhythm-beat="0">
+              <p id="landingWarEyebrow" class="landing-eyebrow">War</p>
+              <h3 id="landingWarTitle">Opt in. Use hits. Improve.</h3>
+              <p id="landingWarBody">Organised wars without the noise.</p>
+              <ul id="landingWarHighlights" class="landing-rhythm-facts" aria-label="War highlights">
+                <li><span>Rhythm</span><strong>Back-to-back Wars</strong></li>
+                <li><span>Help</span><strong>Planning support</strong></li>
+                <li><span>Options</span><strong>Hero-down wars</strong></li>
+              </ul>
+            </article>
+
+            <article class="landing-rhythm-beat" data-landing-rhythm-beat="1">
+              <p id="landingCwlEyebrow" class="landing-eyebrow">CWL</p>
+              <h3 id="landingCwlTitle">Planned lineups. Fair rewards.</h3>
+              <ul id="landingCwlHighlights" class="landing-rhythm-facts" aria-label="CWL highlights">
+                <li><span>Participating</span><strong>Open to everyone</strong></li>
+                <li><span>Rosters</span><strong>Organized on Discord</strong></li>
+              </ul>
+            </article>
+
+            <article class="landing-rhythm-beat landing-rhythm-beat--extras" data-landing-rhythm-beat="2">
+              <p id="landingExtrasEyebrow" class="landing-eyebrow">Beyond attacks</p>
+              <h3 id="landingExtrasTitle">The good stuff between wars.</h3>
+            </article>
+
+            <article class="landing-rhythm-beat" data-landing-rhythm-beat="3">
+              <p id="landingNetworkEyebrow" class="landing-eyebrow">Progression</p>
+              <h3 id="landingNetworkTitle">Your results have somewhere to go.</h3>
+              <ul id="landingNetworkHighlights" class="landing-rhythm-facts" aria-label="Progression highlights">
+                <li><span>Practice</span><strong>Friendly Challenge Hub</strong></li>
+              </ul>
+            </article>
           </div>
-          <aside class="landing-feature__rail" aria-label="Network highlights">
-            <div class="landing-feature-chip">
-              <span id="landingNetworkChip1Label" class="landing-feature-chip__label">This website</span>
-              <strong id="landingNetworkChip1Value" class="landing-feature-chip__value">Tracks all Results</strong>
-            </div>
-            <div class="landing-feature-chip">
-              <span id="landingNetworkChip2Label" class="landing-feature-chip__label">Lineups</span>
-              <strong id="landingNetworkChip2Value" class="landing-feature-chip__value">High CWL Leagues</strong>
-            </div>
-            <div class="landing-feature-chip">
-              <span id="landingNetworkChip3Label" class="landing-feature-chip__label">Practice</span>
-              <strong id="landingNetworkChip3Value" class="landing-feature-chip__value">Friendly Challenge Hub</strong>
-            </div>
-          </aside>
-        </article>
+
+          <ol class="landing-rhythm__nav" aria-label="TURTLE life chapters">
+            <li class="is-active" data-landing-rhythm-nav="0"><span>01</span>War</li>
+            <li data-landing-rhythm-nav="1"><span>02</span>CWL</li>
+            <li data-landing-rhythm-nav="2"><span>03</span>Extras</li>
+            <li data-landing-rhythm-nav="3"><span>04</span>Progress</li>
+          </ol>
+        </div>
       </section>
 
-      <section class="landing-chapter landing-arrival" data-landing-reveal>
-        <div class="landing-proof__inner">
+      <section class="landing-chapter landing-conclusion" data-landing-reveal>
+        <div class="landing-standards">
           <p id="landingProofEyebrow" class="landing-eyebrow">Standards</p>
-          <h3 id="landingProofTitle">Discord is mandatory.<br>Successful community.<br>Earn progress.</h3>
-          <p id="landingProofBody">Be reachable. Use attacks. No Toxicity.</p>
+          <h3 id="landingProofTitle">Stay on Discord.<br>Use your attacks.<br>Keep it non-toxic.</h3>
         </div>
 
-        <div class="landing-final-cta__content">
-          <p id="landingFinalEyebrow" class="landing-eyebrow">Ready</p>
-          <h3 id="landingFinalTitle">Enter the TURTLE-family.</h3>
-          <ol class="landing-join-steps">
-            <li id="landingFinalStep1">Join Discord.</li>
-            <li id="landingFinalStep2">Send your tag.</li>
-            <li id="landingFinalStep3">Get matched.</li>
-          </ol>
+        <div class="landing-invitation">
+          <p id="landingFinalEyebrow" class="landing-eyebrow">Your move</p>
+          <h3 id="landingFinalTitle">Send your #Tag. We will find your TURTLE clan.</h3>
           <div class="landing-hero__actions">
             <a id="landingBottomDiscordCta" class="landing-cta landing-cta--primary" href="#" target="_blank"
               rel="noopener noreferrer">Join Discord</a>
@@ -360,7 +353,7 @@
 
 
   <script src="./public-config.js?v=20260721a"></script>
-  <script defer src="./client.js?v=20260722a"></script>
+  <script defer src="./client.js?v=20260722c"></script>
 </body>
 </html>
 

@@ -6,6 +6,7 @@ const read = (path) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
 const indexHtml = read("../cloudflarePages/index.html");
 const clientCode = read("../cloudflarePages/client.js");
 const adminCode = read("../cloudflarePages/admin.js");
+const adminDefaults = adminCode.match(/const PUBLIC_PROFILE_EDITOR_DEFAULTS = \{[\s\S]*?\n  \};/)?.[0] || "";
 const robotsTxt = read("../cloudflarePages/robots.txt");
 const sitemapXml = read("../cloudflarePages/sitemap.xml");
 const manifest = JSON.parse(read("../cloudflarePages/site.webmanifest"));
@@ -47,28 +48,61 @@ test("important recruiting claims are visible to visitors and crawlers alike", (
   const discovery = indexHtml.match(/<section class="landing-chapter landing-discovery"[\s\S]*?<\/section>/);
   assert.ok(discovery, "expected a visible clan-family overview");
   assert.doesNotMatch(discovery[0], /\bhidden\b|display\s*:\s*none/i);
-  for (const phrase of ["Clash of Clans", "clan family", "returning casual", "side wars", "hero-down wars", "Gold Pass giveaways", "higher CWL leagues"]) {
+  for (const phrase of ["Clash of Clans", "clan family", "returning players", "top-level competitors", "higher CWL"]) {
     assert.match(discovery[0], new RegExp(phrase, "i"));
   }
   assert.match(discovery[0], /not endorsed by or affiliated with Supercell/i);
+
+  const landing = indexHtml.match(/<section id="publicViewLanding"[\s\S]*?<section id="publicViewRosters"/);
+  assert.ok(landing, "expected crawlable Home content");
+  for (const phrase of ["side wars", "hero-down wars", "Gold Pass giveaways", "friendly challenges", "clan events"]) {
+    assert.match(landing[0], new RegExp(phrase, "i"));
+  }
 });
 
-test("crawlable landing fallbacks match the current published profile copy", () => {
+test("landing selling points use visitor-visible scroll stories instead of crawler-only copy", () => {
+  assert.match(indexHtml, /data-landing-square-story/);
+  assert.match(indexHtml, /data-landing-rhythm-story/);
+  assert.match(indexHtml, /data-landing-rhythm-beat="0"/);
+  assert.match(indexHtml, /data-landing-rhythm-beat="3"/);
+  assert.doesNotMatch(indexHtml, /class="[^"]*(?:crawler|robot|seo-only|visually-hidden)[^"]*"/i);
+  assert.doesNotMatch(indexHtml, /landing-escalation__act/);
+});
+
+test("crawlable landing fallbacks match the compact managed profile copy", () => {
   for (const phrase of [
-    "Join Discord. Share your #Tag. Join the Clan.",
-    "Join the clan that fits and progress within the clan family.",
+    "One Discord. Every way to play.",
+    "From #Tag to the right clan.",
     "Planned lineups. Fair rewards.",
-    "Side wars keep running during CWL.",
-    "Prove yourself and move up.",
-    "Discord is mandatory.",
-    "Successful community.",
-    "Enter the TURTLE-family.",
+    "The good stuff between wars.",
+    "Your results have somewhere to go.",
+    "Stay on Discord.",
+    "Send your #Tag. We will find your TURTLE clan.",
   ]) {
     const exactPhrase = new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
     assert.match(indexHtml, exactPhrase);
     assert.match(clientCode, exactPhrase);
     assert.match(adminCode, exactPhrase);
   }
+
+  for (const retiredPhrase of [
+    "Join Discord. Share your #Tag. Join the Clan.",
+    "Successful community.",
+    "Enter the TURTLE-family.",
+  ]) {
+    const exactPhrase = new RegExp(retiredPhrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    assert.doesNotMatch(indexHtml, exactPhrase);
+    assert.doesNotMatch(adminDefaults, exactPhrase);
+  }
+});
+
+test("admin applies the legacy Home migration only to merged profile overrides", () => {
+  const mergedProfileHelper = adminCode.match(/const getMergedProfileOverride_ = \(rootRaw\) => \{[\s\S]*?\n  \};/)?.[0] || "";
+  const cwlSanitizer = adminCode.match(/const sanitizeCwlStatEntryLocal_ = \(entryRaw\) => \{[\s\S]*?\n  \};/)?.[0] || "";
+
+  assert.match(mergedProfileHelper, /return migrateLegacyProfileOverride_\(out\);/);
+  assert.doesNotMatch(cwlSanitizer, /migrateLegacyProfileOverride_/);
+  assert.match(cwlSanitizer, /return out;/);
 });
 
 test("robots and sitemap expose the public root while private surfaces carry noindex", () => {

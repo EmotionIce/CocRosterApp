@@ -49,12 +49,16 @@
     let globalLastUpdatedTimerId = 0;
     let globalLastUpdatedTimerValue = "";
     let warCountdownTimerId = 0;
-    let landingRevealObserver = null;
+    let landingHeaderResizeObserver = null;
     let landingScrollEffectsBound = false;
     let landingScrollRafId = 0;
     let landingSquareStoryActiveStep = -1;
+    let landingRhythmStoryActiveStep = -1;
     let landingMediaCanStart = false;
     let landingMediaDeferredStartScheduled = false;
+    let landingMediaVisibilityObserver = null;
+    let landingSquareMediaLoadObserver = null;
+    let landingSquareMediaPendingOptions = null;
     let rosterHydrationInFlight = false;
     let rosterNavigatorBound = false;
     let rosterNavigatorEntries = [];
@@ -126,7 +130,6 @@
         leaderboard: "leaderboard",
         landing: "landing",
     };
-    const LANDING_COMPACT_LAYOUT_QUERY = "(max-width: 820px), (max-height: 520px) and (max-width: 940px)";
     const PUBLIC_LANDING_DEFAULTS = {
         bannerMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=banner_xwhksj&profile=cld-looping",
         squareMediaUrl: "https://player.cloudinary.com/embed/?cloud_name=dq2az35aa&public_id=square_ofyufv&profile=cld-looping",
@@ -146,17 +149,28 @@
         hero: {
             eyebrow: "Join \u2022 Match \u2022 War",
             title: "TURTLE",
-            body: "Join Discord. Share your #Tag. Join the Clan.",
+            body: "One Discord. Every way to play.",
             primaryCtaLabel: "Join Discord",
             secondaryCtaLabel: "View Rosters",
         },
+        discovery: {
+            eyebrow: "Clash of Clans clan family",
+            title: "A clan for every goal. A family to grow with.",
+            body: "TURTLE brings returning players, farmers, war attackers, and top-level competitors into one Clash of Clans clan family. Start where you fit. Move when you are ready.",
+            lanes: [
+                { label: "Returning", value: "Find your rhythm" },
+                { label: "Farming", value: "Build without pressure" },
+                { label: "War-focused", value: "Practice. Plan. Perform." },
+                { label: "Competitive", value: "Push into higher CWL" },
+            ],
+        },
         journey: {
             eyebrow: "Entry",
-            title: "Join the clan that fits and progress within the clan family.",
+            title: "From #Tag to the right clan.",
             steps: [
-                { label: "01", title: "Join Discord", body: "Open a ticket and fill out the 'Introduction'." },
-                { label: "02", title: "Get matched to a clan", body: "Based on TH, skills, and goals." },
-                { label: "03", title: "Move up", body: "Join the higher clans as you progress." },
+                { label: "01", title: "Join Discord", body: "Open an Introduction ticket." },
+                { label: "02", title: "Get matched to a clan", body: "Your TH, skill, and goals decide the fit." },
+                { label: "03", title: "Move up", body: "Your results open stronger lineups." },
             ],
         },
         family: {
@@ -174,44 +188,46 @@
             body: "Organised wars without the noise.",
             highlights: [
                 { label: "Rhythm", value: "Back-to-back Wars" },
-                { label: "Reliability", value: "Both hits expected" },
                 { label: "Help", value: "Planning support" },
+                { label: "Options", value: "Hero-down wars" },
             ],
         },
         cwl: {
             eyebrow: "CWL",
             title: "Planned lineups. Fair rewards.",
-            body: "Side wars keep running during CWL.",
             highlights: [
                 { label: "Participating", value: "Open to everyone" },
                 { label: "Rosters", value: "Organized on Discord" },
-                { label: "Regular Wars", value: "ALWAYS running" },
+            ],
+        },
+        extras: {
+            eyebrow: "Beyond attacks",
+            title: "The good stuff between wars.",
+            highlights: [
+                { label: "Gold Pass", value: "Giveaways" },
+                { label: "FC Hub", value: "Friendly challenges" },
+                { label: "Clan events", value: "Together" },
             ],
         },
         network: {
             eyebrow: "Progression",
-            title: "Prove yourself and move up.",
-            body: "Reliability moves you up.",
+            title: "Your results have somewhere to go.",
+            path: [
+                "Results tracked",
+                "Reliability proven",
+                "Higher CWL",
+            ],
             highlights: [
-                { label: "This website", value: "Tracks all Results" },
-                { label: "Lineups", value: "High CWL Leagues" },
                 { label: "Practice", value: "Friendly Challenge Hub" },
-                { label: "Path", value: "Move up in our clans" },
             ],
         },
         proof: {
             eyebrow: "Standards",
-            title: "Discord is mandatory.\nSuccessful community.\nEarn progress.",
-            body: "Be reachable. Use attacks. No Toxicity.",
+            title: "Stay on Discord.\nUse your attacks.\nKeep it non-toxic.",
         },
         finalCta: {
-            eyebrow: "Ready",
-            title: "Enter the TURTLE-family.",
-            steps: [
-                "Join Discord.",
-                "Send your tag.",
-                "Get matched.",
-            ],
+            eyebrow: "Your move",
+            title: "Send your #Tag. We will find your TURTLE clan.",
             primaryCtaLabel: "Join Discord",
             secondaryCtaLabel: "View Leaderboard",
         },
@@ -385,8 +401,9 @@
 
             if (typeof templateItem === "string") {
                 const outStrings = [];
-                for (let i = 0; i < templateRaw.length; i++) {
-                    const fallbackText = toStr(templateRaw[i]).trim();
+                const itemCount = Math.max(templateRaw.length, sourceArray.length);
+                for (let i = 0; i < itemCount; i++) {
+                    const fallbackText = toStr(templateRaw[i] == null ? templateItem : templateRaw[i]).trim();
                     const candidateText = toStr(sourceArray[i]).trim();
                     outStrings.push(candidateText || fallbackText);
                 }
@@ -394,7 +411,8 @@
             }
 
             const outObjects = [];
-            for (let i = 0; i < templateRaw.length; i++) {
+            const itemCount = Math.max(templateRaw.length, sourceArray.length);
+            for (let i = 0; i < itemCount; i++) {
                 const fallbackItem = isPlainObject_(templateRaw[i]) ? templateRaw[i] : templateItem;
                 const sourceItem = isPlainObject_(sourceArray[i]) ? sourceArray[i] : {};
                 outObjects.push(sanitizePublicProfileByTemplate_(fallbackItem, sourceItem));
@@ -413,6 +431,64 @@
         return out;
     };
 
+    // Upgrade the exact legacy Home profile to the compact scroll-story copy.
+    // Custom admin copy is left untouched; this only bridges cached/published snapshots from the previous layout.
+    const migrateLegacyLandingProfileCopy_ = (profileRaw) => {
+        const profile = isPlainObject_(profileRaw) ? profileRaw : {};
+        const replaceExactText = (sectionNameRaw, keyRaw, legacyRaw) => {
+            const sectionName = toStr(sectionNameRaw).trim();
+            const key = toStr(keyRaw).trim();
+            const section = isPlainObject_(profile[sectionName]) ? profile[sectionName] : null;
+            const defaults = isPlainObject_(PUBLIC_PROFILE_DEFAULTS[sectionName]) ? PUBLIC_PROFILE_DEFAULTS[sectionName] : null;
+            if (!section || !defaults || toStr(section[key]).trim() !== toStr(legacyRaw).trim()) return;
+            section[key] = defaults[key];
+        };
+        const highlightValues = (sectionNameRaw) => {
+            const section = isPlainObject_(profile[sectionNameRaw]) ? profile[sectionNameRaw] : {};
+            const highlights = Array.isArray(section.highlights) ? section.highlights : [];
+            return highlights.map((itemRaw) => toStr(isPlainObject_(itemRaw) && itemRaw.value).trim().toLowerCase());
+        };
+        const replaceLegacyHighlights = (sectionNameRaw, legacyValuesRaw) => {
+            const legacyValues = Array.isArray(legacyValuesRaw)
+                ? legacyValuesRaw.map((value) => toStr(value).trim().toLowerCase())
+                : [];
+            const currentValues = highlightValues(sectionNameRaw);
+            if (currentValues.length !== legacyValues.length || currentValues.some((value, index) => value !== legacyValues[index])) return;
+            profile[sectionNameRaw].highlights = PUBLIC_PROFILE_DEFAULTS[sectionNameRaw].highlights.map((item) => ({
+                label: item.label,
+                value: item.value,
+            }));
+        };
+
+        replaceExactText("hero", "body", "Join Discord. Share your #Tag. Join the Clan.");
+        replaceExactText("journey", "title", "Join the clan that fits and progress within the clan family.");
+        replaceExactText("network", "title", "Prove yourself and move up.");
+        replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
+        replaceExactText("finalCta", "eyebrow", "Ready");
+        replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
+
+        const journey = isPlainObject_(profile.journey) ? profile.journey : {};
+        const steps = Array.isArray(journey.steps) ? journey.steps : [];
+        const legacyJourneyBodies = [
+            "Open a ticket and fill out the 'Introduction'.",
+            "Based on TH, skills, and goals.",
+            "Join the higher clans as you progress.",
+        ];
+        if (steps.length === legacyJourneyBodies.length && steps.every((stepRaw, index) =>
+            toStr(isPlainObject_(stepRaw) && stepRaw.body).trim() === legacyJourneyBodies[index])) {
+            journey.steps = PUBLIC_PROFILE_DEFAULTS.journey.steps.map((step) => ({
+                label: step.label,
+                title: step.title,
+                body: step.body,
+            }));
+        }
+
+        replaceLegacyHighlights("war", ["Back-to-back Wars", "Both hits expected", "Planning support"]);
+        replaceLegacyHighlights("cwl", ["Open to everyone", "Organized on Discord", "ALWAYS running"]);
+        replaceLegacyHighlights("network", ["Tracks all Results", "High CWL Leagues", "Friendly Challenge Hub", "Move up in our clans"]);
+        return profile;
+    };
+
     // Build resolved public profile from defaults, payload data, then runtime overrides.
     // Runtime overrides win so static rebranding can be applied without republishing data.
     const buildResolvedPublicProfile_ = (runtimeConfigRaw, payloadConfigRaw, landingConfigRaw, runtimeLandingRaw) => {
@@ -426,7 +502,7 @@
         merged = sanitizePublicProfileByTemplate_(merged, landingConfig.profile);
         merged = sanitizePublicProfileByTemplate_(merged, runtimeConfig.profile);
         merged = sanitizePublicProfileByTemplate_(merged, runtimeLanding.profile);
-        return merged;
+        return migrateLegacyLandingProfileCopy_(merged);
     };
 
     // Get public config from data.
@@ -516,12 +592,136 @@
         if (node.textContent !== text) node.textContent = text;
     };
 
+    // Replace a profile-driven list while keeping crawlable HTML fallbacks in the document source.
+    const replaceLandingProfileList_ = (targetIdRaw, itemsRaw, renderItem) => {
+        const target = $("#" + toStr(targetIdRaw).trim());
+        const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+        if (!target || !items.length || typeof renderItem !== "function") return;
+        const fragment = document.createDocumentFragment();
+        for (let i = 0; i < items.length; i++) {
+            const node = renderItem(items[i], i);
+            if (node) fragment.appendChild(node);
+        }
+        if (!fragment.childNodes.length) return;
+        target.replaceChildren(fragment);
+    };
+
+    // Render the compact player-fit lanes from the managed profile.
+    const renderLandingDiscoveryLanes_ = (lanesRaw) => {
+        replaceLandingProfileList_("landingDiscoveryLanes", lanesRaw, (laneRaw, index) => {
+            const lane = isPlainObject_(laneRaw) ? laneRaw : {};
+            const label = toStr(lane.label).trim();
+            const value = toStr(lane.value).trim();
+            if (!label && !value) return null;
+            const article = document.createElement("article");
+            article.className = "landing-fit-lane";
+            article.setAttribute("role", "listitem");
+            const number = document.createElement("span");
+            number.textContent = String(index + 1).padStart(2, "0");
+            const strong = document.createElement("strong");
+            strong.textContent = label;
+            const body = document.createElement("p");
+            body.textContent = value;
+            article.append(number, strong, body);
+            return article;
+        });
+    };
+
+    // Render every configured journey step so profile entries are never silently discarded.
+    const renderLandingJourneySteps_ = (stepsRaw) => {
+        replaceLandingProfileList_("landingJourneySteps", stepsRaw, (stepRaw, index) => {
+            const step = isPlainObject_(stepRaw) ? stepRaw : {};
+            const article = document.createElement("article");
+            article.className = "landing-square-step" + (index === 0 ? " is-active" : "");
+            article.setAttribute("data-landing-square-step", String(index));
+            const label = document.createElement("p");
+            label.className = "landing-square-step__label";
+            label.textContent = toStr(step.label).trim() || String(index + 1).padStart(2, "0");
+            const title = document.createElement("h4");
+            title.textContent = toStr(step.title).trim();
+            const body = document.createElement("p");
+            body.textContent = toStr(step.body).trim();
+            article.append(label, title, body);
+            return article;
+        });
+        landingSquareStoryActiveStep = -1;
+    };
+
+    // Render the configured supporting facts that are not already carried by the visual.
+    const renderLandingHighlightList_ = (targetIdRaw, highlightsRaw) => {
+        const highlights = Array.isArray(highlightsRaw) ? highlightsRaw : [];
+        replaceLandingProfileList_(targetIdRaw, highlights, (highlightRaw) => {
+            const highlight = isPlainObject_(highlightRaw) ? highlightRaw : {};
+            const labelText = toStr(highlight.label).trim();
+            const valueText = toStr(highlight.value).trim();
+            if (!labelText && !valueText) return null;
+            const item = document.createElement("li");
+            const label = document.createElement("span");
+            label.textContent = labelText;
+            const value = document.createElement("strong");
+            value.textContent = valueText;
+            item.append(label, value);
+            return item;
+        });
+    };
+
+    // Render managed community extras directly into the visual tokens.
+    const renderLandingExtrasVisual_ = (highlightsRaw) => {
+        const modifiers = ["pass", "fc", "event"];
+        const highlights = Array.isArray(highlightsRaw) ? highlightsRaw : [];
+        replaceLandingProfileList_("landingExtrasVisual", highlights, (highlightRaw, index) => {
+            const highlight = isPlainObject_(highlightRaw) ? highlightRaw : {};
+            const labelText = toStr(highlight.label).trim();
+            const valueText = toStr(highlight.value).trim();
+            if (!labelText && !valueText) return null;
+            const token = document.createElement("span");
+            token.className = "landing-extra-token landing-extra-token--" + (modifiers[index] || "event");
+            const label = document.createElement("b");
+            label.textContent = labelText;
+            token.append(label, document.createTextNode(valueText));
+            return token;
+        });
+        const visual = $("#landingExtrasVisual");
+        if (visual) {
+            visual.classList.toggle("is-dense", highlights.length > 3);
+            visual.setAttribute("aria-label", highlights.map((itemRaw) => {
+                const item = isPlainObject_(itemRaw) ? itemRaw : {};
+                return [toStr(item.label).trim(), toStr(item.value).trim()].filter(Boolean).join(" ");
+            }).filter(Boolean).join(", "));
+        }
+    };
+
+    // Render the managed progression path as one visual sequence.
+    const renderLandingProgressVisual_ = (pathRaw) => {
+        const target = $("#landingProgressVisual");
+        const path = Array.isArray(pathRaw) ? pathRaw.map((value) => toStr(value).trim()).filter(Boolean) : [];
+        if (!target || !path.length) return;
+        const fragment = document.createDocumentFragment();
+        const modifiers = ["one", "two", "three"];
+        for (let i = 0; i < path.length; i++) {
+            const node = document.createElement("span");
+            node.className = "landing-progress-node landing-progress-node--" + (modifiers[i] || "three");
+            const number = document.createElement("b");
+            number.textContent = String(i + 1).padStart(2, "0");
+            node.append(number, document.createTextNode(path[i]));
+            fragment.appendChild(node);
+        }
+        const line = document.createElement("i");
+        line.className = "landing-progress-path";
+        fragment.appendChild(line);
+        target.replaceChildren(fragment);
+        target.classList.toggle("is-dense", path.length > 3);
+        target.setAttribute("aria-label", path.join(", "));
+    };
+
     // Apply resolved public profile copy to static DOM content.
     const applyLandingProfileCopy_ = (profileRaw) => {
         const profile = isPlainObject_(profileRaw) ? profileRaw : PUBLIC_PROFILE_DEFAULTS;
         const brand = isPlainObject_(profile.brand) ? profile.brand : {};
         const nav = isPlainObject_(profile.nav) ? profile.nav : {};
         const hero = isPlainObject_(profile.hero) ? profile.hero : {};
+        const discovery = isPlainObject_(profile.discovery) ? profile.discovery : {};
+        const discoveryLanes = Array.isArray(discovery.lanes) ? discovery.lanes : [];
         const journey = isPlainObject_(profile.journey) ? profile.journey : {};
         const journeySteps = Array.isArray(journey.steps) ? journey.steps : [];
         const family = isPlainObject_(profile.family) ? profile.family : {};
@@ -529,11 +729,13 @@
         const warHighlights = Array.isArray(war.highlights) ? war.highlights : [];
         const cwl = isPlainObject_(profile.cwl) ? profile.cwl : {};
         const cwlHighlights = Array.isArray(cwl.highlights) ? cwl.highlights : [];
+        const extras = isPlainObject_(profile.extras) ? profile.extras : {};
+        const extrasHighlights = Array.isArray(extras.highlights) ? extras.highlights : [];
         const network = isPlainObject_(profile.network) ? profile.network : {};
+        const networkPath = Array.isArray(network.path) ? network.path : [];
         const networkHighlights = Array.isArray(network.highlights) ? network.highlights : [];
         const proof = isPlainObject_(profile.proof) ? profile.proof : {};
         const finalCta = isPlainObject_(profile.finalCta) ? profile.finalCta : {};
-        const finalSteps = Array.isArray(finalCta.steps) ? finalCta.steps : [];
         const media = isPlainObject_(profile.media) ? profile.media : {};
 
         setElementTextIfPresent_("publicBrandEyebrow", brand.eyebrow);
@@ -548,22 +750,15 @@
         setElementTextIfPresent_("landingHeroBody", hero.body);
         setElementTextIfPresent_("landingHeroDiscordCta", hero.primaryCtaLabel);
         setElementTextIfPresent_("landingHeroRostersCta", hero.secondaryCtaLabel);
-        setElementTextIfPresent_("landingRouteDiscordLabel", nav.discordLabel || hero.primaryCtaLabel);
-        setElementTextIfPresent_("landingRouteMatchLabel", journeySteps[1] && journeySteps[1].title);
-        setElementTextIfPresent_("landingRouteWarLabel", war.eyebrow);
-        setElementTextIfPresent_("landingRouteCwlLabel", cwl.eyebrow);
+
+        setElementTextIfPresent_("landingDiscoveryEyebrow", discovery.eyebrow);
+        setElementTextIfPresent_("landingDiscoveryTitle", discovery.title);
+        setElementTextIfPresent_("landingDiscoveryBody", discovery.body);
+        renderLandingDiscoveryLanes_(discoveryLanes);
 
         setElementTextIfPresent_("landingJourneyEyebrow", journey.eyebrow);
         setElementTextIfPresent_("landingJourneyTitle", journey.title);
-        setElementTextIfPresent_("landingJourneyStep1Label", journeySteps[0] && journeySteps[0].label);
-        setElementTextIfPresent_("landingJourneyStep1Title", journeySteps[0] && journeySteps[0].title);
-        setElementTextIfPresent_("landingJourneyStep1Body", journeySteps[0] && journeySteps[0].body);
-        setElementTextIfPresent_("landingJourneyStep2Label", journeySteps[1] && journeySteps[1].label);
-        setElementTextIfPresent_("landingJourneyStep2Title", journeySteps[1] && journeySteps[1].title);
-        setElementTextIfPresent_("landingJourneyStep2Body", journeySteps[1] && journeySteps[1].body);
-        setElementTextIfPresent_("landingJourneyStep3Label", journeySteps[2] && journeySteps[2].label);
-        setElementTextIfPresent_("landingJourneyStep3Title", journeySteps[2] && journeySteps[2].title);
-        setElementTextIfPresent_("landingJourneyStep3Body", journeySteps[2] && journeySteps[2].body);
+        renderLandingJourneySteps_(journeySteps);
 
         setElementTextIfPresent_("landingFamilyEyebrow", family.eyebrow);
         setElementTextIfPresent_("landingFamilyTitle", family.title);
@@ -571,40 +766,26 @@
         setElementTextIfPresent_("landingWarEyebrow", war.eyebrow);
         setElementTextIfPresent_("landingWarTitle", war.title);
         setElementTextIfPresent_("landingWarBody", war.body);
-        setElementTextIfPresent_("landingWarChip1Label", warHighlights[0] && warHighlights[0].label);
-        setElementTextIfPresent_("landingWarChip1Value", warHighlights[0] && warHighlights[0].value);
-        setElementTextIfPresent_("landingWarChip2Label", warHighlights[1] && warHighlights[1].label);
-        setElementTextIfPresent_("landingWarChip2Value", warHighlights[1] && warHighlights[1].value);
+        renderLandingHighlightList_("landingWarHighlights", warHighlights);
 
         setElementTextIfPresent_("landingCwlEyebrow", cwl.eyebrow);
         setElementTextIfPresent_("landingCwlTitle", cwl.title);
-        setElementTextIfPresent_("landingCwlBody", cwl.body);
-        setElementTextIfPresent_("landingCwlChip1Label", cwlHighlights[0] && cwlHighlights[0].label);
-        setElementTextIfPresent_("landingCwlChip1Value", cwlHighlights[0] && cwlHighlights[0].value);
-        setElementTextIfPresent_("landingCwlChip2Label", cwlHighlights[1] && cwlHighlights[1].label);
-        setElementTextIfPresent_("landingCwlChip2Value", cwlHighlights[1] && cwlHighlights[1].value);
-        setElementTextIfPresent_("landingCwlChip3Label", cwlHighlights[2] && cwlHighlights[2].label);
-        setElementTextIfPresent_("landingCwlChip3Value", cwlHighlights[2] && cwlHighlights[2].value);
+        renderLandingHighlightList_("landingCwlHighlights", cwlHighlights);
+
+        setElementTextIfPresent_("landingExtrasEyebrow", extras.eyebrow);
+        setElementTextIfPresent_("landingExtrasTitle", extras.title);
+        renderLandingExtrasVisual_(extrasHighlights);
 
         setElementTextIfPresent_("landingNetworkEyebrow", network.eyebrow);
         setElementTextIfPresent_("landingNetworkTitle", network.title);
-        setElementTextIfPresent_("landingNetworkBody", network.body);
-        setElementTextIfPresent_("landingNetworkChip1Label", networkHighlights[0] && networkHighlights[0].label);
-        setElementTextIfPresent_("landingNetworkChip1Value", networkHighlights[0] && networkHighlights[0].value);
-        setElementTextIfPresent_("landingNetworkChip2Label", networkHighlights[1] && networkHighlights[1].label);
-        setElementTextIfPresent_("landingNetworkChip2Value", networkHighlights[1] && networkHighlights[1].value);
-        setElementTextIfPresent_("landingNetworkChip3Label", networkHighlights[2] && networkHighlights[2].label);
-        setElementTextIfPresent_("landingNetworkChip3Value", networkHighlights[2] && networkHighlights[2].value);
+        renderLandingProgressVisual_(networkPath);
+        renderLandingHighlightList_("landingNetworkHighlights", networkHighlights);
 
         setElementTextIfPresent_("landingProofEyebrow", proof.eyebrow);
         setElementTextIfPresent_("landingProofTitle", proof.title);
-        setElementTextIfPresent_("landingProofBody", proof.body);
 
         setElementTextIfPresent_("landingFinalEyebrow", finalCta.eyebrow);
         setElementTextIfPresent_("landingFinalTitle", finalCta.title);
-        setElementTextIfPresent_("landingFinalStep1", finalSteps[0]);
-        setElementTextIfPresent_("landingFinalStep2", finalSteps[1]);
-        setElementTextIfPresent_("landingFinalStep3", finalSteps[2]);
         setElementTextIfPresent_("landingBottomDiscordCta", finalCta.primaryCtaLabel);
         setElementTextIfPresent_("landingBottomLeaderboardCta", finalCta.secondaryCtaLabel);
 
@@ -1006,13 +1187,6 @@
         const num = Number(value);
         if (!Number.isFinite(num)) return 0;
         return Math.max(0, Math.min(1, num));
-    };
-
-    // Handle clamp signed unit.
-    const clampSignedUnit = (value) => {
-        const num = Number(value);
-        if (!Number.isFinite(num)) return 0;
-        return Math.max(-1, Math.min(1, num));
     };
 
     // Format a number with the shared locale formatter.
@@ -7761,6 +7935,11 @@
     // Ensure landing effects active.
     const ensureLandingEffectsActive = () => {
         bindLandingScrollEffects();
+        bindLandingMediaVisibility_();
+        const squareSlot = $("#landingSquareSlot");
+        if (landingSquareMediaPendingOptions && isLandingMediaSlotNearViewport_(squareSlot, 600)) {
+            loadPendingLandingSquareMedia_();
+        }
         queueLandingScrollEffectsFrame();
     };
 
@@ -7775,9 +7954,8 @@
         if (shell) shell.setAttribute("data-active-view", activeView);
         if (activeView === PUBLIC_VIEW_VALUES.landing) {
             ensureLandingEffectsActive();
-        } else if (typeof document !== "undefined" && document.documentElement) {
-            document.documentElement.style.setProperty("--landing-scroll-progress", "0");
         }
+        syncLandingMediaPlayback_();
     };
 
     // Normalize landing asset path.
@@ -7798,6 +7976,94 @@
         if (/\.png$/i.test(assetPath)) return "image/png";
         if (/\.jpe?g$/i.test(assetPath)) return "image/jpeg";
         return "";
+    };
+
+    // Return whether landing motion should be minimized for this visitor.
+    const prefersReducedLandingMotion_ = () => {
+        if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+        try {
+            return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        } catch (err) {
+            return false;
+        }
+    };
+
+    // Treat tiny one-frame WebM fallbacks as posters instead of looping video work.
+    const isLandingVideoPoster_ = (videoRaw) => {
+        const duration = Number(videoRaw && videoRaw.duration);
+        return Number.isFinite(duration) && duration > 0 && duration <= 0.15;
+    };
+
+    // Return whether a media slot is in or close to the visible viewport.
+    const isLandingMediaSlotNearViewport_ = (slotRaw, marginRaw) => {
+        const slot = slotRaw && typeof slotRaw.getBoundingClientRect === "function" ? slotRaw : null;
+        if (!slot || typeof window === "undefined") return true;
+        const margin = Math.max(0, Number(marginRaw) || 0);
+        const rect = slot.getBoundingClientRect();
+        const viewportHeight = Math.max(1, Number(window.innerHeight) || 1);
+        const viewportWidth = Math.max(1, Number(window.innerWidth) || 1);
+        return rect.bottom >= -margin
+            && rect.top <= viewportHeight + margin
+            && rect.right >= -margin
+            && rect.left <= viewportWidth + margin;
+    };
+
+    // Track each landing media slot independently so off-screen animation does not consume battery or decoding work.
+    const bindLandingMediaVisibility_ = () => {
+        if (typeof window === "undefined" || typeof document === "undefined") return;
+        const slots = [$("#landingBannerSlot"), $("#landingSquareSlot")].filter(Boolean);
+        for (let i = 0; i < slots.length; i++) {
+            slots[i].dataset.landingMediaInView = isLandingMediaSlotNearViewport_(slots[i], 160) ? "true" : "false";
+        }
+        if (landingMediaVisibilityObserver || typeof window.IntersectionObserver !== "function") return;
+        landingMediaVisibilityObserver = new window.IntersectionObserver((entries) => {
+            for (let i = 0; i < entries.length; i++) {
+                const entry = entries[i];
+                if (!entry || !entry.target) continue;
+                entry.target.dataset.landingMediaInView = entry.isIntersecting ? "true" : "false";
+            }
+            syncLandingMediaPlayback_();
+        }, { root: null, rootMargin: "160px 0px", threshold: 0.01 });
+        for (let i = 0; i < slots.length; i++) landingMediaVisibilityObserver.observe(slots[i]);
+    };
+
+    // Pause landing media whenever its view is hidden, far off-screen, or motion has been reduced.
+    const syncLandingMediaPlayback_ = () => {
+        if (typeof document === "undefined") return;
+        const landingRoot = $("#publicViewLanding");
+        if (!landingRoot) return;
+        const canPlayLanding = !prefersReducedLandingMotion_()
+            && document.visibilityState !== "hidden"
+            && !landingRoot.classList.contains("hidden");
+        const videos = landingRoot.querySelectorAll("video");
+        for (let i = 0; i < videos.length; i++) {
+            const video = videos[i];
+            const slot = typeof video.closest === "function" ? video.closest(".landing-media-slot") : null;
+            const slotInView = !slot || slot.dataset.landingMediaInView !== "false";
+            if (!canPlayLanding || !slotInView || isLandingVideoPoster_(video)) {
+                try { video.pause(); } catch (err) { }
+                continue;
+            }
+            const playPromise = video.play();
+            if (playPromise && typeof playPromise.catch === "function") playPromise.catch(() => { });
+        }
+
+        const iframes = landingRoot.querySelectorAll("iframe.landing-media-slot__media-item--iframe");
+        for (let i = 0; i < iframes.length; i++) {
+            const iframe = iframes[i];
+            const slot = typeof iframe.closest === "function" ? iframe.closest(".landing-media-slot") : null;
+            const slotInView = !slot || slot.dataset.landingMediaInView !== "false";
+            const shouldRunFrame = canPlayLanding && slotInView;
+            const currentSource = toStr(iframe.getAttribute("src")).trim();
+            const resumeSource = toStr(iframe.dataset.landingResumeSource).trim();
+            if (!shouldRunFrame && currentSource && currentSource !== "about:blank") {
+                iframe.dataset.landingResumeSource = currentSource;
+                iframe.setAttribute("src", "about:blank");
+            } else if (shouldRunFrame && resumeSource) {
+                iframe.removeAttribute("data-landing-resume-source");
+                iframe.setAttribute("src", resumeSource);
+            }
+        }
     };
 
     // Get landing media load token.
@@ -7864,6 +8130,8 @@
         host.dataset.loadedSource = toStr(sourceKey).trim();
         slot.classList.remove("is-loading");
         slot.classList.remove("is-placeholder");
+        bindLandingMediaVisibility_();
+        syncLandingMediaPlayback_();
     };
 
     // Normalize landing fallback candidates.
@@ -8010,10 +8278,11 @@
 
             const video = document.createElement("video");
             video.className = "landing-media-slot__media-item landing-media-slot__media-item--video";
-            video.autoplay = true;
+            const reduceMotion = prefersReducedLandingMotion_();
+            video.autoplay = !reduceMotion;
             video.muted = true;
             video.defaultMuted = true;
-            video.loop = true;
+            video.loop = !reduceMotion;
             video.playsInline = true;
             video.preload = "metadata";
             video.controls = false;
@@ -8048,9 +8317,14 @@
                     resolve(false);
                     return;
                 }
-                const playPromise = video.play();
-                if (playPromise && typeof playPromise.catch === "function") {
-                    playPromise.catch(() => { });
+                if (isLandingVideoPoster_(video)) {
+                    video.loop = false;
+                    try { video.pause(); } catch (err) { }
+                } else if (!prefersReducedLandingMotion_()) {
+                    const playPromise = video.play();
+                    if (playPromise && typeof playPromise.catch === "function") {
+                        playPromise.catch(() => { });
+                    }
                 }
                 showLandingMediaElement(slot, host, video, "remote-video:" + mediaUrl);
                 resolve(true);
@@ -8081,6 +8355,7 @@
             );
             if (loadedVideo) return true;
         }
+        if (prefersReducedLandingMotion_()) return false;
         return loadLandingRemoteIframe(slotId, loadToken, slot, host, remoteUrl, mediaLabelRaw);
     };
 
@@ -8092,10 +8367,11 @@
         if (mimeType.indexOf("video/") === 0) {
             const video = document.createElement("video");
             video.className = "landing-media-slot__media-item landing-media-slot__media-item--video";
-            video.autoplay = true;
+            const reduceMotion = prefersReducedLandingMotion_();
+            video.autoplay = !reduceMotion;
             video.muted = true;
             video.defaultMuted = true;
-            video.loop = true;
+            video.loop = !reduceMotion;
             video.playsInline = true;
             video.preload = "metadata";
             video.controls = false;
@@ -8158,7 +8434,10 @@
                     resolve(false);
                     return;
                 }
-                if (candidate.kind === "video" && typeof node.play === "function") {
+                if (candidate.kind === "video" && isLandingVideoPoster_(node)) {
+                    node.loop = false;
+                    try { node.pause(); } catch (err) { }
+                } else if (candidate.kind === "video" && typeof node.play === "function" && !prefersReducedLandingMotion_()) {
                     const playPromise = node.play();
                     if (playPromise && typeof playPromise.catch === "function") {
                         playPromise.catch(() => { });
@@ -8200,7 +8479,10 @@
 
         if (source.kind === "url") {
             const loadedSource = toStr(host.dataset.loadedSource).trim();
-            if (loadedSource === ("remote:" + source.value) && !slot.classList.contains("is-placeholder")) {
+            const directVideoUrl = getCloudinaryDirectVideoUrl(source.value);
+            const sourceIsCurrent = loadedSource === ("remote:" + source.value)
+                || (!!directVideoUrl && loadedSource === ("remote-video:" + directVideoUrl));
+            if (sourceIsCurrent && !slot.classList.contains("is-placeholder")) {
                 slot.classList.remove("is-loading");
                 return;
             }
@@ -8237,6 +8519,43 @@
         })().catch(() => {
             finishWithPlaceholder();
         });
+    };
+
+    // Complete the deferred square-media request once its journey is close enough to matter.
+    const loadPendingLandingSquareMedia_ = () => {
+        const options = landingSquareMediaPendingOptions;
+        if (!options) return;
+        landingSquareMediaPendingOptions = null;
+        if (landingSquareMediaLoadObserver) {
+            landingSquareMediaLoadObserver.disconnect();
+            landingSquareMediaLoadObserver = null;
+        }
+        setLandingMediaSlotSource(options);
+    };
+
+    // Keep the below-fold square media as a lightweight placeholder until the journey approaches the viewport.
+    const scheduleLandingSquareMediaLoad_ = (optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const slot = $("#landingSquareSlot");
+        landingSquareMediaPendingOptions = options;
+        if (!slot || typeof window === "undefined" || typeof window.IntersectionObserver !== "function") {
+            loadPendingLandingSquareMedia_();
+            return;
+        }
+        if (getEffectivePublicView() === PUBLIC_VIEW_VALUES.landing && isLandingMediaSlotNearViewport_(slot, 600)) {
+            loadPendingLandingSquareMedia_();
+            return;
+        }
+        if (landingSquareMediaLoadObserver) landingSquareMediaLoadObserver.disconnect();
+        landingSquareMediaLoadObserver = new window.IntersectionObserver((entries) => {
+            for (let i = 0; i < entries.length; i++) {
+                if (entries[i] && entries[i].isIntersecting) {
+                    loadPendingLandingSquareMedia_();
+                    return;
+                }
+            }
+        }, { root: null, rootMargin: "600px 0px", threshold: 0.01 });
+        landingSquareMediaLoadObserver.observe(slot);
     };
 
     // Handle count unique tags across active roster roles.
@@ -8346,53 +8665,24 @@
             const isActive = i === stepIndex;
             node.classList.toggle("is-active", isActive);
             node.setAttribute("aria-current", isActive ? "true" : "false");
+            if (isActive) node.removeAttribute("aria-hidden");
+            else node.setAttribute("aria-hidden", "true");
         }
     };
 
-    // Return whether compact landing journey layout is active.
-    const isLandingCompactJourneyLayout_ = () => {
-        if (typeof window === "undefined" || !window) return false;
-        if (typeof window.matchMedia === "function") {
-            try {
-                return window.matchMedia(LANDING_COMPACT_LAYOUT_QUERY).matches;
-            } catch (err) { }
-        }
+    // Pin scroll stories only when the viewport has enough vertical room to keep them usable.
+    const canUseLandingPinnedStories_ = () => {
+        if (typeof window === "undefined") return false;
         const width = Number(window.innerWidth) || 0;
         const height = Number(window.innerHeight) || 0;
-        return width <= 820 || (height <= 520 && width <= 940);
-    };
-
-    // Resolve the active compact journey card from the cards' viewport positions.
-    const resolveLandingCompactSquareStoryStep = (storyRoot, viewportHeightRaw) => {
-        const story = storyRoot || $("#publicViewLanding [data-landing-square-story]");
-        if (!story) return -1;
-        const steps = Array.prototype.slice.call(story.querySelectorAll("[data-landing-square-step]"));
-        if (!steps.length) return -1;
-        const stepsWrap = story.querySelector(".landing-shell-map__steps");
-        if (!stepsWrap) return -1;
-
-        const viewportHeight = Math.max(1, Number(viewportHeightRaw) || 1);
-        const wrapRect = stepsWrap.getBoundingClientRect();
-        const isStepsZoneVisible = wrapRect.top < viewportHeight * 0.88 && wrapRect.bottom > viewportHeight * 0.12;
-        if (!isStepsZoneVisible) {
-            if (wrapRect.top >= viewportHeight * 0.88) return 0;
-            if (wrapRect.bottom <= viewportHeight * 0.12) return steps.length - 1;
-            return -1;
+        if (typeof window.matchMedia !== "function") return height >= (width <= 820 ? 760 : 700);
+        try {
+            return width <= 820
+                ? window.matchMedia("(min-height: 760px)").matches
+                : window.matchMedia("(min-height: 700px)").matches;
+        } catch (err) {
+            return height >= (width <= 820 ? 760 : 700);
         }
-
-        const targetY = viewportHeight * 0.52;
-        let bestIndex = 0;
-        let bestDistance = Infinity;
-        for (let i = 0; i < steps.length; i++) {
-            const rect = steps[i].getBoundingClientRect();
-            const centerY = rect.top + (rect.height * 0.5);
-            const distance = Math.abs(centerY - targetY);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestIndex = i;
-            }
-        }
-        return bestIndex;
     };
 
     // Apply landing square story effects.
@@ -8409,65 +8699,128 @@
         }
 
         if (reduceMotion) {
+            story.classList.add("is-static");
             story.style.setProperty("--landing-square-progress", "0");
             setLandingSquareStoryStep(story, 0);
+            const staticSteps = story.querySelectorAll("[data-landing-square-step]");
+            for (let i = 0; i < staticSteps.length; i++) staticSteps[i].removeAttribute("aria-hidden");
             return;
         }
 
+        story.classList.remove("is-static");
+
         const rect = story.getBoundingClientRect();
-        const scrollRange = Math.max(1, rect.height - (viewportHeight * 0.44));
-        const rawProgress = clamp01(((viewportHeight * 0.38) - rect.top) / scrollRange);
+        const scrollRange = Math.max(1, rect.height - (viewportHeight * 0.78));
+        const rawProgress = clamp01(((viewportHeight * 0.16) - rect.top) / scrollRange);
         const easedProgress = rawProgress < 0.5
             ? (2 * rawProgress * rawProgress)
             : (1 - (Math.pow((-2 * rawProgress) + 2, 2) / 2));
         story.style.setProperty("--landing-square-progress", easedProgress.toFixed(4));
 
-        let stepIndex = 0;
-        if (rawProgress >= 0.9) stepIndex = 2;
-        else if (rawProgress >= 0.66) stepIndex = 1;
-        if (isLandingCompactJourneyLayout_()) {
-            const compactStepIndex = resolveLandingCompactSquareStoryStep(story, viewportHeight);
-            if (compactStepIndex >= 0) stepIndex = compactStepIndex;
-        }
+        const steps = story.querySelectorAll("[data-landing-square-step]");
+        const stepIndex = Math.min(steps.length - 1, Math.floor(rawProgress * steps.length));
         setLandingSquareStoryStep(story, stepIndex);
     };
 
-    // Refresh landing reveal targets.
-    const refreshLandingRevealTargets = () => {
-        const landingRoot = $("#publicViewLanding");
-        if (!landingRoot) return;
-        const revealTargets = Array.prototype.slice.call(landingRoot.querySelectorAll("[data-landing-reveal]"));
-        if (!revealTargets.length) return;
+    // Set one active chapter in the four-scene TURTLE rhythm story.
+    const setLandingRhythmStoryStep_ = (storyRoot, stepIndexRaw, exposeAllRaw) => {
+        const story = storyRoot || $("#publicViewLanding [data-landing-rhythm-story]");
+        if (!story) return;
+        const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
+        if (!beats.length) return;
+        const maxStep = beats.length - 1;
+        const stepIndex = Math.max(0, Math.min(maxStep, Number(stepIndexRaw) || 0));
+        const exposeAll = !!exposeAllRaw;
+        if (landingRhythmStoryActiveStep === stepIndex && !exposeAll) return;
+        landingRhythmStoryActiveStep = stepIndex;
+        story.setAttribute("data-active-scene", String(stepIndex));
 
-        if (typeof window === "undefined" || !window.IntersectionObserver) {
-            for (let i = 0; i < revealTargets.length; i++) {
-                revealTargets[i].classList.add("is-visible");
+        for (let i = 0; i < beats.length; i++) {
+            const isActive = i === stepIndex;
+            beats[i].classList.toggle("is-active", isActive);
+            if (isActive || exposeAll) beats[i].removeAttribute("aria-hidden");
+            else beats[i].setAttribute("aria-hidden", "true");
+        }
+
+        const scenes = story.querySelectorAll("[data-landing-rhythm-scene]");
+        for (let i = 0; i < scenes.length; i++) {
+            const isActive = i === stepIndex;
+            scenes[i].classList.toggle("is-active", isActive);
+            if (isActive || exposeAll) scenes[i].removeAttribute("aria-hidden");
+            else scenes[i].setAttribute("aria-hidden", "true");
+        }
+
+        const navItems = story.querySelectorAll("[data-landing-rhythm-nav]");
+        for (let i = 0; i < navItems.length; i++) {
+            const isActive = i === stepIndex;
+            navItems[i].classList.toggle("is-active", isActive);
+            navItems[i].setAttribute("aria-current", isActive ? "step" : "false");
+        }
+    };
+
+    // Apply local, evenly divided progress to the TURTLE rhythm story.
+    const applyLandingRhythmStoryEffects_ = (landingRoot, optionsRaw) => {
+        const root = landingRoot || $("#publicViewLanding");
+        if (!root) return;
+        const story = root.querySelector("[data-landing-rhythm-story]");
+        if (!story) {
+            landingRhythmStoryActiveStep = -1;
+            return;
+        }
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const reduceMotion = !!options.reduceMotion;
+        const viewportHeight = Math.max(1, Number(options.viewportHeight) || 1);
+        const factLists = story.querySelectorAll(".landing-rhythm-facts");
+        let denseProfile = false;
+        for (let i = 0; i < factLists.length; i++) {
+            if (factLists[i].children.length > 4) {
+                denseProfile = true;
+                break;
             }
+        }
+        if (story.querySelectorAll(".landing-extra-token").length > 3
+            || story.querySelectorAll(".landing-progress-node").length > 3) {
+            denseProfile = true;
+        }
+        const exposeStatic = reduceMotion || denseProfile;
+        story.classList.toggle("is-static", exposeStatic);
+        if (exposeStatic) {
+            story.style.setProperty("--landing-rhythm-progress", "0");
+            story.style.setProperty("--landing-rhythm-scene-progress", "0");
+            setLandingRhythmStoryStep_(story, 0, true);
             return;
         }
 
-        if (!landingRevealObserver) {
-            landingRevealObserver = new window.IntersectionObserver((entries) => {
-                for (let i = 0; i < entries.length; i++) {
-                    const entry = entries[i];
-                    if (!entry || !entry.target) continue;
-                    if (!entry.isIntersecting && entry.intersectionRatio <= 0) continue;
-                    entry.target.classList.add("is-visible");
-                    if (landingRevealObserver) landingRevealObserver.unobserve(entry.target);
-                }
-            }, {
-                threshold: 0.12,
-                rootMargin: "0px 0px -8% 0px",
-            });
-        }
+        const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
+        if (!beats.length) return;
+        const rect = story.getBoundingClientRect();
+        const scrollRange = Math.max(1, rect.height - (viewportHeight * 0.82));
+        const rawProgress = clamp01(((viewportHeight * 0.14) - rect.top) / scrollRange);
+        const scaledProgress = rawProgress * beats.length;
+        const stepIndex = Math.min(beats.length - 1, Math.floor(scaledProgress));
+        const sceneProgress = stepIndex === beats.length - 1 && rawProgress >= 1
+            ? 1
+            : clamp01(scaledProgress - stepIndex);
+        story.style.setProperty("--landing-rhythm-progress", rawProgress.toFixed(4));
+        story.style.setProperty("--landing-rhythm-scene-progress", sceneProgress.toFixed(4));
+        setLandingRhythmStoryStep_(story, stepIndex, false);
+    };
 
-        for (let i = 0; i < revealTargets.length; i++) {
-            const node = revealTargets[i];
-            if (node.classList.contains("is-visible")) continue;
-            if (node.getAttribute("data-landing-reveal-observed") === "1") continue;
-            node.setAttribute("data-landing-reveal-observed", "1");
-            landingRevealObserver.observe(node);
-        }
+    // Enable progressive motion styling without running a redundant reveal observer.
+    const refreshLandingRevealTargets = () => {
+        const landingRoot = $("#publicViewLanding");
+        if (!landingRoot || !document.documentElement) return;
+        document.documentElement.classList.add("landing-motion-ready");
+        const revealTargets = landingRoot.querySelectorAll("[data-landing-reveal]");
+        for (let i = 0; i < revealTargets.length; i++) revealTargets[i].classList.add("is-visible");
+    };
+
+    // Keep sticky scenes below the actual public header at every breakpoint.
+    const syncLandingStickyOffset_ = () => {
+        if (!document.documentElement) return;
+        const header = $(".public-header");
+        const height = header ? Math.ceil(header.getBoundingClientRect().height) : 56;
+        document.documentElement.style.setProperty("--landing-sticky-top", String(Math.max(48, height + 12)) + "px");
     };
 
     // Apply landing scroll effects frame.
@@ -8480,51 +8833,34 @@
 
         const landingRoot = $("#publicViewLanding");
         if (!landingRoot || landingRoot.classList.contains("hidden")) {
-            docEl.style.setProperty("--landing-scroll-progress", "0");
             landingSquareStoryActiveStep = -1;
+            landingRhythmStoryActiveStep = -1;
             return;
         }
 
         const reduceMotion = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const usePinnedStories = canUseLandingPinnedStories_();
+        const useStaticStories = reduceMotion || !usePinnedStories;
+        const viewportHeight = Math.max(window.innerHeight || 0, 1);
+        docEl.classList.toggle("landing-motion-reduced", reduceMotion);
         if (reduceMotion) {
-            docEl.style.setProperty("--landing-scroll-progress", "0");
-            const heroStatic = landingRoot.querySelector(".landing-hero");
-            if (heroStatic) heroStatic.style.setProperty("--landing-hero-depth", "0");
-            const staticTargets = landingRoot.querySelectorAll("[data-landing-reveal]");
-            for (let i = 0; i < staticTargets.length; i++) {
-                staticTargets[i].style.setProperty("--landing-depth", "0");
-            }
             applyLandingSquareStoryEffects(landingRoot, {
-                reduceMotion: true,
-                viewportHeight: 1,
+                reduceMotion: useStaticStories,
+                viewportHeight: viewportHeight,
+            });
+            applyLandingRhythmStoryEffects_(landingRoot, {
+                reduceMotion: useStaticStories,
+                viewportHeight: viewportHeight,
             });
             return;
         }
 
-        const viewportHeight = Math.max(window.innerHeight || 0, 1);
-        const scrollTop = Math.max(0, window.pageYOffset || window.scrollY || 0);
-        const maxScroll = Math.max(1, (docEl.scrollHeight || 1) - viewportHeight);
-        const progress = clamp01(scrollTop / maxScroll);
-        docEl.style.setProperty("--landing-scroll-progress", progress.toFixed(4));
-
-        const heroNode = landingRoot.querySelector(".landing-hero");
-        if (heroNode) {
-            const heroRect = heroNode.getBoundingClientRect();
-            const heroCenterOffset = ((heroRect.top + (heroRect.height * 0.5)) - (viewportHeight * 0.5)) / viewportHeight;
-            heroNode.style.setProperty("--landing-hero-depth", clampSignedUnit(heroCenterOffset).toFixed(4));
-        }
-
-        const revealTargets = landingRoot.querySelectorAll("[data-landing-reveal]");
-        for (let i = 0; i < revealTargets.length; i++) {
-            const node = revealTargets[i];
-            if (!node) continue;
-            const rect = node.getBoundingClientRect();
-            const centerOffset = ((rect.top + (rect.height * 0.5)) - (viewportHeight * 0.5)) / viewportHeight;
-            node.style.setProperty("--landing-depth", clampSignedUnit(centerOffset).toFixed(4));
-        }
-
         applyLandingSquareStoryEffects(landingRoot, {
-            reduceMotion: false,
+            reduceMotion: useStaticStories,
+            viewportHeight: viewportHeight,
+        });
+        applyLandingRhythmStoryEffects_(landingRoot, {
+            reduceMotion: useStaticStories,
             viewportHeight: viewportHeight,
         });
     };
@@ -8540,52 +8876,55 @@
     const bindLandingScrollEffects = () => {
         if (landingScrollEffectsBound || typeof window === "undefined") return;
         landingScrollEffectsBound = true;
+        refreshLandingRevealTargets();
+        syncLandingStickyOffset_();
         // Queue the next scheduled update.
         const queue = () => queueLandingScrollEffectsFrame();
         const queueAfterViewportChange = () => {
             landingSquareStoryActiveStep = -1;
+            landingRhythmStoryActiveStep = -1;
+            syncLandingStickyOffset_();
             queueLandingScrollEffectsFrame();
             window.setTimeout(queueLandingScrollEffectsFrame, 80);
             window.setTimeout(queueLandingScrollEffectsFrame, 260);
         };
-        const readViewportSignature = () => {
-            const visualViewport = window.visualViewport || null;
-            const width = Math.round(Number(window.innerWidth) || 0);
-            const height = Math.round(Number(window.innerHeight) || 0);
-            const visualWidth = visualViewport ? Math.round(Number(visualViewport.width) || 0) : 0;
-            const visualHeight = visualViewport ? Math.round(Number(visualViewport.height) || 0) : 0;
-            return [width, height, visualWidth, visualHeight, isLandingCompactJourneyLayout_() ? "compact" : "wide"].join("x");
-        };
-        let lastViewportSignature = readViewportSignature();
-        const queueIfViewportChanged = () => {
-            const nextViewportSignature = readViewportSignature();
-            if (nextViewportSignature === lastViewportSignature) return;
-            lastViewportSignature = nextViewportSignature;
-            queueAfterViewportChange();
-        };
         window.addEventListener("scroll", queue, { passive: true });
         window.addEventListener("resize", queueAfterViewportChange);
         window.addEventListener("orientationchange", queueAfterViewportChange);
+        document.addEventListener("visibilitychange", syncLandingMediaPlayback_);
         if (window.visualViewport && typeof window.visualViewport.addEventListener === "function") {
             window.visualViewport.addEventListener("resize", queueAfterViewportChange);
             window.visualViewport.addEventListener("scroll", queue, { passive: true });
         }
         if (typeof window.matchMedia === "function") {
             try {
-                const compactLayoutMedia = window.matchMedia(LANDING_COMPACT_LAYOUT_QUERY);
-                if (compactLayoutMedia && typeof compactLayoutMedia.addEventListener === "function") {
-                    compactLayoutMedia.addEventListener("change", queueAfterViewportChange);
-                } else if (compactLayoutMedia && typeof compactLayoutMedia.addListener === "function") {
-                    compactLayoutMedia.addListener(queueAfterViewportChange);
+                const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
+                const handleReducedMotionChange = () => {
+                    syncLandingMediaPlayback_();
+                    queueAfterViewportChange();
+                };
+                if (reducedMotionMedia && typeof reducedMotionMedia.addEventListener === "function") {
+                    reducedMotionMedia.addEventListener("change", handleReducedMotionChange);
+                } else if (reducedMotionMedia && typeof reducedMotionMedia.addListener === "function") {
+                    reducedMotionMedia.addListener(handleReducedMotionChange);
                 }
             } catch (err) { }
         }
-        window.setInterval(queueIfViewportChanged, 500);
+        const header = $(".public-header");
+        if (header && typeof window.ResizeObserver === "function") {
+            landingHeaderResizeObserver = new window.ResizeObserver(queueAfterViewportChange);
+            landingHeaderResizeObserver.observe(header);
+        }
         queueLandingScrollEffectsFrame();
     };
 
     // Set landing media slots to placeholder.
     const setLandingMediaSlotsToPlaceholder = () => {
+        landingSquareMediaPendingOptions = null;
+        if (landingSquareMediaLoadObserver) {
+            landingSquareMediaLoadObserver.disconnect();
+            landingSquareMediaLoadObserver = null;
+        }
         const bannerSlot = $("#landingBannerSlot");
         const bannerHost = $("#landingBannerMediaHost");
         const squareSlot = $("#landingSquareSlot");
@@ -8607,6 +8946,7 @@
             setLandingMediaSlotsToPlaceholder();
             return;
         }
+        bindLandingMediaVisibility_();
         setLandingMediaSlotSource({
             slotId: "landingBannerSlot",
             mediaHostId: "landingBannerMediaHost",
@@ -8614,7 +8954,7 @@
             mediaLabel: toStr(mediaProfile.bannerLabel).trim() || "Clan banner animation",
             fallbackCandidates: LANDING_MEDIA_FALLBACK_CANDIDATES.banner,
         });
-        setLandingMediaSlotSource({
+        scheduleLandingSquareMediaLoad_({
             slotId: "landingSquareSlot",
             mediaHostId: "landingSquareMediaHost",
             mediaUrl: config.squareMediaUrl,
