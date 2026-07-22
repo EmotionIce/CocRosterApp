@@ -122,8 +122,8 @@
     },
     war: {
       eyebrow: "War",
-      title: "Opt in. Use hits. Improve.",
-      body: "Organised wars without the noise.",
+      title: "Plan together. Finish both attacks.",
+      body: "Opt in when you can play. The clan helps before battle day.",
       highlights: [
         { label: "Rhythm", value: "Back-to-back Wars" },
         { label: "Help", value: "Planning support" },
@@ -132,7 +132,7 @@
     },
     cwl: {
       eyebrow: "CWL",
-      title: "Planned lineups. Fair rewards.",
+      title: "Every opted-in player gets a clear plan.",
       highlights: [
         { label: "Participating", value: "Open to everyone" },
         { label: "Rosters", value: "Organized on Discord" },
@@ -140,16 +140,16 @@
     },
     extras: {
       eyebrow: "Beyond attacks",
-      title: "The good stuff between wars.",
+      title: "The clan stays active between wars.",
       highlights: [
         { label: "Gold Pass", value: "Giveaways" },
         { label: "FC Hub", value: "Friendly challenges" },
-        { label: "Clan events", value: "Together" },
+        { label: "Clan events", value: "Clan-wide activities" },
       ],
     },
     network: {
       eyebrow: "Progression",
-      title: "Your results have somewhere to go.",
+      title: "Reliable attacks open stronger lineups.",
       path: [
         "Results tracked",
         "Reliability proven",
@@ -315,7 +315,7 @@
     {
       id: "war",
       label: "War",
-      description: "Main war section copy and highlights.",
+      description: "War chapter copy and supporting facts for the attack-plan visual.",
       fields: [
         { key: "war.eyebrow", source: "profile", type: "text", path: "war.eyebrow", label: "War eyebrow" },
         { key: "war.title", source: "profile", type: "textarea", path: "war.title", label: "War title" },
@@ -339,7 +339,7 @@
     {
       id: "cwl",
       label: "CWL",
-      description: "CWL section copy and highlight chips.",
+      description: "CWL chapter copy and supporting facts for the lineup plan.",
       fields: [
         { key: "cwl.eyebrow", source: "profile", type: "text", path: "cwl.eyebrow", label: "CWL eyebrow" },
         { key: "cwl.title", source: "profile", type: "textarea", path: "cwl.title", label: "CWL title" },
@@ -362,7 +362,7 @@
     {
       id: "extras",
       label: "Extras",
-      description: "Community rewards and events rendered directly as visual tokens.",
+      description: "Community rewards and events rendered along the between-wars timeline.",
       fields: [
         { key: "extras.eyebrow", source: "profile", type: "text", path: "extras.eyebrow", label: "Extras eyebrow" },
         { key: "extras.title", source: "profile", type: "textarea", path: "extras.title", label: "Extras title" },
@@ -371,8 +371,8 @@
           source: "profile",
           type: "repeater",
           path: "extras.highlights",
-          label: "Visual extras",
-          description: "Three compact tokens work best in the Home visual.",
+          label: "Activity timeline",
+          description: "Three short moments work best in the animated Home timeline.",
           itemType: "object",
           itemLabel: "Extra",
           defaultItem: { label: "", value: "" },
@@ -396,7 +396,7 @@
           type: "repeater",
           path: "network.path",
           label: "Progression path",
-          description: "Use three short stages for the animated route.",
+          description: "Use three short milestones for the member-record unlock path.",
           itemType: "string",
           itemLabel: "Stage",
           defaultItem: "",
@@ -698,6 +698,11 @@
     replaceExactText("hero", "body", "Join Discord. Share your #Tag. Join the Clan.");
     replaceExactText("journey", "title", "Join the clan that fits and progress within the clan family.");
     replaceExactText("network", "title", "Prove yourself and move up.");
+    replaceExactText("war", "title", "Opt in. Use hits. Improve.");
+    replaceExactText("war", "body", "Organised wars without the noise.");
+    replaceExactText("cwl", "title", "Planned lineups. Fair rewards.");
+    replaceExactText("extras", "title", "The good stuff between wars.");
+    replaceExactText("network", "title", "Your results have somewhere to go.");
     replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
     replaceExactText("finalCta", "eyebrow", "Ready");
     replaceExactText("finalCta", "title", "Enter the TURTLE-family.");

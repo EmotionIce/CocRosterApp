@@ -184,8 +184,8 @@
         },
         war: {
             eyebrow: "War",
-            title: "Opt in. Use hits. Improve.",
-            body: "Organised wars without the noise.",
+            title: "Plan together. Finish both attacks.",
+            body: "Opt in when you can play. The clan helps before battle day.",
             highlights: [
                 { label: "Rhythm", value: "Back-to-back Wars" },
                 { label: "Help", value: "Planning support" },
@@ -194,7 +194,7 @@
         },
         cwl: {
             eyebrow: "CWL",
-            title: "Planned lineups. Fair rewards.",
+            title: "Every opted-in player gets a clear plan.",
             highlights: [
                 { label: "Participating", value: "Open to everyone" },
                 { label: "Rosters", value: "Organized on Discord" },
@@ -202,16 +202,16 @@
         },
         extras: {
             eyebrow: "Beyond attacks",
-            title: "The good stuff between wars.",
+            title: "The clan stays active between wars.",
             highlights: [
                 { label: "Gold Pass", value: "Giveaways" },
                 { label: "FC Hub", value: "Friendly challenges" },
-                { label: "Clan events", value: "Together" },
+                { label: "Clan events", value: "Clan-wide activities" },
             ],
         },
         network: {
             eyebrow: "Progression",
-            title: "Your results have somewhere to go.",
+            title: "Reliable attacks open stronger lineups.",
             path: [
                 "Results tracked",
                 "Reliability proven",
@@ -463,6 +463,11 @@
         replaceExactText("hero", "body", "Join Discord. Share your #Tag. Join the Clan.");
         replaceExactText("journey", "title", "Join the clan that fits and progress within the clan family.");
         replaceExactText("network", "title", "Prove yourself and move up.");
+        replaceExactText("war", "title", "Opt in. Use hits. Improve.");
+        replaceExactText("war", "body", "Organised wars without the noise.");
+        replaceExactText("cwl", "title", "Planned lineups. Fair rewards.");
+        replaceExactText("extras", "title", "The good stuff between wars.");
+        replaceExactText("network", "title", "Your results have somewhere to go.");
         replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
         replaceExactText("finalCta", "eyebrow", "Ready");
         replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
@@ -675,15 +680,22 @@
             const valueText = toStr(highlight.value).trim();
             if (!labelText && !valueText) return null;
             const token = document.createElement("span");
-            token.className = "landing-extra-token landing-extra-token--" + (modifiers[index] || "event");
+            token.className = "landing-extra-event landing-extra-event--" + (modifiers[index] || "event");
+            token.setAttribute("role", "listitem");
+            const number = document.createElement("i");
+            number.textContent = String(index + 1).padStart(2, "0");
             const label = document.createElement("b");
             label.textContent = labelText;
-            token.append(label, document.createTextNode(valueText));
+            const value = document.createElement("em");
+            value.textContent = valueText;
+            token.append(number, label, value);
             return token;
         });
         const visual = $("#landingExtrasVisual");
         if (visual) {
             visual.classList.toggle("is-dense", highlights.length > 3);
+            const scene = visual.closest("[data-landing-rhythm-scene]");
+            if (scene) scene.classList.toggle("is-dense", highlights.length > 3);
             visual.setAttribute("aria-label", highlights.map((itemRaw) => {
                 const item = isPlainObject_(itemRaw) ? itemRaw : {};
                 return [toStr(item.label).trim(), toStr(item.value).trim()].filter(Boolean).join(" ");
@@ -703,14 +715,22 @@
             node.className = "landing-progress-node landing-progress-node--" + (modifiers[i] || "three");
             const number = document.createElement("b");
             number.textContent = String(i + 1).padStart(2, "0");
-            node.append(number, document.createTextNode(path[i]));
+            const label = document.createElement("em");
+            label.textContent = path[i];
+            const status = document.createElement("i");
+            status.textContent = i === path.length - 1 ? "UNLOCK" : "\u2713";
+            node.append(number, label, status);
             fragment.appendChild(node);
         }
-        const line = document.createElement("i");
+        const line = document.createElement("span");
         line.className = "landing-progress-path";
+        line.setAttribute("aria-hidden", "true");
+        line.appendChild(document.createElement("i"));
         fragment.appendChild(line);
         target.replaceChildren(fragment);
         target.classList.toggle("is-dense", path.length > 3);
+        const scene = target.closest("[data-landing-rhythm-scene]");
+        if (scene) scene.classList.toggle("is-dense", path.length > 3);
         target.setAttribute("aria-label", path.join(", "));
     };
 
@@ -8723,7 +8743,7 @@
     };
 
     // Set one active chapter in the four-scene TURTLE rhythm story.
-    const setLandingRhythmStoryStep_ = (storyRoot, stepIndexRaw, exposeAllRaw) => {
+    const setLandingRhythmStoryStep_ = (storyRoot, stepIndexRaw, exposeAllRaw, transitionProgressRaw) => {
         const story = storyRoot || $("#publicViewLanding [data-landing-rhythm-story]");
         if (!story) return;
         const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
@@ -8731,9 +8751,26 @@
         const maxStep = beats.length - 1;
         const stepIndex = Math.max(0, Math.min(maxStep, Number(stepIndexRaw) || 0));
         const exposeAll = !!exposeAllRaw;
-        if (landingRhythmStoryActiveStep === stepIndex && !exposeAll) return;
+        const transitionProgress = exposeAll ? 0 : clamp01(Number(transitionProgressRaw) || 0);
+        const nextStep = stepIndex < maxStep ? stepIndex + 1 : -1;
         landingRhythmStoryActiveStep = stepIndex;
         story.setAttribute("data-active-scene", String(stepIndex));
+
+        const chapters = story.querySelectorAll("[data-landing-rhythm-chapter]");
+        for (let i = 0; i < chapters.length; i++) {
+            const isActive = i === stepIndex;
+            const isEntering = i === nextStep && transitionProgress > 0;
+            chapters[i].classList.toggle("is-active", isActive);
+            chapters[i].classList.toggle("is-entering", isEntering);
+            chapters[i].style.setProperty("--landing-chapter-opacity", exposeAll
+                ? "1"
+                : (isActive ? String(1 - transitionProgress) : (isEntering ? String(transitionProgress) : "0")));
+            chapters[i].style.setProperty("--landing-chapter-progress", exposeAll || i < stepIndex ? "1" : (isActive
+                ? story.style.getPropertyValue("--landing-rhythm-scene-progress") || "0"
+                : "0"));
+            if (isActive || exposeAll) chapters[i].removeAttribute("aria-hidden");
+            else chapters[i].setAttribute("aria-hidden", "true");
+        }
 
         for (let i = 0; i < beats.length; i++) {
             const isActive = i === stepIndex;
@@ -8778,7 +8815,7 @@
                 break;
             }
         }
-        if (story.querySelectorAll(".landing-extra-token").length > 3
+        if (story.querySelectorAll(".landing-extra-event").length > 3
             || story.querySelectorAll(".landing-progress-node").length > 3) {
             denseProfile = true;
         }
@@ -8787,7 +8824,9 @@
         if (exposeStatic) {
             story.style.setProperty("--landing-rhythm-progress", "0");
             story.style.setProperty("--landing-rhythm-scene-progress", "0");
-            setLandingRhythmStoryStep_(story, 0, true);
+            story.style.setProperty("--landing-rhythm-track-progress", "0");
+            story.style.setProperty("--landing-rhythm-transition-progress", "0");
+            setLandingRhythmStoryStep_(story, 0, true, 0);
             return;
         }
 
@@ -8798,12 +8837,24 @@
         const rawProgress = clamp01(((viewportHeight * 0.14) - rect.top) / scrollRange);
         const scaledProgress = rawProgress * beats.length;
         const stepIndex = Math.min(beats.length - 1, Math.floor(scaledProgress));
-        const sceneProgress = stepIndex === beats.length - 1 && rawProgress >= 1
+        const chapterProgress = stepIndex === beats.length - 1 && rawProgress >= 1
             ? 1
             : clamp01(scaledProgress - stepIndex);
+        const transitionProgress = stepIndex < beats.length - 1
+            ? clamp01((chapterProgress - 0.72) / 0.28)
+            : 0;
+        const sceneProgress = stepIndex === beats.length - 1
+            ? chapterProgress
+            : clamp01(chapterProgress / 0.72);
+        const smoothTransition = transitionProgress * transitionProgress * (3 - (2 * transitionProgress));
+        const trackProgress = beats.length > 1
+            ? clamp01((stepIndex + smoothTransition) / (beats.length - 1))
+            : 0;
         story.style.setProperty("--landing-rhythm-progress", rawProgress.toFixed(4));
         story.style.setProperty("--landing-rhythm-scene-progress", sceneProgress.toFixed(4));
-        setLandingRhythmStoryStep_(story, stepIndex, false);
+        story.style.setProperty("--landing-rhythm-transition-progress", transitionProgress.toFixed(4));
+        story.style.setProperty("--landing-rhythm-track-progress", trackProgress.toFixed(4));
+        setLandingRhythmStoryStep_(story, stepIndex, false, transitionProgress);
     };
 
     // Enable progressive motion styling without running a redundant reveal observer.

@@ -6,6 +6,8 @@ const read = (path) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
 const indexHtml = read("../cloudflarePages/index.html");
 const clientCode = read("../cloudflarePages/client.js");
 const adminCode = read("../cloudflarePages/admin.js");
+const stylesCode = read("../cloudflarePages/styles.css");
+const memberJourneyStyles = stylesCode.slice(stylesCode.indexOf("/* Continuous TURTLE member journey"));
 const adminDefaults = adminCode.match(/const PUBLIC_PROFILE_EDITOR_DEFAULTS = \{[\s\S]*?\n  \};/)?.[0] || "";
 const robotsTxt = read("../cloudflarePages/robots.txt");
 const sitemapXml = read("../cloudflarePages/sitemap.xml");
@@ -65,17 +67,29 @@ test("landing selling points use visitor-visible scroll stories instead of crawl
   assert.match(indexHtml, /data-landing-rhythm-story/);
   assert.match(indexHtml, /data-landing-rhythm-beat="0"/);
   assert.match(indexHtml, /data-landing-rhythm-beat="3"/);
+  assert.match(indexHtml, /class="landing-rhythm__member"/);
+  assert.match(indexHtml, /class="landing-war-plan"/);
+  assert.match(indexHtml, /class="landing-cwl-assignments"/);
+  assert.match(indexHtml, /class="landing-extra-timeline"/);
+  assert.match(indexHtml, /class="landing-progress-route"/);
+  assert.match(clientCode, /--landing-rhythm-track-progress/);
+  assert.match(clientCode, /querySelectorAll\("\.landing-extra-event"\)\.length > 3/);
+  assert.match(memberJourneyStyles, /min-height:290svh/);
+  assert.match(memberJourneyStyles, /aspect-ratio:16 \/ 10/);
+  assert.match(memberJourneyStyles, /prefers-reduced-motion: reduce/);
   assert.doesNotMatch(indexHtml, /class="[^"]*(?:crawler|robot|seo-only|visually-hidden)[^"]*"/i);
   assert.doesNotMatch(indexHtml, /landing-escalation__act/);
+  assert.doesNotMatch(indexHtml, /landing-war-target|landing-cwl-board|landing-extra-token/);
 });
 
 test("crawlable landing fallbacks match the compact managed profile copy", () => {
   for (const phrase of [
     "One Discord. Every way to play.",
     "From #Tag to the right clan.",
-    "Planned lineups. Fair rewards.",
-    "The good stuff between wars.",
-    "Your results have somewhere to go.",
+    "Plan together. Finish both attacks.",
+    "Every opted-in player gets a clear plan.",
+    "The clan stays active between wars.",
+    "Reliable attacks open stronger lineups.",
     "Stay on Discord.",
     "Send your #Tag. We will find your TURTLE clan.",
   ]) {

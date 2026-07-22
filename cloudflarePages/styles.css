@@ -11274,3 +11274,988 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"]{
     transition:none !important;
   }
 }
+
+/* Continuous TURTLE member journey: every scroll state explains one real clan process. */
+.landing-rhythm{
+  --landing-rhythm-track-progress:0;
+  --landing-rhythm-transition-progress:0;
+}
+
+.landing-rhythm__stage{
+  display:grid;
+  grid-template-columns:1fr;
+  grid-template-areas:
+    "intro"
+    "chapters"
+    "journey";
+  grid-template-rows:auto 1fr auto;
+  gap:clamp(16px, 2.6vw, 30px);
+  padding:clamp(22px, 3.5vw, 44px);
+}
+
+.landing-rhythm__intro{
+  grid-area:intro;
+  min-width:0;
+}
+
+.landing-rhythm__intro h3{
+  min-width:0;
+  text-align:right;
+  text-wrap:balance;
+}
+
+.landing-rhythm__chapters{
+  grid-area:chapters;
+  min-width:0;
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:1px;
+  background:rgba(205,244,105,.15);
+}
+
+.landing-rhythm-chapter{
+  --landing-chapter-opacity:1;
+  --landing-chapter-progress:1;
+  min-width:0;
+  display:grid;
+  grid-template-columns:1fr;
+  align-content:start;
+  gap:18px;
+  padding:clamp(16px, 2.4vw, 26px);
+  background:#061015;
+  opacity:var(--landing-chapter-opacity);
+}
+
+.landing-rhythm-scene,
+html:not(.landing-motion-ready) .landing-rhythm-scene,
+.landing-rhythm.is-static .landing-rhythm-scene{
+  position:relative;
+  inset:auto;
+  z-index:1;
+  width:100%;
+  min-width:0;
+  aspect-ratio:16 / 10;
+  display:grid;
+  grid-template-rows:auto 1fr auto;
+  gap:12px;
+  padding:clamp(12px, 1.8vw, 18px);
+  border:1px solid rgba(205,244,105,.22);
+  clip-path:polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
+  background:
+    linear-gradient(135deg, rgba(205,244,105,.065), transparent 42%),
+    repeating-linear-gradient(0deg, rgba(255,255,255,.024) 0 1px, transparent 1px 20px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.024) 0 1px, transparent 1px 20px),
+    #050c11;
+  box-shadow:inset 0 0 44px rgba(0,0,0,.32);
+  overflow:hidden;
+  opacity:1;
+  visibility:visible;
+  transform:none;
+}
+
+.landing-rhythm-scene::before{
+  content:"";
+  position:absolute;
+  inset:7px;
+  z-index:-1;
+  border:1px solid rgba(255,255,255,.04);
+  pointer-events:none;
+}
+
+.landing-life-panel__top,
+.landing-war-cycle,
+.landing-cwl-decision,
+.landing-progress-outcome{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  min-width:0;
+  color:#87978d;
+  font-size:9px;
+  font-weight:850;
+  line-height:1.15;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+}
+
+.landing-life-panel__top{
+  padding-bottom:8px;
+  border-bottom:1px solid rgba(205,244,105,.16);
+}
+
+.landing-life-panel__top span{
+  color:#fff7d6;
+}
+
+.landing-life-panel__top strong{
+  color:#cdf469;
+  font-size:8px;
+  text-align:right;
+}
+
+.landing-war-plan{
+  min-height:0;
+  display:grid;
+  grid-template-columns:minmax(0, .78fr) minmax(22px, .18fr) minmax(0, 1.2fr);
+  align-items:center;
+  gap:8px;
+}
+
+.landing-war-plan__brief{
+  display:grid;
+  gap:4px;
+  padding:12px;
+  border-left:2px solid #cdf469;
+  background:rgba(205,244,105,.09);
+  transform:translateX(calc((1 - var(--landing-chapter-progress)) * -12px));
+  opacity:calc(.45 + (var(--landing-chapter-progress) * .55));
+}
+
+.landing-war-plan__brief span,
+.landing-war-plan__brief small{
+  color:#8ea294;
+  font-size:8px;
+  font-style:normal;
+  font-weight:800;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+}
+
+.landing-war-plan__brief strong{
+  color:#f7f3da;
+  font-size:clamp(12px, 1.35vw, 17px);
+  line-height:1.05;
+}
+
+.landing-war-plan__link{
+  position:relative;
+  height:2px;
+  background:rgba(205,244,105,.2);
+  transform:scaleX(var(--landing-chapter-progress));
+  transform-origin:left center;
+}
+
+.landing-war-plan__link::after{
+  content:"";
+  position:absolute;
+  right:-1px;
+  top:50%;
+  width:7px;
+  aspect-ratio:1;
+  border-top:2px solid #cdf469;
+  border-right:2px solid #cdf469;
+  transform:translateY(-50%) rotate(45deg);
+}
+
+.landing-war-attacks{
+  display:grid;
+  gap:7px;
+}
+
+.landing-war-attack{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .12) * 4.8), 1);
+  position:relative;
+  min-width:0;
+  display:grid;
+  grid-template-columns:auto 1fr auto;
+  align-items:center;
+  gap:8px;
+  padding:9px 10px;
+  border:1px solid rgba(205,244,105,calc(.15 + (var(--landing-step-reveal) * .28)));
+  background:rgba(5,12,16,.9);
+  transform:translateX(calc((1 - var(--landing-step-reveal)) * 16px));
+}
+
+.landing-war-attack--two{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .38) * 4.8), 1);
+}
+
+.landing-war-attack b{
+  color:#cdf469;
+  font-size:13px;
+}
+
+.landing-war-attack em,
+.landing-war-attack::after{
+  color:#829188;
+  font-size:8px;
+  font-style:normal;
+  font-weight:850;
+  letter-spacing:.12em;
+}
+
+.landing-war-attack strong{
+  color:#e9ffd0;
+  font-size:8px;
+  letter-spacing:.1em;
+  opacity:var(--landing-step-reveal);
+}
+
+.landing-war-attack::after{
+  content:"PLANNED";
+  position:absolute;
+  right:10px;
+  opacity:calc(1 - var(--landing-step-reveal));
+}
+
+.landing-war-cycle{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .7) * 5), 1);
+  padding-top:8px;
+  border-top:1px solid rgba(205,244,105,.16);
+  opacity:calc(.35 + (var(--landing-step-reveal) * .65));
+}
+
+.landing-war-cycle span{ color:#b8c4b7; }
+.landing-war-cycle strong{ color:#cdf469; }
+
+.landing-cwl-source{
+  align-self:center;
+  justify-self:center;
+  display:flex;
+  align-items:center;
+  gap:5px;
+  padding:7px 10px;
+  border:1px solid rgba(255,177,61,.3);
+  color:#ffd28a;
+  font-size:8px;
+  font-weight:850;
+  letter-spacing:.13em;
+  opacity:calc(1 - (var(--landing-chapter-progress) * .68));
+  transform:translateY(calc(var(--landing-chapter-progress) * 8px));
+}
+
+.landing-cwl-source i,
+.landing-cwl-assignment b i{
+  width:7px;
+  aspect-ratio:1;
+  display:block;
+  border:1px solid currentColor;
+  border-radius:50%;
+  background:currentColor;
+  box-shadow:0 0 8px currentColor;
+}
+
+.landing-cwl-assignments{
+  min-height:0;
+  display:grid;
+  grid-template-columns:1.2fr .82fr 1fr;
+  align-items:stretch;
+  gap:7px;
+}
+
+.landing-cwl-assignment{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .16) * 4.5), 1);
+  display:grid;
+  align-content:center;
+  justify-items:start;
+  gap:8px;
+  padding:9px;
+  border:1px solid rgba(255,177,61,.25);
+  background:linear-gradient(160deg, rgba(255,177,61,.12), rgba(5,12,16,.88));
+  color:#ffc568;
+  opacity:var(--landing-step-reveal);
+  transform:translateY(calc((1 - var(--landing-step-reveal)) * 14px));
+}
+
+.landing-cwl-assignment--rotate{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .34) * 4.5), 1);
+  color:#ff91d9;
+  border-color:rgba(255,121,214,.26);
+  background:linear-gradient(160deg, rgba(255,121,214,.11), rgba(5,12,16,.88));
+}
+
+.landing-cwl-assignment--side{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .52) * 4.5), 1);
+  color:#62ebc9;
+  border-color:rgba(45,230,184,.28);
+  background:linear-gradient(160deg, rgba(45,230,184,.1), rgba(5,12,16,.88));
+}
+
+.landing-cwl-assignment > span{
+  color:currentColor;
+  font-size:8px;
+  font-weight:900;
+  letter-spacing:.12em;
+}
+
+.landing-cwl-assignment b{
+  display:flex;
+  flex-wrap:wrap;
+  gap:5px;
+  color:currentColor;
+}
+
+.landing-cwl-assignment b i{
+  opacity:calc(.2 + (var(--landing-step-reveal) * .8));
+  transform:scale(calc(.55 + (var(--landing-step-reveal) * .45)));
+}
+
+.landing-cwl-decision{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .72) * 5), 1);
+  padding-top:8px;
+  border-top:1px solid rgba(45,230,184,.16);
+  opacity:var(--landing-step-reveal);
+}
+
+.landing-cwl-decision strong{
+  color:#8fffe2;
+  font-size:8px;
+  text-align:right;
+}
+
+.landing-extra-timeline{
+  position:relative;
+  z-index:2;
+  min-height:0;
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  align-items:stretch;
+  gap:8px;
+}
+
+.landing-extra-event{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .1) * 4.5), 1);
+  min-width:0;
+  display:grid;
+  align-content:center;
+  gap:5px;
+  padding:10px;
+  border:1px solid rgba(255,177,61,.32);
+  background:linear-gradient(145deg, rgba(255,177,61,.13), rgba(5,12,16,.92));
+  opacity:var(--landing-step-reveal);
+  transform:translateY(calc((1 - var(--landing-step-reveal)) * 16px));
+}
+
+.landing-extra-event--fc{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .34) * 4.5), 1);
+  border-color:rgba(255,121,214,.32);
+  background:linear-gradient(145deg, rgba(255,121,214,.12), rgba(5,12,16,.92));
+}
+
+.landing-extra-event--event{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .58) * 4.5), 1);
+  border-color:rgba(45,230,184,.34);
+  background:linear-gradient(145deg, rgba(45,230,184,.11), rgba(5,12,16,.92));
+}
+
+.landing-extra-event i{
+  color:#7f9085;
+  font-size:8px;
+  font-style:normal;
+  font-weight:850;
+  letter-spacing:.12em;
+}
+
+.landing-extra-event b{
+  color:#fff7d6;
+  font-size:clamp(10px, 1.25vw, 14px);
+  line-height:1.05;
+}
+
+.landing-extra-event em{
+  color:#aebcaf;
+  font-size:9px;
+  font-style:normal;
+  line-height:1.2;
+}
+
+.landing-extra-timeline__line{
+  position:relative;
+  align-self:center;
+  height:2px;
+  margin:0 4%;
+  background:rgba(205,244,105,.16);
+}
+
+.landing-extra-timeline__line i{
+  display:block;
+  width:calc(var(--landing-chapter-progress) * 100%);
+  height:100%;
+  background:linear-gradient(90deg, #ffb13d, #ff79d6, #2de6b8);
+  box-shadow:0 0 10px rgba(205,244,105,.32);
+}
+
+.landing-progress-route{
+  position:relative;
+  min-height:0;
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  align-items:center;
+  gap:9px;
+}
+
+.landing-progress-node,
+html:not(.landing-motion-ready) .landing-progress-node,
+.landing-rhythm.is-static .landing-progress-node{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .08) * 4.5), 1);
+  position:relative;
+  inset:auto;
+  z-index:2;
+  min-width:0;
+  min-height:76px;
+  display:grid;
+  grid-template-columns:auto 1fr;
+  grid-template-areas:
+    "number status"
+    "label label";
+  align-content:center;
+  gap:5px 8px;
+  padding:10px;
+  border:1px solid rgba(45,230,184,.26);
+  clip-path:none;
+  background:#071116;
+  opacity:calc(.18 + (var(--landing-step-reveal) * .82));
+  transform:translateY(calc((1 - var(--landing-step-reveal)) * 14px));
+}
+
+.landing-progress-node--two{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .34) * 4.5), 1);
+}
+
+.landing-progress-node--three{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .6) * 4.5), 1);
+  border-color:rgba(205,244,105,.4);
+  box-shadow:0 0 22px rgba(205,244,105,calc(var(--landing-step-reveal) * .12));
+}
+
+.landing-progress-node b{
+  grid-area:number;
+  color:#67f4ce;
+  font-size:9px;
+  letter-spacing:.12em;
+}
+
+.landing-progress-node em{
+  grid-area:label;
+  color:#eef6e6;
+  font-size:clamp(9px, 1.1vw, 12px);
+  font-style:normal;
+  font-weight:800;
+  line-height:1.15;
+}
+
+.landing-progress-node > i{
+  grid-area:status;
+  justify-self:end;
+  color:#cdf469;
+  font-size:7px;
+  font-style:normal;
+  font-weight:900;
+  letter-spacing:.08em;
+}
+
+.landing-progress-path,
+html:not(.landing-motion-ready) .landing-progress-path,
+.landing-rhythm.is-static .landing-progress-path{
+  position:absolute;
+  left:8%;
+  right:8%;
+  top:50%;
+  bottom:auto;
+  z-index:1;
+  height:2px;
+  border:0;
+  background:rgba(45,230,184,.14);
+  transform:none;
+  filter:none;
+}
+
+.landing-progress-path i{
+  display:block;
+  width:calc(var(--landing-chapter-progress) * 100%);
+  height:100%;
+  background:linear-gradient(90deg, #2de6b8, #cdf469);
+  box-shadow:0 0 10px rgba(205,244,105,.42);
+}
+
+.landing-progress-outcome{
+  --landing-step-reveal:clamp(0, calc((var(--landing-chapter-progress) - .76) * 5), 1);
+  padding-top:8px;
+  border-top:1px solid rgba(205,244,105,.16);
+  opacity:var(--landing-step-reveal);
+}
+
+.landing-progress-outcome strong{
+  color:#cdf469;
+  font-size:8px;
+  text-align:right;
+}
+
+.landing-rhythm-beat{
+  min-width:0;
+  align-self:center;
+  opacity:1;
+  visibility:visible;
+  transform:none;
+}
+
+.landing-rhythm-beat h3{
+  max-width:16ch;
+}
+
+.landing-rhythm-facts{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  background:none;
+}
+
+.landing-rhythm-facts li,
+.landing-rhythm-facts li:last-child:nth-child(odd){
+  flex:1 1 130px;
+  grid-column:auto;
+  min-height:0;
+  gap:3px;
+  padding:8px 10px;
+  border:1px solid rgba(205,244,105,.14);
+  background:rgba(5,11,14,.74);
+}
+
+.landing-rhythm-facts span{ font-size:8px; }
+.landing-rhythm-facts strong{ font-size:11px; }
+
+.landing-rhythm__journey{
+  grid-area:journey;
+  position:relative;
+  min-width:0;
+  padding-top:20px;
+}
+
+.landing-rhythm__rail{
+  position:absolute;
+  left:12.5%;
+  right:12.5%;
+  top:9px;
+  height:2px;
+  background:rgba(205,244,105,.16);
+}
+
+.landing-rhythm__rail::after{
+  content:"NEXT CYCLE";
+  position:absolute;
+  right:0;
+  top:-15px;
+  color:#627067;
+  font-size:6px;
+  font-weight:850;
+  letter-spacing:.13em;
+}
+
+.landing-rhythm__rail-fill{
+  position:absolute;
+  inset:0 auto 0 0;
+  width:calc(var(--landing-rhythm-track-progress) * 100%);
+  background:linear-gradient(90deg, #cdf469, #ffb13d 38%, #ff79d6 68%, #2de6b8);
+  box-shadow:0 0 10px rgba(205,244,105,.38);
+}
+
+.landing-rhythm__member{
+  position:absolute;
+  left:calc(var(--landing-rhythm-track-progress) * 100%);
+  top:50%;
+  z-index:3;
+  display:grid;
+  gap:0;
+  min-width:44px;
+  padding:4px 6px;
+  border:1px solid #cdf469;
+  background:#071015;
+  color:#fff7d6;
+  text-align:center;
+  transform:translate(-50%, -50%);
+  box-shadow:0 0 16px rgba(205,244,105,.18);
+}
+
+.landing-rhythm__member small{
+  color:#819086;
+  font-size:5px;
+  font-weight:850;
+  letter-spacing:.13em;
+}
+
+.landing-rhythm__member strong{
+  color:#cdf469;
+  font-size:8px;
+  line-height:1;
+  letter-spacing:.08em;
+}
+
+.landing-rhythm__nav{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:0;
+}
+
+.landing-rhythm__nav li{
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  min-width:0;
+  color:#66736b;
+  text-align:center;
+  transform:none;
+}
+
+.landing-rhythm__nav li::before{
+  content:"";
+  position:absolute;
+  left:50%;
+  top:-17px;
+  width:7px;
+  aspect-ratio:1;
+  border:1px solid currentColor;
+  border-radius:50%;
+  background:#071015;
+  transform:translateX(-50%);
+}
+
+.landing-rhythm__nav li span{
+  font-size:9px;
+}
+
+.landing-rhythm__nav li b{
+  color:inherit;
+  font-size:8px;
+  font-weight:850;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+}
+
+.landing-rhythm__nav li.is-active{
+  color:#cdf469;
+  transform:none;
+}
+
+.landing-rhythm__nav li.is-active::before{
+  background:#cdf469;
+  box-shadow:0 0 10px rgba(205,244,105,.5);
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static){
+  min-height:290vh;
+  min-height:290svh;
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__stage{
+  position:sticky;
+  top:var(--landing-sticky-top, 72px);
+  grid-template-columns:1fr;
+  grid-template-areas:
+    "intro"
+    "chapters"
+    "journey";
+  grid-template-rows:auto minmax(0, 1fr) auto;
+  gap:clamp(16px, 2.6vw, 30px);
+  padding:clamp(22px, 3.5vw, 44px);
+  height:min(760px, calc(100vh - var(--landing-sticky-top, 72px) - 18px));
+  height:min(760px, calc(100svh - var(--landing-sticky-top, 72px) - 18px));
+  min-height:520px;
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__chapters{
+  display:grid;
+  grid-template-columns:1fr;
+  background:none;
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter{
+  grid-area:1 / 1;
+  grid-template-columns:minmax(280px, .94fr) minmax(300px, 1.06fr);
+  align-content:center;
+  align-items:center;
+  gap:clamp(24px, 4.5vw, 62px);
+  padding:0;
+  background:transparent;
+  opacity:var(--landing-chapter-opacity);
+  visibility:hidden;
+  pointer-events:none;
+  transform:translateX(calc(var(--landing-rhythm-transition-progress) * -18px));
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter .landing-rhythm-scene,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter .landing-rhythm-beat{
+  grid-area:auto;
+  opacity:1;
+  visibility:visible;
+  transform:none;
+  transition:none;
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter.is-active,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter.is-entering{
+  visibility:visible;
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter.is-entering{
+  transform:translateX(calc((1 - var(--landing-rhythm-transition-progress)) * 22px));
+}
+
+html:not(.landing-motion-ready) .landing-rhythm__journey,
+.landing-rhythm.is-static .landing-rhythm__journey{
+  display:none;
+}
+
+html:not(.landing-motion-ready) .landing-rhythm__chapters,
+.landing-rhythm.is-static .landing-rhythm__chapters{
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+}
+
+html:not(.landing-motion-ready) .landing-rhythm-chapter,
+.landing-rhythm.is-static .landing-rhythm-chapter{
+  --landing-chapter-opacity:1 !important;
+  --landing-chapter-progress:1 !important;
+  opacity:1;
+  visibility:visible;
+  transform:none;
+}
+
+html:not(.landing-motion-ready) .landing-rhythm-scene.is-dense,
+.landing-rhythm.is-static .landing-rhythm-scene.is-dense{
+  aspect-ratio:auto;
+  min-height:260px;
+}
+
+html:not(.landing-motion-ready) .landing-rhythm-scene--extras.is-dense,
+html:not(.landing-motion-ready) .landing-rhythm-scene--progress.is-dense,
+.landing-rhythm.is-static .landing-rhythm-scene--extras.is-dense,
+.landing-rhythm.is-static .landing-rhythm-scene--progress.is-dense{
+  display:grid;
+  grid-template-columns:1fr;
+  grid-template-rows:auto 1fr auto;
+  gap:12px;
+  padding:clamp(12px, 1.8vw, 18px);
+}
+
+html:not(.landing-motion-ready) .landing-extra-timeline.is-dense,
+.landing-rhythm.is-static .landing-extra-timeline.is-dense,
+html:not(.landing-motion-ready) .landing-progress-route.is-dense,
+.landing-rhythm.is-static .landing-progress-route.is-dense{
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  align-items:stretch;
+}
+
+html:not(.landing-motion-ready) .landing-progress-route.is-dense .landing-progress-path,
+.landing-rhythm.is-static .landing-progress-route.is-dense .landing-progress-path{
+  display:none;
+}
+
+@media (min-width: 1280px){
+  html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__stage{
+    padding:30px;
+  }
+}
+
+@media (max-width: 820px){
+  .landing-rhythm__stage{
+    gap:10px;
+    padding:16px;
+  }
+
+  .landing-rhythm__intro{
+    display:grid;
+    justify-content:start;
+    gap:3px;
+    padding-bottom:8px;
+  }
+
+  .landing-rhythm__intro h3{
+    font-size:20px;
+    line-height:1.08;
+    text-align:left;
+  }
+
+  html.landing-motion-ready .landing-rhythm:not(.is-static){
+    min-height:290vh;
+    min-height:290svh;
+  }
+
+  html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__stage{
+    top:var(--landing-sticky-top, 62px);
+    gap:10px;
+    padding:16px;
+    height:calc(100vh - var(--landing-sticky-top, 62px) - 10px);
+    height:calc(100svh - var(--landing-sticky-top, 62px) - 10px);
+    min-height:560px;
+  }
+
+  html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter{
+    grid-template-columns:1fr;
+    grid-template-rows:auto auto;
+    align-content:center;
+    gap:10px;
+  }
+
+  .landing-rhythm-scene,
+  html:not(.landing-motion-ready) .landing-rhythm-scene,
+  .landing-rhythm.is-static .landing-rhythm-scene{
+    width:min(100%, 410px);
+    justify-self:center;
+    aspect-ratio:16 / 10;
+    gap:8px;
+    padding:11px;
+  }
+
+  .landing-rhythm-beat{
+    gap:7px;
+  }
+
+  .landing-rhythm-beat h3{
+    max-width:20ch;
+    font-size:clamp(27px, 7.5vw, 36px);
+    line-height:.98;
+  }
+
+  .landing-rhythm-beat > p:not(.landing-eyebrow){
+    font-size:13px;
+    line-height:1.35;
+  }
+
+  .landing-rhythm-facts{
+    margin-top:2px;
+    gap:4px;
+  }
+
+  .landing-rhythm-facts li,
+  .landing-rhythm-facts li:last-child:nth-child(odd){
+    flex:1 1 30%;
+    min-height:0;
+    padding:6px 8px;
+  }
+
+  .landing-rhythm-facts strong{ font-size:10px; }
+  .landing-rhythm__journey{ padding-top:18px; }
+  .landing-rhythm__rail{ top:8px; }
+  .landing-rhythm__nav li::before{ top:-15px; }
+}
+
+@media (max-width: 460px){
+  .landing-rhythm__stage{ padding:11px; }
+
+  .landing-life-panel__top,
+  .landing-war-cycle,
+  .landing-cwl-decision,
+  .landing-progress-outcome{
+    font-size:7px;
+    letter-spacing:.11em;
+  }
+
+  .landing-life-panel__top strong,
+  .landing-cwl-decision strong,
+  .landing-progress-outcome strong{
+    font-size:6px;
+  }
+
+  .landing-war-plan{
+    grid-template-columns:minmax(0, .78fr) 15px minmax(0, 1.22fr);
+    gap:5px;
+  }
+
+  .landing-war-plan__brief,
+  .landing-war-attack{
+    padding:7px;
+  }
+
+  .landing-war-plan__brief strong{ font-size:10px; }
+  .landing-war-attack{ gap:5px; }
+  .landing-war-attack b{ font-size:10px; }
+  .landing-war-attack em,
+  .landing-war-attack strong,
+  .landing-war-attack::after{ font-size:6px; }
+  .landing-war-attack::after{ right:7px; }
+
+  .landing-cwl-source{ padding:5px 7px; font-size:6px; }
+  .landing-cwl-source i,
+  .landing-cwl-assignment b i{ width:5px; }
+  .landing-cwl-assignments{ gap:4px; }
+  .landing-cwl-assignment{ gap:5px; padding:6px; }
+  .landing-cwl-assignment > span{ font-size:6px; }
+  .landing-cwl-assignment b{ gap:3px; }
+
+  .landing-extra-timeline{ gap:4px; }
+  .landing-extra-event{ gap:3px; padding:7px; }
+  .landing-extra-event b{ font-size:9px; }
+  .landing-extra-event em{ font-size:7px; }
+
+  .landing-progress-route{ gap:4px; }
+  .landing-progress-node,
+  html:not(.landing-motion-ready) .landing-progress-node,
+  .landing-rhythm.is-static .landing-progress-node{
+    min-height:60px;
+    gap:3px 5px;
+    padding:7px;
+  }
+  .landing-progress-node em{ font-size:8px; }
+  .landing-progress-node > i{ font-size:5px; }
+
+  .landing-rhythm-beat h3{ font-size:clamp(25px, 7.2vw, 32px); }
+  .landing-rhythm-facts li,
+  .landing-rhythm-facts li:last-child:nth-child(odd){ flex-basis:44%; }
+  .landing-rhythm__nav li{ gap:3px; }
+  .landing-rhythm__nav li span,
+  .landing-rhythm__nav li b{ font-size:7px; }
+
+  html:not(.landing-motion-ready) .landing-rhythm__chapters,
+  .landing-rhythm.is-static .landing-rhythm__chapters{
+    grid-template-columns:1fr;
+  }
+}
+
+@media (max-height: 699px), (prefers-reduced-motion: reduce){
+  html.landing-motion-ready .landing-rhythm,
+  html.landing-motion-ready .landing-rhythm:not(.is-static){
+    min-height:0;
+  }
+
+  html.landing-motion-ready .landing-rhythm .landing-rhythm__stage,
+  html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__stage{
+    position:relative;
+    top:auto;
+    height:auto;
+    min-height:0;
+  }
+
+  html.landing-motion-ready .landing-rhythm .landing-rhythm__chapters{
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:1px;
+    background:rgba(205,244,105,.15);
+  }
+
+  html.landing-motion-ready .landing-rhythm .landing-rhythm-chapter{
+    grid-area:auto;
+    grid-template-columns:1fr;
+    gap:18px;
+    padding:clamp(16px, 2.4vw, 26px);
+    background:#061015;
+    opacity:1 !important;
+    visibility:visible;
+    pointer-events:auto;
+    transform:none;
+  }
+
+  html.landing-motion-ready .landing-rhythm .landing-rhythm__journey{
+    display:none;
+  }
+}
+
+@media (max-width: 620px) and (max-height: 699px){
+  html.landing-motion-ready .landing-rhythm .landing-rhythm__chapters{
+    grid-template-columns:1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce){
+  .landing-rhythm-chapter,
+  .landing-war-plan__brief,
+  .landing-war-plan__link,
+  .landing-war-attack,
+  .landing-cwl-source,
+  .landing-cwl-assignment,
+  .landing-extra-event,
+  .landing-progress-node{
+    transition:none !important;
+    animation:none !important;
+  }
+}

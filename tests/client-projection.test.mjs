@@ -148,10 +148,31 @@ test("landing profile upgrades only the exact legacy Home copy", () => {
   ]);
   assert.deepEqual(Array.from(profile.cwl.highlights, (item) => item.value), ["Open to everyone", "Organized on Discord"]);
   assert.deepEqual(Array.from(profile.network.highlights, (item) => item.value), ["Friendly Challenge Hub"]);
-  assert.equal(profile.network.title, "Your results have somewhere to go.");
+  assert.equal(profile.network.title, "Reliable attacks open stronger lineups.");
   assert.equal(profile.proof.title, "Stay on Discord.\nUse your attacks.\nKeep it non-toxic.");
   assert.equal(profile.finalCta.eyebrow, "Your move");
   assert.equal(profile.finalCta.title, "Send your #Tag. We will find your TURTLE clan.");
+});
+
+test("landing profile upgrades the previous decorative-story copy to the connected member journey", () => {
+  const { buildResolvedPublicProfile_ } = loadClientInternals();
+  const profile = buildResolvedPublicProfile_({}, {
+    profile: {
+      war: {
+        title: "Opt in. Use hits. Improve.",
+        body: "Organised wars without the noise.",
+      },
+      cwl: { title: "Planned lineups. Fair rewards." },
+      extras: { title: "The good stuff between wars." },
+      network: { title: "Your results have somewhere to go." },
+    },
+  }, {}, {});
+
+  assert.equal(profile.war.title, "Plan together. Finish both attacks.");
+  assert.equal(profile.war.body, "Opt in when you can play. The clan helps before battle day.");
+  assert.equal(profile.cwl.title, "Every opted-in player gets a clear plan.");
+  assert.equal(profile.extras.title, "The clan stays active between wars.");
+  assert.equal(profile.network.title, "Reliable attacks open stronger lineups.");
 });
 
 test("formats ongoing regular-war and CWL star standings only when fresh score data is available", () => {

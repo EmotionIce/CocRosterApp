@@ -77,7 +77,7 @@
     ]
   }
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260722c" />
+  <link rel="stylesheet" href="./styles.css?v=20260722d" />
 </head>
 <body style="margin:0;">
 <div class="container public-shell">
@@ -195,83 +195,120 @@
         <div class="landing-rhythm__stage">
           <header class="landing-rhythm__intro">
             <p class="landing-eyebrow">Life in TURTLE</p>
-            <h3 id="landingRhythmTitle">Why TURTLEs stay.</h3>
+            <h3 id="landingRhythmTitle">What happens after you join.</h3>
           </header>
 
-          <div class="landing-rhythm__visual">
-            <div class="landing-rhythm-scene landing-rhythm-scene--war is-active" data-landing-rhythm-scene="0"
-              role="img" aria-label="Back-to-back wars with both attacks used">
-              <span class="landing-war-target">WAR</span>
-              <span class="landing-war-hit landing-war-hit--one">01 <b>&check;</b></span>
-              <span class="landing-war-hit landing-war-hit--two">02 <b>&check;</b></span>
-              <span class="landing-war-loop">REPEAT &circlearrowright;</span>
-            </div>
-            <div class="landing-rhythm-scene landing-rhythm-scene--cwl" data-landing-rhythm-scene="1"
-              role="img" aria-label="A planned CWL lineup with side wars running">
-              <div class="landing-cwl-board">
-                <span></span><span></span><span></span><span></span><span></span><span></span>
+          <div class="landing-rhythm__chapters">
+            <article class="landing-rhythm-chapter is-active" data-landing-rhythm-chapter="0">
+              <div class="landing-rhythm-scene landing-rhythm-scene--war is-active" data-landing-rhythm-scene="0"
+                role="group" aria-label="A war plan is agreed, both attacks are completed, and the member is ready for the next war">
+                <div class="landing-life-panel__top"><span>WAR PLAN</span><strong>OPTED IN</strong></div>
+                <div class="landing-war-plan">
+                  <div class="landing-war-plan__brief">
+                    <span>PLAN</span>
+                    <strong>Target + timing</strong>
+                    <small>With the clan</small>
+                  </div>
+                  <i class="landing-war-plan__link" aria-hidden="true"></i>
+                  <div class="landing-war-attacks">
+                    <span class="landing-war-attack landing-war-attack--one"><b>01</b><em>ATTACK</em><strong>USED &check;</strong></span>
+                    <span class="landing-war-attack landing-war-attack--two"><b>02</b><em>ATTACK</em><strong>USED &check;</strong></span>
+                  </div>
+                </div>
+                <div class="landing-war-cycle"><span>Hero-down wars available</span><strong>NEXT WAR &rarr;</strong></div>
               </div>
-              <span class="landing-cwl-lock">LINEUP</span>
-              <span class="landing-cwl-side">SIDE WARS</span>
-            </div>
-            <div id="landingExtrasVisual" class="landing-rhythm-scene landing-rhythm-scene--extras"
-              data-landing-rhythm-scene="2" role="img"
-              aria-label="Gold Pass giveaways, friendly challenges, and clan events">
-              <span class="landing-extra-token landing-extra-token--pass"><b>GOLD PASS</b>Giveaways</span>
-              <span class="landing-extra-token landing-extra-token--fc"><b>FC HUB</b>Friendly challenges</span>
-              <span class="landing-extra-token landing-extra-token--event"><b>CLAN EVENTS</b>Together</span>
-            </div>
-            <div id="landingProgressVisual" class="landing-rhythm-scene landing-rhythm-scene--progress"
-              data-landing-rhythm-scene="3" role="img"
-              aria-label="Results tracked, reliability proven, and higher CWL unlocked">
-              <span class="landing-progress-node landing-progress-node--one"><b>01</b>Results tracked</span>
-              <span class="landing-progress-node landing-progress-node--two"><b>02</b>Reliability proven</span>
-              <span class="landing-progress-node landing-progress-node--three"><b>03</b>Higher CWL</span>
-              <i class="landing-progress-path"></i>
-            </div>
+
+              <div class="landing-rhythm-beat is-active" data-landing-rhythm-beat="0">
+                <p id="landingWarEyebrow" class="landing-eyebrow">War</p>
+                <h3 id="landingWarTitle">Plan together. Finish both attacks.</h3>
+                <p id="landingWarBody">Opt in when you can play. The clan helps before battle day.</p>
+                <ul id="landingWarHighlights" class="landing-rhythm-facts" aria-label="War highlights">
+                  <li><span>Rhythm</span><strong>Back-to-back Wars</strong></li>
+                  <li><span>Help</span><strong>Planning support</strong></li>
+                  <li><span>Options</span><strong>Hero-down wars</strong></li>
+                </ul>
+              </div>
+            </article>
+
+            <article class="landing-rhythm-chapter" data-landing-rhythm-chapter="1">
+              <div class="landing-rhythm-scene landing-rhythm-scene--cwl" data-landing-rhythm-scene="1"
+                role="group" aria-label="Opted-in members are assigned to the main CWL lineup, rotation, or a side war through a Discord plan">
+                <div class="landing-life-panel__top"><span>CWL WEEK</span><strong>PLANNED ON DISCORD</strong></div>
+                <div class="landing-cwl-source">
+                  <span>OPTED IN</span>
+                  <i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+                <div class="landing-cwl-assignments">
+                  <div class="landing-cwl-assignment landing-cwl-assignment--main"><span>MAIN LINEUP</span><b><i></i><i></i><i></i><i></i><i></i></b></div>
+                  <div class="landing-cwl-assignment landing-cwl-assignment--rotate"><span>ROTATION</span><b><i></i><i></i></b></div>
+                  <div class="landing-cwl-assignment landing-cwl-assignment--side"><span>SIDE WARS</span><b><i></i><i></i><i></i><i></i></b></div>
+                </div>
+                <div class="landing-cwl-decision"><span>BEFORE DAY 1</span><strong>EVERY PLAYER HAS A PLAN</strong></div>
+              </div>
+
+              <div class="landing-rhythm-beat" data-landing-rhythm-beat="1">
+                <p id="landingCwlEyebrow" class="landing-eyebrow">CWL</p>
+                <h3 id="landingCwlTitle">Every opted-in player gets a clear plan.</h3>
+                <ul id="landingCwlHighlights" class="landing-rhythm-facts" aria-label="CWL highlights">
+                  <li><span>Participating</span><strong>Open to everyone</strong></li>
+                  <li><span>Rosters</span><strong>Organized on Discord</strong></li>
+                </ul>
+              </div>
+            </article>
+
+            <article class="landing-rhythm-chapter" data-landing-rhythm-chapter="2">
+              <div class="landing-rhythm-scene landing-rhythm-scene--extras" data-landing-rhythm-scene="2"
+                role="group" aria-label="A between-wars activity timeline with Gold Pass giveaways, friendly challenges, and clan events">
+                <div class="landing-life-panel__top"><span>BETWEEN WARS</span><strong>CLAN ACTIVE</strong></div>
+                <div id="landingExtrasVisual" class="landing-extra-timeline" role="list" aria-label="Community activities">
+                  <span class="landing-extra-event landing-extra-event--pass" role="listitem"><i>01</i><b>GOLD PASS</b><em>Giveaway</em></span>
+                  <span class="landing-extra-event landing-extra-event--fc" role="listitem"><i>02</i><b>FC HUB</b><em>Friendly challenges</em></span>
+                  <span class="landing-extra-event landing-extra-event--event" role="listitem"><i>03</i><b>CLAN EVENTS</b><em>Clan-wide activities</em></span>
+                </div>
+                <div class="landing-extra-timeline__line" aria-hidden="true"><i></i></div>
+              </div>
+
+              <div class="landing-rhythm-beat landing-rhythm-beat--extras" data-landing-rhythm-beat="2">
+                <p id="landingExtrasEyebrow" class="landing-eyebrow">Beyond attacks</p>
+                <h3 id="landingExtrasTitle">The clan stays active between wars.</h3>
+              </div>
+            </article>
+
+            <article class="landing-rhythm-chapter" data-landing-rhythm-chapter="3">
+              <div class="landing-rhythm-scene landing-rhythm-scene--progress" data-landing-rhythm-scene="3"
+                role="group" aria-label="The member record moves from tracked results to proven reliability and then to higher CWL opportunities">
+                <div class="landing-life-panel__top"><span>MEMBER RECORD</span><strong>LIVE</strong></div>
+                <div id="landingProgressVisual" class="landing-progress-route" aria-label="Results tracked, reliability proven, higher CWL">
+                  <span class="landing-progress-node landing-progress-node--one"><b>01</b><em>Results tracked</em><i>&check;</i></span>
+                  <span class="landing-progress-node landing-progress-node--two"><b>02</b><em>Reliability proven</em><i>&check;</i></span>
+                  <span class="landing-progress-node landing-progress-node--three"><b>03</b><em>Higher CWL</em><i>UNLOCK</i></span>
+                  <span class="landing-progress-path" aria-hidden="true"><i></i></span>
+                </div>
+                <div class="landing-progress-outcome"><span>RECORD CARRIED FORWARD</span><strong>STRONGER LINEUPS &rarr;</strong></div>
+              </div>
+
+              <div class="landing-rhythm-beat" data-landing-rhythm-beat="3">
+                <p id="landingNetworkEyebrow" class="landing-eyebrow">Progression</p>
+                <h3 id="landingNetworkTitle">Reliable attacks open stronger lineups.</h3>
+                <ul id="landingNetworkHighlights" class="landing-rhythm-facts" aria-label="Progression highlights">
+                  <li><span>Practice</span><strong>Friendly Challenge Hub</strong></li>
+                </ul>
+              </div>
+            </article>
           </div>
 
-          <div class="landing-rhythm__beats">
-            <article class="landing-rhythm-beat is-active" data-landing-rhythm-beat="0">
-              <p id="landingWarEyebrow" class="landing-eyebrow">War</p>
-              <h3 id="landingWarTitle">Opt in. Use hits. Improve.</h3>
-              <p id="landingWarBody">Organised wars without the noise.</p>
-              <ul id="landingWarHighlights" class="landing-rhythm-facts" aria-label="War highlights">
-                <li><span>Rhythm</span><strong>Back-to-back Wars</strong></li>
-                <li><span>Help</span><strong>Planning support</strong></li>
-                <li><span>Options</span><strong>Hero-down wars</strong></li>
-              </ul>
-            </article>
-
-            <article class="landing-rhythm-beat" data-landing-rhythm-beat="1">
-              <p id="landingCwlEyebrow" class="landing-eyebrow">CWL</p>
-              <h3 id="landingCwlTitle">Planned lineups. Fair rewards.</h3>
-              <ul id="landingCwlHighlights" class="landing-rhythm-facts" aria-label="CWL highlights">
-                <li><span>Participating</span><strong>Open to everyone</strong></li>
-                <li><span>Rosters</span><strong>Organized on Discord</strong></li>
-              </ul>
-            </article>
-
-            <article class="landing-rhythm-beat landing-rhythm-beat--extras" data-landing-rhythm-beat="2">
-              <p id="landingExtrasEyebrow" class="landing-eyebrow">Beyond attacks</p>
-              <h3 id="landingExtrasTitle">The good stuff between wars.</h3>
-            </article>
-
-            <article class="landing-rhythm-beat" data-landing-rhythm-beat="3">
-              <p id="landingNetworkEyebrow" class="landing-eyebrow">Progression</p>
-              <h3 id="landingNetworkTitle">Your results have somewhere to go.</h3>
-              <ul id="landingNetworkHighlights" class="landing-rhythm-facts" aria-label="Progression highlights">
-                <li><span>Practice</span><strong>Friendly Challenge Hub</strong></li>
-              </ul>
-            </article>
+          <div class="landing-rhythm__journey">
+            <div class="landing-rhythm__rail" aria-hidden="true">
+              <span class="landing-rhythm__rail-fill"></span>
+              <span class="landing-rhythm__member"><small>YOUR</small><strong>#TAG</strong></span>
+            </div>
+            <ol class="landing-rhythm__nav" aria-label="TURTLE member journey">
+              <li class="is-active" data-landing-rhythm-nav="0"><span>01</span><b>War</b></li>
+              <li data-landing-rhythm-nav="1"><span>02</span><b>CWL</b></li>
+              <li data-landing-rhythm-nav="2"><span>03</span><b>Extras</b></li>
+              <li data-landing-rhythm-nav="3"><span>04</span><b>Progress</b></li>
+            </ol>
           </div>
-
-          <ol class="landing-rhythm__nav" aria-label="TURTLE life chapters">
-            <li class="is-active" data-landing-rhythm-nav="0"><span>01</span>War</li>
-            <li data-landing-rhythm-nav="1"><span>02</span>CWL</li>
-            <li data-landing-rhythm-nav="2"><span>03</span>Extras</li>
-            <li data-landing-rhythm-nav="3"><span>04</span>Progress</li>
-          </ol>
         </div>
       </section>
 
@@ -353,7 +390,7 @@
 
 
   <script src="./public-config.js?v=20260721a"></script>
-  <script defer src="./client.js?v=20260722c"></script>
+  <script defer src="./client.js?v=20260722d"></script>
 </body>
 </html>
 
