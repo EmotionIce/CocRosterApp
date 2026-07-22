@@ -33,6 +33,9 @@
     const ROSTER_SNAPSHOT_IDB_STORE_NAME = "snapshots";
     const ROSTER_SNAPSHOT_CACHE_MAX_AGE_MS = 14 * DAY_MS;
     const ROSTER_ANCHOR_PREFIX = "roster-";
+    const LANDING_RHYTHM_SETTLE_LOCAL_PROGRESS = 0.62;
+    const LANDING_RHYTHM_SETTLE_IDLE_MS = 150;
+    const LANDING_RHYTHM_SETTLE_RELEASE_MS = 700;
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
         : { format: (value) => String(value) };
@@ -54,6 +57,13 @@
     let landingScrollRafId = 0;
     let landingSquareStoryActiveStep = -1;
     let landingRhythmStoryActiveStep = -1;
+    let landingRhythmSettleTimerId = 0;
+    let landingRhythmSettleReleaseTimerId = 0;
+    let landingRhythmSettleInFlight = false;
+    let landingRhythmSettleTargetY = Number.NaN;
+    let landingRhythmSettleStoryRoot = null;
+    let landingRhythmLastScrollY = 0;
+    let landingRhythmScrollDirection = 1;
     let landingMediaCanStart = false;
     let landingMediaDeferredStartScheduled = false;
     let landingMediaVisibilityObserver = null;
@@ -8728,6 +8738,50 @@
         setLandingSquareStoryStep(story, stepIndex);
     };
 
+    // Ease scroll-driven movement while retaining exact endpoints.
+    const easeLandingRhythmProgress_ = (valueRaw) => {
+        const value = clamp01(Number(valueRaw) || 0);
+        return value * value * value * ((value * ((value * 6) - 15)) + 10);
+    };
+
+    // Pick the nearest readable rest point without catching entry or exit scrolling.
+    const getLandingRhythmSnapProgress_ = (rawProgressRaw, stepCountRaw, directionRaw) => {
+        const rawProgress = clamp01(Number(rawProgressRaw) || 0);
+        const stepCount = Math.max(1, Math.floor(Number(stepCountRaw) || 1));
+        const localProgress = LANDING_RHYTHM_SETTLE_LOCAL_PROGRESS;
+        const firstRestPoint = localProgress / stepCount;
+        const lastRestPoint = ((stepCount - 1) + localProgress) / stepCount;
+        const entryBoundary = firstRestPoint / 2;
+        const exitBoundary = (lastRestPoint + 1) / 2;
+        if (rawProgress <= entryBoundary || rawProgress >= exitBoundary) return null;
+
+        const scaledStep = (rawProgress * stepCount) - localProgress;
+        const lowerStep = Math.floor(scaledStep);
+        const stepFraction = scaledStep - lowerStep;
+        let stepIndex = stepFraction === 0.5
+            ? (Number(directionRaw) < 0 ? lowerStep : lowerStep + 1)
+            : Math.round(scaledStep);
+        stepIndex = Math.max(0, Math.min(stepCount - 1, stepIndex));
+        return (stepIndex + localProgress) / stepCount;
+    };
+
+    // Measure progress and its matching document-space scroll target for the rhythm story.
+    const getLandingRhythmGeometry_ = (storyRoot, viewportHeightRaw) => {
+        const story = storyRoot || null;
+        if (!story || typeof window === "undefined") return null;
+        const viewportHeight = Math.max(1, Number(viewportHeightRaw) || window.innerHeight || 1);
+        const rect = story.getBoundingClientRect();
+        const scrollRange = Math.max(1, rect.height - (viewportHeight * 0.82));
+        const rawProgress = clamp01(((viewportHeight * 0.14) - rect.top) / scrollRange);
+        const scrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
+        return {
+            rawProgress: rawProgress,
+            scrollRange: scrollRange,
+            storyDocumentTop: rect.top + scrollY,
+            viewportHeight: viewportHeight,
+        };
+    };
+
     // Set one active chapter in the four-scene TURTLE rhythm story.
     const setLandingRhythmStoryStep_ = (storyRoot, stepIndexRaw, exposeAllRaw, transitionProgressRaw) => {
         const story = storyRoot || $("#publicViewLanding [data-landing-rhythm-story]");
@@ -8739,8 +8793,8 @@
         const exposeAll = !!exposeAllRaw;
         const transitionProgress = exposeAll ? 0 : clamp01(Number(transitionProgressRaw) || 0);
         const nextStep = stepIndex < maxStep ? stepIndex + 1 : -1;
-        const outgoingOpacity = exposeAll ? 1 : clamp01((0.58 - transitionProgress) / 0.58);
-        const incomingOpacity = exposeAll ? 1 : clamp01((transitionProgress - 0.42) / 0.58);
+        const outgoingOpacity = exposeAll ? 1 : 1 - transitionProgress;
+        const incomingOpacity = exposeAll ? 1 : transitionProgress;
         landingRhythmStoryActiveStep = stepIndex;
         story.setAttribute("data-active-scene", String(stepIndex));
 
@@ -8820,29 +8874,124 @@
 
         const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
         if (!beats.length) return;
-        const rect = story.getBoundingClientRect();
-        const scrollRange = Math.max(1, rect.height - (viewportHeight * 0.82));
-        const rawProgress = clamp01(((viewportHeight * 0.14) - rect.top) / scrollRange);
+        const geometry = getLandingRhythmGeometry_(story, viewportHeight);
+        if (!geometry) return;
+        const rawProgress = geometry.rawProgress;
         const scaledProgress = rawProgress * beats.length;
         const stepIndex = Math.min(beats.length - 1, Math.floor(scaledProgress));
         const chapterProgress = stepIndex === beats.length - 1 && rawProgress >= 1
             ? 1
             : clamp01(scaledProgress - stepIndex);
         const transitionProgress = stepIndex < beats.length - 1
-            ? clamp01((chapterProgress - 0.72) / 0.28)
+            ? clamp01((chapterProgress - 0.76) / 0.24)
             : 0;
-        const sceneProgress = stepIndex === beats.length - 1
-            ? chapterProgress
-            : clamp01(chapterProgress / 0.72);
-        const smoothTransition = transitionProgress * transitionProgress * (3 - (2 * transitionProgress));
+        const sceneProgress = easeLandingRhythmProgress_(clamp01(chapterProgress / 0.52));
+        const smoothTransition = easeLandingRhythmProgress_(transitionProgress);
         const trackProgress = beats.length > 1
             ? clamp01((stepIndex + smoothTransition) / (beats.length - 1))
             : 0;
         story.style.setProperty("--landing-rhythm-progress", rawProgress.toFixed(4));
         story.style.setProperty("--landing-rhythm-scene-progress", sceneProgress.toFixed(4));
-        story.style.setProperty("--landing-rhythm-transition-progress", transitionProgress.toFixed(4));
+        story.style.setProperty("--landing-rhythm-transition-progress", smoothTransition.toFixed(4));
         story.style.setProperty("--landing-rhythm-track-progress", trackProgress.toFixed(4));
-        setLandingRhythmStoryStep_(story, stepIndex, false, transitionProgress);
+        setLandingRhythmStoryStep_(story, stepIndex, false, smoothTransition);
+    };
+
+    // Release any pending or active automatic rhythm-story settle.
+    const cancelLandingRhythmSettle_ = () => {
+        if (landingRhythmSettleTimerId && typeof window !== "undefined") window.clearTimeout(landingRhythmSettleTimerId);
+        if (landingRhythmSettleReleaseTimerId && typeof window !== "undefined") window.clearTimeout(landingRhythmSettleReleaseTimerId);
+        landingRhythmSettleTimerId = 0;
+        landingRhythmSettleReleaseTimerId = 0;
+        landingRhythmSettleInFlight = false;
+        landingRhythmSettleTargetY = Number.NaN;
+        if (landingRhythmSettleStoryRoot) landingRhythmSettleStoryRoot.classList.remove("is-settling");
+        landingRhythmSettleStoryRoot = null;
+    };
+
+    // Smoothly move to one stable chapter position while leaving native input interruptible.
+    const scrollLandingRhythmToProgress_ = (storyRoot, targetProgressRaw, behaviorRaw) => {
+        if (!storyRoot || typeof window === "undefined") return false;
+        const geometry = getLandingRhythmGeometry_(storyRoot, window.innerHeight || 1);
+        if (!geometry) return false;
+        const targetProgress = clamp01(Number(targetProgressRaw) || 0);
+        const targetY = Math.max(0, geometry.storyDocumentTop
+            - (geometry.viewportHeight * 0.14)
+            + (targetProgress * geometry.scrollRange));
+        const currentY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
+        if (Math.abs(targetY - currentY) < 3) return false;
+
+        cancelLandingRhythmSettle_();
+        landingRhythmSettleInFlight = true;
+        landingRhythmSettleTargetY = targetY;
+        landingRhythmSettleStoryRoot = storyRoot;
+        storyRoot.classList.add("is-settling");
+        window.scrollTo({
+            top: targetY,
+            behavior: behaviorRaw === "auto" ? "auto" : "smooth",
+        });
+        landingRhythmSettleReleaseTimerId = window.setTimeout(() => {
+            cancelLandingRhythmSettle_();
+            queueLandingScrollEffectsFrame();
+        }, LANDING_RHYTHM_SETTLE_RELEASE_MS);
+        return true;
+    };
+
+    // Settle an interrupted chapter to the nearest deliberate reading position.
+    const settleLandingRhythmStory_ = () => {
+        landingRhythmSettleTimerId = 0;
+        if (landingRhythmSettleInFlight || typeof window === "undefined" || typeof document === "undefined") return;
+        const landingRoot = $("#publicViewLanding");
+        const story = landingRoot && !landingRoot.classList.contains("hidden")
+            ? landingRoot.querySelector("[data-landing-rhythm-story]")
+            : null;
+        if (!story || story.classList.contains("is-static") || !canUseLandingPinnedStories_()) return;
+        if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
+        const geometry = getLandingRhythmGeometry_(story, window.innerHeight || 1);
+        if (!beats.length || !geometry) return;
+        const targetProgress = getLandingRhythmSnapProgress_(
+            geometry.rawProgress,
+            beats.length,
+            landingRhythmScrollDirection,
+        );
+        if (targetProgress == null) return;
+        scrollLandingRhythmToProgress_(story, targetProgress, "smooth");
+    };
+
+    // Debounce wheel and touch momentum before gently settling the story.
+    const scheduleLandingRhythmSettle_ = () => {
+        if (typeof window === "undefined" || landingRhythmSettleInFlight) return;
+        if (landingRhythmSettleTimerId) window.clearTimeout(landingRhythmSettleTimerId);
+        landingRhythmSettleTimerId = window.setTimeout(settleLandingRhythmStory_, LANDING_RHYTHM_SETTLE_IDLE_MS);
+    };
+
+    // Make the visible journey labels useful tap and keyboard shortcuts.
+    const bindLandingRhythmControls_ = (landingRoot) => {
+        const story = landingRoot && landingRoot.querySelector("[data-landing-rhythm-story]");
+        if (!story) return;
+        const controls = story.querySelectorAll("[data-landing-rhythm-jump]");
+        for (let i = 0; i < controls.length; i++) {
+            const control = controls[i];
+            if (control.dataset.landingRhythmBound === "1") continue;
+            control.dataset.landingRhythmBound = "1";
+            control.addEventListener("click", () => {
+                if (story.classList.contains("is-static") || !canUseLandingPinnedStories_()) return;
+                const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
+                const stepIndex = Math.max(0, Math.min(
+                    beats.length - 1,
+                    Math.floor(Number(control.getAttribute("data-landing-rhythm-jump")) || 0),
+                ));
+                if (!beats.length) return;
+                const currentStep = landingRhythmStoryActiveStep;
+                landingRhythmScrollDirection = stepIndex < currentStep ? -1 : 1;
+                scrollLandingRhythmToProgress_(
+                    story,
+                    (stepIndex + LANDING_RHYTHM_SETTLE_LOCAL_PROGRESS) / beats.length,
+                    "smooth",
+                );
+            });
+        }
     };
 
     // Enable progressive motion styling without running a redundant reveal observer.
@@ -8917,17 +9066,53 @@
         landingScrollEffectsBound = true;
         refreshLandingRevealTargets();
         syncLandingStickyOffset_();
+        const landingRoot = $("#publicViewLanding");
+        bindLandingRhythmControls_(landingRoot);
+        landingRhythmLastScrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
         // Queue the next scheduled update.
         const queue = () => queueLandingScrollEffectsFrame();
+        const handleLandingScroll = () => {
+            const currentScrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
+            const scrollDelta = currentScrollY - landingRhythmLastScrollY;
+            if (!landingRhythmSettleInFlight && Math.abs(scrollDelta) > 0.5) {
+                landingRhythmScrollDirection = scrollDelta < 0 ? -1 : 1;
+            }
+            landingRhythmLastScrollY = currentScrollY;
+            queueLandingScrollEffectsFrame();
+            if (!landingRhythmSettleInFlight) scheduleLandingRhythmSettle_();
+        };
+        const handleLandingScrollEnd = () => {
+            const currentScrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
+            if (landingRhythmSettleInFlight) {
+                if (Number.isFinite(landingRhythmSettleTargetY)
+                    && Math.abs(currentScrollY - landingRhythmSettleTargetY) < 4) {
+                    cancelLandingRhythmSettle_();
+                }
+                return;
+            }
+            settleLandingRhythmStory_();
+        };
+        const interruptLandingRhythmSettle = () => cancelLandingRhythmSettle_();
+        const interruptLandingRhythmSettleFromKey = (event) => {
+            if (!event || !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+            cancelLandingRhythmSettle_();
+        };
         const queueAfterViewportChange = () => {
+            cancelLandingRhythmSettle_();
             landingSquareStoryActiveStep = -1;
             landingRhythmStoryActiveStep = -1;
+            landingRhythmLastScrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
             syncLandingStickyOffset_();
             queueLandingScrollEffectsFrame();
             window.setTimeout(queueLandingScrollEffectsFrame, 80);
             window.setTimeout(queueLandingScrollEffectsFrame, 260);
         };
-        window.addEventListener("scroll", queue, { passive: true });
+        window.addEventListener("scroll", handleLandingScroll, { passive: true });
+        if ("onscrollend" in window) window.addEventListener("scrollend", handleLandingScrollEnd, { passive: true });
+        window.addEventListener("wheel", interruptLandingRhythmSettle, { passive: true });
+        window.addEventListener("touchstart", interruptLandingRhythmSettle, { passive: true });
+        window.addEventListener("pointerdown", interruptLandingRhythmSettle, { passive: true });
+        window.addEventListener("keydown", interruptLandingRhythmSettleFromKey);
         window.addEventListener("resize", queueAfterViewportChange);
         window.addEventListener("orientationchange", queueAfterViewportChange);
         document.addEventListener("visibilitychange", syncLandingMediaPlayback_);

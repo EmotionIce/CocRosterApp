@@ -30,6 +30,7 @@ const loadClientInternals = (overrides = {}) => {
       "        getRosterCurrentWarStarStanding,",
       "        getRosterWarScoreState,",
       "        buildResolvedPublicProfile_,",
+      "        getLandingRhythmSnapProgress_,",
       "    };",
       "    return;",
       bootMarker,
@@ -95,6 +96,16 @@ test("landing profile keeps additional managed repeater items", () => {
   assert.equal(profile.discovery.lanes[4].value, "5");
   assert.equal(profile.extras.highlights.length, 4);
   assert.deepEqual(Array.from(profile.network.path), ["One", "Two", "Three", "Four"]);
+});
+
+test("landing rhythm settle chooses readable chapter rests without trapping section exits", () => {
+  const { getLandingRhythmSnapProgress_ } = loadClientInternals();
+  assert.equal(getLandingRhythmSnapProgress_(0.03, 4, 1), null);
+  assert.equal(getLandingRhythmSnapProgress_(0.1, 4, 1), 0.155);
+  assert.equal(getLandingRhythmSnapProgress_(0.3, 4, 1), 0.405);
+  assert.equal(getLandingRhythmSnapProgress_(0.53, 4, 1), 0.655);
+  assert.equal(getLandingRhythmSnapProgress_(0.53, 4, -1), 0.405);
+  assert.equal(getLandingRhythmSnapProgress_(0.97, 4, 1), null);
 });
 
 test("landing profile upgrades only the exact legacy Home copy", () => {

@@ -11848,6 +11848,8 @@ html:not(.landing-motion-ready) .landing-progress-path,
   width:calc(var(--landing-rhythm-track-progress) * 100%);
   background:linear-gradient(90deg, #cdf469, #ffb13d 38%, #ff79d6 68%, #2de6b8);
   box-shadow:0 0 10px rgba(205,244,105,.38);
+  will-change:width;
+  transition:width .1s linear;
 }
 
 .landing-rhythm__member{
@@ -11865,6 +11867,8 @@ html:not(.landing-motion-ready) .landing-progress-path,
   text-align:center;
   transform:translate(-50%, -50%);
   box-shadow:0 0 16px rgba(205,244,105,.18);
+  will-change:left;
+  transition:left .1s linear;
 }
 
 .landing-rhythm__member small{
@@ -11897,6 +11901,38 @@ html:not(.landing-motion-ready) .landing-progress-path,
   color:#66736b;
   text-align:center;
   transform:none;
+}
+
+.landing-rhythm__nav button{
+  appearance:none;
+  width:100%;
+  min-height:36px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  padding:7px 4px 3px;
+  border:0;
+  border-radius:2px;
+  background:transparent;
+  color:inherit;
+  font:inherit;
+  letter-spacing:inherit;
+  text-transform:inherit;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:color .16s ease, background-color .16s ease;
+}
+
+.landing-rhythm__nav button:hover{
+  color:#e9ffad;
+  background:rgba(205,244,105,.055);
+}
+
+.landing-rhythm__nav button:focus-visible{
+  outline:1px solid #cdf469;
+  outline-offset:2px;
+  color:#cdf469;
 }
 
 .landing-rhythm__nav li::before{
@@ -11973,6 +12009,8 @@ html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapte
   visibility:hidden;
   pointer-events:none;
   transform:translateX(calc(var(--landing-rhythm-transition-progress) * -18px));
+  will-change:opacity, transform;
+  transition:opacity .14s linear, transform .18s cubic-bezier(.2,.72,.2,1);
 }
 
 html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter .landing-rhythm-scene,
@@ -11991,6 +12029,15 @@ html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapte
 
 html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm-chapter.is-entering{
   transform:translateX(calc((1 - var(--landing-rhythm-transition-progress)) * 22px));
+}
+
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-war-plan__brief,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-war-attack,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-cwl-step,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-extra-event,
+html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-progress-node{
+  will-change:opacity, transform;
+  transition:opacity .12s linear, transform .16s cubic-bezier(.2,.72,.2,1), border-color .16s ease, box-shadow .16s ease;
 }
 
 html:not(.landing-motion-ready) .landing-rhythm__journey,
@@ -12254,7 +12301,10 @@ html:not(.landing-motion-ready) .landing-progress-route.is-dense .landing-progre
   .landing-cwl-source,
   .landing-cwl-assignment,
   .landing-extra-event,
-  .landing-progress-node{
+  .landing-progress-node,
+  .landing-rhythm__rail-fill,
+  .landing-rhythm__member,
+  .landing-rhythm__nav button{
     transition:none !important;
     animation:none !important;
   }

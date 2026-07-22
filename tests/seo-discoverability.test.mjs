@@ -72,6 +72,7 @@ test("landing selling points use visitor-visible scroll stories instead of crawl
   assert.match(indexHtml, /data-landing-rhythm-beat="0"/);
   assert.match(indexHtml, /data-landing-rhythm-beat="3"/);
   assert.match(indexHtml, /class="landing-rhythm__member"/);
+  assert.equal((indexHtml.match(/data-landing-rhythm-jump="[0-3]"/g) || []).length, 4);
   assert.match(indexHtml, /class="landing-war-plan"/);
   assert.match(indexHtml, /class="landing-cwl-flow"/);
   assert.match(indexHtml, /landing-cwl-step--choose/);
@@ -81,6 +82,9 @@ test("landing selling points use visitor-visible scroll stories instead of crawl
   assert.match(indexHtml, /class="landing-extra-timeline"/);
   assert.match(indexHtml, /class="landing-progress-route"/);
   assert.match(clientCode, /--landing-rhythm-track-progress/);
+  assert.match(clientCode, /getLandingRhythmSnapProgress_/);
+  assert.match(clientCode, /scheduleLandingRhythmSettle_/);
+  assert.match(clientCode, /scrollLandingRhythmToProgress_/);
   assert.match(clientCode, /querySelectorAll\("\.landing-extra-event"\)\.length > 3/);
   assert.match(memberJourneyStyles, /min-height:290svh/);
   assert.match(memberJourneyStyles, /aspect-ratio:16 \/ 10/);
