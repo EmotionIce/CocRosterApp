@@ -31,6 +31,7 @@ const loadClientInternals = (overrides = {}) => {
       "        getRosterWarScoreState,",
       "        buildResolvedPublicProfile_,",
       "        getLandingRhythmSnapProgress_,",
+      "        getLandingRhythmGestureAction_,",
       "    };",
       "    return;",
       bootMarker,
@@ -106,6 +107,35 @@ test("landing rhythm settle chooses readable chapter rests without trapping sect
   assert.equal(getLandingRhythmSnapProgress_(0.53, 4, 1), 0.655);
   assert.equal(getLandingRhythmSnapProgress_(0.53, 4, -1), 0.405);
   assert.equal(getLandingRhythmSnapProgress_(0.97, 4, 1), null);
+});
+
+test("landing rhythm gestures advance one chapter while preserving deliberate exits", () => {
+  const { getLandingRhythmGestureAction_ } = loadClientInternals();
+
+  let action = getLandingRhythmGestureAction_(0.03, 4, 1, 100, 340);
+  assert.equal(action.type, "step");
+  assert.equal(action.stepIndex, 0);
+  assert.equal(action.targetProgress, 0.155);
+
+  action = getLandingRhythmGestureAction_(0.03, 4, -1, 100, 340);
+  assert.equal(action.type, "native");
+
+  action = getLandingRhythmGestureAction_(0.405, 4, 1, 100, 340);
+  assert.equal(action.type, "step");
+  assert.equal(action.stepIndex, 2);
+  assert.equal(action.targetProgress, 0.655);
+
+  action = getLandingRhythmGestureAction_(0.405, 4, 1, 360, 340);
+  assert.equal(action.type, "exit");
+  assert.equal(action.direction, 1);
+
+  action = getLandingRhythmGestureAction_(0.905, 4, 1, 100, 340);
+  assert.equal(action.type, "native");
+
+  action = getLandingRhythmGestureAction_(0.97, 4, -1, 100, 340);
+  assert.equal(action.type, "step");
+  assert.equal(action.stepIndex, 3);
+  assert.equal(action.targetProgress, 0.905);
 });
 
 test("landing profile upgrades only the exact legacy Home copy", () => {

@@ -36,6 +36,14 @@
     const LANDING_RHYTHM_SETTLE_LOCAL_PROGRESS = 0.62;
     const LANDING_RHYTHM_SETTLE_IDLE_MS = 150;
     const LANDING_RHYTHM_SETTLE_RELEASE_MS = 700;
+    const LANDING_RHYTHM_WHEEL_STEP_THRESHOLD_PX = 28;
+    const LANDING_RHYTHM_WHEEL_ESCAPE_MIN_PX = 320;
+    const LANDING_RHYTHM_WHEEL_ESCAPE_VIEWPORT_RATIO = 0.38;
+    const LANDING_RHYTHM_WHEEL_GESTURE_GAP_MS = 210;
+    const LANDING_RHYTHM_TOUCH_STEP_THRESHOLD_PX = 44;
+    const LANDING_RHYTHM_TOUCH_ESCAPE_MIN_PX = 300;
+    const LANDING_RHYTHM_TOUCH_ESCAPE_VIEWPORT_RATIO = 0.38;
+    const LANDING_RHYTHM_NATIVE_BYPASS_MS = 700;
     const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat
         ? new Intl.NumberFormat()
         : { format: (value) => String(value) };
@@ -64,6 +72,10 @@
     let landingRhythmSettleStoryRoot = null;
     let landingRhythmLastScrollY = 0;
     let landingRhythmScrollDirection = 1;
+    let landingRhythmWheelGesture = null;
+    let landingRhythmWheelGestureTimerId = 0;
+    let landingRhythmTouchGesture = null;
+    let landingRhythmNativeBypassUntil = 0;
     let landingMediaCanStart = false;
     let landingMediaDeferredStartScheduled = false;
     let landingMediaVisibilityObserver = null;
@@ -8765,6 +8777,61 @@
         return (stepIndex + localProgress) / stepCount;
     };
 
+    // Resolve one deliberate gesture to one chapter, or release/escape the story.
+    const getLandingRhythmGestureAction_ = (
+        rawProgressRaw,
+        stepCountRaw,
+        directionRaw,
+        magnitudeRaw,
+        escapeThresholdRaw,
+    ) => {
+        const rawProgress = clamp01(Number(rawProgressRaw) || 0);
+        const stepCount = Math.max(1, Math.floor(Number(stepCountRaw) || 1));
+        const direction = Number(directionRaw) < 0 ? -1 : 1;
+        const magnitude = Math.max(0, Number(magnitudeRaw) || 0);
+        const escapeThreshold = Math.max(1, Number(escapeThresholdRaw) || Number.POSITIVE_INFINITY);
+        if (magnitude >= escapeThreshold) return { type: "exit", direction: direction };
+
+        const localProgress = LANDING_RHYTHM_SETTLE_LOCAL_PROGRESS;
+        const firstRestPoint = localProgress / stepCount;
+        const lastRestPoint = ((stepCount - 1) + localProgress) / stepCount;
+        const entryBoundary = firstRestPoint / 2;
+        const exitBoundary = (lastRestPoint + 1) / 2;
+        if (rawProgress <= entryBoundary) {
+            if (direction < 0) return { type: "native", direction: direction };
+            return {
+                type: "step",
+                direction: direction,
+                stepIndex: 0,
+                targetProgress: firstRestPoint,
+            };
+        }
+        if (rawProgress >= exitBoundary) {
+            if (direction > 0) return { type: "native", direction: direction };
+            return {
+                type: "step",
+                direction: direction,
+                stepIndex: stepCount - 1,
+                targetProgress: lastRestPoint,
+            };
+        }
+
+        const currentStep = Math.max(0, Math.min(
+            stepCount - 1,
+            Math.round((rawProgress * stepCount) - localProgress),
+        ));
+        const targetStep = currentStep + direction;
+        if (targetStep < 0 || targetStep >= stepCount) {
+            return { type: "native", direction: direction };
+        }
+        return {
+            type: "step",
+            direction: direction,
+            stepIndex: targetStep,
+            targetProgress: (targetStep + localProgress) / stepCount,
+        };
+    };
+
     // Measure progress and its matching document-space scroll target for the rhythm story.
     const getLandingRhythmGeometry_ = (storyRoot, viewportHeightRaw) => {
         const story = storyRoot || null;
@@ -8909,15 +8976,10 @@
         landingRhythmSettleStoryRoot = null;
     };
 
-    // Smoothly move to one stable chapter position while leaving native input interruptible.
-    const scrollLandingRhythmToProgress_ = (storyRoot, targetProgressRaw, behaviorRaw) => {
+    // Smoothly move to one document position while leaving later gestures interruptible.
+    const scrollLandingRhythmToY_ = (storyRoot, targetYRaw, behaviorRaw) => {
         if (!storyRoot || typeof window === "undefined") return false;
-        const geometry = getLandingRhythmGeometry_(storyRoot, window.innerHeight || 1);
-        if (!geometry) return false;
-        const targetProgress = clamp01(Number(targetProgressRaw) || 0);
-        const targetY = Math.max(0, geometry.storyDocumentTop
-            - (geometry.viewportHeight * 0.14)
-            + (targetProgress * geometry.scrollRange));
+        const targetY = Math.max(0, Number(targetYRaw) || 0);
         const currentY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
         if (Math.abs(targetY - currentY) < 3) return false;
 
@@ -8937,10 +8999,36 @@
         return true;
     };
 
+    // Smoothly move to one stable chapter position.
+    const scrollLandingRhythmToProgress_ = (storyRoot, targetProgressRaw, behaviorRaw) => {
+        if (!storyRoot || typeof window === "undefined") return false;
+        const geometry = getLandingRhythmGeometry_(storyRoot, window.innerHeight || 1);
+        if (!geometry) return false;
+        const targetProgress = clamp01(Number(targetProgressRaw) || 0);
+        const targetY = geometry.storyDocumentTop
+            - (geometry.viewportHeight * 0.14)
+            + (targetProgress * geometry.scrollRange);
+        return scrollLandingRhythmToY_(storyRoot, targetY, behaviorRaw);
+    };
+
+    // A forceful gesture deliberately clears the sticky scene instead of walking every card.
+    const scrollLandingRhythmPastStory_ = (storyRoot, directionRaw) => {
+        if (!storyRoot || typeof window === "undefined") return false;
+        const geometry = getLandingRhythmGeometry_(storyRoot, window.innerHeight || 1);
+        if (!geometry) return false;
+        const direction = Number(directionRaw) < 0 ? -1 : 1;
+        const exitProgress = direction < 0 ? -0.08 : 1.08;
+        const targetY = geometry.storyDocumentTop
+            - (geometry.viewportHeight * 0.14)
+            + (exitProgress * geometry.scrollRange);
+        return scrollLandingRhythmToY_(storyRoot, targetY, "smooth");
+    };
+
     // Settle an interrupted chapter to the nearest deliberate reading position.
     const settleLandingRhythmStory_ = () => {
         landingRhythmSettleTimerId = 0;
         if (landingRhythmSettleInFlight || typeof window === "undefined" || typeof document === "undefined") return;
+        if (Date.now() < landingRhythmNativeBypassUntil) return;
         const landingRoot = $("#publicViewLanding");
         const story = landingRoot && !landingRoot.classList.contains("hidden")
             ? landingRoot.querySelector("[data-landing-rhythm-story]")
@@ -8964,6 +9052,256 @@
         if (typeof window === "undefined" || landingRhythmSettleInFlight) return;
         if (landingRhythmSettleTimerId) window.clearTimeout(landingRhythmSettleTimerId);
         landingRhythmSettleTimerId = window.setTimeout(settleLandingRhythmStory_, LANDING_RHYTHM_SETTLE_IDLE_MS);
+    };
+
+    const getInteractiveLandingRhythmStory_ = () => {
+        if (typeof window === "undefined" || typeof document === "undefined") return null;
+        const landingRoot = $("#publicViewLanding");
+        const story = landingRoot && !landingRoot.classList.contains("hidden")
+            ? landingRoot.querySelector("[data-landing-rhythm-story]")
+            : null;
+        if (!story || story.classList.contains("is-static") || !canUseLandingPinnedStories_()) return null;
+        if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return null;
+        return story;
+    };
+
+    const eventTargetsLandingRhythmStory_ = (event, storyRoot) => {
+        const target = event && event.target;
+        if (!target || !storyRoot) return false;
+        if (target === storyRoot) return true;
+        return typeof target.nodeType === "number" && storyRoot.contains(target);
+    };
+
+    const normalizeLandingRhythmWheelDelta_ = (event) => {
+        if (!event || typeof window === "undefined") return 0;
+        const multiplier = event.deltaMode === 1
+            ? 16
+            : (event.deltaMode === 2 ? Math.max(1, window.innerHeight || 1) : 1);
+        return (Number(event.deltaY) || 0) * multiplier;
+    };
+
+    const preventLandingRhythmInput_ = (event) => {
+        if (!event || !event.cancelable || typeof event.preventDefault !== "function") return false;
+        event.preventDefault();
+        return true;
+    };
+
+    const resetLandingRhythmWheelGesture_ = () => {
+        if (landingRhythmWheelGestureTimerId && typeof window !== "undefined") {
+            window.clearTimeout(landingRhythmWheelGestureTimerId);
+        }
+        landingRhythmWheelGestureTimerId = 0;
+        landingRhythmWheelGesture = null;
+    };
+
+    const armLandingRhythmWheelGestureReset_ = () => {
+        if (typeof window === "undefined") return;
+        if (landingRhythmWheelGestureTimerId) window.clearTimeout(landingRhythmWheelGestureTimerId);
+        landingRhythmWheelGestureTimerId = window.setTimeout(
+            resetLandingRhythmWheelGesture_,
+            LANDING_RHYTHM_WHEEL_GESTURE_GAP_MS + 40,
+        );
+    };
+
+    // Treat a wheel/trackpad burst as one intention, not as a stream of chapter jumps.
+    const handleLandingRhythmWheelGesture_ = (event) => {
+        if (!event || event.defaultPrevented || event.ctrlKey || typeof window === "undefined") return;
+        const story = getInteractiveLandingRhythmStory_();
+        if (!story || !eventTargetsLandingRhythmStory_(event, story)) return;
+        const delta = normalizeLandingRhythmWheelDelta_(event);
+        if (Math.abs(delta) < 0.5 || Math.abs(Number(event.deltaX) || 0) > Math.abs(Number(event.deltaY) || 0)) return;
+
+        const direction = delta < 0 ? -1 : 1;
+        const now = Date.now();
+        const continuesGesture = !!(
+            landingRhythmWheelGesture
+            && landingRhythmWheelGesture.story === story
+            && landingRhythmWheelGesture.direction === direction
+            && now - landingRhythmWheelGesture.lastAt <= LANDING_RHYTHM_WHEEL_GESTURE_GAP_MS
+        );
+        if (!continuesGesture) {
+            resetLandingRhythmWheelGesture_();
+            cancelLandingRhythmSettle_();
+            landingRhythmNativeBypassUntil = 0;
+            landingRhythmWheelGesture = {
+                story: story,
+                direction: direction,
+                magnitude: 0,
+                lastAt: now,
+                stepped: false,
+                exited: false,
+                nativeBypass: false,
+            };
+        }
+
+        const gesture = landingRhythmWheelGesture;
+        gesture.lastAt = now;
+        gesture.magnitude += Math.abs(delta);
+        armLandingRhythmWheelGestureReset_();
+        if (gesture.nativeBypass) return;
+        if (gesture.exited) {
+            preventLandingRhythmInput_(event);
+            return;
+        }
+
+        const escapeThreshold = Math.max(
+            LANDING_RHYTHM_WHEEL_ESCAPE_MIN_PX,
+            (window.innerHeight || 1) * LANDING_RHYTHM_WHEEL_ESCAPE_VIEWPORT_RATIO,
+        );
+        if (gesture.stepped) {
+            if (!preventLandingRhythmInput_(event)) {
+                gesture.nativeBypass = true;
+                landingRhythmNativeBypassUntil = now + LANDING_RHYTHM_NATIVE_BYPASS_MS;
+                return;
+            }
+            if (gesture.magnitude >= escapeThreshold) {
+                gesture.exited = true;
+                gesture.stepped = false;
+                landingRhythmScrollDirection = direction;
+                cancelLandingRhythmSettle_();
+                scrollLandingRhythmPastStory_(story, direction);
+            }
+            return;
+        }
+
+        const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
+        const geometry = getLandingRhythmGeometry_(story, window.innerHeight || 1);
+        if (!beats.length || !geometry) return;
+        const action = getLandingRhythmGestureAction_(
+            geometry.rawProgress,
+            beats.length,
+            direction,
+            gesture.magnitude,
+            escapeThreshold,
+        );
+        if (action.type === "native") {
+            gesture.nativeBypass = true;
+            landingRhythmNativeBypassUntil = now + LANDING_RHYTHM_NATIVE_BYPASS_MS;
+            cancelLandingRhythmSettle_();
+            return;
+        }
+        if (!preventLandingRhythmInput_(event)) {
+            gesture.nativeBypass = true;
+            landingRhythmNativeBypassUntil = now + LANDING_RHYTHM_NATIVE_BYPASS_MS;
+            return;
+        }
+
+        landingRhythmScrollDirection = direction;
+        if (action.type === "exit") {
+            gesture.exited = true;
+            scrollLandingRhythmPastStory_(story, direction);
+            return;
+        }
+        if (gesture.magnitude < LANDING_RHYTHM_WHEEL_STEP_THRESHOLD_PX) return;
+        gesture.stepped = true;
+        scrollLandingRhythmToProgress_(story, action.targetProgress, "smooth");
+    };
+
+    const resetLandingRhythmTouchGesture_ = () => {
+        landingRhythmTouchGesture = null;
+    };
+
+    const getLandingRhythmTouchEscapeThreshold_ = () => Math.max(
+        LANDING_RHYTHM_TOUCH_ESCAPE_MIN_PX,
+        ((typeof window !== "undefined" && window.innerHeight) || 1) * LANDING_RHYTHM_TOUCH_ESCAPE_VIEWPORT_RATIO,
+    );
+
+    const handleLandingRhythmTouchStart_ = (event) => {
+        const story = getInteractiveLandingRhythmStory_();
+        const touches = event && event.touches;
+        if (!story || !touches || touches.length !== 1 || !eventTargetsLandingRhythmStory_(event, story)) {
+            resetLandingRhythmTouchGesture_();
+            return;
+        }
+        const beats = story.querySelectorAll("[data-landing-rhythm-beat]");
+        const geometry = getLandingRhythmGeometry_(story, window.innerHeight || 1);
+        if (!beats.length || !geometry) return;
+        cancelLandingRhythmSettle_();
+        landingRhythmNativeBypassUntil = 0;
+        landingRhythmTouchGesture = {
+            story: story,
+            stepCount: beats.length,
+            rawProgress: geometry.rawProgress,
+            startX: Number(touches[0].clientX) || 0,
+            startY: Number(touches[0].clientY) || 0,
+            lastX: Number(touches[0].clientX) || 0,
+            lastY: Number(touches[0].clientY) || 0,
+            captured: false,
+            nativeBypass: false,
+        };
+    };
+
+    const handleLandingRhythmTouchMove_ = (event) => {
+        const gesture = landingRhythmTouchGesture;
+        const touches = event && event.touches;
+        if (!gesture || !touches || touches.length !== 1) return;
+        const touch = touches[0];
+        gesture.lastX = Number(touch.clientX) || 0;
+        gesture.lastY = Number(touch.clientY) || 0;
+        if (gesture.nativeBypass) return;
+
+        const xDistance = gesture.lastX - gesture.startX;
+        const yDistance = gesture.lastY - gesture.startY;
+        const magnitude = Math.abs(yDistance);
+        if (magnitude < 2 && Math.abs(xDistance) < 2) return;
+        if (Math.abs(xDistance) > magnitude * 1.15) {
+            gesture.nativeBypass = true;
+            return;
+        }
+        const direction = yDistance < 0 ? 1 : -1;
+        const action = getLandingRhythmGestureAction_(
+            gesture.rawProgress,
+            gesture.stepCount,
+            direction,
+            magnitude,
+            getLandingRhythmTouchEscapeThreshold_(),
+        );
+        if (action.type === "native") {
+            gesture.nativeBypass = true;
+            landingRhythmNativeBypassUntil = Date.now() + LANDING_RHYTHM_NATIVE_BYPASS_MS;
+            return;
+        }
+        cancelLandingRhythmSettle_();
+        if (!preventLandingRhythmInput_(event)) {
+            gesture.nativeBypass = true;
+            landingRhythmNativeBypassUntil = Date.now() + LANDING_RHYTHM_NATIVE_BYPASS_MS;
+            return;
+        }
+        gesture.captured = true;
+        landingRhythmScrollDirection = direction;
+    };
+
+    const handleLandingRhythmTouchEnd_ = (event) => {
+        const gesture = landingRhythmTouchGesture;
+        resetLandingRhythmTouchGesture_();
+        if (!gesture || gesture.nativeBypass) return;
+        const changedTouch = event && event.changedTouches && event.changedTouches[0];
+        const endX = changedTouch ? (Number(changedTouch.clientX) || 0) : gesture.lastX;
+        const endY = changedTouch ? (Number(changedTouch.clientY) || 0) : gesture.lastY;
+        const xDistance = endX - gesture.startX;
+        const yDistance = endY - gesture.startY;
+        const magnitude = Math.abs(yDistance);
+        if (magnitude < LANDING_RHYTHM_TOUCH_STEP_THRESHOLD_PX || Math.abs(xDistance) > magnitude * 1.15) {
+            if (gesture.captured) scheduleLandingRhythmSettle_();
+            return;
+        }
+
+        const direction = yDistance < 0 ? 1 : -1;
+        const action = getLandingRhythmGestureAction_(
+            gesture.rawProgress,
+            gesture.stepCount,
+            direction,
+            magnitude,
+            getLandingRhythmTouchEscapeThreshold_(),
+        );
+        if (action.type === "native") {
+            landingRhythmNativeBypassUntil = Date.now() + LANDING_RHYTHM_NATIVE_BYPASS_MS;
+            return;
+        }
+        preventLandingRhythmInput_(event);
+        landingRhythmScrollDirection = direction;
+        if (action.type === "exit") scrollLandingRhythmPastStory_(gesture.story, direction);
+        else scrollLandingRhythmToProgress_(gesture.story, action.targetProgress, "smooth");
     };
 
     // Make the visible journey labels useful tap and keyboard shortcuts.
@@ -9068,6 +9406,7 @@
         syncLandingStickyOffset_();
         const landingRoot = $("#publicViewLanding");
         bindLandingRhythmControls_(landingRoot);
+        const rhythmStory = landingRoot && landingRoot.querySelector("[data-landing-rhythm-story]");
         landingRhythmLastScrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
         // Queue the next scheduled update.
         const queue = () => queueLandingScrollEffectsFrame();
@@ -9093,12 +9432,18 @@
             settleLandingRhythmStory_();
         };
         const interruptLandingRhythmSettle = () => cancelLandingRhythmSettle_();
+        const interruptLandingRhythmSettleFromWheel = (event) => {
+            if (event && event.defaultPrevented) return;
+            cancelLandingRhythmSettle_();
+        };
         const interruptLandingRhythmSettleFromKey = (event) => {
             if (!event || !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
             cancelLandingRhythmSettle_();
         };
         const queueAfterViewportChange = () => {
             cancelLandingRhythmSettle_();
+            resetLandingRhythmWheelGesture_();
+            resetLandingRhythmTouchGesture_();
             landingSquareStoryActiveStep = -1;
             landingRhythmStoryActiveStep = -1;
             landingRhythmLastScrollY = Number(window.scrollY) || Number(window.pageYOffset) || 0;
@@ -9109,7 +9454,14 @@
         };
         window.addEventListener("scroll", handleLandingScroll, { passive: true });
         if ("onscrollend" in window) window.addEventListener("scrollend", handleLandingScrollEnd, { passive: true });
-        window.addEventListener("wheel", interruptLandingRhythmSettle, { passive: true });
+        if (rhythmStory) {
+            rhythmStory.addEventListener("wheel", handleLandingRhythmWheelGesture_, { passive: false });
+            rhythmStory.addEventListener("touchstart", handleLandingRhythmTouchStart_, { passive: true });
+            rhythmStory.addEventListener("touchmove", handleLandingRhythmTouchMove_, { passive: false });
+            rhythmStory.addEventListener("touchend", handleLandingRhythmTouchEnd_, { passive: false });
+            rhythmStory.addEventListener("touchcancel", resetLandingRhythmTouchGesture_, { passive: true });
+        }
+        window.addEventListener("wheel", interruptLandingRhythmSettleFromWheel, { passive: true });
         window.addEventListener("touchstart", interruptLandingRhythmSettle, { passive: true });
         window.addEventListener("pointerdown", interruptLandingRhythmSettle, { passive: true });
         window.addEventListener("keydown", interruptLandingRhythmSettleFromKey);

@@ -83,6 +83,9 @@ test("landing selling points use visitor-visible scroll stories instead of crawl
   assert.match(indexHtml, /class="landing-progress-route"/);
   assert.match(clientCode, /--landing-rhythm-track-progress/);
   assert.match(clientCode, /getLandingRhythmSnapProgress_/);
+  assert.match(clientCode, /getLandingRhythmGestureAction_/);
+  assert.match(clientCode, /handleLandingRhythmWheelGesture_/);
+  assert.match(clientCode, /handleLandingRhythmTouchMove_/);
   assert.match(clientCode, /scheduleLandingRhythmSettle_/);
   assert.match(clientCode, /scrollLandingRhythmToProgress_/);
   assert.match(clientCode, /querySelectorAll\("\.landing-extra-event"\)\.length > 3/);
