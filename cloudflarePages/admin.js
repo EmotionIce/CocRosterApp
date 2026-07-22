@@ -112,8 +112,8 @@
       ],
     },
     family: {
-      eyebrow: "Live clans",
-      title: "Strong rosters",
+      eyebrow: "Live clan family",
+      title: "The whole clan family, at a glance.",
       metaTemplate: "{clanCount} clans \u2022 {playerCount} rostered players",
       loadingMetaText: "Syncing live rosters.",
       playersLabel: "Rostered players",
@@ -132,7 +132,7 @@
     },
     cwl: {
       eyebrow: "CWL",
-      title: "Every opted-in player gets a clear plan.",
+      title: "Your league. Your spot. Full rewards.",
       highlights: [
         { label: "Participating", value: "Open to everyone" },
         { label: "Rosters", value: "Organized on Discord" },
@@ -165,7 +165,7 @@
     },
     finalCta: {
       eyebrow: "Your move",
-      title: "Send your #Tag. We will find your TURTLE clan.",
+      title: "Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.",
       primaryCtaLabel: "Join Discord",
       secondaryCtaLabel: "View Leaderboard",
     },
@@ -214,17 +214,6 @@
             { key: "general.media.bannerPlaceholderLabel", source: "profile", type: "text", path: "media.bannerPlaceholderLabel", label: "Banner placeholder label" },
           ],
         },
-        {
-          key: "general.squareMedia",
-          type: "group",
-          label: "Square media",
-          description: "Square media source and display copy.",
-          fields: [
-            { key: "general.squareMediaUrl", source: "landing", type: "url", path: "squareMediaUrl", label: "Square media URL", description: "Landing square media source." },
-            { key: "general.media.squareLabel", source: "profile", type: "text", path: "media.squareLabel", label: "Square media label" },
-            { key: "general.media.squarePlaceholderLabel", source: "profile", type: "text", path: "media.squarePlaceholderLabel", label: "Square placeholder label" },
-          ],
-        },
       ],
     },
     {
@@ -265,34 +254,9 @@
       ],
     },
     {
-      id: "journey",
-      label: "Journey",
-      description: "Joining flow and step cards.",
-      fields: [
-        { key: "journey.eyebrow", source: "profile", type: "text", path: "journey.eyebrow", label: "Journey eyebrow" },
-        { key: "journey.title", source: "profile", type: "textarea", path: "journey.title", label: "Journey title" },
-        {
-          key: "journey.steps",
-          source: "profile",
-          type: "repeater",
-          path: "journey.steps",
-          label: "Journey steps",
-          description: "Cards shown in order on the landing timeline.",
-          itemType: "object",
-          itemLabel: "Step",
-          defaultItem: { label: "Step", title: "", body: "" },
-          itemFields: [
-            { key: "label", type: "text", label: "Label" },
-            { key: "title", type: "text", label: "Title" },
-            { key: "body", type: "textarea", label: "Body" },
-          ],
-        },
-      ],
-    },
-    {
       id: "family",
       label: "Family",
-      description: "Clan family intro and roster meta labels.",
+      description: "The all-visible clan list and its live player-count labels.",
       fields: [
         { key: "family.eyebrow", source: "profile", type: "text", path: "family.eyebrow", label: "Family eyebrow" },
         { key: "family.title", source: "profile", type: "textarea", path: "family.title", label: "Family title" },
@@ -308,8 +272,6 @@
         },
         { key: "family.loadingMetaText", source: "profile", type: "textarea", path: "family.loadingMetaText", label: "Loading meta text" },
         { key: "family.playersLabel", source: "profile", type: "text", path: "family.playersLabel", label: "Players label" },
-        { key: "family.cwlLabel", source: "profile", type: "text", path: "family.cwlLabel", label: "CWL label" },
-        { key: "family.regularWarLabel", source: "profile", type: "text", path: "family.regularWarLabel", label: "Regular war label" },
       ],
     },
     {
@@ -339,24 +301,10 @@
     {
       id: "cwl",
       label: "CWL",
-      description: "CWL chapter copy and supporting facts for the lineup plan.",
+      description: "Copy beside the choose-league, join-roster, and full-rewards visual.",
       fields: [
         { key: "cwl.eyebrow", source: "profile", type: "text", path: "cwl.eyebrow", label: "CWL eyebrow" },
         { key: "cwl.title", source: "profile", type: "textarea", path: "cwl.title", label: "CWL title" },
-        {
-          key: "cwl.highlights",
-          source: "profile",
-          type: "repeater",
-          path: "cwl.highlights",
-          label: "CWL highlights",
-          itemType: "object",
-          itemLabel: "Highlight",
-          defaultItem: { label: "", value: "" },
-          itemFields: [
-            { key: "label", type: "text", label: "Label" },
-            { key: "value", type: "text", label: "Value" },
-          ],
-        },
       ],
     },
     {
@@ -697,15 +645,19 @@
 
     replaceExactText("hero", "body", "Join Discord. Share your #Tag. Join the Clan.");
     replaceExactText("journey", "title", "Join the clan that fits and progress within the clan family.");
+    replaceExactText("family", "eyebrow", "Live clans");
+    replaceExactText("family", "title", "Strong rosters");
     replaceExactText("network", "title", "Prove yourself and move up.");
     replaceExactText("war", "title", "Opt in. Use hits. Improve.");
     replaceExactText("war", "body", "Organised wars without the noise.");
     replaceExactText("cwl", "title", "Planned lineups. Fair rewards.");
+    replaceExactText("cwl", "title", "Every opted-in player gets a clear plan.");
     replaceExactText("extras", "title", "The good stuff between wars.");
     replaceExactText("network", "title", "Your results have somewhere to go.");
     replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
     replaceExactText("finalCta", "eyebrow", "Ready");
     replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
+    replaceExactText("finalCta", "title", "Send your #Tag. We will find your TURTLE clan.");
 
     const journey = isPlainObject_(profile.journey) ? profile.journey : {};
     const steps = Array.isArray(journey.steps) ? journey.steps : [];

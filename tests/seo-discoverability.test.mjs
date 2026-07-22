@@ -8,6 +8,7 @@ const clientCode = read("../cloudflarePages/client.js");
 const adminCode = read("../cloudflarePages/admin.js");
 const stylesCode = read("../cloudflarePages/styles.css");
 const memberJourneyStyles = stylesCode.slice(stylesCode.indexOf("/* Continuous TURTLE member journey"));
+const clanOverviewStyles = stylesCode.slice(stylesCode.indexOf("/* Clear clan overview"));
 const adminDefaults = adminCode.match(/const PUBLIC_PROFILE_EDITOR_DEFAULTS = \{[\s\S]*?\n  \};/)?.[0] || "";
 const robotsTxt = read("../cloudflarePages/robots.txt");
 const sitemapXml = read("../cloudflarePages/sitemap.xml");
@@ -63,13 +64,20 @@ test("important recruiting claims are visible to visitors and crawlers alike", (
 });
 
 test("landing selling points use visitor-visible scroll stories instead of crawler-only copy", () => {
-  assert.match(indexHtml, /data-landing-square-story/);
+  assert.doesNotMatch(indexHtml, /data-landing-square-story|landing-shell-map|landingJourneySteps/);
+  assert.match(indexHtml, /class="landing-chapter landing-family-overview"/);
+  assert.match(indexHtml, /class="landing-family-roster" role="list"/);
+  assert.doesNotMatch(clanOverviewStyles, /overflow-x\s*:\s*(?:auto|scroll)|scroll-snap-type\s*:\s*x/i);
   assert.match(indexHtml, /data-landing-rhythm-story/);
   assert.match(indexHtml, /data-landing-rhythm-beat="0"/);
   assert.match(indexHtml, /data-landing-rhythm-beat="3"/);
   assert.match(indexHtml, /class="landing-rhythm__member"/);
   assert.match(indexHtml, /class="landing-war-plan"/);
-  assert.match(indexHtml, /class="landing-cwl-assignments"/);
+  assert.match(indexHtml, /class="landing-cwl-flow"/);
+  assert.match(indexHtml, /landing-cwl-step--choose/);
+  assert.match(indexHtml, /landing-cwl-step--roster/);
+  assert.match(indexHtml, /landing-cwl-step--rewards/);
+  assert.match(indexHtml, /class="landing-cwl-side-lane"/);
   assert.match(indexHtml, /class="landing-extra-timeline"/);
   assert.match(indexHtml, /class="landing-progress-route"/);
   assert.match(clientCode, /--landing-rhythm-track-progress/);
@@ -79,19 +87,20 @@ test("landing selling points use visitor-visible scroll stories instead of crawl
   assert.match(memberJourneyStyles, /prefers-reduced-motion: reduce/);
   assert.doesNotMatch(indexHtml, /class="[^"]*(?:crawler|robot|seo-only|visually-hidden)[^"]*"/i);
   assert.doesNotMatch(indexHtml, /landing-escalation__act/);
-  assert.doesNotMatch(indexHtml, /landing-war-target|landing-cwl-board|landing-extra-token/);
+  assert.doesNotMatch(indexHtml, /landing-war-target|landing-cwl-board|landing-cwl-assignments|landing-extra-token/);
+  assert.doesNotMatch(indexHtml, /WAR PLAN|OPTED IN|Hero-down wars available|NEXT WAR|PLANNED ON DISCORD|EVERY PLAYER HAS A PLAN|BEFORE DAY 1|CLAN ACTIVE/);
 });
 
 test("crawlable landing fallbacks match the compact managed profile copy", () => {
   for (const phrase of [
     "One Discord. Every way to play.",
-    "From #Tag to the right clan.",
+    "The whole clan family, at a glance.",
     "Plan together. Finish both attacks.",
-    "Every opted-in player gets a clear plan.",
+    "Your league. Your spot. Full rewards.",
     "The clan stays active between wars.",
     "Reliable attacks open stronger lineups.",
     "Stay on Discord.",
-    "Send your #Tag. We will find your TURTLE clan.",
+    "Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.",
   ]) {
     const exactPhrase = new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
     assert.match(indexHtml, exactPhrase);

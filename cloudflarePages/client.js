@@ -174,8 +174,8 @@
             ],
         },
         family: {
-            eyebrow: "Live clans",
-            title: "Strong rosters",
+            eyebrow: "Live clan family",
+            title: "The whole clan family, at a glance.",
             metaTemplate: "{clanCount} clans \u2022 {playerCount} rostered players",
             loadingMetaText: "Syncing live rosters.",
             playersLabel: "Rostered players",
@@ -194,7 +194,7 @@
         },
         cwl: {
             eyebrow: "CWL",
-            title: "Every opted-in player gets a clear plan.",
+            title: "Your league. Your spot. Full rewards.",
             highlights: [
                 { label: "Participating", value: "Open to everyone" },
                 { label: "Rosters", value: "Organized on Discord" },
@@ -227,7 +227,7 @@
         },
         finalCta: {
             eyebrow: "Your move",
-            title: "Send your #Tag. We will find your TURTLE clan.",
+            title: "Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.",
             primaryCtaLabel: "Join Discord",
             secondaryCtaLabel: "View Leaderboard",
         },
@@ -462,15 +462,19 @@
 
         replaceExactText("hero", "body", "Join Discord. Share your #Tag. Join the Clan.");
         replaceExactText("journey", "title", "Join the clan that fits and progress within the clan family.");
+        replaceExactText("family", "eyebrow", "Live clans");
+        replaceExactText("family", "title", "Strong rosters");
         replaceExactText("network", "title", "Prove yourself and move up.");
         replaceExactText("war", "title", "Opt in. Use hits. Improve.");
         replaceExactText("war", "body", "Organised wars without the noise.");
         replaceExactText("cwl", "title", "Planned lineups. Fair rewards.");
+        replaceExactText("cwl", "title", "Every opted-in player gets a clear plan.");
         replaceExactText("extras", "title", "The good stuff between wars.");
         replaceExactText("network", "title", "Your results have somewhere to go.");
         replaceExactText("proof", "title", "Discord is mandatory.\nSuccessful community.\nEarn progress.");
         replaceExactText("finalCta", "eyebrow", "Ready");
         replaceExactText("finalCta", "title", "Enter the TURTLE-family.");
+        replaceExactText("finalCta", "title", "Send your #Tag. We will find your TURTLE clan.");
 
         const journey = isPlainObject_(profile.journey) ? profile.journey : {};
         const steps = Array.isArray(journey.steps) ? journey.steps : [];
@@ -742,13 +746,10 @@
         const hero = isPlainObject_(profile.hero) ? profile.hero : {};
         const discovery = isPlainObject_(profile.discovery) ? profile.discovery : {};
         const discoveryLanes = Array.isArray(discovery.lanes) ? discovery.lanes : [];
-        const journey = isPlainObject_(profile.journey) ? profile.journey : {};
-        const journeySteps = Array.isArray(journey.steps) ? journey.steps : [];
         const family = isPlainObject_(profile.family) ? profile.family : {};
         const war = isPlainObject_(profile.war) ? profile.war : {};
         const warHighlights = Array.isArray(war.highlights) ? war.highlights : [];
         const cwl = isPlainObject_(profile.cwl) ? profile.cwl : {};
-        const cwlHighlights = Array.isArray(cwl.highlights) ? cwl.highlights : [];
         const extras = isPlainObject_(profile.extras) ? profile.extras : {};
         const extrasHighlights = Array.isArray(extras.highlights) ? extras.highlights : [];
         const network = isPlainObject_(profile.network) ? profile.network : {};
@@ -776,10 +777,6 @@
         setElementTextIfPresent_("landingDiscoveryBody", discovery.body);
         renderLandingDiscoveryLanes_(discoveryLanes);
 
-        setElementTextIfPresent_("landingJourneyEyebrow", journey.eyebrow);
-        setElementTextIfPresent_("landingJourneyTitle", journey.title);
-        renderLandingJourneySteps_(journeySteps);
-
         setElementTextIfPresent_("landingFamilyEyebrow", family.eyebrow);
         setElementTextIfPresent_("landingFamilyTitle", family.title);
 
@@ -790,7 +787,6 @@
 
         setElementTextIfPresent_("landingCwlEyebrow", cwl.eyebrow);
         setElementTextIfPresent_("landingCwlTitle", cwl.title);
-        renderLandingHighlightList_("landingCwlHighlights", cwlHighlights);
 
         setElementTextIfPresent_("landingExtrasEyebrow", extras.eyebrow);
         setElementTextIfPresent_("landingExtrasTitle", extras.title);
@@ -8625,40 +8621,33 @@
 
         for (let i = 0; i < rosters.length; i++) {
             const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
-            const card = el("article", "landing-shell-clan");
-            const count = rosters.length;
-            const angle = count <= 1 ? -90 : (-112 + ((224 / Math.max(1, count - 1)) * i));
-            const radians = angle * Math.PI / 180;
-            const orbitX = 50 + (Math.cos(radians) * 39);
-            const orbitY = 52 + (Math.sin(radians) * 35);
-            const scale = 0.94 + (Math.min(1, rosterMemberCounts[i] / Math.max(1, maxMembers)) * 0.12);
-            const tilt = ((i % 2 === 0 ? -1 : 1) * (5 + ((i % 3) * 2)));
-            card.style.setProperty("--orbit-x", orbitX.toFixed(2));
-            card.style.setProperty("--orbit-y", orbitY.toFixed(2));
-            card.style.setProperty("--plate-scale", scale.toFixed(3));
-            card.style.setProperty("--plate-tilt", String(tilt) + "deg");
-
             const titleText = toStr(roster.title).trim() || "Unnamed roster";
             const members = rosterMemberCounts[i];
             totalMembers += members;
-            const playersLabel = toStr(family.playersLabel).trim() || "Players in roster";
-            const trackingMode = getRosterTrackingMode(roster) === "regularWar"
-                ? (toStr(family.regularWarLabel).trim() || "Regular war")
-                : (toStr(family.cwlLabel).trim() || "CWL");
+            const playersLabel = toStr(family.playersLabel).trim() || "Rostered players";
+            const row = el("article", "landing-family-roster__row");
+            row.setAttribute("role", "listitem");
+            row.style.setProperty("--landing-family-fill", String(Math.min(1, members / Math.max(1, maxMembers))).slice(0, 6));
 
-            const mode = el("div", "landing-shell-clan__mode", trackingMode);
-            const title = el("h4", "landing-shell-clan__title", titleText);
-            const countWrap = el("div", "landing-shell-clan__count");
+            const index = el("span", "landing-family-roster__index", String(i + 1).padStart(2, "0"));
+            const identity = el("div", "landing-family-roster__identity");
+            const title = el("h4", "landing-family-roster__title", titleText);
+            identity.appendChild(title);
+            const meter = el("span", "landing-family-roster__meter");
+            meter.setAttribute("aria-hidden", "true");
+            meter.appendChild(document.createElement("i"));
+            const countWrap = el("div", "landing-family-roster__count");
             const memberValue = el("strong", "", formatNumber(members));
             const memberLabel = el("span", "", playersLabel);
             countWrap.appendChild(memberValue);
             countWrap.appendChild(memberLabel);
-            card.setAttribute("aria-label", titleText + ", " + formatNumber(members) + " " + playersLabel + ", " + trackingMode);
+            row.setAttribute("aria-label", titleText + ", " + formatNumber(members) + " " + playersLabel);
 
-            card.appendChild(mode);
-            card.appendChild(title);
-            card.appendChild(countWrap);
-            target.appendChild(card);
+            row.appendChild(index);
+            row.appendChild(identity);
+            row.appendChild(meter);
+            row.appendChild(countWrap);
+            target.appendChild(row);
         }
 
         if (familyMeta) {
@@ -8753,6 +8742,8 @@
         const exposeAll = !!exposeAllRaw;
         const transitionProgress = exposeAll ? 0 : clamp01(Number(transitionProgressRaw) || 0);
         const nextStep = stepIndex < maxStep ? stepIndex + 1 : -1;
+        const outgoingOpacity = exposeAll ? 1 : clamp01((0.58 - transitionProgress) / 0.58);
+        const incomingOpacity = exposeAll ? 1 : clamp01((transitionProgress - 0.42) / 0.58);
         landingRhythmStoryActiveStep = stepIndex;
         story.setAttribute("data-active-scene", String(stepIndex));
 
@@ -8764,7 +8755,7 @@
             chapters[i].classList.toggle("is-entering", isEntering);
             chapters[i].style.setProperty("--landing-chapter-opacity", exposeAll
                 ? "1"
-                : (isActive ? String(1 - transitionProgress) : (isEntering ? String(transitionProgress) : "0")));
+                : (isActive ? String(outgoingOpacity) : (isEntering ? String(incomingOpacity) : "0")));
             chapters[i].style.setProperty("--landing-chapter-progress", exposeAll || i < stepIndex ? "1" : (isActive
                 ? story.style.getPropertyValue("--landing-rhythm-scene-progress") || "0"
                 : "0"));
@@ -9082,12 +9073,8 @@
 
         const loadingGrid = el("div", "landing-family-loading-grid");
         for (let i = 0; i < 4; i++) {
-            const card = el("article", "landing-shell-clan landing-shell-clan--loading landing-family-card--loading view-loading-skeleton");
-            const angle = -112 + ((224 / 3) * i);
-            const radians = angle * Math.PI / 180;
-            card.style.setProperty("--orbit-x", (50 + (Math.cos(radians) * 39)).toFixed(2));
-            card.style.setProperty("--orbit-y", (52 + (Math.sin(radians) * 35)).toFixed(2));
-            card.style.setProperty("--plate-tilt", String((i % 2 === 0 ? -7 : 7)) + "deg");
+            const card = el("article", "landing-family-roster__row landing-family-roster__row--loading view-loading-skeleton");
+            card.setAttribute("aria-hidden", "true");
             card.appendChild(createViewLoadingSkeletonLine("title"));
             card.appendChild(createViewLoadingSkeletonLine("value"));
             card.appendChild(createViewLoadingSkeletonLine("label"));

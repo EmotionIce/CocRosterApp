@@ -77,7 +77,7 @@
     ]
   }
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260722d" />
+  <link rel="stylesheet" href="./styles.css?v=20260722e" />
 </head>
 <body style="margin:0;">
 <div class="container public-shell">
@@ -151,44 +151,16 @@
         </p>
       </section>
 
-      <section class="landing-chapter landing-shell-map" data-landing-square-story data-landing-reveal>
-        <div class="landing-shell-map__intro">
-          <div class="landing-shell-map__copy">
-            <p id="landingJourneyEyebrow" class="landing-eyebrow">Entry</p>
-            <h3 id="landingJourneyTitle">From #Tag to the right clan.</h3>
+      <section class="landing-chapter landing-family-overview" data-landing-reveal aria-labelledby="landingFamilyTitle">
+        <header class="landing-family-overview__header">
+          <div>
+            <p id="landingFamilyEyebrow" class="landing-eyebrow">Live clan family</p>
+            <h3 id="landingFamilyTitle">The whole clan family, at a glance.</h3>
           </div>
-          <div class="landing-shell-map__family">
-            <p id="landingFamilyEyebrow" class="landing-eyebrow">Live clans</p>
-            <h3 id="landingFamilyTitle">Strong rosters</h3>
-            <p id="landingFamilyMeta" class="landing-family__meta">Syncing live rosters.</p>
-          </div>
-        </div>
+          <p id="landingFamilyMeta" class="landing-family__meta" aria-live="polite">Syncing live rosters.</p>
+        </header>
 
-        <div class="landing-shell-map__stage">
-          <div class="landing-shell-map__orbital" aria-hidden="true"></div>
-          <figure id="landingSquareSlot" class="landing-media-slot landing-media-slot--square is-placeholder">
-            <div id="landingSquareMediaHost" class="landing-media-slot__media hidden" aria-hidden="true"></div>
-            <figcaption id="landingSquarePlaceholderText" class="landing-media-slot__placeholder">TURTLE icon preview</figcaption>
-          </figure>
-          <div id="landingClanFamilyGrid" class="landing-family-grid"></div>
-          <div id="landingJourneySteps" class="landing-shell-map__steps">
-            <article class="landing-square-step is-active" data-landing-square-step="0">
-                  <p id="landingJourneyStep1Label" class="landing-square-step__label">01</p>
-                  <h4 id="landingJourneyStep1Title">Join Discord</h4>
-                  <p id="landingJourneyStep1Body">Open an Introduction ticket.</p>
-            </article>
-            <article class="landing-square-step" data-landing-square-step="1">
-                  <p id="landingJourneyStep2Label" class="landing-square-step__label">02</p>
-                  <h4 id="landingJourneyStep2Title">Get matched to a clan</h4>
-                  <p id="landingJourneyStep2Body">Your TH, skill, and goals decide the fit.</p>
-            </article>
-            <article class="landing-square-step" data-landing-square-step="2">
-                  <p id="landingJourneyStep3Label" class="landing-square-step__label">03</p>
-                  <h4 id="landingJourneyStep3Title">Move up</h4>
-                  <p id="landingJourneyStep3Body">Your results open stronger lineups.</p>
-            </article>
-          </div>
-        </div>
+        <div id="landingClanFamilyGrid" class="landing-family-roster" role="list" aria-label="TURTLE clans and rostered player counts"></div>
       </section>
 
       <section class="landing-chapter landing-rhythm" data-landing-rhythm-story data-landing-reveal aria-labelledby="landingRhythmTitle">
@@ -201,8 +173,8 @@
           <div class="landing-rhythm__chapters">
             <article class="landing-rhythm-chapter is-active" data-landing-rhythm-chapter="0">
               <div class="landing-rhythm-scene landing-rhythm-scene--war is-active" data-landing-rhythm-scene="0"
-                role="group" aria-label="A war plan is agreed, both attacks are completed, and the member is ready for the next war">
-                <div class="landing-life-panel__top"><span>WAR PLAN</span><strong>OPTED IN</strong></div>
+                role="group" aria-label="A war plan is agreed and both attacks are completed with the clan">
+                <div class="landing-life-panel__top"><span>WAR</span></div>
                 <div class="landing-war-plan">
                   <div class="landing-war-plan__brief">
                     <span>PLAN</span>
@@ -215,7 +187,6 @@
                     <span class="landing-war-attack landing-war-attack--two"><b>02</b><em>ATTACK</em><strong>USED &check;</strong></span>
                   </div>
                 </div>
-                <div class="landing-war-cycle"><span>Hero-down wars available</span><strong>NEXT WAR &rarr;</strong></div>
               </div>
 
               <div class="landing-rhythm-beat is-active" data-landing-rhythm-beat="0">
@@ -232,34 +203,43 @@
 
             <article class="landing-rhythm-chapter" data-landing-rhythm-chapter="1">
               <div class="landing-rhythm-scene landing-rhythm-scene--cwl" data-landing-rhythm-scene="1"
-                role="group" aria-label="Opted-in members are assigned to the main CWL lineup, rotation, or a side war through a Discord plan">
-                <div class="landing-life-panel__top"><span>CWL WEEK</span><strong>PLANNED ON DISCORD</strong></div>
-                <div class="landing-cwl-source">
-                  <span>OPTED IN</span>
-                  <i></i><i></i><i></i><i></i><i></i><i></i>
+                role="group" aria-label="Choose your CWL league, join your roster spot, and play for full rewards while side wars keep everyone active">
+                <div class="landing-life-panel__top"><span>CWL</span></div>
+                <div class="landing-cwl-flow">
+                  <div class="landing-cwl-step landing-cwl-step--choose">
+                    <span class="landing-cwl-step__number">01</span>
+                    <div class="landing-cwl-step__copy"><small>CHOOSE LEAGUE</small><strong>YOUR CWL</strong></div>
+                    <b class="landing-cwl-step__status">SELECTED <i>&check;</i></b>
+                  </div>
+                  <span class="landing-cwl-flow__link landing-cwl-flow__link--one" aria-hidden="true"><i></i></span>
+                  <div class="landing-cwl-step landing-cwl-step--roster">
+                    <span class="landing-cwl-step__number">02</span>
+                    <div class="landing-cwl-step__copy"><small>JOIN ROSTER</small><strong>YOUR #TAG</strong></div>
+                    <b class="landing-cwl-step__status">YOUR SPOT <i>&check;</i></b>
+                  </div>
+                  <span class="landing-cwl-flow__link landing-cwl-flow__link--two" aria-hidden="true"><i></i></span>
+                  <div class="landing-cwl-step landing-cwl-step--rewards">
+                    <span class="landing-cwl-step__number">03</span>
+                    <div class="landing-cwl-step__copy"><small>PLAY</small><strong>YOUR ROSTER</strong></div>
+                    <span class="landing-cwl-rewards"><i></i></span>
+                    <b class="landing-cwl-step__status">FULL REWARDS</b>
+                  </div>
                 </div>
-                <div class="landing-cwl-assignments">
-                  <div class="landing-cwl-assignment landing-cwl-assignment--main"><span>MAIN LINEUP</span><b><i></i><i></i><i></i><i></i><i></i></b></div>
-                  <div class="landing-cwl-assignment landing-cwl-assignment--rotate"><span>ROTATION</span><b><i></i><i></i></b></div>
-                  <div class="landing-cwl-assignment landing-cwl-assignment--side"><span>SIDE WARS</span><b><i></i><i></i><i></i><i></i></b></div>
+                <div class="landing-cwl-side-lane">
+                  <span>SIDE WARS</span><i aria-hidden="true"><b></b></i><strong>STAY ACTIVE</strong>
                 </div>
-                <div class="landing-cwl-decision"><span>BEFORE DAY 1</span><strong>EVERY PLAYER HAS A PLAN</strong></div>
               </div>
 
               <div class="landing-rhythm-beat" data-landing-rhythm-beat="1">
                 <p id="landingCwlEyebrow" class="landing-eyebrow">CWL</p>
-                <h3 id="landingCwlTitle">Every opted-in player gets a clear plan.</h3>
-                <ul id="landingCwlHighlights" class="landing-rhythm-facts" aria-label="CWL highlights">
-                  <li><span>Participating</span><strong>Open to everyone</strong></li>
-                  <li><span>Rosters</span><strong>Organized on Discord</strong></li>
-                </ul>
+                <h3 id="landingCwlTitle">Your league. Your spot. Full rewards.</h3>
               </div>
             </article>
 
             <article class="landing-rhythm-chapter" data-landing-rhythm-chapter="2">
               <div class="landing-rhythm-scene landing-rhythm-scene--extras" data-landing-rhythm-scene="2"
                 role="group" aria-label="A between-wars activity timeline with Gold Pass giveaways, friendly challenges, and clan events">
-                <div class="landing-life-panel__top"><span>BETWEEN WARS</span><strong>CLAN ACTIVE</strong></div>
+                <div class="landing-life-panel__top"><span>BETWEEN WARS</span></div>
                 <div id="landingExtrasVisual" class="landing-extra-timeline" role="list" aria-label="Community activities">
                   <span class="landing-extra-event landing-extra-event--pass" role="listitem"><i>01</i><b>GOLD PASS</b><em>Giveaway</em></span>
                   <span class="landing-extra-event landing-extra-event--fc" role="listitem"><i>02</i><b>FC HUB</b><em>Friendly challenges</em></span>
@@ -320,7 +300,7 @@
 
         <div class="landing-invitation">
           <p id="landingFinalEyebrow" class="landing-eyebrow">Your move</p>
-          <h3 id="landingFinalTitle">Send your #Tag. We will find your TURTLE clan.</h3>
+          <h3 id="landingFinalTitle">Open an Introduction ticket with your #Tag. We'll find your TURTLE clan.</h3>
           <div class="landing-hero__actions">
             <a id="landingBottomDiscordCta" class="landing-cta landing-cta--primary" href="#" target="_blank"
               rel="noopener noreferrer">Join Discord</a>
@@ -390,7 +370,7 @@
 
 
   <script src="./public-config.js?v=20260721a"></script>
-  <script defer src="./client.js?v=20260722d"></script>
+  <script defer src="./client.js?v=20260722e"></script>
 </body>
 </html>
 
