@@ -8867,7 +8867,7 @@
         ));
         const targetStep = currentStep + direction;
         if (targetStep < 0 || targetStep >= stepCount) {
-            return { type: "native", direction: direction };
+            return { type: "exit", direction: direction };
         }
         return {
             type: "step",
@@ -8889,6 +8889,7 @@
         return {
             rawProgress: rawProgress,
             scrollRange: scrollRange,
+            storyHeight: rect.height,
             storyDocumentTop: rect.top + scrollY,
             viewportHeight: viewportHeight,
         };
@@ -9062,10 +9063,9 @@
         const geometry = getLandingRhythmGeometry_(storyRoot, window.innerHeight || 1);
         if (!geometry) return false;
         const direction = Number(directionRaw) < 0 ? -1 : 1;
-        const exitProgress = direction < 0 ? -0.08 : 1.08;
-        const targetY = geometry.storyDocumentTop
-            - (geometry.viewportHeight * 0.14)
-            + (exitProgress * geometry.scrollRange);
+        const targetY = direction < 0
+            ? geometry.storyDocumentTop - (geometry.viewportHeight * 0.44)
+            : geometry.storyDocumentTop + geometry.storyHeight - (geometry.viewportHeight * 0.56);
         return scrollLandingRhythmToY_(storyRoot, targetY, "smooth");
     };
 

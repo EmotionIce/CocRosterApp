@@ -3687,7 +3687,8 @@ html.landing-motion-ready .landing-rhythm:not(.is-static){
 
 html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__stage{
   position:sticky;
-  top:var(--landing-sticky-top, 72px);
+  top:max(var(--landing-sticky-top, 72px), calc((100vh - 760px) / 2));
+  top:max(var(--landing-sticky-top, 72px), calc((100svh - 760px) / 2));
   align-self:start;
   height:min(760px, calc(100vh - var(--landing-sticky-top, 72px) - 18px));
   height:min(760px, calc(100svh - var(--landing-sticky-top, 72px) - 18px));
@@ -11979,7 +11980,8 @@ html.landing-motion-ready .landing-rhythm:not(.is-static){
 
 html.landing-motion-ready .landing-rhythm:not(.is-static) .landing-rhythm__stage{
   position:sticky;
-  top:var(--landing-sticky-top, 72px);
+  top:max(var(--landing-sticky-top, 72px), calc((100vh - 760px) / 2));
+  top:max(var(--landing-sticky-top, 72px), calc((100svh - 760px) / 2));
   grid-template-columns:1fr;
   grid-template-areas:
     "intro"

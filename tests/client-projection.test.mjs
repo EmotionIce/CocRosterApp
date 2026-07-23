@@ -130,7 +130,8 @@ test("landing rhythm gestures advance one chapter while preserving deliberate ex
   assert.equal(action.direction, 1);
 
   action = getLandingRhythmGestureAction_(0.905, 4, 1, 100, 340);
-  assert.equal(action.type, "native");
+  assert.equal(action.type, "exit");
+  assert.equal(action.direction, 1);
 
   action = getLandingRhythmGestureAction_(0.97, 4, -1, 100, 340);
   assert.equal(action.type, "step");
