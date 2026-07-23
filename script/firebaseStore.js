@@ -2922,12 +2922,17 @@ function buildSafePublishArchiveKey_(timestampRaw) {
 	return prefix + "_" + Utilities.getUuid().slice(0, 8);
 }
 
-// Build Firebase child path.
-function buildFirebaseChildPath_(parentPathRaw, keyRaw) {
-	const parentPath = normalizeFirebasePath_(parentPathRaw);
-	const key = String(keyRaw == null ? "" : keyRaw).trim();
-	if (!key) return parentPath;
-	return parentPath ? parentPath + "/" + key : key;
+// Build a Firebase child path from one or more child segments. Existing
+// two-argument callers retain the same behavior; variadic segments prevent
+// sharded stores from accidentally collapsing onto their parent node.
+function buildFirebaseChildPath_(parentPathRaw) {
+	let path = normalizeFirebasePath_(parentPathRaw);
+	for (let i = 1; i < arguments.length; i++) {
+		const child = normalizeFirebasePath_(arguments[i]);
+		if (!child) continue;
+		path = path ? path + "/" + child : child;
+	}
+	return path;
 }
 
 // Handle read Firebase map object.

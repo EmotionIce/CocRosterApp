@@ -244,6 +244,10 @@ test("migration reconstructs only a single monotonic CWL archive segment and sub
 
 test("migration checksum survives Firebase empty-container elision between stage and commit", () => {
   const b = loadBackend();
+  assert.equal(
+    b.buildFirebaseChildPath_("private/playerWarEventLedger", "shards", "02", "events", "event-key"),
+    "private/playerWarEventLedger/shards/02/events/event-key",
+  );
   const tag = "#P2L9";
   const wp = b.createEmptyRosterWarPerformance_();
   b.upsertRegularWarHistoryEntry_(wp, "war-one", { [tag]: stats(3) }, {
