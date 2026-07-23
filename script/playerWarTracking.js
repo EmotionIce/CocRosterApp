@@ -774,10 +774,16 @@ function buildPlayerWarMigrationChecksumPayload_(planRaw) {
 		const tag = normalizeTag_(tagRaw);
 		if (!tag) return;
 		const raw = baselinesRaw[tagRaw] && typeof baselinesRaw[tagRaw] === "object" ? baselinesRaw[tagRaw] : {};
+		const cwlByRosterKeyRaw = raw.cwlByRosterKey && typeof raw.cwlByRosterKey === "object" ? raw.cwlByRosterKey : {};
+		const cwlByRosterKey = {};
+		Object.keys(cwlByRosterKeyRaw).sort().forEach(function (rosterKey) {
+			cwlByRosterKey[String(rosterKey || "")] = sanitizePlayerWarStats_(cwlByRosterKeyRaw[rosterKey]);
+		});
 		baselinesByTag[tag] = {
 			regular: sanitizePlayerWarStats_(raw.regular),
 			cwl: sanitizePlayerWarStats_(raw.cwl),
 			cwlRosterKey: String(raw.cwlRosterKey || ""),
+			cwlByRosterKey: cwlByRosterKey,
 			provenance: (Array.isArray(raw.provenance) ? raw.provenance : []).map(function (item) {
 				const value = item && typeof item === "object" ? item : {};
 				return {
@@ -808,6 +814,7 @@ function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const candidates = [];
 	const baselinesByTag = {};
+	const cwlBaselinesByTagAndRoster = {};
 	const cwlSeriesByRosterKey = {};
 	const classifications = { exact: 0, reconstructed: 0, ambiguous: 0, partial: 0, unrecoverable: 0 };
 	const sourceFingerprints = [];
@@ -857,15 +864,19 @@ function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 				}
 				const cwlStats = legacyCwl[tag] && legacyCwl[tag].cwl;
 				if (hasPlayerWarStats_(cwlStats)) {
-					if (!hasPlayerWarStats_(baselinesByTag[tag].cwl)) {
-						baselinesByTag[tag].cwl = sanitizePlayerWarStats_(cwlStats);
-						baselinesByTag[tag].cwlRosterKey = cwlRosterKey;
-						baselinesByTag[tag].provenance.push({
-							source: String(source.id || ""),
+					const baselineKey = tag + "|" + cwlRosterKey;
+					if (!cwlBaselinesByTagAndRoster[baselineKey]) {
+						cwlBaselinesByTagAndRoster[baselineKey] = {
+							tag: tag,
 							rosterKey: cwlRosterKey,
-							kind: "legacy-cwl-aggregate",
-							classification: "ambiguous",
-						});
+							stats: sanitizePlayerWarStats_(cwlStats),
+							provenance: {
+								source: String(source.id || ""),
+								rosterKey: cwlRosterKey,
+								kind: "legacy-cwl-aggregate",
+								classification: "ambiguous",
+							},
+						};
 						classifications.ambiguous++;
 					}
 				}
@@ -882,9 +893,11 @@ function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 		if (Object.prototype.hasOwnProperty.call(classifications, classification)) classifications[classification]++;
 	}
 	const deduped = dedupePlayerWarCandidates_(candidates);
-	// The newest legacy CWL aggregate was captured as a baseline above. Remove
-	// every safely reconstructed segment from that baseline so migration applies
-	// each contribution exactly once.
+	// One newest legacy CWL aggregate is retained per player and tracked clan.
+	// Repeated archives for the same clan are duplicates, while aggregates from
+	// distinct clans are independent history and must follow the player tag.
+	// Remove safely reconstructed segments from their matching clan baseline so
+	// each contribution is applied exactly once.
 	const reconstructedCwlByTagAndRoster = {};
 	deduped.filter(function (candidate) { return candidate.kind === "cwl"; }).forEach(function (candidate) {
 		Object.keys(candidate.contributionsByTag).forEach(function (tag) {
@@ -893,12 +906,27 @@ function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 			addSignedPlayerWarStats_(reconstructedCwlByTagAndRoster[key], candidate.contributionsByTag[tag].stats, 1);
 		});
 	});
-	Object.keys(baselinesByTag).forEach(function (tag) {
-		const baseline = baselinesByTag[tag];
-		const reconstructed = reconstructedCwlByTagAndRoster[tag + "|" + String(baseline.cwlRosterKey || "")];
-		if (!reconstructed) return;
-		const residual = subtractMonotonicPlayerWarStats_(baseline.cwl, reconstructed);
-		if (residual) baseline.cwl = residual;
+	Object.keys(cwlBaselinesByTagAndRoster).sort().forEach(function (baselineKey) {
+		const evidence = cwlBaselinesByTagAndRoster[baselineKey];
+		let residual = sanitizePlayerWarStats_(evidence.stats);
+		const reconstructed = reconstructedCwlByTagAndRoster[baselineKey];
+		if (reconstructed) {
+			const subtracted = subtractMonotonicPlayerWarStats_(residual, reconstructed);
+			if (subtracted) residual = subtracted;
+		}
+		if (!hasPlayerWarStats_(residual)) return;
+		if (!baselinesByTag[evidence.tag]) {
+			baselinesByTag[evidence.tag] = {
+				regular: createEmptyWarPerformanceStats_(),
+				cwl: createEmptyWarPerformanceStats_(),
+				provenance: [],
+			};
+		}
+		const baseline = baselinesByTag[evidence.tag];
+		if (!baseline.cwlByRosterKey || typeof baseline.cwlByRosterKey !== "object") baseline.cwlByRosterKey = {};
+		baseline.cwlByRosterKey[evidence.rosterKey] = residual;
+		addSignedPlayerWarStats_(baseline.cwl, residual, 1);
+		baseline.provenance.push(evidence.provenance);
 	});
 	Object.keys(baselinesByTag).forEach(function (tag) {
 		const baseline = baselinesByTag[tag];

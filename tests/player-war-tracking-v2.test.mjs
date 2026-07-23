@@ -242,6 +242,41 @@ test("migration reconstructs only a single monotonic CWL archive segment and sub
   assert.equal(executed.store.meta.baselineCount, 1);
 });
 
+test("migration preserves distinct clan CWL baselines while deduplicating repeated archives", () => {
+  const b = loadBackend();
+  const tag = "#P2L9";
+  const makeRoster = (id, clanTag, cwl) => ({
+    id,
+    connectedClanTag: clanTag,
+    main: [{ slot: 1, tag, name: "Mover", th: 16, notes: [] }],
+    subs: [],
+    missing: [],
+    warPerformance: {
+      byTag: {
+        [tag]: { cwl },
+      },
+    },
+  });
+  const rosterData = {
+    rosters: [
+      makeRoster("a", "#CLANA", stats(5)),
+      makeRoster("b", "#CLANB", stats(3)),
+    ],
+  };
+  const plan = b.buildPlayerWarTrackingMigrationPlan_([
+    { id: "active", rosterData },
+    { id: "archive-copy", rosterData },
+  ], { createdAt: "2026-07-01T00:00:00.000Z" });
+
+  assert.equal(plan.report.classifications.ambiguous, 2);
+  assert.equal(Object.keys(plan.baselinesByTag[tag].cwlByRosterKey).length, 2);
+  assert.equal(plan.baselinesByTag[tag].cwl.starsTotal, 8);
+
+  const executed = b.executePlayerWarMigrationPlan_(plan, { persist: false, stage: "shadow" });
+  assert.equal(executed.store.byTag[tag].cwl.starsTotal, 8);
+  assert.equal(executed.store.byTag[tag].overall.starsTotal, 8);
+});
+
 test("migration checksum survives Firebase empty-container elision between stage and commit", () => {
   const b = loadBackend();
   assert.equal(
