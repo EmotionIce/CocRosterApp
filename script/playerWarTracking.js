@@ -7,6 +7,7 @@
 
 const PLAYER_WAR_TRACKING_SCHEMA_VERSION = 2;
 const PLAYER_WAR_EVENT_SCHEMA_VERSION = 1;
+const PLAYER_WAR_MIGRATION_CHECKSUM_VERSION = 2;
 const PLAYER_WAR_LEDGER_SHARD_COUNT = 32;
 const PLAYER_WAR_RECENT_REGULAR_LIMIT = 8;
 const PLAYER_WAR_CWL_SEASON_LIMIT = 8;
@@ -789,6 +790,7 @@ function buildPlayerWarMigrationChecksumPayload_(planRaw) {
 		};
 	});
 	return {
+		checksumVersion: Math.max(1, toNonNegativeInt_(plan.checksumVersion) || PLAYER_WAR_MIGRATION_CHECKSUM_VERSION),
 		migrationId: String(plan.migrationId || ""),
 		sourceFingerprint: String(plan.sourceFingerprint || ""),
 		candidates: dedupePlayerWarCandidates_(plan.candidates),
@@ -902,9 +904,15 @@ function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 		const baseline = baselinesByTag[tag];
 		if (!hasPlayerWarStats_(baseline.regular) && !hasPlayerWarStats_(baseline.cwl)) delete baselinesByTag[tag];
 	});
-	const migrationId = "pwt-" + hashPlayerWarValue_({ sourceFingerprints: sourceFingerprints, candidates: deduped, baselinesByTag: baselinesByTag }).slice(0, 20);
+	const migrationId = "pwt-" + hashPlayerWarValue_({
+		checksumVersion: PLAYER_WAR_MIGRATION_CHECKSUM_VERSION,
+		sourceFingerprints: sourceFingerprints,
+		candidates: deduped,
+		baselinesByTag: baselinesByTag,
+	}).slice(0, 20);
 	const plan = {
 		schemaVersion: PLAYER_WAR_TRACKING_SCHEMA_VERSION,
+		checksumVersion: PLAYER_WAR_MIGRATION_CHECKSUM_VERSION,
 		migrationId: migrationId,
 		createdAt: String(options.createdAt || new Date().toISOString()),
 		sourceFingerprints: sourceFingerprints,

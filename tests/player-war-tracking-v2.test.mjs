@@ -281,6 +281,7 @@ test("migration checksum survives Firebase empty-container elision between stage
     return value;
   };
   const stagedRoundTrip = stripFirebaseEmpty(plan);
+  assert.equal(plan.checksumVersion, 2);
   assert.equal(b.calculatePlayerWarMigrationChecksum_(stagedRoundTrip), plan.checksum);
   assert.doesNotThrow(() => b.executePlayerWarMigrationPlan_(stagedRoundTrip, {
     persist: false,
