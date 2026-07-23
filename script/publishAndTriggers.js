@@ -548,6 +548,16 @@ function readAutoRefreshCoordinatorSourceSnapshot_() {
 				playerMetrics: createEmptyPlayerMetricsStore_(),
 				lastUpdatedAt: sourceLastUpdatedAt,
 			};
+			const requiresPlayerWarPerformance =
+				(Array.isArray(manifest.requiredShards) && manifest.requiredShards.indexOf("playerWarPerformance") >= 0) ||
+				toNonNegativeInt_(manifest.playerWarPerformanceSchemaVersion) >= PLAYER_WAR_TRACKING_SCHEMA_VERSION;
+			if (requiresPlayerWarPerformance) {
+				const encodedPerformance = firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerWarPerformance"), "GET");
+				if (!encodedPerformance || typeof encodedPerformance !== "object" || Array.isArray(encodedPerformance)) {
+					throw new Error("Missing active version player-war performance for " + versionId + ".");
+				}
+				sourcePayload.playerWarPerformance = decodeFirebaseObjectKeysRecursive_(encodedPerformance);
+			}
 			if (manifest.publicConfig && typeof manifest.publicConfig === "object") sourcePayload.publicConfig = manifest.publicConfig;
 			const rosterData = validateRosterData_(sourcePayload);
 			return {
@@ -1146,6 +1156,14 @@ function writeAutoRefreshRunSourceShards_(runIdRaw, rosterDataRaw, sourceFingerp
 		method: "PUT",
 		payload: encodeFirebaseObjectKeysRecursive_(sanitizePlayerMetricsStore_(sourceMetrics, source.lastUpdatedAt || new Date().toISOString())),
 	});
+	const sourcePlayerWarPerformance = source.playerWarPerformance && typeof source.playerWarPerformance === "object"
+		? sanitizePlayerWarPerformanceStore_(source.playerWarPerformance)
+		: createEmptyPlayerWarPerformanceStore_({ stage: getPlayerWarTrackingStage_(), provenance: "auto-refresh-bootstrap" });
+	writes.push({
+		path: buildActiveVersionPath_(runIdRaw, "playerWarPerformance"),
+		method: "PUT",
+		payload: encodeFirebaseObjectKeysRecursive_(sourcePlayerWarPerformance),
+	});
 	if (!sourceVersionId) {
 		writes.push({
 			path: buildAutoRefreshRunPath_(runIdRaw, "source/playerMetrics"),
@@ -1594,7 +1612,7 @@ function collectAutoRefreshRosterPlayerTags_(rosterRaw) {
 }
 
 // Build the roster result shard from a single-roster pipeline output.
-function buildRosterWarResult_(workingRosterDataRaw, rosterIdRaw, pipelineResultRaw, accumulatorRaw, timingsRaw) {
+function buildRosterWarResult_(workingRosterDataRaw, rosterIdRaw, pipelineResultRaw, accumulatorRaw, timingsRaw, eventCandidatesRaw) {
 	const rosterId = String(rosterIdRaw == null ? "" : rosterIdRaw).trim();
 	const roster = findRosterInDataById_(workingRosterDataRaw, rosterId);
 	if (!roster) throw new Error("Roster result missing after pipeline: " + rosterId);
@@ -1615,6 +1633,7 @@ function buildRosterWarResult_(workingRosterDataRaw, rosterIdRaw, pipelineResult
 		pipelineResult: pipelineResultRaw && typeof pipelineResultRaw === "object" ? pipelineResultRaw : {},
 		perRoster: perRoster,
 		issues: Array.isArray(accumulator.issues) ? accumulator.issues : [],
+		eventCandidates: dedupePlayerWarCandidates_(Array.isArray(eventCandidatesRaw) ? eventCandidatesRaw : []),
 		timings: timingsRaw && typeof timingsRaw === "object" ? timingsRaw : {},
 		writtenAt: new Date().toISOString(),
 	};
@@ -3020,9 +3039,17 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				cwlCoordinatorClanView: input.cwlCoordinatorClanView || null,
 			};
 			if (input.cwlCoordinatorResult) pipelineOptions.cwlCoordinatorResult = input.cwlCoordinatorResult;
-			const guarded = withAutoRefreshQueueLiveFetchGuard_(() =>
-				processRefreshAllRosterPipelineIntoAccumulator_(workingRosterData, rosterId, pipelineOptions, accumulator),
-			);
+			const eventCandidateSink = [];
+			const previousEventCandidateSink = beginPlayerWarEventCandidateCapture_(eventCandidateSink);
+			let guarded = null;
+			let capturedEventCandidates = [];
+			try {
+				guarded = withAutoRefreshQueueLiveFetchGuard_(() =>
+					processRefreshAllRosterPipelineIntoAccumulator_(workingRosterData, rosterId, pipelineOptions, accumulator),
+				);
+			} finally {
+				capturedEventCandidates = endPlayerWarEventCandidateCapture_(previousEventCandidateSink);
+			}
 			processMs += Math.max(0, Date.now() - processStartMs);
 			if (guarded.guard && guarded.guard.attempted) {
 				return markAutoRefreshRosterPhaseDeferred_(current, task, state, "forbidden-live-fetch", new Error("Roster processing attempted forbidden live fetch: " + guarded.guard.labels.join(",")), executionStartMsRaw);
@@ -3046,7 +3073,7 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 				clanFetchMs: clanFetchMs,
 				metricReadMs: metricReadMs,
 				processMs: processMs,
-			});
+			}, capturedEventCandidates);
 			const activeRoster = findRosterInDataById_(validatedProcessedRosterData, rosterId);
 			if (!activeRoster) throw new Error("Active roster shard missing after pipeline: " + rosterId + ".");
 			const processOutput = {
@@ -3662,6 +3689,7 @@ function verifyAutoRefreshFinalizeResultMarkers_(runIdRaw, rosterIdsRaw, options
 	}
 	const verifyPayloadByPath = firebaseBatchGetJson_(verifyPaths, { disableFallback: true });
 	const activeRosterById = {};
+	const warResultByRosterId = {};
 	const metricResultByRosterId = {};
 	const rosterWriteByRosterId = {};
 	for (let i = 0; i < verifyPaths.length; i++) {
@@ -3672,6 +3700,7 @@ function verifyAutoRefreshFinalizeResultMarkers_(runIdRaw, rosterIdsRaw, options
 			if (!warResult || typeof warResult !== "object") {
 				throw new Error("Auto-refresh finalization missing roster result shard: " + meta.rosterId + ".");
 			}
+			warResultByRosterId[meta.rosterId] = warResult;
 		} else if (meta.kind === "metric") {
 			const metricResult = decodeFirebaseObjectKeysRecursive_(payload);
 			if (!metricResult || typeof metricResult !== "object") {
@@ -3693,6 +3722,7 @@ function verifyAutoRefreshFinalizeResultMarkers_(runIdRaw, rosterIdsRaw, options
 	}
 	return {
 		activeRosterById: activeRosterById,
+		warResultByRosterId: warResultByRosterId,
 		metricResultByRosterId: metricResultByRosterId,
 		rosterWriteByRosterId: rosterWriteByRosterId,
 	};
@@ -3781,17 +3811,121 @@ function buildAutoRefreshActiveVersionManifestFromSourceMeta_(runIdRaw, sourceMe
 		rosterOrder: Array.isArray(sourceMeta.rosterOrder) ? sourceMeta.rosterOrder.slice() : rosterIds.slice(),
 		rosterIds: rosterIds,
 		connectedClanTags: Array.isArray(sourceMeta.connectedClanTags) ? sourceMeta.connectedClanTags.slice() : [],
+		rostersValidated: true,
 		lastUpdatedAt: String(options.lastUpdatedAt || publishedAt),
 		playerMetricsSchemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
 		playerMetricEntryCount: toNonNegativeInt_(options.playerMetricEntryCount),
 		layoutVersion: FIREBASE_LAYOUT_VERSION,
 	};
+	if (options.playerWarPerformance && typeof options.playerWarPerformance === "object") {
+		const performance = sanitizePlayerWarPerformanceStore_(options.playerWarPerformance);
+		manifest.playerWarPerformanceSchemaVersion = PLAYER_WAR_TRACKING_SCHEMA_VERSION;
+		manifest.playerWarPerformanceEntryCount = Object.keys(performance.byTag || {}).length;
+		manifest.playerWarPerformanceHash = String(performance.contentHash || "");
+		manifest.playerWarTrackingStage = normalizePlayerWarTrackingStage_(performance.stage);
+		manifest.requiredShards = ["manifest", "rosters", "playerMetrics", "playerWarPerformance"];
+	} else {
+		manifest.requiredShards = ["manifest", "rosters", "playerMetrics"];
+	}
 	if (Array.isArray(options.rosterPlayerTags)) {
 		manifest.rosterPlayerTags = normalizeActivePlayerMetricsSubsetTags_(options.rosterPlayerTags);
 	}
 	if (sourceMeta.publicConfig && typeof sourceMeta.publicConfig === "object") manifest.publicConfig = sourceMeta.publicConfig;
 	if (options.sourceFingerprint) manifest.sourceFingerprint = String(options.sourceFingerprint || "");
 	return manifest;
+}
+
+// Centralized history finalization. Per-roster workers only emit candidates;
+// this serialized phase owns ledger conflict resolution and global deltas.
+function finalizeAutoRefreshPlayerWarPerformance_(runIdRaw, verifiedResultsRaw, optionsRaw) {
+	const runId = normalizeActiveVersionId_(runIdRaw);
+	const verified = verifiedResultsRaw && typeof verifiedResultsRaw === "object" ? verifiedResultsRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const checkpointPath = buildAutoRefreshRunPath_(runId, "playerWarFinalization");
+	const checkpointEncoded = firebaseRequestJson_(checkpointPath, "GET");
+	const checkpoint = decodeFirebaseObjectKeysRecursive_(checkpointEncoded);
+	if (checkpoint && checkpoint.completed === true) {
+		const targetEncoded = firebaseRequestJson_(buildActiveVersionPath_(runId, "playerWarPerformance"), "GET");
+		const checkpointStore = sanitizePlayerWarPerformanceStore_(decodeFirebaseObjectKeysRecursive_(targetEncoded));
+		if (!checkpoint.storeHash || checkpoint.storeHash === checkpointStore.contentHash) {
+			return { store: checkpointStore, results: checkpoint.results || [], checkpointed: true };
+		}
+		throw new Error("Player-war finalization checkpoint does not match its immutable target shard.");
+	}
+	const candidates = [];
+	const warResults = verified.warResultByRosterId && typeof verified.warResultByRosterId === "object" ? verified.warResultByRosterId : {};
+	Object.keys(warResults).sort().forEach(function (rosterId) {
+		const result = warResults[rosterId] && typeof warResults[rosterId] === "object" ? warResults[rosterId] : {};
+		const rosterCandidates = Array.isArray(result.eventCandidates) ? result.eventCandidates : [];
+		for (let i = 0; i < rosterCandidates.length; i++) candidates.push(rosterCandidates[i]);
+	});
+	const canonicalEncoded = firebaseRequestJson_(PLAYER_WAR_PERFORMANCE_CURRENT_PATH, "GET");
+	const sourceEncoded = canonicalEncoded && typeof canonicalEncoded === "object"
+		? canonicalEncoded
+		: firebaseRequestJson_(buildActiveVersionPath_(runId, "playerWarPerformance"), "GET");
+	const sourceStore = sourceEncoded && typeof sourceEncoded === "object"
+		? decodeFirebaseObjectKeysRecursive_(sourceEncoded)
+		: createEmptyPlayerWarPerformanceStore_({ stage: getPlayerWarTrackingStage_(), provenance: "auto-refresh-bootstrap" });
+	const dedupedCandidates = dedupePlayerWarCandidates_(candidates);
+	const ledgerPaths = dedupedCandidates.map(function (candidate) {
+		return buildPlayerWarLedgerEventPath_(candidate.eventId);
+	});
+	const existingEncodedByPath = ledgerPaths.length
+		? firebaseBatchGetJson_(ledgerPaths, { disableFallback: true })
+		: {};
+	const existingRecordsByEventId = {};
+	for (let i = 0; i < dedupedCandidates.length; i++) {
+		const decoded = decodeFirebaseObjectKeysRecursive_(existingEncodedByPath[ledgerPaths[i]]);
+		if (decoded && typeof decoded === "object") existingRecordsByEventId[dedupedCandidates[i].eventId] = decoded;
+	}
+	const finalized = finalizePlayerWarEventCandidates_(sourceStore, dedupedCandidates, {
+		persist: false,
+		collectLedgerWrites: true,
+		existingRecordsByEventId: existingRecordsByEventId,
+		stage: getPlayerWarTrackingStage_(),
+		nowIso: String(options.nowIso || new Date().toISOString()),
+	});
+	const store = sanitizePlayerWarPerformanceStore_(finalized.store, { stage: getPlayerWarTrackingStage_() });
+	const writes = Array.isArray(finalized.ledgerWrites) ? finalized.ledgerWrites.slice() : [];
+	writes.push(
+		{
+			path: PLAYER_WAR_PERFORMANCE_CURRENT_PATH,
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_(store),
+		},
+		{
+			path: buildActiveVersionPath_(runId, "playerWarPerformance"),
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_(store),
+		},
+		{
+			path: checkpointPath,
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_({
+				completed: true,
+				completedAt: new Date().toISOString(),
+				candidateCount: dedupedCandidates.length,
+				acceptedCount: finalized.acceptedCount,
+				results: finalized.results,
+				storeHash: store.contentHash,
+			}),
+		},
+		{
+			path: buildFirebaseChildPath_(PLAYER_WAR_LEDGER_PATH, "meta"),
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_({
+				schemaVersion: PLAYER_WAR_EVENT_SCHEMA_VERSION,
+				shardCount: PLAYER_WAR_LEDGER_SHARD_COUNT,
+				updatedAt: store.updatedAt,
+				eventCount: toNonNegativeInt_(store.meta && store.meta.eventCount),
+				conflictCount: toNonNegativeInt_(store.meta && store.meta.conflictCount),
+			}),
+		},
+	);
+	// One Firebase root PATCH makes the selected ledger revisions, exact read-model
+	// deltas, and completion checkpoint a single rollback boundary.
+	firebaseBatchPutJson_(writes, { disableFallback: true });
+	return { store: store, results: finalized.results, acceptedCount: finalized.acceptedCount, checkpointed: false };
 }
 
 // Build the lightest valid roster payload needed to probe connected-clan CWL
@@ -4817,6 +4951,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: false });
 		let rosterPlayerTags = assertAutoRefreshRosterWriteTagsUnique_(verifiedResults.rosterWriteByRosterId, rosterIds);
 		if (!rosterPlayerTags) rosterPlayerTags = assertAutoRefreshActiveRosterShardTagsUnique_(runId, rosterIds);
+		const playerWarFinalization = finalizeAutoRefreshPlayerWarPerformance_(runId, verifiedResults, { nowIso: new Date().toISOString() });
 		const writeStartMs = Date.now();
 		const writtenAt = new Date().toISOString();
 		const playerMetricEntryCount = countActiveVersionPlayerMetricEntriesShallow_(runId);
@@ -4826,6 +4961,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 			publishedAt: writtenAt,
 			lastUpdatedAt: writtenAt,
 			playerMetricEntryCount: playerMetricEntryCount,
+			playerWarPerformance: playerWarFinalization.store,
 			rosterPlayerTags: rosterPlayerTags,
 			sourceFingerprint: current.sourceFingerprint,
 		});
@@ -4925,6 +5061,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: true });
 	const activeRosterById = verifiedResults.activeRosterById;
 	const metricResultByRosterId = verifiedResults.metricResultByRosterId;
+	const playerWarFinalization = finalizeAutoRefreshPlayerWarPerformance_(runId, verifiedResults, { nowIso: new Date().toISOString() });
 	const writeStartMs = Date.now();
 	const writtenAt = new Date().toISOString();
 	let finalRosterData = buildAutoRefreshFinalRosterDataFromShards_(runId, rosterIds, writtenAt, {
@@ -5010,6 +5147,8 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		rosterData: finalRosterData,
 		cloudflareLabel: "auto-refresh-finalize",
 	});
+	finalRosterData.playerWarPerformance = playerWarFinalization.store;
+	finalRosterData = validateRosterData_(finalRosterData);
 	current.cwlFinalCoordinatorCapture = finalPhases && finalPhases.cwlFinalCoordinatorCapture ? finalPhases.cwlFinalCoordinatorCapture : current.cwlFinalCoordinatorCapture;
 	current.cwlSeasonEventRefresh = finalPhases && finalPhases.cwlSeasonEventRefresh ? finalPhases.cwlSeasonEventRefresh : current.cwlSeasonEventRefresh;
 	current.cwlFinalOutcome = finalPhases && finalPhases.cwlFinalOutcome ? finalPhases.cwlFinalOutcome : current.cwlFinalOutcome;

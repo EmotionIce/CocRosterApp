@@ -356,6 +356,29 @@ function buildCanonicalRosterPlayerByTag_(rosterRaw) {
 	return out;
 }
 
+// Build the single canonical roster placement for every player tag.
+function buildCanonicalRosterPlacementByTag_(rosterDataRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const out = {};
+	const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+	for (let i = 0; i < rosters.length; i++) {
+		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+		const players = []
+			.concat(Array.isArray(roster.main) ? roster.main : [])
+			.concat(Array.isArray(roster.subs) ? roster.subs : [])
+			.concat(Array.isArray(roster.missing) ? roster.missing : []);
+		for (let j = 0; j < players.length; j++) {
+			const tag = normalizeTag_(players[j] && players[j].tag);
+			if (!tag || out[tag]) continue;
+			out[tag] = {
+				rosterId: String(roster.id || ""),
+				rosterTitle: String(roster.title || ""),
+			};
+		}
+	}
+	return out;
+}
+
 // Build roster stats tracked tag set.
 function buildRosterStatsTrackedTagSet_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
@@ -381,6 +404,7 @@ function buildRosterPublicLineupProjectionFromMembers_(rosterDataRaw, rosterRaw,
 	const unavailableReason = String(options.unavailableReason == null ? "" : options.unavailableReason).trim();
 	const updatedAt = String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString();
 	const canonicalPlayerByTag = buildCanonicalRosterPlayerByTag_(roster);
+	const canonicalPlacementByTag = buildCanonicalRosterPlacementByTag_(rosterData);
 	const canonicalTagSet = buildRosterPoolTagSet_(roster);
 	const seedPlayerByTag = buildRosterPlayerSeedByTag_(rosterData);
 	const members = mapApiMembers_(membersRaw);
@@ -407,6 +431,8 @@ function buildRosterPublicLineupProjectionFromMembers_(rosterDataRaw, rosterRaw,
 		player.trackingMode = trackingMode;
 		player.source = source;
 		player.synthetic = !canonicalTagSet[tag];
+		player.canonicalRosterId = String(canonicalPlacementByTag[tag] && canonicalPlacementByTag[tag].rosterId || "");
+		player.canonicalRosterTitle = String(canonicalPlacementByTag[tag] && canonicalPlacementByTag[tag].rosterTitle || "");
 		player.updatedAt = updatedAt;
 		players.push(player);
 	}
@@ -415,6 +441,13 @@ function buildRosterPublicLineupProjectionFromMembers_(rosterDataRaw, rosterRaw,
 		trackingMode: trackingMode,
 		source: source,
 		unavailableReason: unavailableReason,
+		eventId: String(options.eventId || ""),
+		warIdentifier: String(options.warIdentifier || ""),
+		warState: String(options.warState || ""),
+		authoritative: options.authoritative !== false,
+		stale: options.stale === true,
+		staleSince: String(options.staleSince || ""),
+		lastAuthoritativeAt: String(options.lastAuthoritativeAt || updatedAt),
 		updatedAt: updatedAt,
 		players: players,
 	};
@@ -446,9 +479,39 @@ function setRosterPublicLineupProjection_(rosterRaw, projectionRaw) {
 		trackingMode: trackingMode,
 		source: source,
 		unavailableReason: unavailableReason,
+		eventId: String(projection.eventId || ""),
+		warIdentifier: String(projection.warIdentifier || ""),
+		warState: String(projection.warState || ""),
+		authoritative: projection.authoritative !== false,
+		stale: projection.stale === true,
+		staleSince: String(projection.staleSince || ""),
+		lastAuthoritativeAt: String(projection.lastAuthoritativeAt || (projection.authoritative === false ? "" : updatedAt)),
 		updatedAt: updatedAt,
 		players: active ? players : [],
 	};
+}
+
+// Retain the last authoritative participation projection during transient
+// source failures. Only authoritative lifecycle evidence may clear it.
+function markRosterPublicLineupProjectionStale_(rosterRaw, optionsRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster) return false;
+	const previous = roster.publicLineupProjection && typeof roster.publicLineupProjection === "object"
+		? roster.publicLineupProjection
+		: null;
+	if (!previous || previous.active !== true || !Array.isArray(previous.players) || !previous.players.length) return false;
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const nowIso = String(options.updatedAt || new Date().toISOString());
+	setRosterPublicLineupProjection_(roster, Object.assign({}, previous, {
+		active: true,
+		authoritative: false,
+		stale: true,
+		staleSince: String(previous.staleSince || nowIso),
+		unavailableReason: String(options.unavailableReason || "sourceUnavailable"),
+		updatedAt: nowIso,
+		players: previous.players,
+	}));
+	return true;
 }
 
 // Mark roster public lineup projection inactive.
@@ -464,6 +527,97 @@ function setRosterPublicLineupProjectionInactive_(rosterRaw, optionsRaw) {
 		updatedAt: String(options.updatedAt == null ? "" : options.updatedAt).trim() || new Date().toISOString(),
 		players: [],
 	});
+}
+
+// Derive participation protection from the already-prefetched authoritative war
+// snapshot before canonical membership reconciliation can evict a moved player.
+function deriveRosterProjectionProtectionFromPrefetch_(rosterDataRaw, rosterIdRaw, optionsRaw) {
+	const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : {};
+	const roster = findRosterInDataById_(rosterData, rosterIdRaw);
+	if (!roster) return { changed: false, reason: "roster-not-found" };
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const clanTag = normalizeTag_(roster.connectedClanTag);
+	const nowIso = new Date().toISOString();
+	const trackingMode = getRosterTrackingMode_(roster);
+	if (trackingMode === "regularWar") {
+		const errors = options.prefetchedRegularWarErrorByClanTag && typeof options.prefetchedRegularWarErrorByClanTag === "object"
+			? options.prefetchedRegularWarErrorByClanTag
+			: {};
+		if (Object.prototype.hasOwnProperty.call(errors, clanTag)) {
+			return { changed: markRosterPublicLineupProjectionStale_(roster, { unavailableReason: "prefetchFailed", updatedAt: nowIso }), reason: "prefetch-failed" };
+		}
+		const snapshots = options.prefetchedCurrentRegularWarByClanTag && typeof options.prefetchedCurrentRegularWarByClanTag === "object"
+			? options.prefetchedCurrentRegularWarByClanTag
+			: {};
+		if (!Object.prototype.hasOwnProperty.call(snapshots, clanTag)) return { changed: false, reason: "no-prefetch" };
+		const war = snapshots[clanTag] && typeof snapshots[clanTag] === "object" ? snapshots[clanTag] : {};
+		const state = normalizeWarState_(war.state);
+		const live = state === "preparation" || state === "inwar";
+		if (!live) {
+			setRosterPublicLineupProjectionInactive_(roster, {
+				trackingMode: "regularWar",
+				source: "regularWarCurrentWar",
+				unavailableReason: "authoritativeWarLifecycleComplete",
+				updatedAt: nowIso,
+			});
+			return { changed: true, reason: "authoritative-complete" };
+		}
+		const warKey = getStableRegularWarKey_(war, clanTag);
+		setRosterPublicLineupProjection_(
+			roster,
+			buildRosterPublicLineupProjectionFromMembers_(rosterData, roster, war.participants, {
+				trackingMode: "regularWar",
+				source: "regularWarCurrentWar",
+				eventId: buildPlayerWarEventId_("regular", clanTag, warKey),
+				warIdentifier: warKey,
+				warState: state,
+				authoritative: true,
+				lastAuthoritativeAt: nowIso,
+				updatedAt: nowIso,
+			}),
+		);
+		return { changed: true, reason: "authoritative-live-war" };
+	}
+
+	const view = options.cwlCoordinatorClanView && typeof options.cwlCoordinatorClanView === "object"
+		? options.cwlCoordinatorClanView
+		: (typeof getCwlCoordinatorClanViewFromOptions_ === "function" ? getCwlCoordinatorClanViewFromOptions_(options, clanTag) : null);
+	if (!view || typeof view !== "object") return { changed: false, reason: "no-cwl-prefetch" };
+	const currentWar = view.currentWar && typeof view.currentWar === "object" ? view.currentWar : null;
+	const members = Array.isArray(currentWar && currentWar.members) ? currentWar.members : [];
+	const state = normalizeWarState_(currentWar && (currentWar.state || currentWar.warState));
+	if (currentWar && members.length && (state === "preparation" || state === "inwar")) {
+		const warTag = normalizeTag_(currentWar.warTag);
+		setRosterPublicLineupProjection_(
+			roster,
+			buildRosterPublicLineupProjectionFromMembers_(rosterData, roster, members, {
+				trackingMode: "cwl",
+				source: "cwlRuntime",
+				eventId: buildPlayerWarEventId_("cwl", clanTag, warTag),
+				warIdentifier: warTag,
+				warState: state,
+				authoritative: true,
+				lastAuthoritativeAt: nowIso,
+				updatedAt: nowIso,
+			}),
+		);
+		return { changed: true, reason: "authoritative-live-war" };
+	}
+	const unavailableReason = String(view.unavailableReason || "");
+	const authoritativeNoWar = unavailableReason === "leagueGroup404" || unavailableReason === "clanNotInLeagueGroup" || unavailableReason === "noWarTags" || unavailableReason === "noUsableWars";
+	if (authoritativeNoWar && view.freshness && view.freshness.discoveryIncomplete !== true) {
+		setRosterPublicLineupProjectionInactive_(roster, {
+			trackingMode: "cwl",
+			source: "cwlRuntime",
+			unavailableReason: "authoritativeWarLifecycleComplete",
+			updatedAt: nowIso,
+		});
+		return { changed: true, reason: "authoritative-complete" };
+	}
+	return {
+		changed: markRosterPublicLineupProjectionStale_(roster, { unavailableReason: unavailableReason || "cwlPrefetchUnavailable", updatedAt: nowIso }),
+		reason: "stale-retained",
+	};
 }
 
 // Prune tag from roster tracking state.
@@ -484,78 +638,13 @@ function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 		changed = true;
 	}
 
-	const cwlStats = roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : null;
-	if (cwlStats && cwlStats.byTag && typeof cwlStats.byTag === "object" && Object.prototype.hasOwnProperty.call(cwlStats.byTag, tag)) {
-		delete cwlStats.byTag[tag];
-		changed = true;
-	}
-
+	// cwlStats and regularWar are live roster state. Finalized aggregates,
+	// baselines, form evidence and event history are immutable identity history
+	// and deliberately remain attached until the global ledger migration/cutover.
 	const warPerformance = roster.warPerformance && typeof roster.warPerformance === "object" ? roster.warPerformance : null;
-	let regularHistoryOrBaselineChanged = false;
-	if (warPerformance && warPerformance.byTag && typeof warPerformance.byTag === "object" && Object.prototype.hasOwnProperty.call(warPerformance.byTag, tag)) {
-		delete warPerformance.byTag[tag];
-		changed = true;
-	}
 	if (warPerformance && warPerformance.membershipByTag && typeof warPerformance.membershipByTag === "object" && Object.prototype.hasOwnProperty.call(warPerformance.membershipByTag, tag)) {
 		delete warPerformance.membershipByTag[tag];
 		changed = true;
-	}
-	if (
-		warPerformance &&
-		warPerformance.regularWarLegacyBaselineByTag &&
-		typeof warPerformance.regularWarLegacyBaselineByTag === "object" &&
-		Object.prototype.hasOwnProperty.call(warPerformance.regularWarLegacyBaselineByTag, tag)
-	) {
-		delete warPerformance.regularWarLegacyBaselineByTag[tag];
-		changed = true;
-		regularHistoryOrBaselineChanged = true;
-	}
-	if (
-		warPerformance &&
-		warPerformance.cwlPreSeasonBaselineByTag &&
-		typeof warPerformance.cwlPreSeasonBaselineByTag === "object" &&
-		Object.prototype.hasOwnProperty.call(warPerformance.cwlPreSeasonBaselineByTag, tag)
-	) {
-		delete warPerformance.cwlPreSeasonBaselineByTag[tag];
-		changed = true;
-	}
-	if (warPerformance && warPerformance.regularWarHistoryByKey && typeof warPerformance.regularWarHistoryByKey === "object") {
-		const historyByKey = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
-		const warKeys = Object.keys(historyByKey);
-		let historyChanged = false;
-		for (let i = 0; i < warKeys.length; i++) {
-			const warKey = warKeys[i];
-			const entry = sanitizeRegularWarHistoryEntry_(historyByKey[warKey], warKey);
-			if (!entry) continue;
-			const statsByTag = entry.statsByTag && typeof entry.statsByTag === "object" ? entry.statsByTag : {};
-			const formStatsByTag = entry.formStatsByTag && typeof entry.formStatsByTag === "object" ? entry.formStatsByTag : {};
-			let entryChanged = false;
-			if (Object.prototype.hasOwnProperty.call(statsByTag, tag)) {
-				delete statsByTag[tag];
-				entryChanged = true;
-			}
-			if (Object.prototype.hasOwnProperty.call(formStatsByTag, tag)) {
-				delete formStatsByTag[tag];
-				entryChanged = true;
-			}
-			if (!entryChanged) continue;
-			entry.statsByTag = statsByTag;
-			entry.formStatsByTag = formStatsByTag;
-			historyChanged = true;
-			if (Object.keys(entry.statsByTag).length < 1 && Object.keys(entry.formStatsByTag).length < 1) {
-				delete historyByKey[warKey];
-			} else {
-				historyByKey[warKey] = sanitizeRegularWarHistoryEntry_(entry, warKey);
-			}
-		}
-		if (historyChanged) {
-			warPerformance.regularWarHistoryByKey = historyByKey;
-			changed = true;
-			regularHistoryOrBaselineChanged = true;
-		}
-	}
-	if (warPerformance && regularHistoryOrBaselineChanged) {
-		rebuildRegularWarAggregatesFromHistory_(warPerformance, new Date().toISOString());
 	}
 
 	return changed;
@@ -1385,6 +1474,17 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 			"cwlRuntimeSettled",
 			false,
 		);
+		if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
+			emitPlayerWarEventCandidate_(
+				buildCwlPlayerWarCandidate_(filteredStats, warTag, ctx.clanTag, ctx.rosterId, {
+					season: cwlView.season,
+					startTime: contribution.startTime,
+					endTime: contribution.endTime,
+					observedAt: nowIso,
+					source: "cwlRuntimeSettled",
+				}),
+			);
+		}
 		if (result && result.applied) finalizedCwlWars++;
 	}
 	const cwlCurrentWar = sanitizeCwlCurrentWar_(cwlView.currentWar);
@@ -1699,9 +1799,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		const currentWarMeta = currentWar && currentWar.currentWarMeta && typeof currentWar.currentWarMeta === "object" ? currentWar.currentWarMeta : {};
 		const unavailableReason = String((currentWarMeta && currentWarMeta.unavailableReason) || "").trim();
 		if (unavailableReason === "privateWarLog") {
-			setRosterPublicLineupProjectionInactive_(ctx.roster, {
-				trackingMode: "regularWar",
-				source: "regularWarCurrentWar",
+			markRosterPublicLineupProjectionStale_(ctx.roster, {
 				unavailableReason: "privateWarLog",
 				updatedAt: nowIso,
 			});
@@ -1759,6 +1857,11 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			buildRosterPublicLineupProjectionFromMembers_(ctx.rosterData, ctx.roster, currentWar.participants, {
 				trackingMode: "regularWar",
 				source: "regularWarCurrentWar",
+				eventId: buildPlayerWarEventId_("regular", ctx.clanTag, getStableRegularWarKey_(currentWar, ctx.clanTag)),
+				warIdentifier: getStableRegularWarKey_(currentWar, ctx.clanTag),
+				warState: state,
+				authoritative: true,
+				lastAuthoritativeAt: nowIso,
 				updatedAt: nowIso,
 			}),
 		);
@@ -1783,12 +1886,20 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		const currentWar = cwlCoordinatorView.currentWar && typeof cwlCoordinatorView.currentWar === "object" ? cwlCoordinatorView.currentWar : null;
 		const members = Array.isArray(currentWar && currentWar.members) ? currentWar.members : [];
 		if (!currentWar || !members.length) {
-			setRosterPublicLineupProjectionInactive_(ctx.roster, {
-				trackingMode: "cwl",
-				source: "cwlRuntime",
-				unavailableReason: String(cwlCoordinatorView.unavailableReason || "noUsableWars"),
-				updatedAt: nowIso,
-			});
+			const discoveryIncomplete = !!(cwlCoordinatorView.freshness && cwlCoordinatorView.freshness.discoveryIncomplete);
+			if (discoveryIncomplete) {
+				markRosterPublicLineupProjectionStale_(ctx.roster, {
+					unavailableReason: String(cwlCoordinatorView.unavailableReason || "cwlDiscoveryIncomplete"),
+					updatedAt: nowIso,
+				});
+			} else {
+				setRosterPublicLineupProjectionInactive_(ctx.roster, {
+					trackingMode: "cwl",
+					source: "cwlRuntime",
+					unavailableReason: String(cwlCoordinatorView.unavailableReason || "authoritativeWarLifecycleComplete"),
+					updatedAt: nowIso,
+				});
+			}
 			const outRosterData = finalizeRefreshStepRosterDataForReturn_(ctx.rosterData, options, "refresh step");
 			return {
 				ok: true,
@@ -1801,6 +1912,11 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 			buildRosterPublicLineupProjectionFromMembers_(ctx.rosterData, ctx.roster, members, {
 				trackingMode: "cwl",
 				source: "cwlRuntime",
+				eventId: buildPlayerWarEventId_("cwl", ctx.clanTag, currentWar.warTag),
+				warIdentifier: normalizeTag_(currentWar.warTag),
+				warState: normalizeWarState_(currentWar.state || currentWar.warState),
+				authoritative: true,
+				lastAuthoritativeAt: nowIso,
 				updatedAt: nowIso,
 			}),
 		);
@@ -1900,6 +2016,11 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		buildRosterPublicLineupProjectionFromMembers_(ctx.rosterData, ctx.roster, currentWar.members, {
 			trackingMode: "cwl",
 			source: "cwlCurrentWar",
+			eventId: buildPlayerWarEventId_("cwl", ctx.clanTag, currentWar.warTag),
+			warIdentifier: normalizeTag_(currentWar.warTag),
+			warState: normalizeWarState_(currentWar.state || currentWar.warState),
+			authoritative: true,
+			lastAuthoritativeAt: nowIso,
 			updatedAt: nowIso,
 		}),
 	);
@@ -1915,9 +2036,7 @@ function syncClanTodayLineupCore_(rosterData, rosterId, optionsRaw) {
 		const source = mode === "regularWar" ? "regularWarCurrentWar" : "cwlCurrentWar";
 		const failureMessage = errorMessage_(err);
 		Logger.log("syncClanTodayLineupCore unexpected failure rosterId=%s mode=%s error=%s", ctx.rosterId, mode, failureMessage);
-		setRosterPublicLineupProjectionInactive_(ctx.roster, {
-			trackingMode: mode,
-			source: source,
+		markRosterPublicLineupProjectionStale_(ctx.roster, {
 			unavailableReason: "syncFailed",
 			updatedAt: nowIso,
 		});

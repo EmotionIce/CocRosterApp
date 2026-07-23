@@ -968,11 +968,22 @@ function buildActiveVersionManifestFromValidatedData_(versionIdRaw, validatedRos
 		rosterIds: rosterIds,
 		connectedClanTags: connectedClanTags,
 		rosterPlayerTags: collectActiveVersionRosterPlayerTags_(rosters),
+		rostersValidated: true,
 		lastUpdatedAt: String(rosterData.lastUpdatedAt || ""),
 		playerMetricsSchemaVersion: PLAYER_METRICS_SCHEMA_VERSION,
 		playerMetricEntryCount: countPlayerMetricsEntries_(rosterData.playerMetrics),
 		layoutVersion: FIREBASE_LAYOUT_VERSION,
 	};
+	if (rosterData.playerWarPerformance && typeof rosterData.playerWarPerformance === "object") {
+		const performance = sanitizePlayerWarPerformanceStore_(rosterData.playerWarPerformance);
+		manifest.playerWarPerformanceSchemaVersion = PLAYER_WAR_TRACKING_SCHEMA_VERSION;
+		manifest.playerWarPerformanceEntryCount = Object.keys(performance.byTag || {}).length;
+		manifest.playerWarPerformanceHash = String(performance.contentHash || hashPlayerWarValue_(performance));
+		manifest.playerWarTrackingStage = normalizePlayerWarTrackingStage_(performance.stage);
+		manifest.requiredShards = ["manifest", "rosters", "playerMetrics", "playerWarPerformance"];
+	} else {
+		manifest.requiredShards = ["manifest", "rosters", "playerMetrics"];
+	}
 	if (rosterData.publicConfig && typeof rosterData.publicConfig === "object") {
 		manifest.publicConfig = rosterData.publicConfig;
 	}
@@ -986,6 +997,7 @@ function publishActiveRosterVersionPointer_(versionIdRaw, manifestRaw) {
 	if (!versionId) throw new Error("Active version id is required.");
 	if (!isSafeActiveVersionId_(versionId)) throw new Error("New active version ids must use only letters, digits, underscore, and hyphen.");
 	const manifest = manifestRaw && typeof manifestRaw === "object" ? manifestRaw : { versionId: versionId };
+	validateActiveVersionRequiredShards_(versionId, manifest);
 	const pointer = {
 		currentVersionId: versionId,
 		updatedAt: String(manifest.publishedAt || new Date().toISOString()),
@@ -994,6 +1006,41 @@ function publishActiveRosterVersionPointer_(versionIdRaw, manifestRaw) {
 	firebaseRequestJson_(FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH, "PUT", versionId);
 	firebaseRequestJson_(FIREBASE_ACTIVE_PUBLISHED_PATH, "PATCH", pointer);
 	return { versionId: versionId, manifest: manifest };
+}
+
+// Validate every schema-declared immutable shard before pointer commit.
+function validateActiveVersionRequiredShards_(versionIdRaw, manifestRaw) {
+	const versionId = normalizeActiveVersionId_(versionIdRaw);
+	const manifest = manifestRaw && typeof manifestRaw === "object" ? manifestRaw : {};
+	const required = Array.isArray(manifest.requiredShards) && manifest.requiredShards.length
+		? manifest.requiredShards.map(String)
+		: ["manifest", "rosters", "playerMetrics"];
+	const objectChildren = required.filter(function (child) { return child !== "rosters"; });
+	const paths = objectChildren.map(function (child) { return buildActiveVersionPath_(versionId, child); });
+	const encodedByPath = firebaseBatchGetJson_(paths, { disableFallback: true });
+	for (let i = 0; i < paths.length; i++) {
+		const value = encodedByPath[paths[i]];
+		if (!value || typeof value !== "object" || Array.isArray(value)) {
+			throw new Error("Active version '" + versionId + "' is incomplete; missing required shard '" + objectChildren[i] + "'.");
+		}
+	}
+	if (required.indexOf("rosters") >= 0 && manifest.rostersValidated !== true) {
+		readActiveVersionRosterShards_(versionId, manifest);
+	}
+	if (required.indexOf("playerWarPerformance") >= 0) {
+		const path = buildActiveVersionPath_(versionId, "playerWarPerformance");
+		const performance = sanitizePlayerWarPerformanceStore_(decodeFirebaseObjectKeysRecursive_(encodedByPath[path]));
+		if (toNonNegativeInt_(manifest.playerWarPerformanceSchemaVersion) !== PLAYER_WAR_TRACKING_SCHEMA_VERSION) {
+			throw new Error("Active version player-war manifest schema is invalid.");
+		}
+		if (Object.keys(performance.byTag || {}).length !== toNonNegativeInt_(manifest.playerWarPerformanceEntryCount)) {
+			throw new Error("Active version player-war entry count does not match its manifest.");
+		}
+		if (manifest.playerWarPerformanceHash && String(performance.contentHash || "") !== String(manifest.playerWarPerformanceHash)) {
+			throw new Error("Active version player-war content hash does not match its manifest.");
+		}
+	}
+	return { ok: true, versionId: versionId, requiredShards: required };
 }
 
 // Write a validated active payload into /activeVersions/{versionId} shards.
@@ -1014,6 +1061,10 @@ function writeActiveRosterVersionShards_(versionIdRaw, validatedRosterData, opti
 	}
 	const playerMetrics = sanitizePlayerMetricsStore_(validated.playerMetrics, validated.lastUpdatedAt || new Date().toISOString());
 	firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerMetrics"), "PUT", encodeFirebaseObjectKeysRecursive_(playerMetrics));
+	if (validated.playerWarPerformance && typeof validated.playerWarPerformance === "object") {
+		const performance = sanitizePlayerWarPerformanceStore_(validated.playerWarPerformance);
+		firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerWarPerformance"), "PUT", encodeFirebaseObjectKeysRecursive_(performance));
+	}
 	writeActiveVersionLinkedAccountTagIndex_(versionId, playerMetrics, {
 		builtAt: validated.lastUpdatedAt || new Date().toISOString(),
 	});
@@ -2741,7 +2792,7 @@ function updateActiveRosterDataCaches_(text) {
 function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 	const validated = validateRosterData_(validatedRosterData);
 	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
-	const activeFields = ["schemaVersion", "pageTitle", "rosterOrder", "rosters", "playerMetrics", "lastUpdatedAt", "publicConfig"];
+	const activeFields = ["schemaVersion", "pageTitle", "rosterOrder", "rosters", "playerMetrics", "playerWarPerformance", "lastUpdatedAt", "publicConfig"];
 	const writes = [];
 	for (let i = 0; i < activeFields.length; i++) {
 		const field = activeFields[i];
@@ -2806,6 +2857,16 @@ function readLegacyActiveRosterSnapshotFromRawVersion_(versionIdRaw) {
 		rosters: rosters,
 		playerMetrics: playerMetrics,
 	};
+	const requiresPlayerWarPerformance =
+		(Array.isArray(manifest.requiredShards) && manifest.requiredShards.indexOf("playerWarPerformance") >= 0) ||
+		toNonNegativeInt_(manifest.playerWarPerformanceSchemaVersion) >= PLAYER_WAR_TRACKING_SCHEMA_VERSION;
+	if (requiresPlayerWarPerformance) {
+		const encodedPerformance = firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerWarPerformance"), "GET");
+		if (!encodedPerformance || typeof encodedPerformance !== "object" || Array.isArray(encodedPerformance)) {
+			throw new Error("Missing active version player-war performance for " + versionId + ".");
+		}
+		payload.playerWarPerformance = decodeFirebaseObjectKeysRecursive_(encodedPerformance);
+	}
 	if (manifest.lastUpdatedAt) payload.lastUpdatedAt = String(manifest.lastUpdatedAt || "");
 	if (manifest.publicConfig && typeof manifest.publicConfig === "object") payload.publicConfig = manifest.publicConfig;
 	const rosterData = validateRosterData_(payload);
@@ -3281,6 +3342,16 @@ function replaceActiveRosterData_(validatedRosterData, options) {
 		} catch (err) {
 			sourceSnapshot = null;
 		}
+	}
+	// Browser/admin payloads are not trusted as historical aggregates. Preserve
+	// the server-owned global read model unless a central finalizer/migration
+	// explicitly supplied it.
+	if (opts.acceptServerOwnedPlayerWarPerformance !== true) {
+		delete validated.playerWarPerformance;
+		if (sourceSnapshot && sourceSnapshot.rosterData && sourceSnapshot.rosterData.playerWarPerformance) {
+			validated.playerWarPerformance = sanitizePlayerWarPerformanceStore_(sourceSnapshot.rosterData.playerWarPerformance);
+		}
+		validated = validateRosterData_(validated);
 	}
 	const canonicalized = canonicalizeDiscordIdentityForRosterData_(validated, {
 		sourceRosterData: sourceSnapshot && sourceSnapshot.rosterData,

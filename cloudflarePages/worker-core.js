@@ -894,7 +894,7 @@ const isCanonicalPublicMutablePath = (pathRaw) => {
 
 const parseVirtualBotActivePath = (pathRaw) => {
   const path = String(pathRaw == null ? "" : pathRaw).replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
-  const match = /^activeVersions\/([^/]+)\/(active|rosters|playerMetrics\/meta|playerMetrics\/byTag)$/.exec(path);
+  const match = /^activeVersions\/([^/]+)\/(active|rosters|playerMetrics\/meta|playerMetrics\/byTag|playerWarPerformance)$/.exec(path);
   if (!match) return null;
   try {
     return { versionId: decodeURIComponent(match[1]), child: match[2] };
@@ -1200,7 +1200,7 @@ const buildProjectedDataStoreObject = async (valueRaw) => {
 // Return the requested active-version shard if it can be projected from legacy active data.
 const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathRaw) => {
   const path = String(objectPathRaw == null ? "" : objectPathRaw).replace(/\.json$/i, "");
-  const match = /^activeVersions\/([^/]+)\/(manifest|rosters|playerMetrics)$/.exec(path);
+  const match = /^activeVersions\/([^/]+)\/(manifest|rosters|playerMetrics|playerWarPerformance)$/.exec(path);
   if (!match) return undefined;
   const versionId = match[1] || "";
   const child = match[2] || "";
@@ -1231,6 +1231,11 @@ const projectCurrentActiveVersionShardFromLegacyData = async (store, objectPathR
       ? active.playerMetrics
       : {};
   }
+  if (child === "playerWarPerformance") {
+    return active.playerWarPerformance && typeof active.playerWarPerformance === "object" && !Array.isArray(active.playerWarPerformance)
+      ? active.playerWarPerformance
+      : undefined;
+  }
   const rosters = Array.isArray(active.rosters) ? active.rosters : [];
   const rosterMap = {};
   for (let i = 0; i < rosters.length; i++) {
@@ -1246,16 +1251,23 @@ const parsePublicActiveVersionProjection = async (versionIdRaw, objectsRaw) => {
   if (!versionId) return null;
   const objects = objectsRaw && typeof objectsRaw === "object" ? objectsRaw : {};
   const manifestObject = objects.manifest || null;
+  const manifestValue = isPlainJsonObject(objects.manifestValue) ? objects.manifestValue : null;
   const rostersObject = objects.rosters || null;
   const metricsObject = objects.playerMetrics || null;
+  const performanceObject = objects.playerWarPerformance || null;
   if (!manifestObject || !rostersObject || !metricsObject) return null;
   try {
-    const [manifest, rosterMap, playerMetrics] = await Promise.all([
-      manifestObject.text().then((text) => JSON.parse(text)),
+    const [manifest, rosterMap, playerMetrics, playerWarPerformance] = await Promise.all([
+      manifestValue ? Promise.resolve(manifestValue) : manifestObject.text().then((text) => JSON.parse(text)),
       rostersObject.text().then((text) => JSON.parse(text)),
       metricsObject.text().then((text) => JSON.parse(text)),
+      performanceObject ? performanceObject.text().then((text) => JSON.parse(text)) : Promise.resolve(null),
     ]);
     if (!isPlainJsonObject(manifest) || !isPlainJsonObject(rosterMap) || !isPlainJsonObject(playerMetrics)) return null;
+    const requiresPerformance =
+      (Array.isArray(manifest.requiredShards) && manifest.requiredShards.map(String).includes("playerWarPerformance")) ||
+      Number(manifest.playerWarPerformanceSchemaVersion || 0) >= 2;
+    if (requiresPerformance && !isPlainJsonObject(playerWarPerformance)) return null;
     const rosterIds = Array.isArray(manifest.rosterIds) && manifest.rosterIds.length
       ? manifest.rosterIds.map((value) => String(value || "").trim()).filter(Boolean)
       : Object.keys(rosterMap).map((key) => decodeFirebaseDerivationKey(key));
@@ -1274,6 +1286,7 @@ const parsePublicActiveVersionProjection = async (versionIdRaw, objectsRaw) => {
       playerMetrics,
       activeVersionId: versionId,
     };
+    if (isPlainJsonObject(playerWarPerformance)) active.playerWarPerformance = playerWarPerformance;
     if (manifest.lastUpdatedAt) active.lastUpdatedAt = String(manifest.lastUpdatedAt);
     if (isPlainJsonObject(manifest.publicConfig)) active.publicConfig = manifest.publicConfig;
     const metricsMeta = Object.assign({}, playerMetrics);
@@ -1284,6 +1297,7 @@ const parsePublicActiveVersionProjection = async (versionIdRaw, objectsRaw) => {
       rosterMap,
       rosters,
       playerMetrics,
+      playerWarPerformance: isPlainJsonObject(playerWarPerformance) ? playerWarPerformance : null,
       metricsMeta,
       byTag: isPlainJsonObject(playerMetrics.byTag) ? playerMetrics.byTag : {},
       active,
@@ -1297,12 +1311,28 @@ const readPublicActiveVersionProjection = async (store, versionIdRaw) => {
   const versionId = String(versionIdRaw || "").trim();
   if (!versionId) return null;
   const base = "activeVersions/" + encodeURIComponent(versionId);
-  const [manifest, rosters, playerMetrics] = await Promise.all([
-    getDataStoreObject(store, buildDataObjectKey("public", base + "/manifest")),
+  const manifest = await getDataStoreObject(store, buildDataObjectKey("public", base + "/manifest"));
+  if (!manifest) return null;
+  let manifestValue = null;
+  try { manifestValue = JSON.parse(await manifest.text()); } catch (err) { return null; }
+  const requiresPerformance = isPlainJsonObject(manifestValue) && (
+    (Array.isArray(manifestValue.requiredShards) && manifestValue.requiredShards.map(String).includes("playerWarPerformance")) ||
+    Number(manifestValue.playerWarPerformanceSchemaVersion || 0) >= 2
+  );
+  const [rosters, playerMetrics, playerWarPerformance] = await Promise.all([
     getDataStoreObject(store, buildDataObjectKey("public", base + "/rosters")),
     getDataStoreObject(store, buildDataObjectKey("public", base + "/playerMetrics")),
+    requiresPerformance
+      ? getDataStoreObject(store, buildDataObjectKey("public", base + "/playerWarPerformance"))
+      : Promise.resolve(null),
   ]);
-  return parsePublicActiveVersionProjection(versionId, { manifest, rosters, playerMetrics });
+  return parsePublicActiveVersionProjection(versionId, {
+    manifest,
+    manifestValue,
+    rosters,
+    playerMetrics,
+    playerWarPerformance,
+  });
 };
 
 const readVirtualBotImmutableObject = async (store, pathRaw) => {
@@ -1313,6 +1343,7 @@ const readVirtualBotImmutableObject = async (store, pathRaw) => {
   if (parsed.child === "active") return buildProjectedDataStoreObject(projection.active);
   if (parsed.child === "rosters") return buildProjectedDataStoreObject(projection.rosters);
   if (parsed.child === "playerMetrics/meta") return buildProjectedDataStoreObject(projection.metricsMeta);
+  if (parsed.child === "playerWarPerformance") return buildProjectedDataStoreObject(projection.playerWarPerformance);
   return buildProjectedDataStoreObject(projection.byTag);
 };
 
@@ -1332,23 +1363,26 @@ const readVersionedBotObject = async (store, versionIdRaw, objectPathRaw, projec
     if (!descriptor || descriptor.shardedActive !== true) return buildProjectedDataStoreObject(descriptor);
     const versionId = String(versionIdRaw || "").trim();
     const base = "activeVersions/" + encodeURIComponent(versionId);
-    const [rostersObject, metricsMetaObject, byTagObject] = await Promise.all([
+    const [rostersObject, metricsMetaObject, byTagObject, performanceObject] = await Promise.all([
       getDataStoreObject(store, buildDataObjectKey("bot", base + "/rosters")),
       getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/meta")),
       getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerMetrics/byTag")),
+      getDataStoreObject(store, buildDataObjectKey("bot", base + "/playerWarPerformance")),
     ]);
     if (!rostersObject || !metricsMetaObject || !byTagObject) return null;
     try {
-      const [rosters, metricsMeta, byTag] = await Promise.all([
+      const [rosters, metricsMeta, byTag, playerWarPerformance] = await Promise.all([
         rostersObject.text().then((text) => JSON.parse(text)),
         metricsMetaObject.text().then((text) => JSON.parse(text)),
         byTagObject.text().then((text) => JSON.parse(text)),
+        performanceObject ? performanceObject.text().then((text) => JSON.parse(text)) : Promise.resolve(undefined),
       ]);
       const activeMeta = isPlainJsonObject(descriptor.activeMeta) ? descriptor.activeMeta : {};
       return buildProjectedDataStoreObject(Object.assign({}, activeMeta, {
         activeVersionId: versionId,
         rosters: Array.isArray(rosters) ? rosters : [],
         playerMetrics: Object.assign({}, isPlainJsonObject(metricsMeta) ? metricsMeta : {}, { byTag: isPlainJsonObject(byTag) ? byTag : {} }),
+        playerWarPerformance: isPlainJsonObject(playerWarPerformance) ? playerWarPerformance : undefined,
       }));
     } catch (err) {
       return null;
@@ -1358,6 +1392,12 @@ const readVersionedBotObject = async (store, versionIdRaw, objectPathRaw, projec
     const projected = projectionRaw
       ? await buildProjectedDataStoreObject(projectionRaw.byTag)
       : await readVirtualBotImmutableObject(store, "activeVersions/" + encodeURIComponent(String(versionIdRaw || "").trim()) + "/playerMetrics/byTag");
+    if (projected) return projected;
+  }
+  if (normalizedObjectPath === "active/playerWarPerformance") {
+    const projected = projectionRaw
+      ? await buildProjectedDataStoreObject(projectionRaw.playerWarPerformance)
+      : await readVirtualBotImmutableObject(store, "activeVersions/" + encodeURIComponent(String(versionIdRaw || "").trim()) + "/playerWarPerformance");
     if (projected) return projected;
   }
   const cachedBotObjects = botStatusRaw && botStatusRaw.objects && typeof botStatusRaw.objects === "object"
@@ -1401,7 +1441,7 @@ const getPublicDataObjectWithBootstrapFallback = async (store, key, objectPath) 
     if (path === "activePublished/currentManifest") {
       return buildProjectedDataStoreObject(await readDirectPublicActiveManifest(store, resolution.versionId));
     }
-    const match = /^activeVersions\/([^/]+)\/(manifest|rosters|playerMetrics)$/.exec(path);
+    const match = /^activeVersions\/([^/]+)\/(manifest|rosters|playerMetrics|playerWarPerformance)$/.exec(path);
     if (match && decodeURIComponent(match[1] || "") === shared.currentVersionId && resolution.versionId !== shared.currentVersionId) {
       const fallbackPath = "activeVersions/" + encodeURIComponent(resolution.versionId) + "/" + match[2];
       return getDataStoreObject(store, buildDataObjectKey("public", fallbackPath));
@@ -1450,6 +1490,7 @@ const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
     manifest: false,
     rosters: false,
     playerMetrics: false,
+    playerWarPerformance: false,
     complete: false,
     missing: [],
   };
@@ -1457,9 +1498,18 @@ const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
     status.missing = ["manifest", "rosters", "playerMetrics"];
     return status;
   }
-  const names = ["manifest", "rosters", "playerMetrics"];
+  const manifestObject = await getDataStoreObject(store, buildDataObjectKey("public", "activeVersions/" + versionId + "/manifest"));
+  let manifest = null;
+  try { manifest = manifestObject ? JSON.parse(await manifestObject.text()) : null; } catch (err) { manifest = null; }
+  const requiresPerformance = isPlainJsonObject(manifest) && (
+    (Array.isArray(manifest.requiredShards) && manifest.requiredShards.map(String).includes("playerWarPerformance")) ||
+    Number(manifest.playerWarPerformanceSchemaVersion || 0) >= 2
+  );
+  const names = requiresPerformance ? ["manifest", "rosters", "playerMetrics", "playerWarPerformance"] : ["manifest", "rosters", "playerMetrics"];
   const objects = await Promise.all(names.map((name) =>
-    getDataStoreObject(store, buildDataObjectKey("public", "activeVersions/" + versionId + "/" + name))
+    name === "manifest"
+      ? Promise.resolve(manifestObject)
+      : getDataStoreObject(store, buildDataObjectKey("public", "activeVersions/" + versionId + "/" + name))
   ));
   const objectsByName = {};
   for (let i = 0; i < names.length; i++) {
@@ -1471,12 +1521,12 @@ const readDirectActiveVersionShardStatus = async (store, versionIdRaw) => {
   }
   let projection = null;
   if (!status.missing.length) {
-    projection = await parsePublicActiveVersionProjection(versionId, objectsByName);
+    projection = await parsePublicActiveVersionProjection(versionId, Object.assign({}, objectsByName, { manifestValue: manifest }));
     if (!projection) status.missing.push("invalid-content");
   }
   status.complete = status.missing.length === 0;
   // Keep parsed content request-local and out of health JSON. Bot routes can
-  // now validate and project one generation with exactly the same three reads.
+  // now validate and project one generation with the same schema-declared reads.
   Object.defineProperty(status, "projection", { value: projection, enumerable: false });
   return status;
 };
@@ -1629,7 +1679,7 @@ const handleDataRead = async (request, env, url, scopeRaw) => {
     : await readBotDataObjectWithVersionFallback(store, objectPath, key);
   if (!object) {
     const logicalPath = objectPath.replace(/\.json$/i, "");
-    if (scope === "public" && /^activeVersions\/[^/]+\/(manifest|rosters|playerMetrics)$/.test(logicalPath)) {
+    if (scope === "public" && /^activeVersions\/[^/]+\/(manifest|rosters|playerMetrics|playerWarPerformance)$/.test(logicalPath)) {
       return jsonResponse(503, {
         ok: false,
         temporary: true,
@@ -1875,6 +1925,9 @@ const buildVersionedBotObjectPath = (versionIdRaw, objectPathRaw) => {
   if (objectPath === "active") return "activeVersions/" + encodeURIComponent(versionId) + "/active";
   if (objectPath === "active/playerMetrics/byTag" || objectPath.startsWith("active/playerMetrics/byTag/")) {
     return "activeVersions/" + encodeURIComponent(versionId) + "/playerMetrics/byTag" + objectPath.slice("active/playerMetrics/byTag".length);
+  }
+  if (objectPath === "active/playerWarPerformance" || objectPath.startsWith("active/playerWarPerformance/")) {
+    return "activeVersions/" + encodeURIComponent(versionId) + "/playerWarPerformance" + objectPath.slice("active/playerWarPerformance".length);
   }
   if (objectPath === "indexes/linkedAccountsByDiscordId" || objectPath === "indexes/linkedAccountsByDiscordUsername") {
     return "activeVersions/" + encodeURIComponent(versionId) + "/" + objectPath;

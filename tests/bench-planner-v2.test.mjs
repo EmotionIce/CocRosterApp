@@ -9,6 +9,7 @@ const appScriptFiles = [
   "script/cocApi.js",
   "script/rosterDomain.js",
   "script/warDomain.js",
+  "script/playerWarTracking.js",
   "script/firebaseStore.js",
   "script/metricsTracking.js",
   "script/donationRefresh.js",
@@ -460,7 +461,8 @@ test("bench suggestion persistence sanitizes v2 metadata, rollback restores it, 
   assert.deepEqual(plain(validated.rosters[0].benchSuggestions.benchTags), [p1.tag]);
 
   backend.pruneTagFromRosterTrackingState_(validated.rosters[0], p1.tag);
-  assert.equal(validated.rosters[0].warPerformance.cwlPreSeasonBaselineByTag[p1.tag], undefined);
+  assert.ok(validated.rosters[0].warPerformance.cwlPreSeasonBaselineByTag[p1.tag]);
+  assert.equal(validated.rosters[0].warPerformance.membershipByTag[p1.tag], undefined);
 });
 
 test("CWL preparation ranking still uses the legacy scorer, not bench-specific scoring", () => {

@@ -560,9 +560,35 @@ function getRegularWarQualityStatsForBench_(entryRaw) {
 }
 
 // Build bench history context.
-function buildBenchHistoryContext_(rosterRaw, seasonRaw) {
+function buildBenchHistoryContext_(rosterRaw, seasonRaw, globalPerformanceRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
 	const season = String(seasonRaw == null ? "" : seasonRaw).trim();
+	const globalPerformance = globalPerformanceRaw && typeof globalPerformanceRaw === "object"
+		? sanitizePlayerWarPerformanceStore_(globalPerformanceRaw)
+		: null;
+	if (globalPerformance && normalizePlayerWarTrackingStage_(globalPerformance.stage) === "cutover") {
+		const previousCwlByTag = {};
+		Object.keys(globalPerformance.byTag || {}).forEach(function (tagRaw) {
+			const tag = normalizeTag_(tagRaw);
+			if (!tag) return;
+			const globalEntry = globalPerformance.byTag[tagRaw] && typeof globalPerformance.byTag[tagRaw] === "object"
+				? globalPerformance.byTag[tagRaw]
+				: {};
+			const previous = sanitizeWarPerformanceStatsEntry_(globalEntry.cwl);
+			const currentSeason = globalEntry.cwlSeasonContext && globalEntry.cwlSeasonContext.bySeason && globalEntry.cwlSeasonContext.bySeason[season]
+				? globalEntry.cwlSeasonContext.bySeason[season]
+				: null;
+			if (currentSeason && currentSeason.stats) addSignedPlayerWarStats_(previous, currentSeason.stats, -1);
+			if (hasWarPerformanceStatsData_(previous)) previousCwlByTag[tag] = previous;
+		});
+		return {
+			warPerformance: globalPerformance,
+			cleanPreviousCwlAvailable: true,
+			previousCwlByTag: previousCwlByTag,
+			historyStatus: "global_event_ledger_excluding_current_season",
+			warnings: [],
+		};
+	}
 	const warPerformance = sanitizeRosterWarPerformance_(roster.warPerformance) || createEmptyRosterWarPerformance_();
 	const status = normalizeCwlHistoryStatus_(warPerformance.cwlHistoryStatus || (warPerformance.meta && warPerformance.meta.cwlHistoryStatus));
 	const baselineSeason = String(warPerformance.cwlPreSeasonBaselineSeason || (warPerformance.meta && warPerformance.meta.cwlHistorySeason) || "").trim();
@@ -765,7 +791,7 @@ function orderTargetMainTags_(selectedSet, snapshot) {
 }
 
 // Build CWL planning snapshot (v2).
-function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
+function buildCwlPlanningSnapshot_(roster, seasonContext, config, globalPerformanceRaw) {
 	const rosterSafe = roster && typeof roster === "object" ? roster : {};
 	const season = seasonContext && typeof seasonContext === "object" ? seasonContext : {};
 	const rosterStatsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object" ? rosterSafe.cwlStats.byTag : {};
@@ -784,7 +810,7 @@ function buildCwlPlanningSnapshot_(roster, seasonContext, config) {
 		currentMainTags.push(tag);
 	}
 	const currentMainTagSet = listToTagSet_(currentMainTags);
-	const historyContext = buildBenchHistoryContext_(rosterSafe, season.season);
+	const historyContext = buildBenchHistoryContext_(rosterSafe, season.season, globalPerformanceRaw);
 	const warPerformance = historyContext.warPerformance || {};
 	const warPerformanceByTag = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
 	const previousCwlByTag = historyContext.previousCwlByTag && typeof historyContext.previousCwlByTag === "object" ? historyContext.previousCwlByTag : {};
@@ -1594,7 +1620,7 @@ function computeBenchSuggestionsCore_(rosterData, rosterId, optionsRaw) {
 	const config = getBenchPlannerConfig_();
 	const updatedAt = new Date().toISOString();
 	const seasonContext = buildCwlSeasonContext_(ctx.roster, config, options);
-	const snapshot = buildCwlPlanningSnapshot_(ctx.roster, seasonContext, config);
+	const snapshot = buildCwlPlanningSnapshot_(ctx.roster, seasonContext, config, ctx.rosterData && ctx.rosterData.playerWarPerformance);
 	const plan = solveSeasonLineupPlan_(snapshot, config);
 	const suggestions = deriveNextDaySwapSuggestionsFromPlan_(ctx.roster, plan, snapshot, config);
 	const summary = buildBenchSuggestionSummary_(ctx.roster, plan, suggestions, snapshot, config);

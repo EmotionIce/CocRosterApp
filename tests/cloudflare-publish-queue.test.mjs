@@ -726,7 +726,7 @@ test("schema-v2 ordinary and commit states migrate to the first idempotent phase
       active: { targetVersionId: "target", targetGeneration: 4, phase, cursor: 9, committedVersionId: "committed" },
       dirty: { relevantSnapshot: { revision: 3, phase: "ordinary", cursor: 4 } },
     });
-    assert.equal(migrated.schemaVersion, 5);
+    assert.equal(migrated.schemaVersion, 6);
     assert.equal(migrated.active.phase, "public-manifest-rosters");
     assert.equal(migrated.active.committedVersionId, "committed");
     assert.equal(migrated.dirty.repair.revision, 3);
@@ -748,7 +748,7 @@ test("schema-v4 bot-active rollout resumes from private indexes and clears its o
         dispatch: { phase: "bot-active", generation: 8, guard: { generation: 9, batchId: "old-bot-active" } },
       },
     });
-    assert.equal(migrated.schemaVersion, 5);
+    assert.equal(migrated.schemaVersion, 6);
     assert.equal(migrated.active.phase, expectedPhase);
     assert.equal(migrated.active.dispatch, null);
     assert.equal(migrated.active.committedVersionId, "committed");
@@ -1289,8 +1289,9 @@ test("active phase progression skips redundant bot derivation only after Worker 
     { response: { ok: true, completedDerivationCount: 1 } },
   );
   assert.equal(q.__getState().active.botDerivedReady, true);
+  assert.equal(q.__getState().active.phase, "public-player-war-performance");
   q.completeCloudflareActivePhase_(
-    { category: "active", phase: "bot-active", cursor: 0, targetVersionId: "version-B", generation: 7 },
+    { category: "active", phase: "public-player-war-performance", cursor: 0, targetVersionId: "version-B", generation: 7 },
     { response: { ok: true } },
   );
   assert.equal(q.__getState().active.phase, "commit");
@@ -1489,7 +1490,7 @@ test("canonical active enqueue derives bot metrics during the public metrics pha
     phases.push(before);
     q.processCloudflareActiveQueueRequest_(q.__getState());
   }
-  assert.deepEqual(phases, ["public-manifest-rosters", "public-player-metrics", "commit"]);
+  assert.deepEqual(phases, ["public-manifest-rosters", "public-player-metrics", "public-player-war-performance", "commit"]);
   assert.equal(q.__getState().active.committedVersionId, "version-B");
   assert.equal(objectStore.get("public:activePublished/currentVersionId"), "version-B");
   assert.equal(objectStore.has("bot:active/currentVersionId"), false);

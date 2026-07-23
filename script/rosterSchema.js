@@ -405,6 +405,8 @@ function sanitizeRosterPublicLineupProjection_(rawProjection, rosterPoolTagSetRa
 			trackingMode: playerTrackingMode,
 			source: playerSource,
 			synthetic: synthetic,
+			canonicalRosterId: String(rawPlayer.canonicalRosterId || "").trim().slice(0, 120),
+			canonicalRosterTitle: String(rawPlayer.canonicalRosterTitle || "").trim().slice(0, 160),
 			updatedAt: playerUpdatedAt,
 		});
 	}
@@ -416,6 +418,13 @@ function sanitizeRosterPublicLineupProjection_(rawProjection, rosterPoolTagSetRa
 		trackingMode: projectionTrackingMode,
 		source: source,
 		unavailableReason: unavailableReason,
+		eventId: String(projection.eventId || "").trim().slice(0, 160),
+		warIdentifier: String(projection.warIdentifier || "").trim().slice(0, 200),
+		warState: String(projection.warState || "").trim().toLowerCase().slice(0, 40),
+		authoritative: projection.authoritative !== false,
+		stale: projection.stale === true,
+		staleSince: String(projection.staleSince || "").trim(),
+		lastAuthoritativeAt: String(projection.lastAuthoritativeAt || "").trim(),
 		updatedAt: updatedAt,
 		players: active ? players : [],
 	};
@@ -478,6 +487,11 @@ function validateRosterData_(data) {
 		rosters: [],
 		playerMetrics: createEmptyPlayerMetricsStore_(),
 	};
+	if (data.playerWarPerformance && typeof sanitizePlayerWarPerformanceStore_ === "function") {
+		out.playerWarPerformance = sanitizePlayerWarPerformanceStore_(data.playerWarPerformance, {
+			stage: data.playerWarPerformance.stage,
+		});
+	}
 	const lastUpdatedAt = typeof data.lastUpdatedAt === "string" ? data.lastUpdatedAt.trim() : "";
 	if (lastUpdatedAt) out.lastUpdatedAt = lastUpdatedAt;
 	const publicConfig = sanitizePublicConfig_(data.publicConfig);

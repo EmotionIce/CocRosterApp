@@ -12851,3 +12851,20 @@ html:not(.landing-motion-ready) .landing-progress-route.is-dense .landing-progre
     transform:none !important;
   }
 }
+/* Cross-clan active-war projections remain visually distinct and read-only. */
+.roster-player-card.is-projected-participant {
+  outline: 1px dashed color-mix(in srgb, var(--accent, #79d7ff) 62%, transparent);
+  outline-offset: -2px;
+}
+
+.roster-player-card.is-projection-stale {
+  opacity: 0.82;
+}
+
+.player-projection-canonical-link {
+  display: inline-flex;
+  margin: 0.35rem 0.65rem 0.55rem;
+  color: var(--accent, #79d7ff);
+  font-size: 0.74rem;
+  font-weight: 700;
+}

@@ -2455,12 +2455,10 @@
   const pruneTagFromAllRosterPublicLineupProjectionsLocal_ = (tagRaw) => {
     const tag = normalizeTag(tagRaw);
     if (!tag) return false;
-    let changed = false;
-    const rosters = getRosters();
-    for (let i = 0; i < rosters.length; i++) {
-      if (pruneTagFromRosterPublicLineupProjectionLocal_(rosters[i], tag)) changed = true;
-    }
-    return changed;
+    // Canonical membership edits never prove that an active war participant
+    // left the war. The server-owned lifecycle reconciler clears projections
+    // only after authoritative completion evidence.
+    return false;
   };
 
   // Sync one projected player with an edited canonical player.

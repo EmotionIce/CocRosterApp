@@ -1900,6 +1900,9 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 		!!incomplete,
 		formStatsByTag,
 	);
+	if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
+		emitPlayerWarEventCandidate_(buildRegularPlayerWarCandidate_(warPerformance, warKey, clanTag, ""));
+	}
 	return !!result.applied;
 }
 
@@ -1937,6 +1940,16 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 		!!incomplete,
 		Object.keys(filteredFormStats).length > 0 ? filteredFormStats : null,
 	);
+	if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
+		emitPlayerWarEventCandidate_(
+			buildRegularPlayerWarCandidate_(
+				warPerformance,
+				snapshot.warMeta.warKey,
+				snapshot.warMeta.clanTag || "",
+				"",
+			),
+		);
+	}
 	return !!result.applied;
 }
 
@@ -1946,6 +1959,16 @@ function ingestCwlWarIntoWarPerformance_(warPerformance, war, warTagRaw, clanTag
 	if (!warTag) return false;
 	const statsByTag = computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet);
 	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "cwl", warTag, statsByTag, nowIso, source || "cwlWarFinalized", "cwlWarFinalized", false);
+	if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
+		emitPlayerWarEventCandidate_(
+			buildCwlPlayerWarCandidate_(statsByTag, warTag, clanTag, "", {
+				startTime: war && war.startTime,
+				endTime: war && war.endTime,
+				observedAt: nowIso,
+				source: source || "cwlWarFinalized",
+			}),
+		);
+	}
 	return !!result.applied;
 }
 

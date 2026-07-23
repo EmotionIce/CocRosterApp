@@ -1388,6 +1388,9 @@ function runRosterRefreshPipelineCore_(rosterDataRaw, rosterIdRaw, optionsRaw) {
 			steps.pool.message = missingTagMessage;
 			addIssue(poolStepLabel, missingTagMessage);
 		} else {
+			// Participation is protected from the prefetched war snapshot before
+			// canonical pool reconciliation can move the same tag to another roster.
+			deriveRosterProjectionProtectionFromPrefetch_(rosterData, rosterId, pipelinePrefetchOptions);
 			runStepWithRollback("pool", poolStepLabel, () =>
 				syncClanRosterPoolCore_(
 					rosterData,

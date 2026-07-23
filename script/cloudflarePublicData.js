@@ -466,6 +466,10 @@ function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 	const encodedManifest = encodeFirebaseObjectKeysRecursive_(manifest);
 	const encodedRosters = encodeFirebaseObjectKeysRecursive_(rosterMap);
 	const encodedPlayerMetrics = encodeFirebaseObjectKeysRecursive_(playerMetrics);
+	const playerWarPerformance = rosterData.playerWarPerformance && typeof rosterData.playerWarPerformance === "object"
+		? sanitizePlayerWarPerformanceStore_(rosterData.playerWarPerformance)
+		: null;
+	const encodedPlayerWarPerformance = playerWarPerformance ? encodeFirebaseObjectKeysRecursive_(playerWarPerformance) : null;
 	const encodedVersionId = encodeFirebaseObjectKey_(versionId);
 	const publicObjects = [
 		{ path: "activeVersions/" + encodedVersionId + "/manifest", payload: encodedManifest },
@@ -475,6 +479,12 @@ function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 		{ path: "activePublished/currentManifest", payload: encodedManifest },
 		{ path: "activePublished/currentVersionId", payload: versionId },
 	];
+	if (encodedPlayerWarPerformance) {
+		publicObjects.splice(3, 0, {
+			path: "activeVersions/" + encodedVersionId + "/playerWarPerformance",
+			payload: encodedPlayerWarPerformance,
+		});
+	}
 	const publishOptions = versionWrite.options && typeof versionWrite.options === "object" ? versionWrite.options : {};
 	if (publishOptions.includeBootstrap !== false) {
 		publicObjects.push(buildCloudflarePublicBootstrapObject_({
@@ -491,6 +501,9 @@ function buildCloudflareActiveRosterPublishObjects_(versionWriteRaw) {
 		{ path: "indexes/linkedAccountsByDiscordId", payload: encodeFirebaseObjectKeysRecursive_(linkedIndexes.byDiscordId) },
 		{ path: "indexes/linkedAccountsByDiscordUsername", payload: encodeFirebaseObjectKeysRecursive_(linkedIndexes.byDiscordUsername) },
 	];
+	if (encodedPlayerWarPerformance) {
+		botObjects.splice(2, 0, { path: "active/playerWarPerformance", payload: encodedPlayerWarPerformance });
+	}
 	return {
 		versionId: versionId,
 		publicObjects: publicObjects,

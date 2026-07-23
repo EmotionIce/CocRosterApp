@@ -856,7 +856,7 @@ test("current shard propagation failure retries one whole version then loads eve
   assert.equal(loaded.data.pageTitle, "Complete previous");
   assert.deepEqual(Array.from(loaded.data.rosters, (roster) => roster.id), ["previous"]);
   for (const child of ["manifest", "rosters", "playerMetrics"]) {
-    assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + currentVersionId + "/" + child + ".json"), 2);
+    assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + currentVersionId + "/" + child + ".json"), 3);
     assert.equal(counts.get("https://public-data.test/api/public-data/activeVersions/" + previousVersionId + "/" + child + ".json"), 1);
   }
 });
@@ -898,7 +898,7 @@ test("immutable version retry honors Retry-After before retrying the whole versi
   assert.equal(loaded.activeVersionId, "version-retry");
   assert.ok(elapsedMs >= 40, `Retry-After delay should be real, received ${elapsedMs}ms`);
   assert.ok(elapsedMs < 500, `Retry-After delay should stay capped for boot, received ${elapsedMs}ms`);
-  assert.deepEqual(Object.fromEntries(counts), { [urls.manifest]: 2, [urls.rosters]: 2, [urls.metrics]: 2 });
+  assert.deepEqual(Object.fromEntries(counts), { [urls.manifest]: 3, [urls.rosters]: 2, [urls.metrics]: 2 });
 });
 
 test("roster shards and independent event metadata load concurrently under simulated latency", async () => {
@@ -930,8 +930,8 @@ test("roster shards and independent event metadata load concurrently under simul
   const elapsedMs = Date.now() - startedAt;
 
   assert.equal(loaded.activeVersionId, "version-fast");
-  assert.ok(maxInFlight >= 7, `expected three shards and four metadata reads in flight, observed ${maxInFlight}`);
-  assert.ok(elapsedMs < 150, `parallel hydration should avoid serialized simulated latency, received ${elapsedMs}ms`);
+  assert.ok(maxInFlight >= 6, `expected schema-aware shards and four metadata reads in flight, observed ${maxInFlight}`);
+  assert.ok(elapsedMs < 190, `schema-aware hydration should keep post-manifest reads parallel, received ${elapsedMs}ms`);
 });
 
 test("does not fall back to legacy active when the published version shard is missing", async () => {

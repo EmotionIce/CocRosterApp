@@ -230,6 +230,62 @@ test("sharded bot-active publication reconstructs the unchanged active route con
   });
 });
 
+test("schema-v2 performance shard is exact-version public data and part of authenticated bot active", async () => {
+  const worker = loadWorker();
+  const versionId = "version-performance";
+  const selector = { schemaVersion: 1, currentVersionId: versionId, previousVersionId: "", generation: 10, committedAt: "now" };
+  const rosters = [{ id: "main", main: [{ tag: "#PLAYER" }], subs: [], missing: [] }];
+  const performance = {
+    schemaVersion: 2,
+    stage: "cutover",
+    byTag: { "#PLAYER": { overall: { starsTotal: 9 }, regular: { starsTotal: 6 }, cwl: { starsTotal: 3 } } },
+    meta: { eventCount: 4 },
+  };
+  const env = {
+    ROSTER_BOT_SECRET: "secret",
+    ROSTER_DATA_KV: createKv({
+      "public-data/activePublished/currentSelector.json": JSON.stringify(selector),
+      [`public-data/activeVersions/${versionId}/manifest.json`]: JSON.stringify({
+        versionId,
+        rosterIds: ["main"],
+        requiredShards: ["manifest", "rosters", "playerMetrics", "playerWarPerformance"],
+        playerWarPerformanceSchemaVersion: 2,
+      }),
+      [`public-data/activeVersions/${versionId}/rosters.json`]: JSON.stringify({ main: rosters[0] }),
+      [`public-data/activeVersions/${versionId}/playerMetrics.json`]: JSON.stringify({ schemaVersion: 1, byTag: {} }),
+      [`public-data/activeVersions/${versionId}/playerWarPerformance.json`]: JSON.stringify(performance),
+      [`bot-data/activeVersions/${versionId}/indexes/linkedAccountsByDiscordId.json`]: JSON.stringify({}),
+      [`bot-data/activeVersions/${versionId}/indexes/linkedAccountsByDiscordUsername.json`]: JSON.stringify({}),
+    }),
+  };
+  const auth = { authorization: "Bearer secret" };
+  const publicShard = await worker.fetch(new Request(
+    `https://worker.test/api/public-data/activeVersions/${versionId}/playerWarPerformance.json`,
+    { headers: auth },
+  ), env, {});
+  const botShard = await worker.fetch(new Request(
+    "https://worker.test/api/bot-data/active/playerWarPerformance.json",
+    { headers: auth },
+  ), env, {});
+  const botActive = await worker.fetch(new Request(
+    "https://worker.test/api/bot-data/active.json",
+    { headers: auth },
+  ), env, {});
+  assert.equal(publicShard.status, 200);
+  assert.equal(botShard.status, 200);
+  assert.deepEqual(await publicShard.json(), performance);
+  assert.deepEqual(await botShard.json(), performance);
+  assert.deepEqual(await botActive.json(), {
+    schemaVersion: 1,
+    pageTitle: "",
+    rosterOrder: ["main"],
+    activeVersionId: versionId,
+    rosters,
+    playerMetrics: { schemaVersion: 1, byTag: {} },
+    playerWarPerformance: performance,
+  });
+});
+
 test("committed public pointer and shared selector expose the same version", async () => {
   const worker = loadWorker();
   const selector = { schemaVersion: 1, currentVersionId: "version-current", previousVersionId: "version-previous", generation: 4, committedAt: "now" };

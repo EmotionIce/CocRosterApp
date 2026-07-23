@@ -352,7 +352,7 @@ function getExternalRequestTimeoutSeconds_(propertyNameRaw, fallbackRaw, minimum
 const FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_PATH = "internal/cloudflarePublish";
 const FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_STATE_PATH = "internal/cloudflarePublish/state";
 const FIREBASE_KEY_ENCODING_PREFIX = "__FB64__";
-const FIREBASE_LAYOUT_VERSION = 2;
+const FIREBASE_LAYOUT_VERSION = 3;
 const FIREBASE_ACTIVE_PATH = "active";
 const FIREBASE_ACTIVE_PUBLISHED_PATH = "activePublished";
 const FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";

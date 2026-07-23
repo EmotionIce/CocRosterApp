@@ -127,6 +127,18 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return runCanonicalRepairMarker_(args[0] && args[0].runId);
 		case "pauseCloudflarePublishQueue":
 			return pauseCloudflarePublishQueue(args[0], args[1]);
+		case "dryRunPlayerWarTrackingMigration":
+			return dryRunPlayerWarTrackingMigration(args[0], args[1]);
+		case "stagePlayerWarTrackingMigration":
+			return stagePlayerWarTrackingMigration(args[0], args[1]);
+		case "commitPlayerWarTrackingMigration":
+			return commitPlayerWarTrackingMigration(args[0], args[1]);
+		case "rollbackPlayerWarTrackingMigration":
+			return rollbackPlayerWarTrackingMigration(args[0], args[1]);
+		case "inspectPlayerWarTracking":
+			return inspectPlayerWarTracking(args[0], args[1]);
+		case "setPlayerWarTrackingRolloutStage":
+			return setPlayerWarTrackingRolloutStage(args[0], args[1]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}
@@ -273,6 +285,42 @@ function debugFirebaseAuthForDiscordSync(botSecret, forceRefreshRaw) {
 function cleanupFirebaseStorageRetention(password) {
 	assertAdminPassword_(password);
 	return cleanupFirebaseStorageRetention_({ reason: "admin-api" });
+}
+
+function dryRunPlayerWarTrackingMigration(optionsRaw, password) {
+	assertAdminPassword_(password);
+	return dryRunPlayerWarTrackingMigration_(optionsRaw);
+}
+
+function stagePlayerWarTrackingMigration(optionsRaw, password) {
+	assertAdminPassword_(password);
+	return stagePlayerWarTrackingMigration_(optionsRaw);
+}
+
+function commitPlayerWarTrackingMigration(requestRaw, password) {
+	assertAdminPassword_(password);
+	return withActiveRosterJobLock_("player-war-migration-commit", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		return commitPlayerWarTrackingMigration_(requestRaw);
+	});
+}
+
+function rollbackPlayerWarTrackingMigration(requestRaw, password) {
+	assertAdminPassword_(password);
+	return withActiveRosterJobLock_("player-war-migration-rollback", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		return rollbackPlayerWarTrackingMigration_(requestRaw);
+	});
+}
+
+function inspectPlayerWarTracking(optionsRaw, password) {
+	assertAdminPassword_(password);
+	return inspectPlayerWarTracking_(optionsRaw);
+}
+
+function setPlayerWarTrackingRolloutStage(stageRaw, password) {
+	assertAdminPassword_(password);
+	return withActiveRosterJobLock_("player-war-stage-transition", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		return publishPlayerWarTrackingStageVersion_(stageRaw);
+	});
 }
 
 // Materialize the compact derived linked-account index for the currently

@@ -10,6 +10,7 @@ const appScriptFiles = [
   "script/cocApi.js",
   "script/rosterDomain.js",
   "script/warDomain.js",
+  "script/playerWarTracking.js",
   "script/firebaseStore.js",
   "script/metricsTracking.js",
   "script/donationRefresh.js",

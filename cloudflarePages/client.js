@@ -1744,6 +1744,10 @@
             notes,
             excludeAsSwapTarget: toBoolFlag(obj.excludeAsSwapTarget),
             excludeAsSwapSource: toBoolFlag(obj.excludeAsSwapSource),
+            projectedParticipant: obj.projectedParticipant === true,
+            projectionStale: obj.projectionStale === true,
+            canonicalRosterId: toStr(obj.canonicalRosterId).trim(),
+            canonicalRosterTitle: toStr(obj.canonicalRosterTitle).trim(),
         };
     };
 
@@ -1837,6 +1841,8 @@
             merged.source = toStr(projected.source).trim() || projectionSource;
             merged.updatedAt = toStr(projected.updatedAt).trim() || projectionUpdatedAt;
             merged.synthetic = projected.synthetic === true || !Object.prototype.hasOwnProperty.call(canonicalByTag, projectedTag);
+            merged.projectedParticipant = true;
+            merged.projectionStale = projection && projection.stale === true;
             merged.slot = null;
 
             // Public lineup projections are snapshots of live lineup order. For players
@@ -1911,6 +1917,10 @@
         const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const useProjection = options.useProjection !== false;
+        const globalPerformance = options.playerWarPerformance && typeof options.playerWarPerformance === "object"
+            ? options.playerWarPerformance
+            : null;
+        const useGlobalPerformance = !!globalPerformance && toStr(globalPerformance.stage).trim().toLowerCase() === "cutover";
         const outRosters = [];
         const byRosterId = Object.create(null);
         for (let i = 0; i < rosters.length; i++) {
@@ -1937,6 +1947,7 @@
                     ? { main: model.badges.main, subs: model.badges.subs, missing: model.badges.missing }
                     : { main: model.badges.main, subs: model.badges.subs },
             });
+            if (useGlobalPerformance) nextRoster.warPerformance = globalPerformance;
             outRosters.push(nextRoster);
             const rosterId = toStr(nextRoster && nextRoster.id).trim();
             if (rosterId) byRosterId[rosterId] = nextRoster;
@@ -2145,6 +2156,9 @@
         // Handle scan roster.
         const scanRoster = (roster, displayRosterRaw) => {
             const displayRoster = displayRosterRaw && typeof displayRosterRaw === "object" ? displayRosterRaw : roster;
+            const performance = displayRoster && displayRoster.warPerformance
+                ? displayRoster.warPerformance
+                : roster && roster.warPerformance;
             const main = Array.isArray(displayRoster && displayRoster.main) ? displayRoster.main : [];
             const subs = Array.isArray(displayRoster && displayRoster.subs) ? displayRoster.subs : [];
             const missing = Array.isArray(displayRoster && displayRoster.missing) ? displayRoster.missing : [];
@@ -2172,9 +2186,9 @@
                         role: section.role,
                         index: i,
                         cwl: getPlayerCwlStats(roster && roster.cwlStats, tag),
-                        regularWar: getPlayerRegularWarStats(roster && roster.regularWar, tag, roster && roster.warPerformance),
-                        longTerm: getPlayerLongTermWarStats(roster && roster.warPerformance, tag),
-                        warPerformance: roster && roster.warPerformance,
+                        regularWar: getPlayerRegularWarStats(roster && roster.regularWar, tag, performance),
+                        longTerm: getPlayerLongTermWarStats(performance, tag),
+                        warPerformance: performance,
                         suggestionModel,
                         suggestion: trackingMode === "cwl" ? getPlayerBenchSuggestion(suggestionModel, tag) : null,
                         canonicalRole: canonicalEntry ? canonicalEntry.role : "",
@@ -7138,6 +7152,15 @@
     const getPlayerRecentRegularWarFormBucket = (warPerformanceRaw, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         if (!tag) return mergePlayerFormStatsBuckets([]);
+        const globalEntry = getWarPerformancePlayerEntry(warPerformanceRaw, tag);
+        const globalRecent = globalEntry && Array.isArray(globalEntry.recentRegularWarForm)
+            ? globalEntry.recentRegularWarForm
+            : [];
+        if (globalRecent.length) {
+            return mergePlayerFormStatsBuckets(globalRecent.slice(0, 5).map((item) =>
+                item && typeof item === "object" ? item.stats : null
+            ).filter(Boolean));
+        }
         const historyByKey = getRegularWarHistoryByKey(warPerformanceRaw);
         const keys = Object.keys(historyByKey);
         const recentEntries = [];
@@ -7313,6 +7336,7 @@
         const isSub = role === "sub";
         const hideSuggestions = !!context.hideSuggestions;
         const player = normalizePlayer(rawPlayer);
+        const projectedReadOnly = player.projectedParticipant === true;
         const playerTag = normalizeClanTag(player.tag);
         const roster = context.roster && typeof context.roster === "object" ? context.roster : null;
         const cwlStats = getPlayerCwlStats(context.cwlStats, playerTag);
@@ -7335,6 +7359,8 @@
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.status === "out") wrap.classList.add("suggest-bench");
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.status === "in") wrap.classList.add("suggest-in");
         if (clanAbsentInPrep) wrap.classList.add("is-clan-absent");
+        if (projectedReadOnly) wrap.classList.add("is-projected-participant");
+        if (player.projectionStale) wrap.classList.add("is-projection-stale");
 
         const top = el("div", "player-top");
         top.setAttribute("data-player-profile-trigger", "1");
@@ -7460,6 +7486,18 @@
         metaRow.appendChild(formBadge);
 
         const attentionItems = [];
+        if (projectedReadOnly) {
+            attentionItems.push({
+                tone: player.projectionStale ? "warning" : "note",
+                text: player.projectionStale ? "projected war participant (stale source)" : "projected war participant · read only",
+            });
+            if (player.canonicalRosterTitle || player.canonicalRosterId) {
+                attentionItems.push({
+                    tone: "note",
+                    text: "canonical: " + (player.canonicalRosterTitle || player.canonicalRosterId),
+                });
+            }
+        }
         for (let i = 0; i < player.notes.length; i++) {
             attentionItems.push({ tone: "note", text: player.notes[i] });
         }
@@ -7499,7 +7537,7 @@
         }
 
         const buildActions = getPlayerActionBuilder();
-        if (buildActions) {
+        if (buildActions && !projectedReadOnly) {
             const actionNode = buildActions({
                 player,
                 rawPlayer,
@@ -7513,6 +7551,13 @@
             if (actionNode && typeof actionNode === "object" && actionNode.nodeType === 1) {
                 wrap.appendChild(actionNode);
             }
+        }
+        if (projectedReadOnly && player.canonicalRosterId) {
+            const canonicalLink = document.createElement("a");
+            canonicalLink.className = "player-projection-canonical-link";
+            canonicalLink.href = "#" + ROSTER_ANCHOR_PREFIX + (slugifyRosterAnchorPart(player.canonicalRosterId) || slugifyRosterAnchorPart(player.canonicalRosterTitle));
+            canonicalLink.textContent = "Open canonical roster";
+            wrap.appendChild(canonicalLink);
         }
 
         return wrap;
@@ -9805,7 +9850,8 @@
         const canonicalRosters = Array.isArray(data.rosters) ? data.rosters : getOrderedRostersFromData(data);
         const isAdminMode = typeof window !== "undefined" && !!window.ROSTER_ADMIN_MODE;
         const displayBundle = buildRosterDisplayBundle(canonicalRosters, {
-            useProjection: !isAdminMode,
+            useProjection: true,
+            playerWarPerformance: data.playerWarPerformance,
         });
         const allRosters = displayBundle.rosters;
         lastRenderedRosterDisplayById = displayBundle.byRosterId;
@@ -9878,7 +9924,8 @@
         const safeData = data && typeof data === "object" ? data : {};
         const allRosters = getOrderedRostersFromData(safeData);
         const rosterDisplayBundle = buildRosterDisplayBundle(allRosters, {
-            useProjection: !isAdminMode,
+            useProjection: true,
+            playerWarPerformance: safeData.playerWarPerformance,
         });
         lastRenderedRosterDisplayById = rosterDisplayBundle.byRosterId;
         lastRenderedData = Object.assign({}, safeData, {
@@ -10451,18 +10498,28 @@
     const loadActivePublishedVersionIdViaCloudflarePublic = async () =>
         toStr(await fetchCloudflarePublicJson(ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
 
-    // Load all immutable shards for one exact version in parallel.
+    // Load all schema-declared immutable shards for one exact version. The
+    // manifest is read first; every remaining object uses the same version id.
     const fetchPublishedActiveVersionShardsViaCloudflarePublic = async (versionIdRaw) => {
         const versionId = toStr(versionIdRaw).trim();
         if (!versionId) throw new Error("Missing active published version pointer.");
-        const paths = ["manifest", "rosters", "playerMetrics"];
+        const manifestPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "manifest"));
+        const manifest = decodePublicDataObjectKeysRecursive(manifestPayload);
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+            throw new Error("Missing active version manifest.");
+        }
+        const requiresPerformance =
+            (Array.isArray(manifest.requiredShards) && manifest.requiredShards.map(String).includes("playerWarPerformance")) ||
+            Number(manifest.playerWarPerformanceSchemaVersion || 0) >= 2;
+        const paths = requiresPerformance ? ["rosters", "playerMetrics", "playerWarPerformance"] : ["rosters", "playerMetrics"];
         const payloads = await Promise.all(paths.map((childPath) =>
             fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, childPath))
         ));
         return {
-            manifestPayload: payloads[0],
-            rostersPayload: payloads[1],
-            playerMetricsPayload: payloads[2],
+            manifestPayload: manifestPayload,
+            rostersPayload: payloads[0],
+            playerMetricsPayload: payloads[1],
+            playerWarPerformancePayload: requiresPerformance ? payloads[2] : null,
         };
     };
 
@@ -10492,22 +10549,25 @@
         const retryDeadlineMs = Math.max(Date.now(), Number(options.retryDeadlineMs) || (Date.now() + PUBLIC_DATA_BOOT_RETRY_BUDGET_MS));
         let shards = null;
         let lastError = null;
-        for (let attempt = 0; attempt <= retryCount; attempt++) {
+        const maximumAttempts = retryCount > 0 ? retryCount + 2 : 1;
+        for (let attempt = 0; attempt < maximumAttempts; attempt++) {
             try {
                 shards = await fetchPublishedActiveVersionShardsViaCloudflarePublic(versionId);
                 break;
             } catch (err) {
                 lastError = err;
-                if (attempt < retryCount && !(await waitForImmutablePublicRetry(err, retryDeadlineMs))) break;
+                if (attempt + 1 < maximumAttempts && !(await waitForImmutablePublicRetry(err, retryDeadlineMs))) break;
             }
         }
         if (!shards) throw lastError || new Error("Immutable version shards are unavailable at " + versionLabel + ".");
         const manifestPayload = shards.manifestPayload;
         const rostersPayload = shards.rostersPayload;
         const playerMetricsPayload = shards.playerMetricsPayload;
+        const playerWarPerformancePayload = shards.playerWarPerformancePayload;
         const manifest = decodePublicDataObjectKeysRecursive(manifestPayload);
         const rosterMap = decodePublicDataObjectKeysRecursive(rostersPayload);
         const playerMetrics = decodePublicDataObjectKeysRecursive(playerMetricsPayload || {});
+        const playerWarPerformance = decodePublicDataObjectKeysRecursive(playerWarPerformancePayload || null);
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("Missing active version manifest at " + versionLabel + ".");
         }
@@ -10532,6 +10592,9 @@
             rosters: rosters,
             playerMetrics: playerMetrics && typeof playerMetrics === "object" && !Array.isArray(playerMetrics) ? playerMetrics : {},
         };
+        if (playerWarPerformance && typeof playerWarPerformance === "object" && !Array.isArray(playerWarPerformance)) {
+            data.playerWarPerformance = playerWarPerformance;
+        }
         if (manifest.lastUpdatedAt) data.lastUpdatedAt = toStr(manifest.lastUpdatedAt);
         if (manifest.publicConfig && typeof manifest.publicConfig === "object" && !Array.isArray(manifest.publicConfig)) {
             data.publicConfig = manifest.publicConfig;

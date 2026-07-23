@@ -260,7 +260,7 @@ function releaseCloudflarePublishQueueLease_(tokenRaw) {
 
 function createEmptyCloudflarePublishQueueState_() {
 	return {
-		schemaVersion: 5,
+		schemaVersion: 6,
 		paused: false,
 		nextRevision: 0,
 		nextDispatchGeneration: 0,
@@ -305,7 +305,7 @@ function createEmptyCloudflarePublishQueueState_() {
 function normalizeCloudflareQueuePhase_(phaseRaw, hasTargetRaw) {
 	const phase = String(phaseRaw || "idle").trim();
 	if (!hasTargetRaw) return "idle";
-	if (phase === "public-manifest-rosters" || phase === "public-player-metrics" || phase === "bot-active" || phase === "bot-derived" || phase === "commit") return phase;
+	if (phase === "public-manifest-rosters" || phase === "public-player-metrics" || phase === "public-player-war-performance" || phase === "bot-active" || phase === "bot-derived" || phase === "commit") return phase;
 	// schema-v2 ordinary and commit states are restarted at the first
 	// idempotent phase; committedVersionId is never changed by migration.
 	return "public-manifest-rosters";
@@ -405,7 +405,7 @@ function normalizeCloudflarePublishQueueState_(raw) {
 		? 0
 		: Math.max(0, toNonNegativeInt_(activeRaw.cursor));
 	return {
-		schemaVersion: 5,
+		schemaVersion: 6,
 		// Schema-v3 used paused for automatic size failures. During migration only
 		// a non-permanent legacy pause can be known to be administrative.
 		paused: source.paused === true && !(Math.max(0, toNonNegativeInt_(source.schemaVersion)) < 4 && legacyRetryRaw.permanent === true),
@@ -1530,6 +1530,32 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 			derivations: [{ kind: "bot-player-metrics", versionId: versionId }],
 		} };
 	}
+	if (phase === "public-player-war-performance") {
+		assertCloudflarePublishQueueDeadline_(45000, "active player war performance read");
+		const manifest = readCloudflareTargetManifest_(versionId);
+		const requiredShards = Array.isArray(manifest.requiredShards) ? manifest.requiredShards.map(String) : [];
+		if (requiredShards.indexOf("playerWarPerformance") < 0) {
+			return {
+				label: "active-public-player-war-performance-legacy-skip",
+				request: { batchId: "active:" + versionId + ":public-player-war-performance", objects: [] },
+			};
+		}
+		const performance = readDecodedCloudflareQueueObject_(
+			typeof buildActiveVersionPath_ === "function"
+				? buildActiveVersionPath_(versionId, "playerWarPerformance")
+				: buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionId), "playerWarPerformance"),
+		);
+		if (!performance || typeof performance !== "object" || Array.isArray(performance)) {
+			throw new Error("Missing active version player-war performance for " + versionId + ".");
+		}
+		return {
+			label: "active-public-player-war-performance",
+			request: {
+				batchId: "active:" + versionId + ":public-player-war-performance",
+				objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerWarPerformance", performance, "public")],
+			},
+		};
+	}
 	if (phase === "bot-active") {
 		// Compatibility for an old in-flight phase. The Worker now projects bot
 		// active data from public immutable shards, so only private indexes remain.
@@ -1558,6 +1584,12 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordId" },
 			{ scope: "bot", path: "activeVersions/" + encodedVersionId + "/indexes/linkedAccountsByDiscordUsername" },
 		];
+		if (
+			(Array.isArray(manifest.requiredShards) && manifest.requiredShards.map(String).indexOf("playerWarPerformance") >= 0) ||
+			toNonNegativeInt_(manifest.playerWarPerformanceSchemaVersion) >= 2
+		) {
+			required.splice(3, 0, { scope: "public", path: "activeVersions/" + encodedVersionId + "/playerWarPerformance" });
+		}
 		verifyCloudflareActiveVersionObjects_(versionId, required);
 		const bootstrap = buildCloudflareQueuedBootstrapCommit_(state, versionId, manifest);
 		const selector = buildCloudflareCommittedVersionSelector_(state, versionId);
@@ -1584,7 +1616,7 @@ function measureCloudflareActivePhasePayloads_(versionIdRaw, optionsRaw) {
 	state.active.targetVersionId = versionId;
 	state.active.targetGeneration = Math.max(1, toNonNegativeInt_(options.generation) || 1);
 	state.active.committedVersionId = normalizeActiveVersionId_(options.previousVersionId);
-	const phases = ["public-manifest-rosters", "public-player-metrics", "commit"];
+	const phases = ["public-manifest-rosters", "public-player-metrics", "public-player-war-performance", "commit"];
 	return phases.map(function (phase) {
 		state.active.phase = phase;
 		const built = buildCloudflareActivePhaseRequest_(state, { phase: phase, cursor: 0, targetVersionId: versionId, generation: state.active.targetGeneration });
@@ -2043,6 +2075,9 @@ function completeCloudflareActivePhase_(claimRaw, sentRaw, ownerTokenRaw) {
 		else if (claim.phase === "public-player-metrics") {
 			const response = sentRaw && sentRaw.response && typeof sentRaw.response === "object" ? sentRaw.response : {};
 			state.active.botDerivedReady = toNonNegativeInt_(response.completedDerivationCount) >= 1;
+			state.active.phase = "public-player-war-performance";
+		}
+		else if (claim.phase === "public-player-war-performance") {
 			state.active.phase = state.active.botDerivedReady === true ? "commit" : "bot-derived";
 		}
 		else if (claim.phase === "bot-active") {
