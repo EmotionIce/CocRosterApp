@@ -1158,6 +1158,16 @@ function readActiveRosterSnapshotFromVersion_(versionIdRaw) {
 		rosters: rosters,
 		playerMetrics: playerMetrics,
 	};
+	const requiresPlayerWarPerformance =
+		(Array.isArray(manifest.requiredShards) && manifest.requiredShards.indexOf("playerWarPerformance") >= 0) ||
+		toNonNegativeInt_(manifest.playerWarPerformanceSchemaVersion) >= PLAYER_WAR_TRACKING_SCHEMA_VERSION;
+	if (requiresPlayerWarPerformance) {
+		const encodedPerformance = firebaseRequestJson_(buildActiveVersionPath_(versionId, "playerWarPerformance"), "GET");
+		if (!encodedPerformance || typeof encodedPerformance !== "object" || Array.isArray(encodedPerformance)) {
+			throw new Error("Missing active version player-war performance for " + versionId + ".");
+		}
+		payload.playerWarPerformance = decodeFirebaseObjectKeysRecursive_(encodedPerformance);
+	}
 	if (manifest.lastUpdatedAt) payload.lastUpdatedAt = String(manifest.lastUpdatedAt || "");
 	if (manifest.publicConfig && typeof manifest.publicConfig === "object") payload.publicConfig = manifest.publicConfig;
 	const rosterData = validateRosterData_(payload);

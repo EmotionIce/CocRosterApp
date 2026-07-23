@@ -702,6 +702,30 @@ test("active reader reconstructs the published active version before legacy acti
   const backend = installMemoryFirebase(loadBackend());
   const versionedData = buildValidRosterData();
   versionedData.pageTitle = "Versioned Roster";
+  versionedData.playerWarPerformance = backend.sanitizePlayerWarPerformanceStore_({
+    stage: "shadow",
+    byTag: {
+      "#PLAYER": {
+        regular: {
+          warsInLineup: 1,
+          possibleAttacks: 2,
+          usedAttacks: 1,
+          attacksMade: 1,
+          attacksMissed: 1,
+          starsTotal: 2,
+          totalDestruction: 75,
+          countedAttacks: 1,
+          formEligibleAttacks: 1,
+          threeStarCount: 0,
+        },
+      },
+    },
+    meta: {
+      eventCount: 1,
+      baselineCount: 0,
+      conflictCount: 0,
+    },
+  });
   const legacyData = buildValidRosterData();
   legacyData.pageTitle = "Legacy Active";
 
@@ -727,8 +751,12 @@ test("active reader reconstructs the published active version before legacy acti
   assert.equal(snapshot.versionId, "version-1");
   assert.equal(snapshot.rosterData.pageTitle, "Versioned Roster");
   assert.equal(snapshot.rosterData.rosters[0].id, "main");
+  assert.equal(snapshot.rosterData.playerWarPerformance.schemaVersion, 2);
+  assert.equal(snapshot.rosterData.playerWarPerformance.stage, "shadow");
+  assert.equal(snapshot.rosterData.playerWarPerformance.byTag["#PLAYER"].regular.starsTotal, 2);
   assert.ok(reads.includes("activeVersions/version-1/manifest"));
   assert.ok(reads.includes("activeVersions/version-1/rosters/main"));
+  assert.ok(reads.includes("activeVersions/version-1/playerWarPerformance"));
   assert.equal(reads.includes("activeVersions/version-1/rosters"), false);
 });
 
