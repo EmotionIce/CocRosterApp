@@ -106,9 +106,12 @@ Legacy CWL aggregates generally cannot be losslessly divided into individual
 war events. A segment is reconstructed only when two ordered archives show
 exactly one newly processed war tag and every per-player aggregate delta is
 monotonic. That proven delta becomes a `reconstructed` event and is subtracted
-from the retained baseline. All other CWL evidence is classified as
-`ambiguous`, `partial`, or `unrecoverable` and kept in the baseline/report; the
-migration never invents war tags, attacks, or per-war outcomes.
+from the retained baseline. Repeated archive snapshots for the same tracked
+clan are deduplicated, while explicit baselines from distinct tracked clans are
+summed under the normalized player tag so cross-clan history is not discarded.
+All other CWL evidence is classified as `ambiguous`, `partial`, or
+`unrecoverable` and kept in the baseline/report; the migration never invents
+war tags, attacks, or per-war outcomes.
 
 ## Diagnostics and recovery
 
