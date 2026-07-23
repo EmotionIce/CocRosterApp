@@ -762,6 +762,44 @@ function reconstructLegacyCwlEventCandidates_(seriesByRosterKeyRaw) {
 	return { candidates: candidates, issues: issues.slice(0, 200) };
 }
 
+// Hash only canonical migration data. Firebase Realtime Database elides empty
+// objects and arrays, so raw plan serialization is not stable across the
+// required stage/read/commit round trip.
+function buildPlayerWarMigrationChecksumPayload_(planRaw) {
+	const plan = planRaw && typeof planRaw === "object" ? planRaw : {};
+	const baselinesRaw = plan.baselinesByTag && typeof plan.baselinesByTag === "object" ? plan.baselinesByTag : {};
+	const baselinesByTag = {};
+	Object.keys(baselinesRaw).sort().forEach(function (tagRaw) {
+		const tag = normalizeTag_(tagRaw);
+		if (!tag) return;
+		const raw = baselinesRaw[tagRaw] && typeof baselinesRaw[tagRaw] === "object" ? baselinesRaw[tagRaw] : {};
+		baselinesByTag[tag] = {
+			regular: sanitizePlayerWarStats_(raw.regular),
+			cwl: sanitizePlayerWarStats_(raw.cwl),
+			cwlRosterKey: String(raw.cwlRosterKey || ""),
+			provenance: (Array.isArray(raw.provenance) ? raw.provenance : []).map(function (item) {
+				const value = item && typeof item === "object" ? item : {};
+				return {
+					source: String(value.source || ""),
+					rosterKey: String(value.rosterKey || ""),
+					kind: String(value.kind || ""),
+					classification: String(value.classification || ""),
+				};
+			}),
+		};
+	});
+	return {
+		migrationId: String(plan.migrationId || ""),
+		sourceFingerprint: String(plan.sourceFingerprint || ""),
+		candidates: dedupePlayerWarCandidates_(plan.candidates),
+		baselinesByTag: baselinesByTag,
+	};
+}
+
+function calculatePlayerWarMigrationChecksum_(planRaw) {
+	return hashPlayerWarValue_(buildPlayerWarMigrationChecksumPayload_(planRaw));
+}
+
 // Build a conservative migration plan without inventing per-war CWL history.
 function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 	const sources = Array.isArray(sourcesRaw) ? sourcesRaw : [];
@@ -886,13 +924,7 @@ function buildPlayerWarTrackingMigrationPlan_(sourcesRaw, optionsRaw) {
 				: [],
 		},
 	};
-	plan.checksum = hashPlayerWarValue_({
-		migrationId: plan.migrationId,
-		sourceFingerprint: plan.sourceFingerprint,
-		candidates: plan.candidates,
-		baselinesByTag: plan.baselinesByTag,
-		report: plan.report,
-	});
+	plan.checksum = calculatePlayerWarMigrationChecksum_(plan);
 	return plan;
 }
 
@@ -917,13 +949,9 @@ function applyPlayerWarMigrationBaselines_(storeRaw, baselinesByTagRaw) {
 
 function executePlayerWarMigrationPlan_(planRaw, optionsRaw) {
 	const plan = planRaw && typeof planRaw === "object" ? planRaw : {};
-	if (!plan.migrationId || plan.checksum !== hashPlayerWarValue_({
-		migrationId: plan.migrationId,
-		sourceFingerprint: plan.sourceFingerprint,
-		candidates: plan.candidates,
-		baselinesByTag: plan.baselinesByTag,
-		report: plan.report,
-	})) throw new Error("Player-war migration checksum mismatch.");
+	if (!plan.migrationId || plan.checksum !== calculatePlayerWarMigrationChecksum_(plan)) {
+		throw new Error("Player-war migration checksum mismatch.");
+	}
 	let store = createEmptyPlayerWarPerformanceStore_({
 		stage: optionsRaw && optionsRaw.stage,
 		migrationId: plan.migrationId,

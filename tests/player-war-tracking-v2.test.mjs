@@ -242,6 +242,52 @@ test("migration reconstructs only a single monotonic CWL archive segment and sub
   assert.equal(executed.store.meta.baselineCount, 1);
 });
 
+test("migration checksum survives Firebase empty-container elision between stage and commit", () => {
+  const b = loadBackend();
+  const tag = "#P2L9";
+  const wp = b.createEmptyRosterWarPerformance_();
+  b.upsertRegularWarHistoryEntry_(wp, "war-one", { [tag]: stats(3) }, {
+    authoritative: true,
+    incomplete: false,
+    formStatsByTag: { [tag]: stats(3) },
+    nowIso: "2026-07-01T00:00:00.000Z",
+  });
+  const plan = b.buildPlayerWarTrackingMigrationPlan_([{
+    id: "active",
+    rosterData: {
+      rosters: [{
+        id: "a",
+        connectedClanTag: "#CLANA",
+        main: [{ slot: 1, tag, name: "Mover", th: 16, notes: [] }],
+        subs: [],
+        missing: [],
+        warPerformance: wp,
+      }],
+    },
+  }], { createdAt: "2026-07-02T00:00:00.000Z" });
+  const stripFirebaseEmpty = (value) => {
+    if (Array.isArray(value)) {
+      const items = value.map(stripFirebaseEmpty).filter((item) => item !== undefined);
+      return items.length ? items : undefined;
+    }
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const [key, child] of Object.entries(value)) {
+        const stripped = stripFirebaseEmpty(child);
+        if (stripped !== undefined) out[key] = stripped;
+      }
+      return Object.keys(out).length ? out : undefined;
+    }
+    return value;
+  };
+  const stagedRoundTrip = stripFirebaseEmpty(plan);
+  assert.equal(b.calculatePlayerWarMigrationChecksum_(stagedRoundTrip), plan.checksum);
+  assert.doesNotThrow(() => b.executePlayerWarMigrationPlan_(stagedRoundTrip, {
+    persist: false,
+    stage: "shadow",
+  }));
+});
+
 test("cross-clan move acceptance scenario finalizes once and immediately updates both contexts", () => {
   const b = loadBackend();
   const tag = "#P2L9";
