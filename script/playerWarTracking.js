@@ -1039,11 +1039,27 @@ function dryRunPlayerWarTrackingMigration_(optionsRaw) {
 	};
 }
 
+function buildPlayerWarMigrationStageStorageKey_(migrationIdRaw, checksumRaw, legacyRaw) {
+	const migrationId = String(migrationIdRaw || "").trim();
+	const checksum = String(checksumRaw || "").trim();
+	return legacyRaw === true
+		? migrationId
+		: migrationId + "-" + checksum.slice(0, 16);
+}
+
+function buildPlayerWarMigrationStagePath_(migrationIdRaw, checksumRaw, legacyRaw) {
+	return buildFirebaseChildPath_(
+		PLAYER_WAR_MIGRATION_PATH,
+		"staged",
+		encodeFirebaseObjectKey_(buildPlayerWarMigrationStageStorageKey_(migrationIdRaw, checksumRaw, legacyRaw)),
+	);
+}
+
 function stagePlayerWarTrackingMigration_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const discovery = discoverPlayerWarTrackingMigrationSources_(options);
 	const plan = buildPlayerWarTrackingMigrationPlan_(discovery.sources, options);
-	const path = buildFirebaseChildPath_(PLAYER_WAR_MIGRATION_PATH, "staged", encodeFirebaseObjectKey_(plan.migrationId));
+	const path = buildPlayerWarMigrationStagePath_(plan.migrationId, plan.checksum, false);
 	const existing = decodeFirebaseObjectKeysRecursive_(firebaseRequestJson_(path, "GET"));
 	if (existing && existing.checksum && existing.checksum !== plan.checksum) {
 		throw new Error("A staged migration with this id has a different checksum.");
@@ -1063,6 +1079,7 @@ function stagePlayerWarTrackingMigration_(optionsRaw) {
 		staged: true,
 		migrationId: plan.migrationId,
 		checksum: plan.checksum,
+		stageStorageKey: buildPlayerWarMigrationStageStorageKey_(plan.migrationId, plan.checksum, false),
 		activeVersionId: discovery.activeVersionId,
 		report: plan.report,
 	};
@@ -1073,8 +1090,12 @@ function commitPlayerWarTrackingMigration_(requestRaw) {
 	const migrationId = String(request.migrationId || "").trim();
 	const checksum = String(request.checksum || "").trim();
 	if (!migrationId || !checksum) throw new Error("Explicit migrationId and checksum are required.");
-	const stagePath = buildFirebaseChildPath_(PLAYER_WAR_MIGRATION_PATH, "staged", encodeFirebaseObjectKey_(migrationId));
-	const staged = decodeFirebaseObjectKeysRecursive_(firebaseRequestJson_(stagePath, "GET"));
+	let stagePath = buildPlayerWarMigrationStagePath_(migrationId, checksum, false);
+	let staged = decodeFirebaseObjectKeysRecursive_(firebaseRequestJson_(stagePath, "GET"));
+	if (!staged) {
+		stagePath = buildPlayerWarMigrationStagePath_(migrationId, checksum, true);
+		staged = decodeFirebaseObjectKeysRecursive_(firebaseRequestJson_(stagePath, "GET"));
+	}
 	if (!staged || staged.status !== "staged" || staged.checksum !== checksum || !staged.plan) {
 		throw new Error("Matching staged player-war migration was not found.");
 	}
