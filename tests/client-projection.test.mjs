@@ -14,6 +14,7 @@ const loadClientInternals = (overrides = {}) => {
     [
       "    window.__ROSTER_CLIENT_TEST_INTERNALS__ = {",
       "        buildRosterPublicDisplayModel,",
+      "        buildRosterDisplayBundle,",
       "        getDisplayDiscordUsernameForPlayer,",
       "        buildSeasonEventLeaderboardModel,",
       "        buildSeasonEventsPublicModel,",
@@ -451,6 +452,8 @@ test("keeps canonical Discord when a stale live projection has an empty Discord 
   assert.deepEqual(Array.from(model.main[0].notes), ["canonical note"]);
   assert.equal(model.main[0].excludeAsSwapTarget, true);
   assert.equal(model.main[0].excludeAsSwapSource, true);
+  assert.equal(model.main[0].projectedParticipant, false);
+  assert.equal(model.main[0].canonicalRosterId, "");
 });
 
 test("lets canonical Discord clearing win over a stale projected Discord value", () => {
@@ -485,6 +488,58 @@ test("lets canonical Discord clearing win over a stale projected Discord value",
 
   assert.equal(model.main[0].discord, "");
   assert.equal(model.main[0].mapPosition, 4);
+  assert.equal(model.main[0].projectedParticipant, false);
+});
+
+test("marks only cross-roster and untracked war participants as projected read-only", () => {
+  const { buildRosterDisplayBundle } = loadClientInternals();
+  const sameRosterTag = "#2LUCULPQ2";
+  const crossRosterTag = "#8P2LQY0V";
+  const untrackedTag = "#9JQ2G8RV";
+  const bundle = buildRosterDisplayBundle([
+    {
+      id: "clan-a",
+      title: "Clan A",
+      trackingMode: "regularWar",
+      main: [{ name: "Same", th: 18, tag: sameRosterTag }],
+      subs: [],
+      missing: [],
+      publicLineupProjection: {
+        active: true,
+        trackingMode: "regularWar",
+        source: "regularWarCurrentWar",
+        players: [
+          { name: "Same live", th: 18, tag: sameRosterTag, canonicalRosterId: "clan-a", canonicalRosterTitle: "Clan A" },
+          { name: "Moved live", th: 17, tag: crossRosterTag, canonicalRosterId: "clan-a", canonicalRosterTitle: "Stale Clan A" },
+          { name: "Gone live", th: 16, tag: untrackedTag, canonicalRosterId: "clan-a", canonicalRosterTitle: "Stale Clan A" },
+        ],
+      },
+    },
+    {
+      id: "clan-b",
+      title: "Clan B",
+      trackingMode: "regularWar",
+      main: [],
+      subs: [{ name: "Moved", th: 17, tag: crossRosterTag }],
+      missing: [],
+    },
+  ]);
+
+  const clanA = bundle.byRosterId["clan-a"];
+  const sameRoster = clanA.main.find((player) => player.tag === sameRosterTag);
+  const crossRoster = clanA.main.find((player) => player.tag === crossRosterTag);
+  const untracked = clanA.main.find((player) => player.tag === untrackedTag);
+  const canonicalCrossRoster = bundle.byRosterId["clan-b"].subs[0];
+
+  assert.equal(sameRoster.projectedParticipant, false);
+  assert.equal(sameRoster.canonicalRosterId, "");
+  assert.equal(crossRoster.projectedParticipant, true);
+  assert.equal(crossRoster.canonicalRosterId, "clan-b");
+  assert.equal(crossRoster.canonicalRosterTitle, "Clan B");
+  assert.equal(untracked.projectedParticipant, true);
+  assert.equal(untracked.canonicalRosterId, "");
+  assert.equal(untracked.canonicalRosterTitle, "");
+  assert.notEqual(canonicalCrossRoster.projectedParticipant, true);
 });
 
 test("prefers canonical metrics Discord username for display", () => {

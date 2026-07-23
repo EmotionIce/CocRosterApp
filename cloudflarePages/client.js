@@ -1768,9 +1768,37 @@
         return out;
     };
 
+    // Build the one canonical roster placement for every tracked player tag.
+    const buildCanonicalRosterPlacementByTag = (rostersRaw) => {
+        const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
+        const out = Object.create(null);
+        for (let i = 0; i < rosters.length; i++) {
+            const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
+            const rosterId = toStr(roster.id).trim();
+            const rosterTitle = toStr(roster.title).trim();
+            const players = []
+                .concat(Array.isArray(roster.main) ? roster.main : [])
+                .concat(Array.isArray(roster.subs) ? roster.subs : [])
+                .concat(Array.isArray(roster.missing) ? roster.missing : []);
+            for (let j = 0; j < players.length; j++) {
+                const tag = normalizeClanTag(players[j] && players[j].tag);
+                if (!tag || Object.prototype.hasOwnProperty.call(out, tag)) continue;
+                out[tag] = { rosterId, rosterTitle };
+            }
+        }
+        return out;
+    };
+
     // Build roster public display model (projection-first without mutating canonical sections).
-    const buildRosterPublicDisplayModel = (rosterRaw) => {
+    const buildRosterPublicDisplayModel = (rosterRaw, optionsRaw) => {
         const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const hasCanonicalPlacementMap = Object.prototype.hasOwnProperty.call(options, "canonicalPlacementByTag");
+        const canonicalPlacementByTag = hasCanonicalPlacementMap
+            && options.canonicalPlacementByTag
+            && typeof options.canonicalPlacementByTag === "object"
+            ? options.canonicalPlacementByTag
+            : Object.create(null);
         const mainCanonical = Array.isArray(roster.main) ? roster.main : [];
         const subsCanonical = Array.isArray(roster.subs) ? roster.subs : [];
         const missingCanonical = Array.isArray(roster.missing) ? roster.missing : [];
@@ -1840,9 +1868,9 @@
             merged.trackingMode = toStr(projected.trackingMode).trim() || projectionTrackingMode;
             merged.source = toStr(projected.source).trim() || projectionSource;
             merged.updatedAt = toStr(projected.updatedAt).trim() || projectionUpdatedAt;
-            merged.synthetic = projected.synthetic === true || !Object.prototype.hasOwnProperty.call(canonicalByTag, projectedTag);
-            merged.projectedParticipant = true;
-            merged.projectionStale = projection && projection.stale === true;
+            merged.synthetic = !hasCanonicalPlayer;
+            merged.projectedParticipant = !hasCanonicalPlayer;
+            merged.projectionStale = !hasCanonicalPlayer && projection && projection.stale === true;
             merged.slot = null;
 
             // Public lineup projections are snapshots of live lineup order. For players
@@ -1853,6 +1881,23 @@
                 merged.notes = canonicalSeed.notes != null ? canonicalSeed.notes : canonicalSeed.note;
                 merged.excludeAsSwapTarget = toBoolFlag(canonicalSeed.excludeAsSwapTarget);
                 merged.excludeAsSwapSource = toBoolFlag(canonicalSeed.excludeAsSwapSource);
+                merged.canonicalRosterId = "";
+                merged.canonicalRosterTitle = "";
+            } else {
+                const canonicalPlacement = canonicalPlacementByTag[projectedTag]
+                    && typeof canonicalPlacementByTag[projectedTag] === "object"
+                    ? canonicalPlacementByTag[projectedTag]
+                    : null;
+                if (canonicalPlacement) {
+                    merged.canonicalRosterId = toStr(canonicalPlacement.rosterId).trim();
+                    merged.canonicalRosterTitle = toStr(canonicalPlacement.rosterTitle).trim();
+                } else if (hasCanonicalPlacementMap) {
+                    // Projection metadata was captured before membership reconciliation
+                    // and may point at an obsolete roster. The current canonical roster
+                    // collections are authoritative for navigation.
+                    merged.canonicalRosterId = "";
+                    merged.canonicalRosterTitle = "";
+                }
             }
             return merged;
         };
@@ -1921,13 +1966,14 @@
             ? options.playerWarPerformance
             : null;
         const useGlobalPerformance = !!globalPerformance && toStr(globalPerformance.stage).trim().toLowerCase() === "cutover";
+        const canonicalPlacementByTag = buildCanonicalRosterPlacementByTag(rosters);
         const outRosters = [];
         const byRosterId = Object.create(null);
         for (let i = 0; i < rosters.length; i++) {
             const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
             const trackingMode = getRosterTrackingMode(roster);
             const model = useProjection
-                ? buildRosterPublicDisplayModel(roster)
+                ? buildRosterPublicDisplayModel(roster, { canonicalPlacementByTag })
                 : {
                     main: Array.isArray(roster.main) ? roster.main : [],
                     subs: Array.isArray(roster.subs) ? roster.subs : [],
