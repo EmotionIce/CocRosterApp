@@ -614,7 +614,8 @@ function validateRosterData_(data) {
 		const prepActive = trackingMode === "cwl" && !!(sanitizedCwlPreparation && sanitizedCwlPreparation.enabled);
 		if (prepActive) {
 			clearRosterBenchSuggestions_(nextRoster);
-			applyCwlPreparationRebalance_(nextRoster, { recordAppliedAt: false, enforceLockedInLimit: true });
+			normalizeRosterSlots_(nextRoster);
+			reconcileCwlPreparationAssignments_(nextRoster);
 		} else if (sanitizedBenchSuggestions) {
 			nextRoster.benchSuggestions = sanitizedBenchSuggestions;
 		}

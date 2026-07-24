@@ -65,7 +65,7 @@ function buildRosterPlayerSeedByTag_(rosterData) {
 	return out;
 }
 
-// Build explicit CWL preparation assignment owner map.
+// Build CWL preparation assignment owner map from the planned roster sections.
 function buildCwlPreparationAssignedRosterIdByTag_(rosterData) {
 	const rosters = rosterData && Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
 	const out = {};
@@ -73,11 +73,9 @@ function buildCwlPreparationAssignedRosterIdByTag_(rosterData) {
 		const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : {};
 		const rosterId = String(roster.id || "").trim();
 		if (!rosterId || getRosterTrackingMode_(roster) !== "cwl" || !isCwlPreparationActive_(roster)) continue;
-		const prep = getRosterCwlPreparation_(roster);
-		const assignedTagSet = prep && prep.assignedTagSet && typeof prep.assignedTagSet === "object" ? prep.assignedTagSet : {};
-		const assignedTags = Object.keys(assignedTagSet);
-		for (let j = 0; j < assignedTags.length; j++) {
-			const tag = normalizeTag_(assignedTags[j]);
+		const poolEntries = collectRosterPoolPlayersWithSection_(roster);
+		for (let j = 0; j < poolEntries.length; j++) {
+			const tag = normalizeTag_(poolEntries[j] && poolEntries[j].tag);
 			if (!tag || out[tag]) continue;
 			out[tag] = rosterId;
 		}
@@ -270,7 +268,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		const tag = normalizeTag_(prepExcludedTags[i]);
 		const rosterId = String(prepExcludedRosterIdByTag[prepExcludedTags[i]] || "").trim();
 		if (!tag || !rosterId) continue;
-		if (liveOwnerRosterIdByTag[tag]) continue;
 		ownerRosterIdByTag[tag] = rosterId;
 	}
 
@@ -280,7 +277,6 @@ function buildLiveRosterOwnershipSnapshot_(rosterData, optionsRaw) {
 		const tag = normalizeTag_(prepAssignedTags[i]);
 		const rosterId = String(prepAssignedRosterIdByTag[prepAssignedTags[i]] || "").trim();
 		if (!tag || !rosterId) continue;
-		if (liveOwnerRosterIdByTag[tag]) continue;
 		ownerRosterIdByTag[tag] = rosterId;
 	}
 
@@ -888,6 +884,11 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 			keptMain.push(player);
 			continue;
 		}
+		if (cwlPreparationActive) {
+			keptMain.push(player);
+			setMembershipTemporaryMissing(tag);
+			continue;
+		}
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
 			removed++;
@@ -911,6 +912,11 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 		if (!tag) continue;
 		if (sourceSet[tag]) {
 			keptSubs.push(player);
+			continue;
+		}
+		if (cwlPreparationActive) {
+			keptSubs.push(player);
+			setMembershipTemporaryMissing(tag);
 			continue;
 		}
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
@@ -955,6 +961,13 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 				subsSet[tag] = true;
 			}
 			setMembershipActive(tag);
+			continue;
+		}
+
+		if (cwlPreparationActive) {
+			setMembershipTemporaryMissing(tag);
+			retainedMissing++;
+			nextMissing.push(player);
 			continue;
 		}
 
@@ -1733,7 +1746,7 @@ function syncClanRosterPoolCore_(rosterData, rosterId, optionsRaw) {
 	}
 	if (ctx.trackingMode === "cwl" && isCwlPreparationActive_(ctx.roster)) {
 		const lockedOutNewJoiners = result && typeof result === "object" ? lockNewCwlPreparationJoinersAsSubs_(ctx.roster, result.addedTags) : 0;
-		const prepSummary = applyCwlPreparationRebalance_(ctx.roster, { enforceLockedInLimit: true, recordAppliedAt: true });
+		const prepSummary = reconcileCwlPreparationAssignments_(ctx.roster);
 		if (result && typeof result === "object") {
 			result.cwlPreparation = prepSummary;
 			if (lockedOutNewJoiners > 0) result.cwlPreparationNewJoinersLockedOut = lockedOutNewJoiners;

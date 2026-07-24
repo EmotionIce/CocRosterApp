@@ -1485,7 +1485,6 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 	for (let i = 0; i < excludedTags.length; i++) {
 		const tag = normalizeTag_(excludedTags[i]);
 		const owner = String(prepExcludedRosterIdByTag[excludedTags[i]] || "").trim();
-		if (tag && liveOwnerRosterIdByTag[tag]) continue;
 		if (tag && owner) ownerRosterIdByTag[tag] = owner;
 	}
 	const prepAssignedRosterIdByTag = sourceOwnership.prepAssignedRosterIdByTag && typeof sourceOwnership.prepAssignedRosterIdByTag === "object"
@@ -1495,7 +1494,6 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 	for (let i = 0; i < assignedTags.length; i++) {
 		const tag = normalizeTag_(assignedTags[i]);
 		const owner = String(prepAssignedRosterIdByTag[assignedTags[i]] || "").trim();
-		if (tag && liveOwnerRosterIdByTag[tag]) continue;
 		if (tag && owner) ownerRosterIdByTag[tag] = owner;
 	}
 	const seedPlayerByTag = sourceSeedByTagRaw && typeof sourceSeedByTagRaw === "object" ? sourceSeedByTagRaw : {};

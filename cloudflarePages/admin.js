@@ -3729,6 +3729,35 @@
     return !!(prep && prep.enabled);
   };
 
+  // Keep compatibility assignment metadata aligned with the visible prep roster plan.
+  const reconcileCwlPreparationAssignmentsLocal_ = (roster) => {
+    const rosterSafe = roster && typeof roster === "object" ? roster : null;
+    if (!rosterSafe || getRosterTrackingMode(rosterSafe) !== "cwl") return null;
+    const prep = getRosterCwlPreparationLocal_(rosterSafe, { keepWhenEmpty: true, enforceLockedInLimit: true });
+    if (!prep || !prep.enabled) return null;
+    if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
+
+    const assignedTagSet = {};
+    const poolEntries = getRosterPoolEntriesForPreparationLocal_(rosterSafe);
+    for (let i = 0; i < poolEntries.length; i++) {
+      const tag = normalizeTag(poolEntries[i] && poolEntries[i].tag);
+      if (!tag) continue;
+      assignedTagSet[tag] = true;
+      delete prep.excludedTagSet[tag];
+    }
+    prep.assignedTagSet = assignedTagSet;
+    rosterSafe.cwlPreparation = prep;
+    return prep;
+  };
+
+  // Reconcile all active prep assignment metadata without changing player placement.
+  const reconcileAllActiveCwlPreparationAssignmentsLocal_ = () => {
+    const rosters = getRosters();
+    for (let i = 0; i < rosters.length; i++) {
+      reconcileCwlPreparationAssignmentsLocal_(rosters[i]);
+    }
+  };
+
   // Build CWL preparation ranking local.
   const buildCwlPreparationRankingLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : {};
@@ -3960,31 +3989,6 @@
       autoSelectedCount: Math.max(0, afterMainTags.length - lockedInCount),
       changed,
     };
-  };
-
-  // Handle rebalance roster if preparation active local.
-  const rebalanceRosterIfPreparationActiveLocal_ = (roster, optionsRaw) => {
-    if (!roster || typeof roster !== "object") return null;
-    const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
-    if (!prep || !prep.enabled || getRosterTrackingMode(roster) !== "cwl") return null;
-    return applyCwlPreparationRebalanceLocal_(roster, Object.assign({ enforceLockedInLimit: true }, optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {}));
-  };
-
-  // Handle rebalance all active CWL preparation rosters local.
-  const rebalanceAllActiveCwlPreparationRostersLocal_ = (optionsRaw) => {
-    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-    const rosters = getRosters();
-    const summariesByRosterId = {};
-    for (let i = 0; i < rosters.length; i++) {
-      const roster = rosters[i] && typeof rosters[i] === "object" ? rosters[i] : null;
-      if (!roster) continue;
-      const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
-      if (!prep || !prep.enabled || getRosterTrackingMode(roster) !== "cwl") continue;
-      const summary = applyCwlPreparationRebalanceLocal_(roster, options);
-      const rosterId = toStr(roster.id).trim();
-      if (rosterId) summariesByRosterId[rosterId] = summary;
-    }
-    return summariesByRosterId;
   };
 
   // Migrate missing players to subs for CWL local.
@@ -4316,7 +4320,7 @@
     syncRosterOrderFromCurrentArray_(state.lastRosterData);
     normalizeRosterOrderInData_(state.lastRosterData);
     reindexAllRosters();
-    rebalanceAllActiveCwlPreparationRostersLocal_({ recordAppliedAt: false, enforceLockedInLimit: false });
+    reconcileAllActiveCwlPreparationAssignmentsLocal_();
     normalizeAllRosterPublicLineupProjectionsLocal_();
     clearSavedBenchSuggestionsFromPreview_();
     clearSuggestionMarks_();
@@ -4543,8 +4547,10 @@
       targetList.push(player);
 
       transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
-      rebalanceRosterIfPreparationActiveLocal_(sourceRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
-      rebalanceRosterIfPreparationActiveLocal_(targetRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      reconcileCwlPreparationAssignmentsLocal_(sourceRoster);
+      reconcileCwlPreparationAssignmentsLocal_(targetRoster);
+      reindexRoster(sourceRoster);
+      reindexRoster(targetRoster);
       pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
     } catch (err) {
       rosters[sourceLoc.rosterIndex] = sourceSnapshot;
@@ -4657,8 +4663,8 @@
       targetList.push(player);
 
       transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
-      rebalanceRosterIfPreparationActiveLocal_(sourceRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
-      rebalanceRosterIfPreparationActiveLocal_(targetRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      reconcileCwlPreparationAssignmentsLocal_(sourceRoster);
+      reconcileCwlPreparationAssignmentsLocal_(targetRoster);
       pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
       reindexRoster(sourceRoster);
       reindexRoster(targetRoster);
@@ -4769,7 +4775,8 @@
         prep.excludedTagSet[playerTag] = true;
         roster.cwlPreparation = prep;
       }
-      rebalanceRosterIfPreparationActiveLocal_(roster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      reconcileCwlPreparationAssignmentsLocal_(roster);
+      reindexRoster(roster);
       pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
     } catch (err) {
       rosters[loc.rosterIndex] = rosterSnapshot;
@@ -4818,7 +4825,8 @@
       player.tag = nextTag;
       player.notes = normalizeNotes(draft && draft.notes);
       movePreparationStateForEditedTagLocal_(roster, currentTag, nextTag);
-      rebalanceRosterIfPreparationActiveLocal_(roster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      reconcileCwlPreparationAssignmentsLocal_(roster);
+      reindexRoster(roster);
       syncRosterPublicLineupProjectionPlayerLocal_(roster, currentTag, player);
       if (nextTag !== currentTag) pruneTagFromAllRosterPublicLineupProjectionsLocal_(currentTag);
     } catch (err) {
@@ -4916,7 +4924,8 @@
         targetRoster.cwlPreparation = prep;
       }
       syncRosterPublicLineupProjectionPlayerLocal_(targetRoster, tag, nextPlayer);
-      rebalanceRosterIfPreparationActiveLocal_(targetRoster, { enforceLockedInLimit: true, recordAppliedAt: false });
+      reconcileCwlPreparationAssignmentsLocal_(targetRoster);
+      reindexRoster(targetRoster);
     } catch (err) {
       const rosterIndex = rosters.findIndex((r) => toStr(r && r.id).trim() === rosterId);
       if (rosterIndex >= 0) rosters[rosterIndex] = rosterSnapshot;
@@ -6136,7 +6145,7 @@
       state.lastRosterData = applied.rosterData;
       normalizeRosterOrderInData_(state.lastRosterData);
       reindexAllRosters();
-      rebalanceAllActiveCwlPreparationRostersLocal_({ recordAppliedAt: false, enforceLockedInLimit: false });
+      reconcileAllActiveCwlPreparationAssignmentsLocal_();
       normalizeAllRosterPublicLineupProjectionsLocal_();
       clearSuggestionMarks_();
       renderPreviewFromState();
@@ -6351,10 +6360,7 @@
     state.lastRosterData = nextRosterData;
     normalizeRosterOrderInData_(state.lastRosterData);
     reindexAllRosters();
-    rebalanceAllActiveCwlPreparationRostersLocal_({
-      recordAppliedAt: false,
-      enforceLockedInLimit: false,
-    });
+    reconcileAllActiveCwlPreparationAssignmentsLocal_();
     normalizeAllRosterPublicLineupProjectionsLocal_();
     clearSuggestionMarks_();
     syncPublicConfigEditorFromState_({ preserveStatus: true });
@@ -7301,7 +7307,7 @@
         syncRosterOrderFromCurrentArray_(state.lastRosterData);
         normalizeRosterOrderInData_(state.lastRosterData);
         reindexAllRosters();
-        rebalanceAllActiveCwlPreparationRostersLocal_({ recordAppliedAt: false, enforceLockedInLimit: false });
+        reconcileAllActiveCwlPreparationAssignmentsLocal_();
         normalizeAllRosterPublicLineupProjectionsLocal_();
 
         $("#publishBtn").disabled = true;

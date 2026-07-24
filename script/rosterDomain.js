@@ -643,6 +643,42 @@ function isCwlPreparationActive_(rosterRaw) {
 	return !!(prep && prep.enabled);
 }
 
+// Reconcile compatibility assignment metadata with the visible prep roster plan.
+function reconcileCwlPreparationAssignments_(rosterRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	if (!roster || getRosterTrackingMode_(roster) !== "cwl") return null;
+	const prep = getRosterCwlPreparation_(roster);
+	if (!prep || !prep.enabled) return null;
+	if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
+
+	const assignedTagSet = {};
+	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
+	for (let i = 0; i < poolEntries.length; i++) {
+		const tag = normalizeTag_(poolEntries[i] && poolEntries[i].tag);
+		if (!tag) continue;
+		assignedTagSet[tag] = true;
+		delete prep.excludedTagSet[tag];
+	}
+	prep.assignedTagSet = assignedTagSet;
+	roster.cwlPreparation = prep;
+
+	const lockStateByTag = prep.lockStateByTag && typeof prep.lockStateByTag === "object" ? prep.lockStateByTag : {};
+	const lockTags = Object.keys(lockStateByTag);
+	const filledMainCount = Array.isArray(roster.main) ? roster.main.length : 0;
+	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
+	return {
+		enabled: true,
+		rosterSize: prep.rosterSize,
+		filledMainCount: filledMainCount,
+		underfilled: filledMainCount < prep.rosterSize,
+		lockedInCount: lockedInCount,
+		lockedOutCount: lockTags.filter((tag) => lockStateByTag[tag] === "lockedOut").length,
+		autoSelectedCount: Math.max(0, filledMainCount - lockedInCount),
+		changed: false,
+		cwlPreparationBlocked: false,
+	};
+}
+
 // Build CWL preparation ranking.
 function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
