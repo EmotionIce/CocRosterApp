@@ -9405,6 +9405,59 @@ body:not(.admin-shell-page) .roster-head--cwl{
   --war-opponent:255,121,214;
 }
 
+/* CWL prep is an assignment board, not a live-war scoreboard. */
+body:not(.admin-shell-page) .roster-head--prep{
+  --war-clan:110,214,198;
+  --war-opponent:110,214,198;
+  border-color:rgba(110,214,198,.24);
+  background:
+    linear-gradient(115deg, rgba(12,20,21,.99), rgba(7,12,14,.995) 58%, rgba(10,17,18,.99)) padding-box;
+}
+
+body:not(.admin-shell-page) .roster-head--prep::before{
+  background:
+    linear-gradient(90deg, rgba(var(--war-clan),.045), transparent 62%),
+    repeating-linear-gradient(116deg, rgba(246,232,185,.018) 0 1px, transparent 1px 35px);
+}
+
+body:not(.admin-shell-page) .roster-head--prep::after{
+  background:linear-gradient(90deg, rgba(var(--war-clan),.62), rgba(var(--war-clan),.08));
+}
+
+body:not(.admin-shell-page) .roster-head--prep .roster-head__top{
+  min-height:52px;
+}
+
+body:not(.admin-shell-page) .roster-head--prep .roster-head__crest{
+  flex-basis:34px;
+  width:34px;
+  height:34px;
+  clip-path:none;
+  border-color:rgba(var(--war-clan),.38);
+  border-radius:50%;
+  background:rgba(var(--war-clan),.08);
+  color:rgb(var(--war-clan));
+  font-size:16px;
+  text-shadow:none;
+  box-shadow:inset 0 0 14px rgba(var(--war-clan),.07);
+}
+
+body:not(.admin-shell-page) .roster-head--prep .roster-command-row{
+  border-top:1px solid rgba(var(--war-clan),.10);
+  background:rgba(5,12,13,.56);
+}
+
+body:not(.admin-shell-page) .roster-head--prep .roster-prep-public-badge{
+  color:rgb(var(--war-clan)) !important;
+}
+
+body:not(.admin-shell-page) .roster-head--prep .roster-head__compact-crest{
+  border-radius:50%;
+  clip-path:none;
+  color:rgb(var(--war-clan));
+  background:rgba(var(--war-clan),.08);
+}
+
 body:not(.admin-shell-page) .roster-head--state-preparation{
   --war-clan:214,247,109;
   --war-opponent:212,194,127;

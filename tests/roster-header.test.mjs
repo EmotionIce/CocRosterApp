@@ -37,6 +37,18 @@ test("preparation and CWL variants retain distinct tactical accent colors", () =
   assert.match(headerStyles, /\.roster-war-countdown::before/);
 });
 
+test("CWL prep renders as a planned-assignment header without live war details", () => {
+  assert.match(clientCode, /const currentWarPresentation = prepActive\s*\?\s*null\s*:/);
+  assert.match(clientCode, /prepActive \? " roster-head--prep" : ""/);
+  assert.match(clientCode, /prepActive \? "Planned CWL assignment" : "CWL roster"/);
+  assert.match(clientCode, /prepActive \? "Assigned" : "Main lineup"/);
+  assert.match(clientCode, /prepActive \? "Assigned to this roster" : "Main"/);
+  assert.match(clientCode, /prepActive \? "Bench" : "Subs"/);
+  assert.match(clientCode, /if \(clanProfileUrl && !prepActive\)/);
+  assert.match(headerStyles, /\.roster-head--prep\{[\s\S]*--war-opponent:110,214,198/);
+  assert.match(headerStyles, /\.roster-head--prep \.roster-head__crest\{[\s\S]*clip-path:none/);
+});
+
 test("keeps the default header lean and animates to a one-row mobile dock", () => {
   assert.match(headerStyles, /\.roster-head__top\{[\s\S]*min-height:56px/);
   assert.match(headerStyles, /\.roster-head-metric\{[\s\S]*border:0;[\s\S]*background:transparent;[\s\S]*opacity:\.72/);

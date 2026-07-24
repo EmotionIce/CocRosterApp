@@ -7762,7 +7762,9 @@
         const regularWarData = roster && roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : {};
         const regularWarCurrentMeta = regularWarData.currentWar && typeof regularWarData.currentWar === "object" ? regularWarData.currentWar : {};
         const cwlStatsData = roster && roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
-        const currentWarPresentation = getRosterCurrentWarPresentation(trackingMode, regularWarCurrentMeta, cwlStatsData);
+        const currentWarPresentation = prepActive
+            ? null
+            : getRosterCurrentWarPresentation(trackingMode, regularWarCurrentMeta, cwlStatsData);
         const currentWarScoreState = getRosterWarScoreState(currentWarPresentation);
         const regularWarAggregateMeta = regularWarData.aggregateMeta && typeof regularWarData.aggregateMeta === "object"
             ? regularWarData.aggregateMeta
@@ -7782,15 +7784,21 @@
 
         const card = el("div", "card roster-card");
         const headStateClass = currentWarPresentation ? (" roster-head--state-" + currentWarPresentation.state) : " roster-head--state-idle";
-        const head = el("div", "roster-head roster-head--" + (trackingMode === "regularWar" ? "war" : "cwl") + headStateClass + " roster-head--score-" + currentWarScoreState);
+        const head = el(
+            "div",
+            "roster-head roster-head--" + (trackingMode === "regularWar" ? "war" : "cwl")
+                + (prepActive ? " roster-head--prep" : "")
+                + headStateClass
+                + " roster-head--score-" + currentWarScoreState
+        );
         const headTop = el("div", "roster-head__top");
         const identityLead = el("div", "roster-head__identity-lead");
-        const crest = el("span", "roster-head__crest", "⚔");
+        const crest = el("span", "roster-head__crest", prepActive ? "\u2713" : "⚔");
         crest.setAttribute("aria-hidden", "true");
         const identity = el("div", "roster-head__identity");
         const eyebrowText = trackingMode === "regularWar"
             ? "Regular war roster"
-            : (prepActive ? "CWL preparation roster" : "CWL roster");
+            : (prepActive ? "Planned CWL assignment" : "CWL roster");
         identity.appendChild(el("div", "roster-head__eyebrow", eyebrowText));
         const h2 = document.createElement("h2");
         const titleText = toStr(roster.title);
@@ -7835,19 +7843,19 @@
         };
         const meta = el("div", "roster-meta roster-command-row");
         meta.appendChild(buildHeadMetric(
-            trackingMode === "regularWar" ? "In war" : "Main lineup",
+            trackingMode === "regularWar" ? "In war" : (prepActive ? "Assigned" : "Main lineup"),
             roster.badges && roster.badges.main,
             "primary",
-            "⚔"
+            prepActive ? "\u2713" : "⚔"
         ));
         meta.appendChild(buildHeadMetric(
-            trackingMode === "regularWar" ? "Out of war" : "Substitutes",
+            trackingMode === "regularWar" ? "Out of war" : (prepActive ? "Bench" : "Substitutes"),
             roster.badges && roster.badges.subs,
             "secondary",
             "⬡"
         ));
         if (prepActive) {
-            meta.appendChild(el("span", "badge roster-prep-public-badge roster-head-status", "Showing planned CWL Rosters"));
+            meta.appendChild(el("span", "badge roster-prep-public-badge roster-head-status", "Planned assignments"));
         }
         if (currentWarPresentation) {
             if (currentWarPresentation.countdownTargetAt) {
@@ -7866,7 +7874,7 @@
         }
 
         const headActions = el("div", "roster-head__actions");
-        if (clanProfileUrl) {
+        if (clanProfileUrl && !prepActive) {
             const openClanBtn = document.createElement("a");
             openClanBtn.className = "roster-open-clan roster-head__clan-link";
             openClanBtn.href = clanProfileUrl;
@@ -7895,7 +7903,7 @@
         head.appendChild(headTop);
         const compactHead = el("div", "roster-head__compact");
         compactHead.setAttribute("aria-hidden", "true");
-        compactHead.appendChild(el("span", "roster-head__compact-crest", "\u2694"));
+        compactHead.appendChild(el("span", "roster-head__compact-crest", prepActive ? "\u2713" : "\u2694"));
         const compactIdentity = el("span", "roster-head__compact-identity");
         compactIdentity.appendChild(el("strong", "roster-head__compact-title", titleText));
         compactIdentity.appendChild(el("span", "roster-head__compact-mode", currentWarPresentation ? currentWarPresentation.phaseLabel : eyebrowText));
@@ -8017,7 +8025,7 @@
             }
         } else {
             if (showEmptySections || mainPlayers.length) {
-                card.appendChild(renderRosterSection("Main", mainPlayers, {
+                card.appendChild(renderRosterSection(prepActive ? "Assigned to this roster" : "Main", mainPlayers, {
                     role: "main",
                     trackingMode,
                     rosterId: roster.id,
@@ -8032,7 +8040,7 @@
                 }));
             }
             if (showEmptySections || subPlayers.length) {
-                card.appendChild(renderRosterSection("Subs", subPlayers, {
+                card.appendChild(renderRosterSection(prepActive ? "Bench" : "Subs", subPlayers, {
                     role: "sub",
                     trackingMode,
                     rosterId: roster.id,
