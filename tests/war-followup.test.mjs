@@ -332,3 +332,113 @@ test("trusted accounts are ignored by automatic work, manual cases, and Discord 
     0,
   );
 });
+
+test("player cards can use the linked Discord username or fall back to its ID", () => {
+  assert.equal(
+    followup.discordIdentityText({ discord: "leader.alt", discordId: "123456789012345678" }),
+    "leader.alt",
+  );
+  assert.equal(
+    followup.discordIdentityText({ discord: "", discordId: "123456789012345678" }),
+    "ID 123456789012345678",
+  );
+  assert.equal(followup.discordIdentityText({}), "");
+
+  const rosterData = buildRosterData();
+  rosterData.playerMetrics.byTag["#P0LYGQ"] = {
+    identity: {
+      discordId: "123456789012345678",
+      discordUsername: "current.username",
+    },
+  };
+  const player = followup.buildPlayerDirectory(rosterData).byTag["#P0LYGQ"];
+  assert.equal(player.discord, "current.username");
+  assert.equal(player.discordId, "123456789012345678");
+});
+
+test("No action closes immediately while its save continues in the background", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let resolveSave;
+    let saveCalls = 0;
+    let savedMethod = "";
+    let savedRequest = null;
+    const save = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        saveCalls += 1;
+        savedMethod = method;
+        savedRequest = args[0];
+        return save;
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    controller.state.selectedTag = item.tag;
+
+    const operation = controller.dismissInBackground(item);
+    assert.equal(controller.state.selectedTag, "", "the drawer must close before the request settles");
+    assert.equal(controller.state.pendingDismissTags.has(item.tag), true);
+    assert.equal(controller.dismissInBackground(item), null, "a pending decision must not be submitted twice");
+
+    resolveSave({
+      tag: item.tag,
+      name: item.player.name,
+      status: "dismissed",
+      outcome: "no_action",
+      dismissedSignalIds: item.signalIds,
+      updatedAt: "2026-07-26T12:00:00.000Z",
+    });
+    const result = await operation;
+    assert.equal(savedMethod, "mutateWarFollowupCase");
+    assert.equal(saveCalls, 1);
+    assert.equal(savedRequest.action, "dismiss");
+    assert.equal(result.status, "dismissed");
+    assert.equal(controller.state.pendingDismissTags.has(item.tag), false);
+    assert.equal(controller.state.work.items.find((entry) => entry.tag === item.tag).status, "closed");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a failed background No action save restores and reopens the player", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let rejectSave;
+    const save = new Promise((resolve, reject) => {
+      rejectSave = reject;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: () => save,
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    controller.state.selectedTag = item.tag;
+
+    const operation = controller.dismissInBackground(item);
+    assert.equal(controller.state.selectedTag, "");
+    rejectSave(new Error("This follow-up changed since it was opened."));
+    assert.equal(await operation, null);
+    assert.equal(controller.state.pendingDismissTags.has(item.tag), false);
+    assert.equal(controller.state.selectedTag, item.tag);
+    assert.equal(controller.state.noticeTag, item.tag);
+    assert.match(controller.state.error, /Could not save No action/);
+    assert.match(controller.state.error, /changed since it was opened/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});

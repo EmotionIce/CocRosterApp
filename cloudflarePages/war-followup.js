@@ -761,6 +761,14 @@
     select.appendChild(option);
   };
 
+  const discordIdentityText = (playerRaw) => {
+    const player = playerRaw && typeof playerRaw === "object" ? playerRaw : {};
+    const name = toText(player.discord).trim();
+    if (name) return name;
+    const id = toText(player.discordId).trim();
+    return id ? "ID " + id : "";
+  };
+
   const copyText = async (textRaw) => {
     const text = toText(textRaw);
     if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
@@ -797,6 +805,8 @@
       modal: "",
       message: "",
       error: "",
+      noticeTag: "",
+      pendingDismissTags: new Set(),
     };
 
     const getMount = () => document.getElementById("warFollowupMount");
@@ -811,9 +821,10 @@
       state.work = buildWorkItems(getRosterData(), state.privateState);
     };
 
-    const setNotice = (message, error) => {
+    const setNotice = (message, error, tagRaw) => {
       state.message = error ? "" : toText(message);
       state.error = error ? toText(message) : "";
+      state.noticeTag = error ? normalizeTag(tagRaw) : "";
     };
 
     const upsertLocalCase = (caseRaw) => {
@@ -893,6 +904,41 @@
       }
     };
 
+    const dismissInBackground = (item) => {
+      const tag = normalizeTag(item && item.tag);
+      if (!tag || state.saving || state.pendingDismissTags.has(tag)) return null;
+      const playerName = toText(item && item.player && item.player.name).trim() || tag;
+      const request = Object.assign({}, mutationBase(item), { action: "dismiss" });
+
+      state.pendingDismissTags.add(tag);
+      state.selectedTag = "";
+      state.decisionMode = "";
+      setNotice("", false);
+      render();
+
+      return Promise.resolve()
+        .then(() => callServer("mutateWarFollowupCase", [request, getPassword()]))
+        .then((result) => {
+          if (!normalizeCase(result)) throw new Error("The server returned an invalid follow-up result.");
+          upsertLocalCase(result);
+          state.pendingDismissTags.delete(tag);
+          render();
+          return result;
+        })
+        .catch((err) => {
+          state.pendingDismissTags.delete(tag);
+          recompute();
+          if (state.work.items.some((entry) => entry.tag === tag)) {
+            state.selectedTag = tag;
+            state.decisionMode = "";
+          }
+          const detail = err && err.message ? err.message : String(err);
+          setNotice(playerName + ": Could not save No action. " + detail, true, tag);
+          render();
+          return null;
+        });
+    };
+
     const getSelectedItem = () => state.work.items.find((item) => item.tag === state.selectedTag) || null;
 
     const statusForItem = (item) => item && STATUS_META[item.status] ? item.status : "needs_review";
@@ -959,7 +1005,10 @@
     const renderStatusTabs = (mount) => {
       const counts = {};
       for (const key of STATUS_ORDER) counts[key] = 0;
-      for (const item of state.work.items) counts[statusForItem(item)] = (counts[statusForItem(item)] || 0) + 1;
+      for (const item of state.work.items) {
+        if (state.pendingDismissTags.has(item.tag)) continue;
+        counts[statusForItem(item)] = (counts[statusForItem(item)] || 0) + 1;
+      }
       const tabs = createElement("div", "wfu-status-tabs");
       const appendStatusButton = (parent, key) => {
         const meta = STATUS_META[key];
@@ -1059,13 +1108,14 @@
     };
 
     const matchesFilters = (item) => {
+      if (state.pendingDismissTags.has(item.tag)) return false;
       if (statusForItem(item) !== state.status) return false;
       const player = item.player || {};
       if (state.clan && state.clan !== player.rosterId && state.clan !== player.clanTag) return false;
       if (state.handler && toText(item.case && item.case.handledBy) !== state.handler) return false;
       const query = state.search.trim().toLowerCase();
       if (!query) return true;
-      return [player.name, item.tag, player.discord, player.rosterTitle, player.clanTag]
+      return [player.name, item.tag, player.discord, player.discordId, player.rosterTitle, player.clanTag]
         .some((value) => toText(value).toLowerCase().includes(query));
     };
 
@@ -1105,6 +1155,12 @@
       const top = createElement("div", "wfu-card__top");
       const identity = createElement("div", "wfu-identity");
       identity.appendChild(createElement("div", "wfu-identity__name", player.name || item.tag));
+      const discordIdentity = discordIdentityText(player);
+      if (discordIdentity) {
+        const discord = createElement("div", "wfu-identity__discord", "Discord \u00b7 " + discordIdentity);
+        if (player.discordId) discord.title = "Discord ID: " + player.discordId;
+        identity.appendChild(discord);
+      }
       identity.appendChild(createElement(
         "div",
         "wfu-identity__meta",
@@ -1319,7 +1375,7 @@
     const renderDecisionStart = (section, item) => {
       section.appendChild(createElement("h3", "wfu-drawer-section__title", "Decision"));
       const actions = createElement("div", "wfu-decision-grid");
-      actions.appendChild(createButton("No action", "btn secondary wfu-decision-btn", () => mutate(item, "dismiss")));
+      actions.appendChild(createButton("No action", "btn secondary wfu-decision-btn", () => dismissInBackground(item)));
       actions.appendChild(createButton("Keep watching", "btn secondary wfu-decision-btn", () => {
         state.decisionMode = "watch";
         render();
@@ -1527,7 +1583,7 @@
       section.appendChild(progressCard);
       const actions = createElement("div", "wfu-form-actions");
       actions.appendChild(createButton("Review now", "btn", () => mutate(item, "reopen")));
-      actions.appendChild(createButton("No action", "btn secondary", () => mutate(item, "dismiss")));
+      actions.appendChild(createButton("No action", "btn secondary", () => dismissInBackground(item)));
       section.appendChild(actions);
     };
 
@@ -1646,6 +1702,9 @@
       head.appendChild(close);
       drawer.appendChild(head);
       const body = createElement("div", "wfu-drawer__body");
+      if (state.error && state.noticeTag === item.tag) {
+        body.appendChild(createElement("div", "wfu-drawer-error", state.error));
+      }
       body.appendChild(evidenceSection(item));
       body.appendChild(renderCaseAction(item));
       if (item.case) body.appendChild(renderNotesAndActivity(item));
@@ -1949,7 +2008,7 @@
       state.initialized = false;
     };
 
-    return { init, destroy, load, render, state };
+    return { init, destroy, load, render, dismissInBackground, state };
   };
 
   let defaultController = null;
@@ -1965,6 +2024,7 @@
     sanitizeSettings,
     normalizeStats,
     statsSummary,
+    discordIdentityText,
     buildPlayerDirectory,
     buildEvidenceForTag,
     buildSignals,
