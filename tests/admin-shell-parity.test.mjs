@@ -34,7 +34,7 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
     assert.match(html, /Admin unlocked\. Loading rosters and refresh settings\./, name);
-    assert.match(html, /admin\.js\?v=[^"]*20260726d/, name);
+    assert.match(html, /admin\.js\?v=[^"]*20260727a/, name);
   }
 });
 
