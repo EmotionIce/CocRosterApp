@@ -40,6 +40,16 @@
     if (el) el.textContent = msg || "";
   };
 
+  // Notify optional admin modules without coupling them to roster rendering.
+  const dispatchAdminEvent_ = (name, detail) => {
+    if (typeof document === "undefined" || typeof CustomEvent !== "function") return;
+    document.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
+  };
+
+  const notifyRosterDataChanged_ = () => {
+    dispatchAdminEvent_("admin:rosterdatachange", { rosterData: state.lastRosterData });
+  };
+
   // Set the add player status message.
   const setAddPlayerStatus = (msg, isError) => {
     const el = $("#addPlayerStatus");
@@ -1986,7 +1996,7 @@
     return $("#clanMappingList") || $("#clanMappingTable tbody") || $("#clanMappingTable");
   };
 
-  const ADMIN_TAB_KEYS = ["rosters", "import", "preview", "website"];
+  const ADMIN_TAB_KEYS = ["rosters", "import", "preview", "followup", "website"];
   // Normalize admin tab key.
   const normalizeAdminTabKey_ = (tabKeyRaw) => toStr(tabKeyRaw).trim().toLowerCase();
   // Get admin tab buttons.
@@ -2130,6 +2140,7 @@
       panel.setAttribute("aria-hidden", active ? "false" : "true");
     }
     syncAdminCompactTabsUi();
+    dispatchAdminEvent_("admin:tabchange", { key: nextTab });
   };
 
   // Set auth card unlocked.
@@ -6365,6 +6376,7 @@
     clearSuggestionMarks_();
     syncPublicConfigEditorFromState_({ preserveStatus: true });
     renderPreviewFromState();
+    notifyRosterDataChanged_();
     markReportStale();
     const publishBtn = $("#publishBtn");
     if (publishBtn) publishBtn.disabled = false;
@@ -6914,6 +6926,7 @@
       }
 
       renderPreviewFromState();
+      notifyRosterDataChanged_();
       const publishBtn = $("#publishBtn");
       if (publishBtn) publishBtn.disabled = false;
       setStatus(statusOnSuccess);
@@ -6933,6 +6946,14 @@
     window.ROSTER_PLAYER_ACTION_BUILDER = buildPlayerActionControls;
     window.ROSTER_GET_ADMIN_PASSWORD = () => state.password || "";
     window.ROSTER_OPEN_PLAYER_EDIT = openPlayerEditPanel;
+
+    if (window.RosterWarFollowup && typeof window.RosterWarFollowup.initialize === "function") {
+      window.RosterWarFollowup.initialize({
+        getRosterData: () => state.lastRosterData,
+        getPassword: () => state.password || "",
+        callServer: (method, args) => runServerMethod(method, args),
+      });
+    }
 
     const backToPublicBtn = $("#backToPublicBtn");
     if (backToPublicBtn) {

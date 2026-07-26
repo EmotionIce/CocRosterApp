@@ -34,10 +34,16 @@
 /admin.js
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
 
+/war-followup.js
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
 /generator.js
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
 
 /styles.css
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/war-followup.css
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
 
 /robots.txt

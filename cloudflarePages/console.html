@@ -12,6 +12,7 @@
   <meta http-equiv="Expires" content="0" />
   <meta name="build-stamp" content="cloudflare-admin" />
   <link rel="stylesheet" href="./styles.css?v=20260724a" />
+  <link rel="stylesheet" href="./war-followup.css?v=20260726a" />
   <style>
     /* Admin-only tweaks */
     .admin-card {
@@ -814,7 +815,7 @@
 
     .admin-command-tabs {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 5px;
       max-height: 0;
       margin-top: -4px;
@@ -1294,7 +1295,7 @@
 
     .admin-tabs {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 8px;
       min-width: 0;
     }
@@ -2034,6 +2035,7 @@
             <button class="admin-command-tab" type="button" data-admin-compact-tab="rosters" aria-label="Roster setup" tabindex="-1">Setup</button>
             <button class="admin-command-tab" type="button" data-admin-compact-tab="import" aria-label="Import" tabindex="-1">Import</button>
             <button class="admin-command-tab" type="button" data-admin-compact-tab="preview" aria-label="Rosters" tabindex="-1">Rosters</button>
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="followup" aria-label="War follow-up" tabindex="-1">Review</button>
             <button class="admin-command-tab" type="button" data-admin-compact-tab="website" aria-label="Website" tabindex="-1">Website</button>
           </nav>
 
@@ -2078,6 +2080,10 @@
         <button id="adminTabBtnPreview" class="admin-tab" type="button" role="tab" aria-selected="false"
           aria-controls="adminTabPreview" data-admin-tab="preview" tabindex="-1">
           Rosters
+        </button>
+        <button id="adminTabBtnFollowup" class="admin-tab" type="button" role="tab" aria-selected="false"
+          aria-controls="adminTabFollowup" data-admin-tab="followup" tabindex="-1">
+          War follow-up
         </button>
         <button id="adminTabBtnWebsite" class="admin-tab" type="button" role="tab" aria-selected="false"
           aria-controls="adminTabWebsite" data-admin-tab="website" tabindex="-1">
@@ -2190,6 +2196,11 @@
         </div>
         <div id="rosters"></div>
         <div id="load-error" class="card hidden"></div>
+      </section>
+
+      <section id="adminTabFollowup" class="admin-tab-panel hidden" role="tabpanel"
+        aria-labelledby="adminTabBtnFollowup" aria-hidden="true">
+        <div id="warFollowupMount"></div>
       </section>
 
       <section id="adminTabWebsite" class="admin-tab-panel hidden" role="tabpanel"
@@ -2337,7 +2348,8 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="./generator.js?v=20260408c"></script>
   <script src="./client.js?v=20260724a"></script>
-  <script src="./admin.js?v=20260724b"></script>
+  <script src="./war-followup.js?v=20260726a"></script>
+  <script src="./admin.js?v=20260726a"></script>
 </body>
 
 </html>

@@ -22,6 +22,7 @@ const appScriptFiles = [
   "script/authAndLocks.js",
   "script/assets.js",
   "script/cwlLeagueSignups.js",
+  "script/warFollowup.js",
   "script/adminApi.js",
   "script/entrypoints.js",
 ];
@@ -5974,4 +5975,129 @@ test("unsafe legacy active version ids are read by their exact encoded key and r
     assert.equal(backend.firebaseRequestJson_("activePublished/currentVersionId", "GET"), "known-good");
     assert.equal(backend.buildRawLegacyActiveVersionPath_(legacyId, "manifest").includes(backend.encodeFirebaseObjectKey_(legacyId)), true);
   }
+});
+
+test("war follow-up state is authenticated, private, and independent from roster publication", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    activePublished: { currentVersionId: "keep-this-version" },
+    internal: { cloudflarePublish: { sentinel: "untouched" } },
+  });
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("getWarFollowupState", ["wrong"]),
+    /Authentication failed/,
+  );
+
+  const settings = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+    regularLookbackWars: 99,
+    regularMissedThreshold: 2,
+    regularPerformanceEnabled: false,
+    cwlLookbackSeasons: 2,
+    defaultRecoveryWars: 4,
+    missingDiscordEnabled: true,
+    moderatorNames: ["Alex", "Alex", " Sam "],
+  }, "change-me"]);
+  assert.equal(settings.regularLookbackWars, 8);
+  assert.equal(settings.regularPerformanceEnabled, false);
+  assert.deepEqual(Array.from(settings.moderatorNames), ["Alex", "Sam"]);
+
+  const db = backend.__getFirebaseDb();
+  assert.equal(db.activePublished.currentVersionId, "keep-this-version");
+  assert.equal(db.internal.cloudflarePublish.sentinel, "untouched");
+  assert.ok(db.private.warFollowup.v1.settings);
+  assert.deepEqual(Object.keys(db).sort(), ["activePublished", "internal", "private"]);
+
+  const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
+  assert.equal(state.settings.defaultRecoveryWars, 4);
+  assert.deepEqual(Array.from(state.cases), []);
+});
+
+test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, and private history", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    activePublished: { currentVersionId: "v-existing" },
+  });
+  const tag = "#P0LYGQ";
+  const evidence = {
+    capturedAt: "2026-07-20T00:00:00.000Z",
+    regular: { warCount: 3, possibleAttacks: 6, usedAttacks: 4, missedAttacks: 2, countedAttacks: 4, starsTotal: 7, totalDestruction: 278 },
+    cwl: { warCount: 2, possibleAttacks: 2, usedAttacks: 2, missedAttacks: 0, countedAttacks: 2, starsTotal: 4, totalDestruction: 151 },
+    regularEvents: [{
+      id: "regular-1",
+      label: "War 1",
+      at: "2026-07-20T00:00:00.000Z",
+      clanTag: "#MAIN",
+      stats: { possibleAttacks: 2, usedAttacks: 0, missedAttacks: 2 },
+    }],
+    cwlEvents: [],
+  };
+
+  const decided = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "hero_down",
+    tag,
+    name: "Player",
+    sourceRosterId: "main",
+    sourceRosterTitle: "Main clan",
+    sourceClanTag: "#MAIN",
+    targetRosterId: "training",
+    targetRosterTitle: "Hero-down clan",
+    targetClanTag: "#TRAIN",
+    handledBy: "Alex",
+    reasonCodes: ["regular_missed"],
+    evidence,
+    dmText: "Specific moderation DM.",
+    recoveryWarTarget: 3,
+    requireNoMisses: true,
+    signalIds: ["regular_missed:event"],
+  }, "change-me"]);
+  assert.equal(decided.status, "needs_dm");
+  assert.equal(decided.handledBy, "Alex");
+  assert.equal(decided.evidence.regular.missedAttacks, 2);
+  assert.equal(decided.activity[0].type, "hero_down_decision");
+
+  const sent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent",
+    tag,
+    actor: "Alex",
+    expectedUpdatedAt: decided.updatedAt,
+    dmText: "Specific moderation DM.",
+  }, "change-me"]);
+  assert.equal(sent.status, "hero_down");
+  assert.ok(sent.dmSentAt);
+  assert.equal(sent.activity.at(-1).type, "dm_sent");
+
+  const noted = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "add_note",
+    tag,
+    actor: "Sam",
+    expectedUpdatedAt: sent.updatedAt,
+    note: "Player acknowledged the decision.",
+  }, "change-me"]);
+  assert.equal(noted.activity.at(-1).text, "Player acknowledged the decision.");
+  assert.equal(noted.status, "hero_down");
+
+  const closed = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "approve_return",
+    tag,
+    actor: "Alex",
+    expectedUpdatedAt: noted.updatedAt,
+    signalIds: ["regular_missed:event"],
+  }, "change-me"]);
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.outcome, "approved_return");
+  assert.equal(closed.activity.at(-1).type, "approved_return");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "reopen",
+      tag,
+      expectedUpdatedAt: "2020-01-01T00:00:00.000Z",
+    }, "change-me"]),
+    /changed since it was opened/,
+  );
+
+  const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
+  assert.equal(state.cases.length, 1);
+  assert.equal(state.cases[0].tag, tag);
+  assert.equal(backend.__getFirebaseDb().activePublished.currentVersionId, "v-existing");
+  assert.equal(backend.__getFirebaseDb().internal, undefined);
 });

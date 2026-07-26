@@ -139,6 +139,12 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return inspectPlayerWarTracking(args[0], args[1]);
 		case "setPlayerWarTrackingRolloutStage":
 			return setPlayerWarTrackingRolloutStage(args[0], args[1]);
+		case "getWarFollowupState":
+			return getWarFollowupState(args[0]);
+		case "saveWarFollowupSettings":
+			return saveWarFollowupSettings(args[0], args[1]);
+		case "mutateWarFollowupCase":
+			return mutateWarFollowupCase(args[0], args[1]);
 		default:
 			throw new Error("Unsupported admin method: " + methodName);
 	}
