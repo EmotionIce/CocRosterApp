@@ -5335,9 +5335,9 @@
     trustTitle.className = "player-admin-settings-title";
     trustTitle.textContent = "Moderation";
     trustPanel.appendChild(trustTitle);
-    const trustButton = mkPlayerActionButton("Trusted account", "secondary player-admin-toggle is-off");
+    const trustButton = mkPlayerActionButton("Ignore in follow-up", "secondary player-admin-toggle is-off");
     trustButton.disabled = true;
-    trustButton.title = "Trusted accounts are hidden from war follow-up and Discord gaps.";
+    trustButton.title = "Ignored accounts never appear in war follow-up or Discord gaps. Turn this off here to include the account again.";
     trustPanel.appendChild(trustButton);
     tray.appendChild(trustPanel);
 
@@ -5353,9 +5353,9 @@
       trustButton.classList.toggle("is-off", !trustLoaded || !trustedAccount);
       trustButton.setAttribute("aria-pressed", trustedAccount ? "true" : "false");
       trustButton.textContent = trustBusy
-        ? "Trusted account\u2026"
-        : (trustError ? "Trust status unavailable" : ("Trusted account: " + (trustedAccount ? "ON" : "OFF")));
-      if (trustedAccount && !trustedSummaryPill) trustedSummaryPill = addSummaryPill("trusted");
+        ? "Ignore in follow-up\u2026"
+        : (trustError ? "Ignore status unavailable" : ("Ignore in follow-up: " + (trustedAccount ? "ON" : "OFF")));
+      if (trustedAccount && !trustedSummaryPill) trustedSummaryPill = addSummaryPill("ignored");
       if (!trustedAccount && trustedSummaryPill) {
         trustedSummaryPill.remove();
         trustedSummaryPill = null;
@@ -5366,7 +5366,7 @@
       if (trustLoaded || trustBusy || !state.password) return;
       trustBusy = true;
       trustError = "";
-      trustButton.title = "Trusted accounts are hidden from war follow-up and Discord gaps.";
+      trustButton.title = "Ignored accounts never appear in war follow-up or Discord gaps. Turn this off here to include the account again.";
       renderTrustControl();
       try {
         const result = await runServerMethod("getWarFollowupTrustStatus", [playerTag, state.password]);
@@ -5374,7 +5374,7 @@
         trustLoaded = true;
       } catch (err) {
         trustError = toErrorMessage(err);
-        trustButton.title = "Trust status unavailable: " + trustError;
+        trustButton.title = "Ignore status unavailable: " + trustError;
       } finally {
         trustBusy = false;
         renderTrustControl();
@@ -5402,7 +5402,7 @@
           updatedAt: toStr(result && result.updatedAt).trim(),
         });
       } catch (err) {
-        alert("Trusted account update failed: " + toErrorMessage(err));
+        alert("Follow-up ignore update failed: " + toErrorMessage(err));
       } finally {
         trustBusy = false;
         renderTrustControl();

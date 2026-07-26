@@ -99,10 +99,14 @@ test("war follow-up private state is loaded only when its tab is opened", () => 
   assert.doesNotMatch(followupClient, /refreshAllRosters|publishRosterData|CloudflarePublishQueue/);
 });
 
-test("trusted-account status is loaded only after player admin controls are opened", () => {
+test("permanent follow-up ignore is reversible from player controls and loaded lazily", () => {
   const adminClient = readShell("admin.js");
+  const followupClient = readShell("war-followup.js");
   assert.equal((adminClient.match(/runServerMethod\("getWarFollowupTrustStatus"/g) || []).length, 1);
   assert.equal((adminClient.match(/runServerMethod\("setWarFollowupTrustedAccount"/g) || []).length, 1);
+  assert.match(adminClient, /Ignore in follow-up: /);
+  assert.match(followupClient, /Always ignore/);
+  assert.equal((followupClient.match(/callServer\("setWarFollowupTrustedAccount"/g) || []).length, 1);
   assert.match(adminClient, /summaryBtn\.onclick[\s\S]*?loadTrustControl\(\)/);
   const activeLoadStart = adminClient.indexOf("const loadActiveRosterData");
   const activeLoadEnd = adminClient.indexOf("const applyServerSyncedPreview");

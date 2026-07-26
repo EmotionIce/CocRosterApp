@@ -220,6 +220,90 @@ test("dismissed evidence stays closed until a genuinely new war revision appears
   assert.equal(changed.items.find((entry) => entry.tag === "#P0LYGQ").status, "needs_review");
 });
 
+test("dismissed evidence stays closed when refresh promotes the same wars into the canonical ledger", () => {
+  const fallbackData = buildRosterData();
+  const canonicalEntry = structuredClone(fallbackData.playerWarPerformance.byTag["#P0LYGQ"]);
+  delete fallbackData.playerWarPerformance;
+  fallbackData.rosters[0].warPerformance = {
+    lastRefreshedAt: "2026-07-25T01:00:00.000Z",
+    regularWarHistoryByKey: Object.fromEntries(
+      canonicalEntry.recentRegularWarForm.map((event) => [event.warKey, {
+        warKey: event.warKey,
+        authoritative: true,
+        finalizedAt: event.finalizedAt,
+        statsByTag: { "#P0LYGQ": structuredClone(event.stats) },
+        formStatsByTag: { "#P0LYGQ": structuredClone(event.stats) },
+      }]),
+    ),
+  };
+  const cwlStats = canonicalEntry.cwlSeasonContext.bySeason["2026-07"].stats;
+  fallbackData.rosters[0].cwlStats = {
+    season: "2026-07",
+    lastRefreshedAt: "2026-07-25T01:00:00.000Z",
+    byTag: {
+      "#P0LYGQ": Object.assign({ resolvedWarDays: 1 }, structuredClone(cwlStats)),
+    },
+  };
+
+  const settings = {
+    regularPerformanceEnabled: true,
+    regularMinimumAttacks: 2,
+    cwlPerformanceEnabled: false,
+  };
+  const fallback = followup.buildWorkItems(fallbackData, { settings, cases: [] });
+  const fallbackItem = fallback.items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.ok(fallbackItem);
+
+  const dismissedCase = {
+    tag: fallbackItem.tag,
+    status: "dismissed",
+    dismissedSignalIds: fallbackItem.signals.map((signal) => signal.legacyIds[0] || signal.id),
+    updatedAt: "2026-07-25T02:00:00.000Z",
+  };
+  const canonicalData = buildRosterData();
+  canonicalData.playerWarPerformance.updatedAt = "2026-07-26T00:00:00.000Z";
+  for (const event of canonicalData.playerWarPerformance.byTag["#P0LYGQ"].recentRegularWarForm) {
+    event.eventId = "ledger-event-" + event.warKey;
+  }
+  const promoted = followup.buildWorkItems(canonicalData, {
+    settings,
+    cases: [dismissedCase],
+  });
+  assert.equal(
+    promoted.items.find((entry) => entry.tag === "#P0LYGQ").status,
+    "closed",
+    "a refresh source promotion must not masquerade as a new war",
+  );
+});
+
+test("dismissals saved with canonical ledger event ids remain closed after identity normalization", () => {
+  const rosterData = buildRosterData();
+  for (const event of rosterData.playerWarPerformance.byTag["#P0LYGQ"].recentRegularWarForm) {
+    event.eventId = "legacy-ledger-" + event.warKey;
+  }
+  const initial = followup.buildWorkItems(rosterData, {
+    settings: { regularMinimumAttacks: 2 },
+    cases: [],
+  });
+  const item = initial.items.find((entry) => entry.tag === "#P0LYGQ");
+  const legacySignalIds = item.signals.map((signal) => signal.legacyIds[0] || signal.id);
+  assert.equal(
+    item.signals.some((signal) => signal.reasonCode.indexOf("regular_") === 0 && signal.legacyIds.length > 0),
+    true,
+  );
+
+  const rebuilt = followup.buildWorkItems(rosterData, {
+    settings: { regularMinimumAttacks: 2 },
+    cases: [{
+      tag: item.tag,
+      status: "dismissed",
+      dismissedSignalIds: legacySignalIds,
+      updatedAt: "2026-07-25T02:00:00.000Z",
+    }],
+  });
+  assert.equal(rebuilt.items.find((entry) => entry.tag === item.tag).status, "closed");
+});
+
 test("hero-down recovery counts consecutive clean regular wars only in the selected clan after the DM", () => {
   const evidence = {
     regularEvents: [
@@ -485,6 +569,88 @@ test("a failed background No action save restores and reopens the player", async
     assert.equal(controller.state.noticeTag, item.tag);
     assert.match(controller.state.error, /Could not save No action/);
     assert.match(controller.state.error, /changed since it was opened/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("Always ignore hides an account immediately and persists outside the refresh pipeline", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let resolveSave;
+    let savedMethod = "";
+    let savedArgs = null;
+    const save = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        savedMethod = method;
+        savedArgs = args;
+        return save;
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    controller.state.selectedTag = item.tag;
+
+    const operation = controller.ignoreAccountInBackground(item);
+    assert.equal(controller.state.selectedTag, "");
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(item.tag), true);
+    assert.equal(controller.state.work.items.some((entry) => entry.tag === item.tag), false);
+
+    resolveSave({ tag: item.tag, trusted: true, updatedAt: "2026-07-26T12:00:00.000Z" });
+    const result = await operation;
+    assert.equal(savedMethod, "setWarFollowupTrustedAccount");
+    assert.deepEqual(savedArgs, [item.tag, true, "change-me"]);
+    assert.equal(result.trusted, true);
+    assert.equal(controller.state.pendingIgnoreTags.has(item.tag), false);
+
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    assert.equal(
+      controller.state.work.items.some((entry) => entry.tag === item.tag),
+      false,
+      "the account must stay excluded when roster data is recomputed",
+    );
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a failed Always ignore save verifies storage, then restores the account", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    const methods = [];
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => {
+        methods.push(method);
+        if (method === "setWarFollowupTrustedAccount") return Promise.reject(new Error("temporary network failure"));
+        return Promise.resolve({ tag: "#P0LYGQ", trusted: false });
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    controller.state.selectedTag = item.tag;
+
+    const result = await controller.ignoreAccountInBackground(item);
+    assert.equal(result, null);
+    assert.deepEqual(methods, ["setWarFollowupTrustedAccount", "getWarFollowupTrustStatus"]);
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(item.tag), false);
+    assert.equal(controller.state.selectedTag, item.tag);
+    assert.equal(controller.state.pendingIgnoreTags.has(item.tag), false);
+    assert.match(controller.state.error, /Could not save Always ignore/);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

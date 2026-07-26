@@ -289,12 +289,17 @@
     const events = rawEvents
       .map((eventRaw) => {
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
-        const id = toText(event.eventId || event.warKey).trim();
+        // Prefer the game-derived war key. The canonical player ledger has its
+        // own event id, while the roster fallback uses warKey; choosing warKey
+        // keeps the same finalized war stable when refresh promotes its source.
+        const id = toText(event.warKey || event.eventId).trim();
         if (!id) return null;
+        const legacyId = toText(event.eventId).trim();
         const stats = normalizeStats(event.stats);
         stats.warCount = 1;
         return {
           id,
+          legacyIds: legacyId && legacyId !== id ? [legacyId] : [],
           label: toText(event.warKey).trim() || "Regular war",
           at: toText(event.finalizedAt).trim(),
           clanTag: normalizeTag(event.clanTag),
@@ -328,6 +333,7 @@
           : (stats.warCount || stats.possibleAttacks);
         return {
           id: "cwl:" + season,
+          legacyIds: [],
           label: season,
           at: season + "-01T00:00:00.000Z",
           clanTag: "",
@@ -382,6 +388,7 @@
         normalized.warCount = 1;
         return {
           id,
+          legacyIds: [],
           label: id,
           at: toText(entry.finalizedAt || entry.lastUpdatedAt).trim(),
           clanTag,
@@ -437,8 +444,9 @@
     );
     const event = {
       id: "cwl:" + season,
+      legacyIds: [],
       label: season,
-      at: season + "T00:00:00.000Z",
+      at: /^\d{4}-\d{2}$/.test(season) ? (season + "-01T00:00:00.000Z") : (season + "T00:00:00.000Z"),
       clanTag: normalizeTag(roster.connectedClanTag),
       stats,
     };
@@ -492,12 +500,12 @@
     const rosterPerformance = roster && roster.warPerformance && typeof roster.warPerformance === "object"
       ? roster.warPerformance
       : {};
-    const rosterCwl = roster && roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
+    const rosterCwlStats = roster && roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
     return {
       capturedAt: toText(
         store.updatedAt ||
         rosterPerformance.lastRefreshedAt ||
-        rosterCwl.lastRefreshedAt ||
+        rosterCwlStats.lastRefreshedAt ||
         (rosterData && rosterData.lastUpdatedAt)
       ).trim(),
       regular: regular.totals,
@@ -514,12 +522,25 @@
     const cwl = statsSummary(evidence.cwl);
     const regularEvents = Array.isArray(evidence.regularEvents) ? evidence.regularEvents : [];
     const cwlEvents = Array.isArray(evidence.cwlEvents) ? evidence.cwlEvents : [];
-    const regularRevision = regularEvents.length
-      ? stableRevision(regularEvents.map((event) => event.id).join("|"))
-      : "none";
-    const cwlRevision = cwlEvents.length
-      ? stableRevision(cwlEvents.map((event) => event.id).join("|"))
-      : "none";
+    const buildRevisions = (events) => {
+      if (!events.length) return ["none"];
+      const idSequences = [events.map((event) => event.id)];
+      const maxAliasCount = events.reduce(
+        (max, event) => Math.max(max, Array.isArray(event.legacyIds) ? event.legacyIds.length : 0),
+        0,
+      );
+      for (let aliasIndex = 0; aliasIndex < maxAliasCount; aliasIndex++) {
+        idSequences.push(events.map((event) => {
+          const aliases = Array.isArray(event.legacyIds) ? event.legacyIds : [];
+          return aliases[aliasIndex] || event.id;
+        }));
+      }
+      return Array.from(new Set(idSequences.map((ids) => stableRevision(ids.join("|")))));
+    };
+    const regularRevisions = buildRevisions(regularEvents);
+    const cwlRevisions = buildRevisions(cwlEvents);
+    const regularRevision = regularRevisions[0];
+    const cwlRevision = cwlRevisions[0];
     const signals = [];
 
     if (regular.possibleAttacks > 0 && regular.missedAttacks >= settings.regularMissedThreshold) {
@@ -567,6 +588,13 @@
           formatNumber(cwl.averageDestruction, 0) + "% · " +
           cwl.countedAttacks + " " + plural(cwl.countedAttacks, "attack"),
       });
+    }
+    for (const signal of signals) {
+      const revisions = signal.reasonCode.indexOf("regular_") === 0 ? regularRevisions : cwlRevisions;
+      const parts = signal.id.split(":");
+      signal.legacyIds = revisions.slice(1).map((revision) =>
+        [parts[0], revision].concat(parts.slice(2)).join(":")
+      );
     }
     return signals;
   };
@@ -664,7 +692,10 @@
       const signals = player && player.automaticEligible ? buildSignals(evidence, settings) : [];
       const signalIds = signals.map((signal) => signal.id);
       const dismissed = new Set(Array.isArray(value && value.dismissedSignalIds) ? value.dismissedSignalIds : []);
-      const hasNewSignal = signals.some((signal) => !dismissed.has(signal.id));
+      const hasNewSignal = signals.some((signal) =>
+        ![signal.id].concat(Array.isArray(signal.legacyIds) ? signal.legacyIds : [])
+          .some((id) => dismissed.has(id))
+      );
       let status = value ? toText(value.status).trim() : (signals.length ? "needs_review" : "");
       if ((status === "closed" || status === "dismissed") && hasNewSignal) status = "needs_review";
       if (status === "dismissed") status = "closed";
@@ -837,6 +868,7 @@
       error: "",
       noticeTag: "",
       pendingDismissTags: new Set(),
+      pendingIgnoreTags: new Set(),
     };
 
     const getMount = () => document.getElementById("warFollowupMount");
@@ -964,6 +996,67 @@
           }
           const detail = err && err.message ? err.message : String(err);
           setNotice(playerName + ": Could not save No action. " + detail, true, tag);
+          render();
+          return null;
+        });
+    };
+
+    const applyLocalIgnoreState = (tagRaw, ignoredRaw, updatedAtRaw) => {
+      const tag = normalizeTag(tagRaw);
+      if (!tag) return;
+      const tags = new Set(state.privateState.settings.trustedPlayerTags);
+      if (ignoredRaw) tags.add(tag);
+      else tags.delete(tag);
+      state.privateState.settings = sanitizeSettings(Object.assign({}, state.privateState.settings, {
+        trustedPlayerTags: Array.from(tags),
+        updatedAt: toText(updatedAtRaw).trim() || state.privateState.settings.updatedAt,
+      }));
+      recompute();
+    };
+
+    const ignoreAccountInBackground = (item) => {
+      const tag = normalizeTag(item && item.tag);
+      if (!tag || state.saving || state.pendingIgnoreTags.has(tag)) return null;
+      const playerName = toText(item && item.player && item.player.name).trim() || tag;
+
+      state.pendingIgnoreTags.add(tag);
+      state.selectedTag = "";
+      state.decisionMode = "";
+      setNotice("", false);
+      applyLocalIgnoreState(tag, true, "");
+      render();
+
+      const finishSaved = (result) => {
+        if (!result || normalizeTag(result.tag) !== tag || result.trusted !== true) {
+          throw new Error("The server did not confirm the account exclusion.");
+        }
+        state.pendingIgnoreTags.delete(tag);
+        applyLocalIgnoreState(tag, true, result.updatedAt);
+        setNotice(playerName + " will stay out of war follow-up.", false);
+        render();
+        return result;
+      };
+
+      return Promise.resolve()
+        .then(() => callServer("setWarFollowupTrustedAccount", [tag, true, getPassword()]))
+        .then(finishSaved)
+        .catch(async (err) => {
+          // If the write committed but its response was interrupted, verify the
+          // saved value before putting the player back into the moderator's way.
+          try {
+            const status = await callServer("getWarFollowupTrustStatus", [tag, getPassword()]);
+            if (status && status.trusted === true) return finishSaved(status);
+          } catch {
+            // The original error below is the useful one to show.
+          }
+          state.pendingIgnoreTags.delete(tag);
+          applyLocalIgnoreState(tag, false, "");
+          if (state.work.items.some((entry) => entry.tag === tag)) {
+            state.selectedTag = tag;
+            state.decisionMode = "";
+          }
+          const detail = err && err.message ? err.message : String(err);
+          setNotice(playerName + ": Could not save Always ignore. " + detail, true, tag);
           render();
           return null;
         });
@@ -1405,7 +1498,9 @@
     const renderDecisionStart = (section, item) => {
       section.appendChild(createElement("h3", "wfu-drawer-section__title", "Decision"));
       const actions = createElement("div", "wfu-decision-grid");
-      actions.appendChild(createButton("No action", "btn secondary wfu-decision-btn", () => dismissInBackground(item)));
+      const noAction = createButton("No action", "btn secondary wfu-decision-btn", () => dismissInBackground(item));
+      noAction.title = "Dismiss this evidence. Genuinely new war evidence can bring it back.";
+      actions.appendChild(noAction);
       actions.appendChild(createButton("Keep watching", "btn secondary wfu-decision-btn", () => {
         state.decisionMode = "watch";
         render();
@@ -1415,6 +1510,9 @@
         render();
       }));
       section.appendChild(actions);
+      const alwaysIgnore = createButton("Always ignore", "wfu-always-ignore", () => ignoreAccountInBackground(item));
+      alwaysIgnore.title = "Keep this account out of war work and Discord gaps until it is enabled again in the roster list.";
+      section.appendChild(alwaysIgnore);
     };
 
     const renderWatchForm = (section, item) => {
@@ -2045,7 +2143,7 @@
       state.initialized = false;
     };
 
-    return { init, destroy, load, render, dismissInBackground, state };
+    return { init, destroy, load, render, dismissInBackground, ignoreAccountInBackground, state };
   };
 
   let defaultController = null;
