@@ -2195,16 +2195,6 @@
     if (shell) shell.setAttribute("inert", "");
   };
 
-  // Refresh startup loader text while already visible.
-  const refreshStartupLoader_ = (stageRaw, messageRaw) => {
-    const overlay = $("#startupLoader");
-    if (!overlay || overlay.classList.contains("hidden")) {
-      showStartupLoader_(stageRaw, messageRaw);
-      return;
-    }
-    setStartupLoaderCopy_(stageRaw, messageRaw);
-  };
-
   // Hide startup loader and restore shell interactions.
   const hideStartupLoader_ = async (optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -2251,6 +2241,21 @@
       overlay.addEventListener("transitionend", onTransitionEnd);
       setTimeout(finish, 320);
     });
+  };
+
+  // Show a non-blocking workspace skeleton while authenticated data hydrates.
+  const setAdminWorkspaceLoading_ = (loadingRaw) => {
+    const loading = !!loadingRaw;
+    const panel = $("#adminPanel");
+    const skeleton = $("#adminWorkspaceSkeleton");
+    if (panel) {
+      panel.classList.toggle("is-loading-workspace", loading);
+      panel.setAttribute("aria-busy", loading ? "true" : "false");
+    }
+    if (skeleton) {
+      skeleton.classList.toggle("hidden", !loading);
+      skeleton.setAttribute("aria-hidden", loading ? "false" : "true");
+    }
   };
 
   // Sync overlay body state.
@@ -7050,6 +7055,7 @@
     setActiveAdminTab(state.activeAdminTab, { focusButton: false });
     queueAdminCompactTabsVisibilitySync();
     setAuthCardUnlocked(false);
+    setAdminWorkspaceLoading_(false);
     renderPreviewFromState();
     renderImportUi();
     syncPublicConfigEditorFromState_();
@@ -7101,6 +7107,7 @@
 
         show("#adminPanel", true);
         setAuthCardUnlocked(true);
+        setAdminWorkspaceLoading_(true);
         setActiveAdminTab(state.activeAdminTab, { focusButton: false });
         queueAdminCompactTabsVisibilitySync();
         if (loginBtn) {
@@ -7110,7 +7117,6 @@
         if (pwInput) pwInput.disabled = true;
         refreshAdminWorkflowUi();
         setLoginStatus("Unlocked. Loading workspace...");
-        refreshStartupLoader_("Step 2 of 3", "Loading rosters and refresh settings...");
         const settingsLoadPromise = Promise.allSettled([
           loadAutoRefreshSettings(),
           loadDonationRefreshSettings(),
@@ -7121,6 +7127,7 @@
           })
           .then(() => ({ ok: true }))
           .catch((loadErr) => ({ ok: false, error: loadErr }));
+        await hideStartupLoader_({ skipMinimumDelay: true });
         const loadResults = await Promise.all([settingsLoadPromise, activeConfigLoadPromise]);
         const settingsResults = Array.isArray(loadResults[0]) ? loadResults[0] : [];
         const activeConfigResult = loadResults[1] && typeof loadResults[1] === "object"
@@ -7132,14 +7139,14 @@
         }
         if (activeConfigResult.ok) {
           setLoginStatus("Unlocked.");
-          refreshStartupLoader_("Step 3 of 3", "Opening admin panel...");
         } else {
           setLoginStatus("Unlocked (auto-load failed).");
           setStatus("Auto-load failed. Refresh and unlock again.");
-          refreshStartupLoader_("Step 3 of 3", "Opening admin panel without roster data...");
         }
+        setAdminWorkspaceLoading_(false);
         unlockSucceeded = true;
       } catch (err) {
+        setAdminWorkspaceLoading_(false);
         show("#adminPanel", false);
         setAuthCardUnlocked(false);
         setLoginStatus("Authentication failed.");
@@ -7152,7 +7159,9 @@
         renderDonationRefreshUi();
         alert("Unlock failed: " + toErrorMessage(err));
       } finally {
-        await hideStartupLoader_({ skipMinimumDelay: !unlockSucceeded });
+        if (!unlockSucceeded) {
+          await hideStartupLoader_({ skipMinimumDelay: true });
+        }
         if (!unlockSucceeded) {
           if (loginBtn) {
             loginBtn.disabled = false;

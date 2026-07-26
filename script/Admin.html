@@ -747,6 +747,92 @@
       min-width: 0;
     }
 
+    .admin-shell.is-loading-workspace > :not(.admin-workspace-skeleton) {
+      display: none;
+    }
+
+    .admin-workspace-skeleton {
+      width: 100%;
+      max-width: 1240px;
+      margin-inline: auto;
+      display: grid;
+      gap: 12px;
+      pointer-events: none;
+    }
+
+    .admin-workspace-skeleton.hidden {
+      display: none;
+    }
+
+    .admin-workspace-skeleton__status {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .admin-workspace-skeleton__command,
+    .admin-workspace-skeleton__tabs,
+    .admin-workspace-skeleton__card {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .admin-workspace-skeleton__command {
+      min-height: 92px;
+      display: grid;
+      gap: 14px;
+      align-content: center;
+    }
+
+    .admin-workspace-skeleton__actions,
+    .admin-workspace-skeleton__tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .admin-workspace-skeleton__tabs {
+      min-height: 54px;
+    }
+
+    .admin-workspace-skeleton__grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .admin-workspace-skeleton__card {
+      min-height: 190px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .admin-workspace-skeleton__row {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    @media (max-width: 760px) {
+      .admin-workspace-skeleton__grid {
+        grid-template-columns: 1fr;
+      }
+
+      .admin-workspace-skeleton__grid .admin-workspace-skeleton__card:not(:first-child) {
+        display: none;
+      }
+    }
+
     .admin-command-bar {
       padding: 12px;
       position: static;
@@ -1573,7 +1659,53 @@
       </div>
     </section>
 
-    <div id="adminPanel" class="admin-shell hidden">
+    <div id="adminPanel" class="admin-shell hidden" aria-busy="false">
+      <div id="adminWorkspaceSkeleton" class="admin-workspace-skeleton hidden" role="status" aria-live="polite"
+        aria-atomic="true" aria-hidden="true">
+        <span class="admin-workspace-skeleton__status">Admin unlocked. Loading rosters and refresh settings.</span>
+        <div class="admin-workspace-skeleton__command view-loading-skeleton" aria-hidden="true">
+          <span class="view-loading-skeleton__line view-loading-skeleton__line--title"></span>
+          <div class="admin-workspace-skeleton__actions">
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--pill"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--pill"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--pill"></span>
+          </div>
+        </div>
+        <div class="admin-workspace-skeleton__tabs view-loading-skeleton" aria-hidden="true">
+          <span class="view-loading-skeleton__line view-loading-skeleton__line--chip"></span>
+          <span class="view-loading-skeleton__line view-loading-skeleton__line--chip"></span>
+          <span class="view-loading-skeleton__line view-loading-skeleton__line--chip"></span>
+          <span class="view-loading-skeleton__line view-loading-skeleton__line--chip"></span>
+        </div>
+        <div class="admin-workspace-skeleton__grid" aria-hidden="true">
+          <div class="admin-workspace-skeleton__card view-loading-skeleton">
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--title"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--subtitle"></span>
+            <div class="admin-workspace-skeleton__row">
+              <span class="view-loading-skeleton__line view-loading-skeleton__line--avatar"></span>
+              <span class="view-loading-skeleton__line view-loading-skeleton__line--name"></span>
+              <span class="view-loading-skeleton__line view-loading-skeleton__line--score"></span>
+            </div>
+            <div class="admin-workspace-skeleton__row">
+              <span class="view-loading-skeleton__line view-loading-skeleton__line--avatar"></span>
+              <span class="view-loading-skeleton__line view-loading-skeleton__line--name"></span>
+              <span class="view-loading-skeleton__line view-loading-skeleton__line--score"></span>
+            </div>
+          </div>
+          <div class="admin-workspace-skeleton__card view-loading-skeleton">
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--title"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--subtitle"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--value"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--meta"></span>
+          </div>
+          <div class="admin-workspace-skeleton__card view-loading-skeleton">
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--title"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--subtitle"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--metric"></span>
+            <span class="view-loading-skeleton__line view-loading-skeleton__line--submetric"></span>
+          </div>
+        </div>
+      </div>
       <section class="card admin-command-bar">
         <div class="admin-command-grid">
           <div class="admin-command-actions admin-command-actions--compact">
@@ -1867,7 +1999,7 @@
   <script src="<?= staticBaseUrl ?>generator.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
   <script src="<?= staticBaseUrl ?>client.js?v=<?!= encodeURIComponent(assetVersion) ?>"></script>
   <script src="<?= staticBaseUrl ?>war-followup.js?v=<?!= encodeURIComponent(String(assetVersion) + '-20260726f') ?>"></script>
-  <script src="<?= staticBaseUrl ?>admin.js?v=<?!= encodeURIComponent(String(assetVersion) + '-20260726c') ?>"></script>
+  <script src="<?= staticBaseUrl ?>admin.js?v=<?!= encodeURIComponent(String(assetVersion) + '-20260726d') ?>"></script>
 </body>
 
 </html>

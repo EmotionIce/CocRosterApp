@@ -24,6 +24,38 @@ test("admin shells both expose the CWL preference apply controls", () => {
   }
 });
 
+test("admin shells expose the optimistic workspace skeleton", () => {
+  const shells = [
+    ["admin.html", readShell("admin.html")],
+    ["console.html", readShell("console.html")],
+    ["script/Admin.html", readScriptShell()],
+  ];
+  for (const [name, html] of shells) {
+    assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
+    assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
+    assert.match(html, /Admin unlocked\. Loading rosters and refresh settings\./, name);
+    assert.match(html, /admin\.js\?v=[^"]*20260726d/, name);
+  }
+});
+
+test("admin unlock blocks only for authentication and hydrates behind the skeleton", () => {
+  const adminClient = readShell("admin.js");
+  const verification = adminClient.indexOf('await runServerMethod("verifyAdminPassword"');
+  const showSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(true)", verification);
+  const startLoads = adminClient.indexOf("const settingsLoadPromise", showSkeleton);
+  const hideBlockingLoader = adminClient.indexOf("await hideStartupLoader_({ skipMinimumDelay: true })", startLoads);
+  const awaitHydration = adminClient.indexOf("const loadResults = await Promise.all", hideBlockingLoader);
+  const hideSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(false)", awaitHydration);
+
+  assert.ok(verification >= 0);
+  assert.ok(showSkeleton > verification);
+  assert.ok(startLoads > showSkeleton);
+  assert.ok(hideBlockingLoader > startLoads);
+  assert.ok(awaitHydration > hideBlockingLoader);
+  assert.ok(hideSkeleton > awaitHydration);
+  assert.doesNotMatch(adminClient, /refreshStartupLoader_\("Step [23] of 3"/);
+});
+
 test("admin shells prefer the same-origin Worker API and retain Apps Script as fallback", () => {
   const publicConfig = readShell("public-config.js");
   assert.match(publicConfig, /ROSTER_ADMIN_API_BASE\s*=\s*configuredAdminApiBase\s*\|\|\s*"\/api\/admin"/);
