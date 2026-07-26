@@ -106,6 +106,92 @@ test("candidate signals use only regular-war and CWL evidence with conservative 
   );
 });
 
+test("candidate signals fall back to finalized per-roster war history and current CWL data", () => {
+  const rosterData = buildRosterData();
+  delete rosterData.playerWarPerformance;
+  const roster = rosterData.rosters[0];
+  roster.warPerformance = {
+    lastRefreshedAt: "2026-07-25T01:00:00.000Z",
+    regularWarHistoryByKey: {
+      "rw-old": {
+        warKey: "rw-old",
+        authoritative: true,
+        finalizedAt: "2026-07-10T00:00:00.000Z",
+        statsByTag: {
+          "#P0LYGQ": {
+            possibleAttacks: 2, usedAttacks: 2, attacksMade: 2, attacksMissed: 0,
+            countedAttacks: 2, starsTotal: 6, totalDestruction: 200,
+          },
+        },
+      },
+      "rw-ignored": {
+        warKey: "rw-ignored",
+        authoritative: false,
+        finalizedAt: "2026-07-25T00:00:00.000Z",
+        statsByTag: {
+          "#P0LYGQ": { possibleAttacks: 2, usedAttacks: 0, attacksMissed: 2 },
+        },
+      },
+      "rw-recent": {
+        warKey: "rw-recent",
+        authoritative: true,
+        finalizedAt: "2026-07-24T00:00:00.000Z",
+        statsByTag: {
+          "#P0LYGQ": {
+            possibleAttacks: 2, usedAttacks: 0, attacksMade: 0, attacksMissed: 2,
+            countedAttacks: 0, starsTotal: 0, totalDestruction: 0,
+          },
+        },
+        formStatsByTag: {
+          "#P0LYGQ": {
+            countedAttacks: 0, starsTotal: 0, totalDestruction: 0,
+          },
+        },
+      },
+    },
+  };
+  roster.cwlStats = {
+    season: "2026-07-03",
+    lastRefreshedAt: "2026-07-25T02:00:00.000Z",
+    byTag: {
+      "#P0LYGQ": {
+        resolvedWarDays: 4,
+        attacksMade: 3,
+        missedAttacks: 1,
+        countedAttacks: 3,
+        starsTotal: 4,
+        totalDestruction: 205,
+      },
+    },
+  };
+
+  const work = followup.buildWorkItems(rosterData, {
+    settings: {
+      regularLookbackWars: 1,
+      regularMissedThreshold: 2,
+      regularPerformanceEnabled: false,
+      cwlMissedThreshold: 1,
+      cwlPerformanceEnabled: true,
+      cwlMinimumAttacks: 3,
+      cwlAverageStarsThreshold: 1.8,
+      cwlAverageDestructionThreshold: 75,
+    },
+    cases: [],
+  });
+  const item = work.items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.ok(item, "the production-shaped roster data must create moderation work");
+  assert.deepEqual(
+    item.signals.map((signal) => signal.reasonCode).sort(),
+    ["cwl_missed", "cwl_performance", "regular_missed"],
+  );
+  assert.equal(item.evidence.regularEvents.length, 1, "the configured recent-war window must be respected");
+  assert.equal(item.evidence.regularEvents[0].id, "rw-recent");
+  assert.equal(item.evidence.regularEvents[0].clanTag, "#MAIN", "recovery evidence must retain its roster clan");
+  assert.equal(item.evidence.cwl.possibleAttacks, 4);
+  assert.equal(item.evidence.cwl.warCount, 4);
+  assert.equal(item.evidence.cwlEvents[0].id, "cwl:2026-07-03");
+});
+
 test("dismissed evidence stays closed until a genuinely new war revision appears", () => {
   const rosterData = buildRosterData();
   const initial = followup.buildWorkItems(rosterData, { settings: {}, cases: [] });
@@ -151,6 +237,52 @@ test("hero-down recovery counts consecutive clean regular wars only in the selec
   assert.equal(progress.completedWars, 2);
   assert.equal(progress.ready, true);
   assert.equal(progress.missedAttacks, 1);
+});
+
+test("per-roster fallback follows hero-down wars across roster boundaries", () => {
+  const rosterData = buildRosterData();
+  delete rosterData.playerWarPerformance;
+  rosterData.rosters[0].warPerformance = {
+    regularWarHistoryByKey: {
+      source: {
+        warKey: "source",
+        authoritative: true,
+        finalizedAt: "2026-07-09T00:00:00.000Z",
+        statsByTag: {
+          "#P0LYGQ": { possibleAttacks: 2, usedAttacks: 1, attacksMissed: 1 },
+        },
+      },
+    },
+  };
+  rosterData.rosters[1].warPerformance = {
+    regularWarHistoryByKey: {
+      recovery: {
+        warKey: "recovery",
+        authoritative: true,
+        finalizedAt: "2026-07-12T00:00:00.000Z",
+        statsByTag: {
+          "#P0LYGQ": { possibleAttacks: 2, usedAttacks: 2, attacksMissed: 0 },
+        },
+      },
+    },
+  };
+  const work = followup.buildWorkItems(rosterData, {
+    settings: { regularLookbackWars: 8 },
+    cases: [{
+      tag: "#P0LYGQ",
+      status: "hero_down",
+      recoveryStartedAt: "2026-07-10T00:00:00.000Z",
+      targetClanTag: "#TRAIN",
+      recoveryWarTarget: 1,
+      requireNoMisses: true,
+    }],
+  });
+  const item = work.items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.ok(item);
+  assert.equal(item.evidence.regularEvents.length, 2);
+  assert.equal(item.recovery.totalWars, 1);
+  assert.equal(item.recovery.ready, true);
+  assert.equal(item.status, "ready");
 });
 
 test("decision DM states the exact evidence, clan handoff, and recovery requirement", () => {

@@ -160,6 +160,40 @@
 
   const getRosters = (rosterData) => Array.isArray(rosterData && rosterData.rosters) ? rosterData.rosters : [];
 
+  const getTaggedValue = (byTagRaw, tagRaw) => {
+    const byTag = byTagRaw && typeof byTagRaw === "object" ? byTagRaw : {};
+    const tag = normalizeTag(tagRaw);
+    if (!tag) return null;
+    if (byTag[tag] && typeof byTag[tag] === "object") return byTag[tag];
+    const storedKey = Object.keys(byTag).find((key) => normalizeTag(key) === tag);
+    return storedKey && byTag[storedKey] && typeof byTag[storedKey] === "object" ? byTag[storedKey] : null;
+  };
+
+  const rosterContainsTag = (rosterRaw, tagRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+    const tag = normalizeTag(tagRaw);
+    if (!tag) return false;
+    return ["main", "subs", "missing"].some((key) =>
+      (Array.isArray(roster[key]) ? roster[key] : []).some((player) => normalizeTag(player && player.tag) === tag)
+    );
+  };
+
+  const findEvidenceRoster = (rosterData, tagRaw, identityRaw) => {
+    const rosters = getRosters(rosterData);
+    const identity = identityRaw && typeof identityRaw === "object" ? identityRaw : {};
+    const preferredId = toText(identity.rosterId || identity.sourceRosterId).trim();
+    const preferredClanTag = normalizeTag(identity.clanTag || identity.sourceClanTag);
+    if (preferredId) {
+      const match = rosters.find((roster) => toText(roster && roster.id).trim() === preferredId);
+      if (match) return match;
+    }
+    if (preferredClanTag) {
+      const match = rosters.find((roster) => normalizeTag(roster && roster.connectedClanTag) === preferredClanTag);
+      if (match) return match;
+    }
+    return rosters.find((roster) => rosterContainsTag(roster, tagRaw)) || null;
+  };
+
   const buildPlayerDirectory = (rosterData) => {
     const data = rosterData && typeof rosterData === "object" ? rosterData : {};
     const metricsByTag = data.playerMetrics && data.playerMetrics.byTag && typeof data.playerMetrics.byTag === "object"
@@ -269,17 +303,166 @@
     return { events, totals: statsSummary(totals) };
   };
 
-  const buildEvidenceForTag = (rosterData, tagRaw, settingsRaw) => {
+  const combineRegularHistoryStats = (statsRaw, formStatsRaw) => {
+    const stats = statsRaw && typeof statsRaw === "object" ? Object.assign({}, statsRaw) : {};
+    const formStats = formStatsRaw && typeof formStatsRaw === "object" ? formStatsRaw : null;
+    if (!formStats) return stats;
+    for (const key of [
+      "countedAttacks",
+      "formEligibleAttacks",
+      "starsTotal",
+      "totalDestruction",
+      "threeStarCount",
+      "hitUpCount",
+      "sameThHitCount",
+      "hitDownCount",
+    ]) {
+      if (formStats[key] != null) stats[key] = formStats[key];
+    }
+    return stats;
+  };
+
+  const buildRosterRegularEvidence = (rosterRaw, tagRaw, settingsRaw) => {
+    const settings = sanitizeSettings(settingsRaw);
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+    const performance = roster.warPerformance && typeof roster.warPerformance === "object"
+      ? roster.warPerformance
+      : {};
+    const history = performance.regularWarHistoryByKey && typeof performance.regularWarHistoryByKey === "object"
+      ? performance.regularWarHistoryByKey
+      : {};
+    const clanTag = normalizeTag(roster.connectedClanTag);
+    const events = Object.keys(history)
+      .map((key) => {
+        const entry = history[key] && typeof history[key] === "object" ? history[key] : null;
+        if (!entry || entry.authoritative !== true) return null;
+        const stats = getTaggedValue(entry.statsByTag, tagRaw);
+        const formStats = getTaggedValue(entry.formStatsByTag, tagRaw);
+        if (!stats && !formStats) return null;
+        const id = toText(entry.warKey || key).trim();
+        if (!id) return null;
+        const normalized = normalizeStats(combineRegularHistoryStats(stats, formStats));
+        normalized.warCount = 1;
+        return {
+          id,
+          label: id,
+          at: toText(entry.finalizedAt || entry.lastUpdatedAt).trim(),
+          clanTag,
+          stats: normalized,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => parseMs(right.at) - parseMs(left.at) || right.id.localeCompare(left.id))
+      .slice(0, settings.regularLookbackWars);
+    const totals = emptyStats();
+    for (const event of events) addStats(totals, event.stats);
+    totals.warCount = events.length;
+    return { events, totals: statsSummary(totals) };
+  };
+
+  const buildRosterRegularEvidenceForTag = (rosterData, tagRaw, settingsRaw, preferredRosterRaw) => {
+    const settings = sanitizeSettings(settingsRaw);
+    const preferredRoster = preferredRosterRaw && typeof preferredRosterRaw === "object" ? preferredRosterRaw : null;
+    const rosters = getRosters(rosterData);
+    const orderedRosters = preferredRoster
+      ? [preferredRoster].concat(rosters.filter((roster) => roster !== preferredRoster))
+      : rosters;
+    const seen = new Set();
+    const events = [];
+    for (const roster of orderedRosters) {
+      const rosterEvidence = buildRosterRegularEvidence(roster, tagRaw, settings);
+      for (const event of rosterEvidence.events) {
+        const key = normalizeTag(event.clanTag) + "|" + event.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        events.push(event);
+      }
+    }
+    events.sort((left, right) => parseMs(right.at) - parseMs(left.at) || right.id.localeCompare(left.id));
+    events.splice(settings.regularLookbackWars);
+    const totals = emptyStats();
+    for (const event of events) addStats(totals, event.stats);
+    totals.warCount = events.length;
+    return { events, totals: statsSummary(totals) };
+  };
+
+  const buildRosterCwlEvidence = (rosterRaw, tagRaw) => {
+    const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+    const cwlStats = roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
+    const season = toText(cwlStats.season).trim();
+    const playerStats = getTaggedValue(cwlStats.byTag, tagRaw);
+    if (!season || !playerStats) return { events: [], totals: statsSummary(emptyStats()) };
+    const stats = normalizeStats(playerStats);
+    stats.warCount = toInt(
+      playerStats.resolvedWarDays != null
+        ? playerStats.resolvedWarDays
+        : (playerStats.daysInLineup != null ? playerStats.daysInLineup : stats.possibleAttacks)
+    );
+    const event = {
+      id: "cwl:" + season,
+      label: season,
+      at: season + "T00:00:00.000Z",
+      clanTag: normalizeTag(roster.connectedClanTag),
+      stats,
+    };
+    const totals = emptyStats();
+    addStats(totals, stats);
+    totals.warCount = stats.warCount;
+    return { events: [event], totals: statsSummary(totals) };
+  };
+
+  const buildRosterCwlEvidenceForTag = (rosterData, tagRaw, settingsRaw, preferredRosterRaw) => {
+    const settings = sanitizeSettings(settingsRaw);
+    const preferredRoster = preferredRosterRaw && typeof preferredRosterRaw === "object" ? preferredRosterRaw : null;
+    const rosters = getRosters(rosterData);
+    const orderedRosters = preferredRoster
+      ? [preferredRoster].concat(rosters.filter((roster) => roster !== preferredRoster))
+      : rosters;
+    const seen = new Set();
+    const events = [];
+    for (const roster of orderedRosters) {
+      const rosterEvidence = buildRosterCwlEvidence(roster, tagRaw);
+      for (const event of rosterEvidence.events) {
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        events.push(event);
+      }
+    }
+    events.sort((left, right) => parseMs(right.at) - parseMs(left.at) || right.id.localeCompare(left.id));
+    events.splice(settings.cwlLookbackSeasons);
+    const totals = emptyStats();
+    for (const event of events) addStats(totals, event.stats);
+    totals.warCount = events.reduce((sum, event) => sum + toInt(event.stats && event.stats.warCount), 0);
+    return { events, totals: statsSummary(totals) };
+  };
+
+  const buildEvidenceForTag = (rosterData, tagRaw, settingsRaw, identityRaw) => {
     const tag = normalizeTag(tagRaw);
     const store = rosterData && rosterData.playerWarPerformance && typeof rosterData.playerWarPerformance === "object"
       ? rosterData.playerWarPerformance
       : {};
     const byTag = store.byTag && typeof store.byTag === "object" ? store.byTag : {};
-    const entry = tag && byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : {};
-    const regular = buildRegularEvidence(entry, settingsRaw);
-    const cwl = buildCwlEvidence(entry, settingsRaw);
+    const entry = getTaggedValue(byTag, tag) || {};
+    const roster = findEvidenceRoster(rosterData, tag, identityRaw);
+    const globalRegular = buildRegularEvidence(entry, settingsRaw);
+    const globalCwl = buildCwlEvidence(entry, settingsRaw);
+    const regular = globalRegular.events.length
+      ? globalRegular
+      : buildRosterRegularEvidenceForTag(rosterData, tag, settingsRaw, roster);
+    const cwl = globalCwl.events.length
+      ? globalCwl
+      : buildRosterCwlEvidenceForTag(rosterData, tag, settingsRaw, roster);
+    const rosterPerformance = roster && roster.warPerformance && typeof roster.warPerformance === "object"
+      ? roster.warPerformance
+      : {};
+    const rosterCwl = roster && roster.cwlStats && typeof roster.cwlStats === "object" ? roster.cwlStats : {};
     return {
-      capturedAt: toText(store.updatedAt || (rosterData && rosterData.lastUpdatedAt)).trim(),
+      capturedAt: toText(
+        store.updatedAt ||
+        rosterPerformance.lastRefreshedAt ||
+        rosterCwl.lastRefreshedAt ||
+        (rosterData && rosterData.lastUpdatedAt)
+      ).trim(),
       regular: regular.totals,
       cwl: cwl.totals,
       regularEvents: regular.events,
@@ -434,7 +617,11 @@
     for (const tag of tags) {
       const player = directory.byTag[tag] || null;
       const value = caseByTag[tag] || null;
-      const evidence = buildEvidenceForTag(rosterData, tag, settings);
+      const evidenceOwner = player || {
+        sourceRosterId: toText(value && value.sourceRosterId).trim(),
+        sourceClanTag: normalizeTag(value && value.sourceClanTag),
+      };
+      const evidence = buildEvidenceForTag(rosterData, tag, settings, evidenceOwner);
       const signals = player && player.automaticEligible ? buildSignals(evidence, settings) : [];
       const signalIds = signals.map((signal) => signal.id);
       const dismissed = new Set(Array.isArray(value && value.dismissedSignalIds) ? value.dismissedSignalIds : []);
