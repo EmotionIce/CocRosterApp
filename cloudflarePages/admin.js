@@ -5280,6 +5280,7 @@
       pill.className = "player-admin-summary-pill";
       pill.textContent = text;
       summaryMeta.appendChild(pill);
+      return pill;
     };
     if (trackingMode === "cwl") {
       const prepLockState = prepActive && roster && roster.cwlPreparation && roster.cwlPreparation.lockStateByTag && typeof roster.cwlPreparation.lockStateByTag === "object"
@@ -5322,6 +5323,86 @@
     tray.className = "player-admin-tray hidden";
     tray.setAttribute("data-player-admin-tray", "1");
     wrap.appendChild(tray);
+
+    const trustPanel = document.createElement("div");
+    trustPanel.className = "player-admin-settings";
+    const trustTitle = document.createElement("div");
+    trustTitle.className = "player-admin-settings-title";
+    trustTitle.textContent = "Moderation";
+    trustPanel.appendChild(trustTitle);
+    const trustButton = mkPlayerActionButton("Trusted account", "secondary player-admin-toggle is-off");
+    trustButton.disabled = true;
+    trustButton.title = "Trusted accounts are hidden from war follow-up and Discord gaps.";
+    trustPanel.appendChild(trustButton);
+    tray.appendChild(trustPanel);
+
+    let trustLoaded = false;
+    let trustBusy = false;
+    let trustedAccount = false;
+    let trustedSummaryPill = null;
+    let trustError = "";
+
+    const renderTrustControl = () => {
+      trustButton.disabled = trustBusy || !trustLoaded || !!trustError;
+      trustButton.classList.toggle("is-on", trustLoaded && trustedAccount);
+      trustButton.classList.toggle("is-off", !trustLoaded || !trustedAccount);
+      trustButton.setAttribute("aria-pressed", trustedAccount ? "true" : "false");
+      trustButton.textContent = trustBusy
+        ? "Trusted account\u2026"
+        : (trustError ? "Trust status unavailable" : ("Trusted account: " + (trustedAccount ? "ON" : "OFF")));
+      if (trustedAccount && !trustedSummaryPill) trustedSummaryPill = addSummaryPill("trusted");
+      if (!trustedAccount && trustedSummaryPill) {
+        trustedSummaryPill.remove();
+        trustedSummaryPill = null;
+      }
+    };
+
+    const loadTrustControl = async () => {
+      if (trustLoaded || trustBusy || !state.password) return;
+      trustBusy = true;
+      trustError = "";
+      trustButton.title = "Trusted accounts are hidden from war follow-up and Discord gaps.";
+      renderTrustControl();
+      try {
+        const result = await runServerMethod("getWarFollowupTrustStatus", [playerTag, state.password]);
+        trustedAccount = !!(result && result.trusted);
+        trustLoaded = true;
+      } catch (err) {
+        trustError = toErrorMessage(err);
+        trustButton.title = "Trust status unavailable: " + trustError;
+      } finally {
+        trustBusy = false;
+        renderTrustControl();
+      }
+    };
+
+    trustButton.onclick = async () => {
+      if (trustBusy) return;
+      if (!trustLoaded) {
+        await loadTrustControl();
+        return;
+      }
+      trustBusy = true;
+      renderTrustControl();
+      try {
+        const result = await runServerMethod("setWarFollowupTrustedAccount", [
+          playerTag,
+          !trustedAccount,
+          state.password,
+        ]);
+        trustedAccount = !!(result && result.trusted);
+        dispatchAdminEvent_("admin:warfollowuptrustchange", {
+          tag: playerTag,
+          trusted: trustedAccount,
+          updatedAt: toStr(result && result.updatedAt).trim(),
+        });
+      } catch (err) {
+        alert("Trusted account update failed: " + toErrorMessage(err));
+      } finally {
+        trustBusy = false;
+        renderTrustControl();
+      }
+    };
 
     const row = document.createElement("div");
     row.className = "player-admin-buttons";
@@ -5558,6 +5639,7 @@
       clearPendingProfileReopen();
       const isExpanded = wrap.classList.contains("is-expanded");
       setPlayerAdminTrayExpanded(wrap, !isExpanded);
+      if (!isExpanded) loadTrustControl();
     };
 
     moveBtn.onclick = () => {

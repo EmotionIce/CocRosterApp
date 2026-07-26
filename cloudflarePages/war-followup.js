@@ -27,6 +27,7 @@
     defaultHeroDownRosterId: "",
     missingDiscordEnabled: true,
     moderatorNames: [],
+    trustedPlayerTags: [],
   };
 
   const STATUS_ORDER = ["needs_review", "needs_dm", "hero_down", "ready", "watching", "closed"];
@@ -106,6 +107,11 @@
         .map((name) => toText(name).trim())
         .filter(Boolean)
         .slice(0, 40),
+      trustedPlayerTags: Array.from(new Set(
+        (Array.isArray(value.trustedPlayerTags) ? value.trustedPlayerTags : [])
+          .map(normalizeTag)
+          .filter(Boolean)
+      )).sort().slice(0, 1000),
       updatedAt: toText(value.updatedAt).trim(),
     };
   };
@@ -194,12 +200,15 @@
     return rosters.find((roster) => rosterContainsTag(roster, tagRaw)) || null;
   };
 
-  const buildPlayerDirectory = (rosterData) => {
+  const buildPlayerDirectory = (rosterData, settingsRaw) => {
     const data = rosterData && typeof rosterData === "object" ? rosterData : {};
+    const settings = sanitizeSettings(settingsRaw);
+    const trustedTags = new Set(settings.trustedPlayerTags);
     const metricsByTag = data.playerMetrics && data.playerMetrics.byTag && typeof data.playerMetrics.byTag === "object"
       ? data.playerMetrics.byTag
       : {};
     const byTag = {};
+    const missingTags = new Set();
     const rosterList = [];
     for (const rosterRaw of getRosters(data)) {
       const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
@@ -210,10 +219,13 @@
         trackingMode: toText(roster.trackingMode).trim(),
       };
       if (rosterInfo.id) rosterList.push(rosterInfo);
+      for (const playerRaw of Array.isArray(roster.missing) ? roster.missing : []) {
+        const tag = normalizeTag(playerRaw && playerRaw.tag);
+        if (tag) missingTags.add(tag);
+      }
       const groups = [
         ["main", Array.isArray(roster.main) ? roster.main : []],
         ["subs", Array.isArray(roster.subs) ? roster.subs : []],
-        ["missing", Array.isArray(roster.missing) ? roster.missing : []],
       ];
       for (const [role, players] of groups) {
         for (const playerRaw of players) {
@@ -233,7 +245,8 @@
             hasDiscord: !!(discordId || displayDiscord),
             th: toInt(player.th),
             role,
-            automaticEligible: role !== "missing",
+            automaticEligible: true,
+            trusted: trustedTags.has(tag),
             rosterId: rosterInfo.id,
             rosterTitle: rosterInfo.title,
             clanTag: rosterInfo.clanTag,
@@ -242,7 +255,7 @@
         }
       }
     }
-    return { byTag, players: Object.values(byTag), rosters: rosterList };
+    return { byTag, players: Object.values(byTag), rosters: rosterList, missingTags };
   };
 
   const buildRegularEvidence = (entryRaw, settingsRaw) => {
@@ -606,7 +619,7 @@
   const buildWorkItems = (rosterData, privateStateRaw) => {
     const privateState = privateStateRaw && typeof privateStateRaw === "object" ? privateStateRaw : {};
     const settings = sanitizeSettings(privateState.settings);
-    const directory = buildPlayerDirectory(rosterData);
+    const directory = buildPlayerDirectory(rosterData, settings);
     const caseByTag = {};
     for (const raw of Array.isArray(privateState.cases) ? privateState.cases : []) {
       const value = normalizeCase(raw);
@@ -617,6 +630,8 @@
     for (const tag of tags) {
       const player = directory.byTag[tag] || null;
       const value = caseByTag[tag] || null;
+      if (settings.trustedPlayerTags.includes(tag)) continue;
+      if (!player && directory.missingTags.has(tag)) continue;
       const evidenceOwner = player || {
         sourceRosterId: toText(value && value.sourceRosterId).trim(),
         sourceClanTag: normalizeTag(value && value.sourceClanTag),
@@ -770,12 +785,13 @@
       loading: false,
       saving: false,
       privateState: { settings: sanitizeSettings(null), cases: [] },
-      work: { items: [], directory: { byTag: {}, players: [], rosters: [] }, settings: sanitizeSettings(null), caseByTag: {} },
+      work: { items: [], directory: { byTag: {}, players: [], rosters: [], missingTags: new Set() }, settings: sanitizeSettings(null), caseByTag: {} },
       view: "work",
       status: "needs_review",
       clan: "",
       handler: "",
       search: "",
+      visibleLimit: 12,
       selectedTag: "",
       decisionMode: "",
       modal: "",
@@ -881,18 +897,6 @@
 
     const statusForItem = (item) => item && STATUS_META[item.status] ? item.status : "needs_review";
 
-    const nextActionForItem = (item) => {
-      if (!item) return "";
-      if (item.status === "hero_down" && item.recovery) {
-        return item.recovery.completedWars + " of " + item.recovery.targetWars + " clean " +
-          plural(item.recovery.targetWars, "war");
-      }
-      if (item.status === "watching" && item.watching) {
-        return item.watching.completedWars + " of " + item.watching.targetWars + " wars observed";
-      }
-      return STATUS_META[statusForItem(item)].next;
-    };
-
     const renderNotice = (mount) => {
       if (!state.message && !state.error) return;
       const notice = createElement("div", "wfu-notice " + (state.error ? "is-error" : "is-success"), state.error || state.message);
@@ -909,35 +913,40 @@
       const header = createElement("div", "wfu-header");
       const copy = createElement("div", "wfu-header__copy");
       copy.appendChild(createElement("h2", "wfu-title", "War follow-up"));
-      const actions = createElement("div", "wfu-header__actions");
-      actions.appendChild(createButton("Add player", "btn secondary wfu-header-btn", () => {
+      const menu = createElement("details", "wfu-menu");
+      menu.appendChild(createElement("summary", "wfu-menu__summary", "More"));
+      const actions = createElement("div", "wfu-menu__panel");
+      actions.appendChild(createButton("Add player", "wfu-menu__item", () => {
         state.modal = "add";
         render();
       }));
-      actions.appendChild(createButton("Rules", "btn secondary wfu-header-btn", () => {
+      actions.appendChild(createButton("Rules", "wfu-menu__item", () => {
         state.modal = "settings";
         render();
       }));
+      menu.appendChild(actions);
       header.appendChild(copy);
-      header.appendChild(actions);
+      header.appendChild(menu);
       mount.appendChild(header);
     };
 
     const renderViewSwitch = (mount) => {
       const switcher = createElement("div", "wfu-view-switch");
-      const workButton = createButton("War work", "wfu-view-switch__btn" + (state.view === "work" ? " is-active" : ""), () => {
+      const workButton = createButton("Work", "wfu-view-switch__btn" + (state.view === "work" ? " is-active" : ""), () => {
         state.view = "work";
+        state.visibleLimit = 12;
         render();
       });
       workButton.setAttribute("aria-pressed", state.view === "work" ? "true" : "false");
       switcher.appendChild(workButton);
       if (state.work.settings.missingDiscordEnabled) {
-        const gapCount = state.work.directory.players.filter((player) => !player.hasDiscord).length;
+        const gapCount = state.work.directory.players.filter((player) => !player.hasDiscord && !player.trusted).length;
         const gapButton = createButton(
           "Discord gaps" + (gapCount ? " " + gapCount : ""),
           "wfu-view-switch__btn" + (state.view === "discord" ? " is-active" : ""),
           () => {
             state.view = "discord";
+            state.visibleLimit = 12;
             render();
           },
         );
@@ -952,20 +961,32 @@
       for (const key of STATUS_ORDER) counts[key] = 0;
       for (const item of state.work.items) counts[statusForItem(item)] = (counts[statusForItem(item)] || 0) + 1;
       const tabs = createElement("div", "wfu-status-tabs");
-      for (const key of STATUS_ORDER) {
+      const appendStatusButton = (parent, key) => {
         const meta = STATUS_META[key];
         const button = createButton(
           meta.label + (counts[key] ? " " + counts[key] : ""),
           "wfu-status-tab" + (state.status === key ? " is-active" : ""),
           () => {
             state.status = key;
+            state.visibleLimit = 12;
             render();
           },
         );
         button.dataset.tone = meta.tone;
         button.setAttribute("aria-pressed", state.status === key ? "true" : "false");
-        tabs.appendChild(button);
+        parent.appendChild(button);
+      };
+      for (const key of ["needs_review", "needs_dm", "hero_down", "ready"]) {
+        appendStatusButton(tabs, key);
       }
+      const secondaryKeys = ["watching", "closed"];
+      const more = createElement("details", "wfu-status-more" + (secondaryKeys.includes(state.status) ? " is-active" : ""));
+      const activeSecondary = secondaryKeys.includes(state.status) ? STATUS_META[state.status].label : "More";
+      more.appendChild(createElement("summary", "wfu-status-more__summary", activeSecondary));
+      const panel = createElement("div", "wfu-status-more__panel");
+      for (const key of secondaryKeys) appendStatusButton(panel, key);
+      more.appendChild(panel);
+      tabs.appendChild(more);
       mount.appendChild(tabs);
     };
 
@@ -983,24 +1004,34 @@
       const toolbar = createElement("div", "wfu-toolbar");
       const search = createElement("input", "wfu-input wfu-search");
       search.type = "search";
-      search.placeholder = "Search player";
+      search.placeholder = "Search";
       search.value = state.search;
       search.setAttribute("aria-label", "Search players");
       search.addEventListener("input", () => {
         state.search = search.value;
+        state.visibleLimit = 12;
         renderListOnly();
       });
       toolbar.appendChild(search);
 
+      const activeFilterCount = (state.clan ? 1 : 0) + (includeHandler && state.handler ? 1 : 0);
+      const filters = createElement("details", "wfu-filter-menu" + (activeFilterCount ? " is-active" : ""));
+      filters.appendChild(createElement(
+        "summary",
+        "wfu-filter-menu__summary",
+        "Filters" + (activeFilterCount ? " " + activeFilterCount : ""),
+      ));
+      const filterPanel = createElement("div", "wfu-filter-menu__panel");
       const clan = createSelect("wfu-select");
       addOption(clan, "", "All clans", !state.clan);
       for (const option of getClanOptions()) addOption(clan, option.value, option.label, option.value === state.clan);
       clan.setAttribute("aria-label", "Filter by clan");
       clan.addEventListener("change", () => {
         state.clan = clan.value;
-        renderListOnly();
+        state.visibleLimit = 12;
+        render();
       });
-      toolbar.appendChild(clan);
+      filterPanel.appendChild(clan);
 
       if (includeHandler) {
         const handler = createSelect("wfu-select");
@@ -1009,10 +1040,21 @@
         handler.setAttribute("aria-label", "Filter by moderator");
         handler.addEventListener("change", () => {
           state.handler = handler.value;
-          renderListOnly();
+          state.visibleLimit = 12;
+          render();
         });
-        toolbar.appendChild(handler);
+        filterPanel.appendChild(handler);
       }
+      if (activeFilterCount) {
+        filterPanel.appendChild(createButton("Clear filters", "wfu-filter-clear", () => {
+          state.clan = "";
+          if (includeHandler) state.handler = "";
+          state.visibleLimit = 12;
+          render();
+        }));
+      }
+      filters.appendChild(filterPanel);
+      toolbar.appendChild(filters);
       mount.appendChild(toolbar);
     };
 
@@ -1046,6 +1088,20 @@
       const meta = STATUS_META[statusForItem(item)];
       const card = createElement("article", "wfu-card");
       card.dataset.status = item.status;
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-label", "Open war follow-up for " + (player.name || item.tag));
+      const open = () => {
+        state.selectedTag = item.tag;
+        state.decisionMode = "";
+        render();
+      };
+      card.addEventListener("click", open);
+      card.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        open();
+      });
       const top = createElement("div", "wfu-card__top");
       const identity = createElement("div", "wfu-identity");
       identity.appendChild(createElement("div", "wfu-identity__name", player.name || item.tag));
@@ -1061,7 +1117,7 @@
       card.appendChild(top);
 
       const reasons = createElement("div", "wfu-card__reasons");
-      const displaySignals = item.signals.slice(0, 2);
+      const displaySignals = item.signals.slice(0, 1);
       if (displaySignals.length) {
         for (const signal of displaySignals) reasons.appendChild(createElement("div", "wfu-reason-line", signal.text));
       } else if (item.case && Array.isArray(item.case.reasonCodes) && item.case.reasonCodes.includes("manual")) {
@@ -1073,17 +1129,9 @@
       card.appendChild(reasons);
 
       const foot = createElement("div", "wfu-card__foot");
-      const next = createElement("div", "wfu-next");
-      next.appendChild(createElement("span", "wfu-next__label", "Next"));
-      next.appendChild(createElement("span", "wfu-next__value", nextActionForItem(item)));
-      foot.appendChild(next);
       const progress = renderProgress(item);
       if (progress) foot.appendChild(progress);
-      foot.appendChild(createButton("Open", "btn secondary wfu-open-btn", () => {
-        state.selectedTag = item.tag;
-        state.decisionMode = "";
-        render();
-      }));
+      foot.appendChild(createElement("span", "wfu-card__open", "Open"));
       card.appendChild(foot);
       return card;
     };
@@ -1095,15 +1143,29 @@
         return;
       }
       list.textContent = "";
-      const visible = state.work.items.filter(matchesFilters);
-      if (!visible.length) {
+      const matching = state.work.items.filter(matchesFilters);
+      if (!matching.length) {
         const empty = createElement("div", "wfu-empty");
         empty.appendChild(createElement("div", "wfu-empty__title", "Nothing here"));
         empty.appendChild(createElement("div", "wfu-empty__text", "Try another status or filter."));
         list.appendChild(empty);
         return;
       }
+      const visible = matching.slice(0, state.visibleLimit);
       for (const item of visible) list.appendChild(renderWorkCard(item));
+      if (matching.length > visible.length) {
+        const remaining = matching.length - visible.length;
+        const more = createElement("div", "wfu-load-more");
+        more.appendChild(createButton(
+          "Show " + Math.min(12, remaining) + " more",
+          "wfu-load-more__button",
+          () => {
+            state.visibleLimit += 12;
+            renderListOnly();
+          },
+        ));
+        list.appendChild(more);
+      }
     };
 
     const renderWorkList = (mount) => {
@@ -1119,7 +1181,7 @@
       renderFilters(mount, false);
       const groups = {};
       for (const player of state.work.directory.players) {
-        if (player.hasDiscord) continue;
+        if (player.hasDiscord || player.trusted) continue;
         const key = player.rosterId || player.clanTag || "unknown";
         if (state.clan && state.clan !== player.rosterId && state.clan !== player.clanTag) continue;
         const query = state.search.trim().toLowerCase();
@@ -1492,8 +1554,9 @@
     };
 
     const renderNotesAndActivity = (item) => {
-      const section = createElement("section", "wfu-drawer-section");
-      section.appendChild(createElement("h3", "wfu-drawer-section__title", "Coordination"));
+      const details = createElement("details", "wfu-details wfu-coordination");
+      details.appendChild(createElement("summary", "wfu-details__summary", "Coordination"));
+      const section = createElement("div", "wfu-coordination__body");
       if (item.case) {
         const assignmentForm = createElement("form", "wfu-form");
         const assignment = handlerControl(toText(item.case.handledBy));
@@ -1547,7 +1610,8 @@
         }
         section.appendChild(timeline);
       }
-      return section;
+      details.appendChild(section);
+      return details;
     };
 
     const renderDrawer = (mount) => {
@@ -1726,6 +1790,7 @@
           defaultHeroDownRosterId: target.value,
           missingDiscordEnabled: gaps.checked,
           moderatorNames: moderators.value.split(/\r?\n/).map((name) => name.trim()).filter(Boolean),
+          trustedPlayerTags: settings.trustedPlayerTags,
         };
         state.saving = true;
         render();
@@ -1775,6 +1840,7 @@
         results.textContent = "";
         const query = search.value.trim().toLowerCase();
         const players = state.work.directory.players
+          .filter((player) => !player.trusted)
           .filter((player) => !query || [player.name, player.tag, player.rosterTitle].some((value) => toText(value).toLowerCase().includes(query)))
           .sort((a, b) => a.name.localeCompare(b.name))
           .slice(0, 40);
@@ -1850,17 +1916,36 @@
       render();
     };
 
+    const handleTrustChange = (event) => {
+      if (!state.loaded) return;
+      const detail = event && event.detail && typeof event.detail === "object" ? event.detail : {};
+      const tag = normalizeTag(detail.tag);
+      if (!tag) return;
+      const tags = new Set(state.privateState.settings.trustedPlayerTags);
+      if (detail.trusted) tags.add(tag);
+      else tags.delete(tag);
+      state.privateState.settings = sanitizeSettings(Object.assign({}, state.privateState.settings, {
+        trustedPlayerTags: Array.from(tags),
+        updatedAt: toText(detail.updatedAt).trim() || state.privateState.settings.updatedAt,
+      }));
+      if (detail.trusted && state.selectedTag === tag) state.selectedTag = "";
+      recompute();
+      render();
+    };
+
     const init = () => {
       if (state.initialized) return;
       state.initialized = true;
       document.addEventListener("admin:tabchange", handleTabChange);
       document.addEventListener("admin:rosterdatachange", handleRosterDataChange);
+      document.addEventListener("admin:warfollowuptrustchange", handleTrustChange);
       render();
     };
 
     const destroy = () => {
       document.removeEventListener("admin:tabchange", handleTabChange);
       document.removeEventListener("admin:rosterdatachange", handleRosterDataChange);
+      document.removeEventListener("admin:warfollowuptrustchange", handleTrustChange);
       state.initialized = false;
     };
 

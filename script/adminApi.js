@@ -143,6 +143,10 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getWarFollowupState(args[0]);
 		case "saveWarFollowupSettings":
 			return saveWarFollowupSettings(args[0], args[1]);
+		case "getWarFollowupTrustStatus":
+			return getWarFollowupTrustStatus(args[0], args[1]);
+		case "setWarFollowupTrustedAccount":
+			return setWarFollowupTrustedAccount(args[0], args[1], args[2]);
 		case "mutateWarFollowupCase":
 			return mutateWarFollowupCase(args[0], args[1]);
 		default:

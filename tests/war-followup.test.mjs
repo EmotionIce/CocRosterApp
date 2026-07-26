@@ -304,11 +304,31 @@ test("decision DM states the exact evidence, clan handoff, and recovery requirem
   assert.match(text, /3 consecutive wars/);
 });
 
-test("Discord identity gaps remain optional and are available by roster group", () => {
+test("missing roster rows are excluded from both work and Discord gaps", () => {
+  const work = followup.buildWorkItems(buildRosterData(), {
+    settings: {},
+    cases: [{ tag: "#P0LYGR", status: "needs_review", reasonCodes: ["manual"] }],
+  });
+  assert.equal(work.items.some((item) => item.tag === "#P0LYGR"), false);
   const directory = followup.buildPlayerDirectory(buildRosterData());
   const gaps = directory.players.filter((player) => !player.hasDiscord);
   assert.deepEqual(
     gaps.map((player) => [player.rosterTitle, player.name]),
-    [["Main clan", "Discord Gap"], ["Main clan", "Missing Member"]],
+    [["Main clan", "Discord Gap"]],
+  );
+  assert.equal(directory.players.some((player) => player.tag === "#P0LYGR"), false);
+});
+
+test("trusted accounts are ignored by automatic work, manual cases, and Discord gaps", () => {
+  const work = followup.buildWorkItems(buildRosterData(), {
+    settings: { trustedPlayerTags: ["#P0LYGQ", "#P0LYGJ"] },
+    cases: [{ tag: "#P0LYGQ", status: "needs_review", reasonCodes: ["manual"] }],
+  });
+  assert.equal(work.items.some((item) => item.tag === "#P0LYGQ"), false);
+  assert.equal(work.directory.byTag["#P0LYGQ"].trusted, true);
+  assert.equal(work.directory.byTag["#P0LYGJ"].trusted, true);
+  assert.equal(
+    work.directory.players.filter((player) => !player.hasDiscord && !player.trusted).length,
+    0,
   );
 });

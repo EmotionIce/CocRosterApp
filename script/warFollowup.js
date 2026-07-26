@@ -89,6 +89,20 @@ function sanitizeWarFollowupStringList_(listRaw, optionsRaw) {
 	return out;
 }
 
+function sanitizeWarFollowupTagList_(listRaw) {
+	const list = Array.isArray(listRaw) ? listRaw : [];
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < list.length && out.length < 1000; i++) {
+		const tag = normalizeTag_(list[i]);
+		if (!tag || !isValidPlayerTag_(tag) || seen[tag]) continue;
+		seen[tag] = true;
+		out.push(tag);
+	}
+	out.sort();
+	return out;
+}
+
 function createDefaultWarFollowupSettings_() {
 	return {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
@@ -108,6 +122,7 @@ function createDefaultWarFollowupSettings_() {
 		defaultHeroDownRosterId: "",
 		missingDiscordEnabled: true,
 		moderatorNames: [],
+		trustedPlayerTags: [],
 		updatedAt: "",
 	};
 }
@@ -139,8 +154,18 @@ function sanitizeWarFollowupSettings_(settingsRaw) {
 			? defaults.missingDiscordEnabled
 			: toBooleanFlag_(settings.missingDiscordEnabled),
 		moderatorNames: sanitizeWarFollowupStringList_(settings.moderatorNames, { maxItems: 40, maxLength: 80 }),
+		trustedPlayerTags: sanitizeWarFollowupTagList_(settings.trustedPlayerTags),
 		updatedAt: sanitizeWarFollowupTimestamp_(settings.updatedAt),
 	};
+}
+
+function readWarFollowupSettings_() {
+	const encoded = firebaseRequestJson_(WAR_FOLLOWUP_SETTINGS_PATH, "GET");
+	return sanitizeWarFollowupSettings_(
+		encoded && typeof encoded === "object" && !Array.isArray(encoded)
+			? decodeFirebaseObjectKeysRecursive_(encoded)
+			: null,
+	);
 }
 
 function createEmptyWarFollowupEvidenceStats_() {
@@ -347,7 +372,13 @@ function saveWarFollowupSettings(settingsRaw, password) {
 	const lock = LockService.getScriptLock();
 	lock.waitLock(30000);
 	try {
-		const settings = sanitizeWarFollowupSettings_(settingsRaw);
+		const current = readWarFollowupSettings_();
+		const incoming = settingsRaw && typeof settingsRaw === "object" ? settingsRaw : {};
+		const settings = sanitizeWarFollowupSettings_(Object.assign({}, current, incoming, {
+			trustedPlayerTags: Object.prototype.hasOwnProperty.call(incoming, "trustedPlayerTags")
+				? incoming.trustedPlayerTags
+				: current.trustedPlayerTags,
+		}));
 		settings.updatedAt = new Date().toISOString();
 		firebaseRequestJson_(
 			WAR_FOLLOWUP_SETTINGS_PATH,
@@ -355,6 +386,50 @@ function saveWarFollowupSettings(settingsRaw, password) {
 			encodeFirebaseObjectKeysRecursive_(settings),
 		);
 		return settings;
+	} finally {
+		lock.releaseLock();
+	}
+}
+
+function getWarFollowupTrustStatus(tagRaw, password) {
+	assertAdminPassword_(password);
+	const tag = normalizeTag_(tagRaw);
+	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
+	const settings = readWarFollowupSettings_();
+	return {
+		tag: tag,
+		trusted: settings.trustedPlayerTags.indexOf(tag) >= 0,
+		updatedAt: settings.updatedAt,
+	};
+}
+
+function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password) {
+	assertAdminPassword_(password);
+	const tag = normalizeTag_(tagRaw);
+	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
+	const trusted = toBooleanFlag_(trustedRaw);
+	const lock = LockService.getScriptLock();
+	lock.waitLock(30000);
+	try {
+		const settings = readWarFollowupSettings_();
+		const tagSet = {};
+		for (let i = 0; i < settings.trustedPlayerTags.length; i++) {
+			tagSet[settings.trustedPlayerTags[i]] = true;
+		}
+		if (trusted) tagSet[tag] = true;
+		else delete tagSet[tag];
+		settings.trustedPlayerTags = sanitizeWarFollowupTagList_(Object.keys(tagSet));
+		settings.updatedAt = new Date().toISOString();
+		firebaseRequestJson_(
+			WAR_FOLLOWUP_SETTINGS_PATH,
+			"PUT",
+			encodeFirebaseObjectKeysRecursive_(settings),
+		);
+		return {
+			tag: tag,
+			trusted: settings.trustedPlayerTags.indexOf(tag) >= 0,
+			updatedAt: settings.updatedAt,
+		};
 	} finally {
 		lock.releaseLock();
 	}

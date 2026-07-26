@@ -66,3 +66,17 @@ test("war follow-up private state is loaded only when its tab is opened", () => 
   assert.equal((followupClient.match(/callServer\("getWarFollowupState"/g) || []).length, 1);
   assert.doesNotMatch(followupClient, /refreshAllRosters|publishRosterData|CloudflarePublishQueue/);
 });
+
+test("trusted-account status is loaded only after player admin controls are opened", () => {
+  const adminClient = readShell("admin.js");
+  assert.equal((adminClient.match(/runServerMethod\("getWarFollowupTrustStatus"/g) || []).length, 1);
+  assert.equal((adminClient.match(/runServerMethod\("setWarFollowupTrustedAccount"/g) || []).length, 1);
+  assert.match(adminClient, /summaryBtn\.onclick[\s\S]*?loadTrustControl\(\)/);
+  const activeLoadStart = adminClient.indexOf("const loadActiveRosterData");
+  const activeLoadEnd = adminClient.indexOf("const applyServerSyncedPreview");
+  assert.ok(activeLoadStart >= 0 && activeLoadEnd > activeLoadStart);
+  assert.doesNotMatch(
+    adminClient.slice(activeLoadStart, activeLoadEnd),
+    /WarFollowupTrustStatus|TrustedAccount/,
+  );
+});

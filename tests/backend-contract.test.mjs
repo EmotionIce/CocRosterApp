@@ -5996,10 +5996,24 @@ test("war follow-up state is authenticated, private, and independent from roster
     defaultRecoveryWars: 4,
     missingDiscordEnabled: true,
     moderatorNames: ["Alex", "Alex", " Sam "],
+    trustedPlayerTags: ["#P0LYGQ", " P0LYGQ ", "invalid"],
   }, "change-me"]);
   assert.equal(settings.regularLookbackWars, 8);
   assert.equal(settings.regularPerformanceEnabled, false);
   assert.deepEqual(Array.from(settings.moderatorNames), ["Alex", "Sam"]);
+  assert.deepEqual(Array.from(settings.trustedPlayerTags), ["#P0LYGQ"]);
+
+  const initialTrust = backend.runAdminApiMethod_("getWarFollowupTrustStatus", ["#P0LYGQ", "change-me"]);
+  assert.equal(initialTrust.trusted, true);
+  const addedTrust = backend.runAdminApiMethod_("setWarFollowupTrustedAccount", ["#P0LYGJ", true, "change-me"]);
+  assert.equal(addedTrust.trusted, true);
+  const removedTrust = backend.runAdminApiMethod_("setWarFollowupTrustedAccount", ["#P0LYGQ", false, "change-me"]);
+  assert.equal(removedTrust.trusted, false);
+
+  const legacySettingsSave = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+    regularMissedThreshold: 3,
+  }, "change-me"]);
+  assert.deepEqual(Array.from(legacySettingsSave.trustedPlayerTags), ["#P0LYGJ"], "older settings clients must not clear trusted accounts");
 
   const db = backend.__getFirebaseDb();
   assert.equal(db.activePublished.currentVersionId, "keep-this-version");
@@ -6009,6 +6023,7 @@ test("war follow-up state is authenticated, private, and independent from roster
 
   const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
   assert.equal(state.settings.defaultRecoveryWars, 4);
+  assert.deepEqual(Array.from(state.settings.trustedPlayerTags), ["#P0LYGJ"]);
   assert.deepEqual(Array.from(state.cases), []);
 });
 
