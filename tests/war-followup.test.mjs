@@ -34,6 +34,12 @@ const buildRosterData = () => ({
     main: [],
     subs: [],
     missing: [],
+    regularWar: {
+      currentWar: {
+        state: "inWar",
+        endTime: "20260727T203045.000Z",
+      },
+    },
   }],
   playerMetrics: { byTag: {} },
   playerWarPerformance: {
@@ -290,6 +296,8 @@ test("decision DM states the exact evidence, clan handoff, and recovery requirem
     playerName: "Player One",
     sourceClan: "Main clan",
     targetClan: "Hero-down clan",
+    targetClanTag: "#2CPRYQRGR",
+    nextWarStartAt: "20260727T203045.000Z",
     recoveryWars: 3,
     reasonCodes: ["regular_missed", "cwl_performance"],
     evidence: {
@@ -302,6 +310,46 @@ test("decision DM states the exact evidence, clan handoff, and recovery requirem
   assert.match(text, /Main clan/);
   assert.match(text, /Hero-down clan/);
   assert.match(text, /3 consecutive wars/);
+  assert.match(text, new RegExp("<t:" + Math.floor(Date.UTC(2026, 6, 27, 20, 30, 45) / 1000) + ":R>"));
+  assert.match(text, /https:\/\/link\.clashofclans\.com\/en\/\?action=OpenClanProfile&tag=%232CPRYQRGR/);
+  assert.match(text, /when the current war ends/);
+});
+
+test("DM timing and clan links fail safely when target data is unavailable", () => {
+  assert.equal(
+    followup.discordRelativeTimestamp("20260727T203045.000Z"),
+    "<t:" + Math.floor(Date.UTC(2026, 6, 27, 20, 30, 45) / 1000) + ":R>",
+  );
+  assert.equal(followup.discordRelativeTimestamp("not-a-time"), "");
+  assert.equal(
+    followup.buildClanProfileLink("#2CPRYQRGR"),
+    "https://link.clashofclans.com/en/?action=OpenClanProfile&tag=%232CPRYQRGR",
+  );
+  assert.equal(followup.buildClanProfileLink(""), "");
+
+  const text = followup.buildDmText({
+    playerName: "Player One",
+    targetClan: "Hero-down clan",
+    recoveryWars: 3,
+    reasonCodes: [],
+    evidence: {},
+  });
+  assert.match(text, /The next war there will start when the current war ends\./);
+  assert.doesNotMatch(text, /<t:/);
+  assert.doesNotMatch(text, /OpenClanProfile/);
+});
+
+test("hero-down roster directory exposes only an active war end as the next start", () => {
+  const rosterData = buildRosterData();
+  let directory = followup.buildPlayerDirectory(rosterData);
+  assert.equal(
+    directory.rosters.find((roster) => roster.id === "training").nextWarStartAt,
+    "20260727T203045.000Z",
+  );
+
+  rosterData.rosters[1].regularWar.currentWar.state = "warEnded";
+  directory = followup.buildPlayerDirectory(rosterData);
+  assert.equal(directory.rosters.find((roster) => roster.id === "training").nextWarStartAt, "");
 });
 
 test("missing roster rows are excluded from both work and Discord gaps", () => {

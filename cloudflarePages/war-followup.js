@@ -54,9 +54,26 @@
     if (!compact) return "";
     return compact.startsWith("#") ? compact : ("#" + compact);
   };
+  const normalizeWarTimestampForDate = (value) => {
+    const text = toText(value).trim();
+    const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(?:\.(\d{3}))?Z$/.exec(text);
+    if (!match) return text;
+    return match[1] + "-" + match[2] + "-" + match[3] + "T" +
+      match[4] + ":" + match[5] + ":" + match[6] + "." + (match[7] || "000") + "Z";
+  };
   const parseMs = (value) => {
-    const ms = new Date(toText(value)).getTime();
+    const ms = new Date(normalizeWarTimestampForDate(value)).getTime();
     return Number.isFinite(ms) ? ms : 0;
+  };
+  const discordRelativeTimestamp = (value) => {
+    const ms = parseMs(value);
+    return ms > 0 ? "<t:" + Math.floor(ms / 1000) + ":R>" : "";
+  };
+  const buildClanProfileLink = (tagRaw) => {
+    const tag = normalizeTag(tagRaw);
+    return tag
+      ? "https://link.clashofclans.com/en/?action=OpenClanProfile&tag=" + encodeURIComponent(tag)
+      : "";
   };
   const formatNumber = (value, digits) => {
     const number = Number(value);
@@ -217,7 +234,14 @@
         title: toText(roster.title).trim() || toText(roster.id).trim(),
         clanTag: normalizeTag(roster.connectedClanTag),
         trackingMode: toText(roster.trackingMode).trim(),
+        nextWarStartAt: "",
       };
+      const regularWar = roster.regularWar && typeof roster.regularWar === "object" ? roster.regularWar : {};
+      const currentWar = regularWar.currentWar && typeof regularWar.currentWar === "object" ? regularWar.currentWar : {};
+      const currentWarState = toText(currentWar.state || currentWar.warState).trim().toLowerCase();
+      if (currentWarState === "preparation" || currentWarState === "inwar") {
+        rosterInfo.nextWarStartAt = toText(currentWar.endTime).trim();
+      }
       if (rosterInfo.id) rosterList.push(rosterInfo);
       for (const playerRaw of Array.isArray(roster.missing) ? roster.missing : []) {
         const tag = normalizeTag(playerRaw && playerRaw.tag);
@@ -709,6 +733,8 @@
     const playerName = toText(options.playerName).trim() || "there";
     const sourceClan = toText(options.sourceClan).trim() || "your current clan";
     const targetClan = toText(options.targetClan).trim() || "the hero-down clan";
+    const targetClanLink = buildClanProfileLink(options.targetClanTag);
+    const nextWarTimestamp = discordRelativeTimestamp(options.nextWarStartAt);
     const recoveryWars = Math.max(1, toInt(options.recoveryWars) || 3);
     const reasonCodes = Array.isArray(options.reasonCodes) ? options.reasonCodes : [];
     const sentences = reasonCodes.map((code) => evidenceSentence(code, options.evidence)).filter(Boolean);
@@ -719,8 +745,12 @@
       "For now, you will not participate in regular wars in " + sourceClan + ".",
       "Please play regular wars in " + targetClan + " and complete " + recoveryWars + " consecutive " +
         plural(recoveryWars, "war") + " without missing an attack.",
+      nextWarTimestamp
+        ? "The next war there will start " + nextWarTimestamp + ", when the current war ends."
+        : "The next war there will start when the current war ends.",
+      targetClanLink ? "Clan link: " + targetClanLink : "",
       "Staff will review you again after that.",
-    ].join(" ");
+    ].filter(Boolean).join(" ");
   };
 
   const createElement = (tag, className, text) => {
@@ -1470,6 +1500,8 @@
           playerName: item.player.name,
           sourceClan: item.player.rosterTitle || (item.case && item.case.sourceRosterTitle),
           targetClan: targetRoster && targetRoster.title,
+          targetClanTag: targetRoster && targetRoster.clanTag,
+          nextWarStartAt: targetRoster && targetRoster.nextWarStartAt,
           recoveryWars: wars.value,
           reasonCodes,
           evidence: item.evidence,
@@ -1496,6 +1528,11 @@
         const targetRoster = state.work.directory.rosters.find((roster) => roster.id === target.value);
         if (!targetRoster) {
           setNotice("Choose a hero-down roster.", true);
+          render();
+          return;
+        }
+        if (!targetRoster.clanTag) {
+          setNotice("The selected hero-down roster needs a connected clan tag.", true);
           render();
           return;
         }
@@ -2024,6 +2061,8 @@
     sanitizeSettings,
     normalizeStats,
     statsSummary,
+    discordRelativeTimestamp,
+    buildClanProfileLink,
     discordIdentityText,
     buildPlayerDirectory,
     buildEvidenceForTag,
