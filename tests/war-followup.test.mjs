@@ -72,6 +72,11 @@ const buildRosterData = () => ({
   },
 });
 
+test("follow-up dates always use compact international English formatting", () => {
+  assert.equal(followup.formatDate("2026-07-04T12:00:00.000Z"), "04 Jul 2026");
+  assert.equal(followup.formatDate("not-a-date"), "");
+});
+
 test("candidate signals use only regular-war and CWL evidence with conservative result thresholds", () => {
   const rosterData = buildRosterData();
   const work = followup.buildWorkItems(rosterData, {

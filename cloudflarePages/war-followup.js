@@ -95,7 +95,11 @@
     const ms = parseMs(value);
     if (!ms) return "";
     try {
-      return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(new Date(ms));
+      return new Intl.DateTimeFormat("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }).format(new Date(ms));
     } catch {
       return new Date(ms).toISOString().slice(0, 10);
     }
@@ -2374,6 +2378,7 @@
     sanitizeSettings,
     normalizeStats,
     statsSummary,
+    formatDate,
     discordRelativeTimestamp,
     buildClanProfileLink,
     discordIdentityText,
