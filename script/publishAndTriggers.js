@@ -706,6 +706,7 @@ function buildAutoRefreshTriggerDiagnostics_() {
 		configuredWatchdogTriggerId: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || ""),
 		configuredWatchdogTriggerAt: String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_AT_PROPERTY) || ""),
 		configuredPermanentWatchdogTriggerId: String(PropertiesService.getScriptProperties().getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || ""),
+		pendingFreshRetry: readAutoRefreshFreshRetryPending_(),
 		schedulerRepairMarker: readAutoRefreshSchedulerRepairMarker_(),
 	};
 }
@@ -3457,6 +3458,12 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			const lastWriteAt = String(getLastSuccessfulActiveWriteAt_() || "").trim();
 			const lastWriteSource = String(getLastSuccessfulActiveWriteSource_() || "").trim();
 			const sourceSuffix = lastWriteSource ? " by " + lastWriteSource : "";
+			const lastWriteMs = parseIsoToMs_(lastWriteAt);
+			const catchUpNotBeforeMs = lastWriteMs > 0
+				? Math.max(Date.now() + 1000, lastWriteMs + AUTO_REFRESH_INTERVAL_MS + AUTO_REFRESH_COOLDOWN_RETRY_GRACE_MS)
+				: Date.now() + AUTO_REFRESH_JOB_RESUME_DELAY_MS;
+			const catchUpRetry = markAutoRefreshFreshRetryPending_("recentActiveWriteCooldown", catchUpNotBeforeMs);
+			const catchUpScheduling = scheduleAutoRefreshFreshRetry_();
 			let cwlSeasonEventRefresh = { ok: true, status: "not-needed" };
 			let cwlSeasonEventCloudflarePublish = { ok: true, skipped: true, reason: "cwl-refresh-not-attempted" };
 			try {
@@ -3496,6 +3503,11 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 				cwlSeasonEventCloudflarePublish = { ok: true, skipped: true, reason: "cwl-refresh-failed" };
 			}
 			let summary = "Auto-refresh skipped: active data was written recently" + sourceSuffix + " (" + (lastWriteAt || "unknown") + ").";
+			if (catchUpScheduling && catchUpScheduling.scheduled) {
+				summary += " Catch-up scheduled for " + catchUpRetry.notBeforeAt + ".";
+			} else {
+				summary += " Catch-up recovery marked for " + catchUpRetry.notBeforeAt + ".";
+			}
 			const cleanupResult = maybeCleanupOldAutoRefreshDailyArchives_(getServerDateString_(new Date()));
 			const cleanupDeleted = toNonNegativeInt_(cleanupResult && cleanupResult.deletedCount);
 			if (cleanupDeleted > 0) summary += " Cleaned " + cleanupDeleted + " stale daily archive(s).";
@@ -3507,6 +3519,8 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 				skipped: true,
 				reason: "cooldown",
 				lastWriteAt: lastWriteAt,
+				catchUpRetry: catchUpRetry,
+				catchUpScheduling: catchUpScheduling,
 				cwlSeasonEventRefresh: cwlSeasonEventRefresh,
 				cwlSeasonEventCloudflarePublish: cwlSeasonEventCloudflarePublish,
 			};
@@ -5192,7 +5206,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 			if (current && current.legacy === true) {
 				clearAutoRefreshQueueCurrent_();
 				Logger.log("autoRefresh worker cleared legacy current state kind=%s", String(current.kind || ""));
-				if (isAutoRefreshFreshRetryPending_()) scheduleAutoRefreshJobResume_();
+				if (isAutoRefreshFreshRetryPending_()) scheduleAutoRefreshFreshRetry_();
 			}
 			return { ok: true, status: "skipped", skipped: true, reason: "noRun" };
 		}
@@ -5559,18 +5573,69 @@ function hasAutoRefreshJobBudgetFor_(executionStartMsRaw, reserveMsRaw) {
 	return getAutoRefreshJobRemainingMs_(executionStartMsRaw) >= reserveMs;
 }
 
+// Read a pending retry for fresh queue creation. Legacy pipe-delimited values
+// remain valid so deployed retries survive this schema upgrade.
+function readAutoRefreshFreshRetryPending_() {
+	const raw = String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_PENDING_FRESH_RETRY_PROPERTY) || "").trim();
+	if (!raw) return null;
+	try {
+		const parsed = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			const notBeforeMs = Math.max(0, Number(parsed.notBeforeMs) || 0);
+			return {
+				reason: String(parsed.reason || "freshRetry"),
+				createdAt: String(parsed.createdAt || ""),
+				notBeforeMs: notBeforeMs,
+				notBeforeAt: notBeforeMs ? new Date(notBeforeMs).toISOString() : "",
+			};
+		}
+	} catch (err) {}
+	const parts = raw.split("|");
+	const legacyNotBeforeMs = Math.max(0, Number(parts[2]) || 0);
+	return {
+		reason: String(parts[0] || "freshRetry"),
+		createdAt: String(parts[1] || ""),
+		notBeforeMs: legacyNotBeforeMs,
+		notBeforeAt: legacyNotBeforeMs ? new Date(legacyNotBeforeMs).toISOString() : "",
+	};
+}
+
 // Mark that the one-shot resume trigger should retry fresh job creation if no job exists yet.
-function markAutoRefreshFreshRetryPending_(reasonRaw) {
+function markAutoRefreshFreshRetryPending_(reasonRaw, notBeforeMsRaw) {
 	const reason = String(reasonRaw == null ? "" : reasonRaw).trim() || "freshRetry";
+	const notBeforeMs = Math.max(0, Number(notBeforeMsRaw) || 0);
+	const state = {
+		reason: reason,
+		createdAt: new Date().toISOString(),
+		notBeforeMs: notBeforeMs,
+	};
 	PropertiesService.getScriptProperties().setProperty(
 		AUTO_REFRESH_JOB_PENDING_FRESH_RETRY_PROPERTY,
-		reason + "|" + new Date().toISOString(),
+		JSON.stringify(state),
 	);
+	return {
+		reason: state.reason,
+		createdAt: state.createdAt,
+		notBeforeMs: state.notBeforeMs,
+		notBeforeAt: state.notBeforeMs ? new Date(state.notBeforeMs).toISOString() : "",
+	};
 }
 
 // Return whether a one-shot resume trigger is allowed to retry fresh job creation.
 function isAutoRefreshFreshRetryPending_() {
-	return !!String(PropertiesService.getScriptProperties().getProperty(AUTO_REFRESH_JOB_PENDING_FRESH_RETRY_PROPERTY) || "").trim();
+	return !!readAutoRefreshFreshRetryPending_();
+}
+
+// Schedule a pending fresh retry without violating its cooldown boundary.
+function scheduleAutoRefreshFreshRetry_() {
+	const pending = readAutoRefreshFreshRetryPending_();
+	if (!pending) return { scheduled: false, skipped: true, reason: "noFreshRetry" };
+	const nowMs = Date.now();
+	const notBeforeMs = Math.max(0, Number(pending.notBeforeMs) || 0);
+	const desiredAtMs = notBeforeMs > nowMs
+		? notBeforeMs
+		: nowMs + AUTO_REFRESH_JOB_RESUME_DELAY_MS;
+	return ensureAutoRefreshDynamicTrigger_("continuation", desiredAtMs, notBeforeMs);
 }
 
 // Clear the fresh-retry marker after a job is persisted or a resume path consumes it.
@@ -5584,7 +5649,7 @@ function deferFreshAutoRefreshStartForBudget_(reasonRaw, startedAtRaw, execution
 	const startedAt = String(startedAtRaw || new Date().toISOString());
 	const reserveMs = Math.max(0, Number(reserveMsRaw) || 0);
 	markAutoRefreshFreshRetryPending_(reason);
-	scheduleAutoRefreshJobResume_();
+	scheduleAutoRefreshFreshRetry_();
 	const summary = "Auto-refresh start deferred before initial queue state was written; retry scheduled.";
 	setAutoRefreshRunResult_("inProgress", summary, "", 0, "", startedAt, new Date().toISOString());
 	Logger.log(
@@ -5881,7 +5946,10 @@ function ensureAutoRefreshDynamicTrigger_(kindRaw, desiredAtMsRaw, minimumAtMsRa
 		const configured = findAutoRefreshTriggerById_(triggers, configuredId);
 		const reusable = meta.kind === "watchdog"
 			? !!configured && configuredAtMs >= minimumAtMs
-			: !!configured && configuredAtMs > 0 && configuredAtMs <= desiredAtMs;
+			: !!configured &&
+				configuredAtMs > 0 &&
+				configuredAtMs <= desiredAtMs &&
+				(!minimumAtMs || configuredAtMs >= minimumAtMs);
 		if (reusable) {
 			clearAutoRefreshSchedulerRepairMarker_(meta.kind);
 			return { scheduled: true, reused: true, degraded: false, kind: meta.kind, triggerId: configuredId, scheduledAtMs: configuredAtMs };
@@ -6028,7 +6096,7 @@ function repairAutoRefreshSchedulingFromPermanentWatchdog_() {
 	if (current && current.kind === "auto-refresh-queue" && (current.status === "running" || current.status === "finalizing")) {
 		dynamic = scheduleAutoRefreshJobResume_();
 	} else if (isAutoRefreshFreshRetryPending_()) {
-		dynamic = scheduleAutoRefreshJobResume_();
+		dynamic = scheduleAutoRefreshFreshRetry_();
 	} else {
 		clearAutoRefreshSchedulerRepairMarker_();
 	}
@@ -6469,7 +6537,7 @@ function repairAutoRefreshScheduler_(optionsRaw) {
 		) {
 			resume = scheduleAutoRefreshJobResume_();
 		} else if (enabled && isAutoRefreshFreshRetryPending_()) {
-			resume = scheduleAutoRefreshJobResume_();
+			resume = scheduleAutoRefreshFreshRetry_();
 		} else if (enabled) {
 			removedResume = removeAutoRefreshJobResumeTriggers_();
 		}
@@ -6914,7 +6982,20 @@ function autoRefreshWorkerTickInternal_() {
 			resultForLog = { ok: true, status: "skipped", skipped: true, reason: "disabled" };
 			return resultForLog;
 		}
-		if (isAutoRefreshFreshRetryPending_() && !readAutoRefreshQueueCurrent_()) {
+		const freshRetry = readAutoRefreshFreshRetryPending_();
+		if (freshRetry && !readAutoRefreshQueueCurrent_()) {
+			if (freshRetry.notBeforeMs > Date.now()) {
+				const scheduling = scheduleAutoRefreshFreshRetry_();
+				resultForLog = {
+					ok: true,
+					status: "inProgress",
+					inProgress: true,
+					reason: "freshRetryNotDue",
+					retryAt: freshRetry.notBeforeAt,
+					scheduling: scheduling,
+				};
+				return resultForLog;
+			}
 			const result = startAutoRefreshQueueCoordinator_({ executionStartMs: Date.now(), startedAt: startedAt });
 			resultForLog = result;
 			return result;

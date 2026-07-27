@@ -401,6 +401,7 @@ const AUTO_REFRESH_PREFETCH_BATCH_SIZE = 8;
 const AUTO_REFRESH_PREFETCH_BATCH_DELAY_MS = 1000;
 const AUTO_REFRESH_JOB_EXECUTION_BUDGET_MS = 270 * 1000;
 const AUTO_REFRESH_JOB_RESUME_DELAY_MS = 60 * 1000;
+const AUTO_REFRESH_COOLDOWN_RETRY_GRACE_MS = 5 * 1000;
 // A hard-killed worker retains the active-roster lease. Its recovery watchdog
 // must therefore run only after that lease expires plus a safety margin.
 const AUTO_REFRESH_JOB_WATCHDOG_SAFETY_MS = 60 * 1000;

@@ -1663,6 +1663,68 @@ test("autoRefreshActiveRosterTick does not repair Cloudflare active mirror while
   assert.equal(repairCalls, 0);
 });
 
+test("recent active write cooldown schedules a catch-up at the freshness boundary", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  installPublishedActiveVersion(backend, sourceData);
+  const nowMs = Date.now();
+  const intervalMs = 2 * 60 * 60 * 1000;
+  const retryGraceMs = 5 * 1000;
+  const remainingCooldownMs = 10 * 60 * 1000;
+  const lastWriteAt = new Date(nowMs - intervalMs + remainingCooldownMs).toISOString();
+  backend.isRecentSuccessfulActiveWrite_ = () => true;
+  backend.getLastSuccessfulActiveWriteAt_ = () => lastWriteAt;
+  backend.getLastSuccessfulActiveWriteSource_ = () => "discord-sync";
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: false });
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+
+  const result = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: new Date(nowMs).toISOString(),
+  });
+  const pending = backend.readAutoRefreshFreshRetryPending_();
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+  const expectedNotBeforeMs = Date.parse(lastWriteAt) + intervalMs + retryGraceMs;
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "cooldown");
+  assert.equal(result.catchUpScheduling.scheduled, true);
+  assert.equal(pending.reason, "recentActiveWriteCooldown");
+  assert.ok(Math.abs(pending.notBeforeMs - expectedNotBeforeMs) < 10);
+  assert.equal(workerTriggers.length, 1);
+  assert.equal(workerRequests.length, 1);
+  assert.ok(workerRequests[0].delayMs >= remainingCooldownMs + retryGraceMs - 1000);
+  assert.ok(workerRequests[0].delayMs <= remainingCooldownMs + retryGraceMs + 1000);
+  assert.match(backend.__properties.get("AUTO_REFRESH_LAST_RUN_SUMMARY"), /Catch-up scheduled for/);
+});
+
+test("fresh retry invoked before its cooldown boundary preserves the not-before trigger", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  const notBeforeMs = Date.now() + 10 * 60 * 1000;
+  backend.markAutoRefreshFreshRetryPending_("recentActiveWriteCooldown", notBeforeMs);
+  let coordinatorCalls = 0;
+  backend.startAutoRefreshQueueCoordinator_ = () => {
+    coordinatorCalls++;
+    return { ok: true, status: "inProgress", inProgress: true };
+  };
+
+  const result = backend.autoRefreshWorkerTickInternal_();
+  const pending = backend.readAutoRefreshFreshRetryPending_();
+  const workerTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+  const workerRequests = backend.__triggerRequests.filter((request) => request.handler === "autoRefreshWorkerTick");
+
+  assert.equal(result.inProgress, true);
+  assert.equal(result.reason, "freshRetryNotDue");
+  assert.equal(result.retryAt, new Date(notBeforeMs).toISOString());
+  assert.equal(coordinatorCalls, 0);
+  assert.equal(pending.notBeforeMs, notBeforeMs);
+  assert.equal(workerTriggers.length, 1);
+  assert.equal(workerRequests.length, 1);
+  assert.ok(workerRequests[0].delayMs >= 10 * 60 * 1000 - 1000);
+});
+
 test("cooldown CWL refresh queues season events exactly once and updates active-war hash", () => {
   const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
   const sourceData = buildRosterData();
