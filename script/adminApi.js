@@ -9,6 +9,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return getRosterData();
 		case "verifyAdminPassword":
 			return verifyAdminPassword(args[0]);
+		case "getAdminWorkspaceBootstrap":
+			return getAdminWorkspaceBootstrap(args[0]);
 		case "getAutoRefreshSettings":
 			return getAutoRefreshSettings(args[0]);
 		case "getAutoRefreshDiagnostics":
@@ -605,15 +607,85 @@ function syncDiscordUsernameForPlayerTag(playerTag, discordUsername, botSecret) 
 	return syncDiscordIdentityForPlayerTag(playerTag, "", discordUsername, botSecret);
 }
 
+// Load reconciled auto-refresh settings while the caller holds the script lock.
+function loadAutoRefreshSettingsForAdmin_() {
+	reconcileAutoRefreshTriggerState_();
+	reconcileRegularWarFinalizationTriggerState_();
+	return readAutoRefreshSettings_();
+}
+
+// Load reconciled donation-refresh settings while the caller holds the script lock.
+function loadDonationRefreshSettingsForAdmin_() {
+	reconcileDonationRefreshTriggerState_();
+	return readDonationRefreshSettings_();
+}
+
+// Capture one independently recoverable admin-workspace bootstrap section.
+function settleAdminWorkspaceBootstrapSection_(callback) {
+	try {
+		return {
+			ok: true,
+			value: callback(),
+		};
+	} catch (err) {
+		return {
+			ok: false,
+			error: errorMessage_(err),
+		};
+	}
+}
+
+// Build matching partial failures when startup settings cannot acquire their shared lock.
+function buildAdminWorkspaceBootstrapLockFailure_(err) {
+	const message = errorMessage_(err);
+	return {
+		schemaVersion: 1,
+		authenticated: true,
+		autoRefresh: {
+			ok: false,
+			error: message,
+		},
+		donationRefresh: {
+			ok: false,
+			error: message,
+		},
+	};
+}
+
+// Authenticate once and load both startup settings under one script lock.
+function getAdminWorkspaceBootstrap(password) {
+	assertAdminPassword_(password);
+	try {
+		const scriptLock = LockService.getScriptLock();
+		scriptLock.waitLock(30000);
+		const result = {
+			schemaVersion: 1,
+			authenticated: true,
+			autoRefresh: settleAdminWorkspaceBootstrapSection_(function () {
+				return loadAutoRefreshSettingsForAdmin_();
+			}),
+			donationRefresh: settleAdminWorkspaceBootstrapSection_(function () {
+				return loadDonationRefreshSettingsForAdmin_();
+			}),
+		};
+		try {
+			scriptLock.releaseLock();
+		} catch (releaseErr) {
+			Logger.log("Admin workspace bootstrap could not release its script lock cleanly: %s", errorMessage_(releaseErr));
+		}
+		return result;
+	} catch (err) {
+		return buildAdminWorkspaceBootstrapLockFailure_(err);
+	}
+}
+
 // Get auto refresh settings.
 function getAutoRefreshSettings(password) {
 	assertAdminPassword_(password);
 	const scriptLock = LockService.getScriptLock();
 	scriptLock.waitLock(30000);
 	try {
-		reconcileAutoRefreshTriggerState_();
-		reconcileRegularWarFinalizationTriggerState_();
-		return readAutoRefreshSettings_();
+		return loadAutoRefreshSettingsForAdmin_();
 	} finally {
 		scriptLock.releaseLock();
 	}
@@ -657,8 +729,7 @@ function getDonationRefreshSettings(password) {
 	const scriptLock = LockService.getScriptLock();
 	scriptLock.waitLock(30000);
 	try {
-		reconcileDonationRefreshTriggerState_();
-		return readDonationRefreshSettings_();
+		return loadDonationRefreshSettingsForAdmin_();
 	} finally {
 		scriptLock.releaseLock();
 	}

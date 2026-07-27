@@ -33,26 +33,34 @@ test("admin shells expose the optimistic workspace skeleton", () => {
   for (const [name, html] of shells) {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
-    assert.match(html, /Admin unlocked\. Loading rosters and refresh settings\./, name);
-    assert.match(html, /admin\.js\?v=[^"]*20260727a/, name);
+    assert.match(html, /Verifying admin access and loading the workspace\./, name);
+    assert.match(html, /admin\.js\?v=[^"]*20260727b/, name);
   }
 });
 
-test("admin unlock blocks only for authentication and hydrates behind the skeleton", () => {
+test("admin unlock overlaps authenticated settings bootstrap with an unapplied roster fetch", () => {
   const adminClient = readShell("admin.js");
-  const verification = adminClient.indexOf('await runServerMethod("verifyAdminPassword"');
-  const showSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(true)", verification);
-  const startLoads = adminClient.indexOf("const settingsLoadPromise", showSkeleton);
-  const hideBlockingLoader = adminClient.indexOf("await hideStartupLoader_({ skipMinimumDelay: true })", startLoads);
-  const awaitHydration = adminClient.indexOf("const loadResults = await Promise.all", hideBlockingLoader);
-  const hideSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(false)", awaitHydration);
+  const unlockStart = adminClient.indexOf("const handleUnlock = async () =>");
+  const showSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(true)", unlockStart);
+  const rosterFetch = adminClient.indexOf("const activeConfigFetchPromise = loadActiveRosterData()", showSkeleton);
+  const settingsBootstrap = adminClient.indexOf("const settingsResults = await loadAdminWorkspaceBootstrapSettings_()", rosterFetch);
+  const markAuthenticated = adminClient.indexOf("setAuthCardUnlocked(true)", settingsBootstrap);
+  const awaitRoster = adminClient.indexOf("const activeConfigFetchResult = await activeConfigFetchPromise", markAuthenticated);
+  const applyRoster = adminClient.indexOf("applyActiveConfigIntoPreview_(", awaitRoster);
+  const hideSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(false)", applyRoster);
 
-  assert.ok(verification >= 0);
-  assert.ok(showSkeleton > verification);
-  assert.ok(startLoads > showSkeleton);
-  assert.ok(hideBlockingLoader > startLoads);
-  assert.ok(awaitHydration > hideBlockingLoader);
-  assert.ok(hideSkeleton > awaitHydration);
+  assert.ok(unlockStart >= 0);
+  assert.ok(showSkeleton > unlockStart);
+  assert.ok(rosterFetch > showSkeleton);
+  assert.ok(settingsBootstrap > rosterFetch);
+  assert.ok(markAuthenticated > settingsBootstrap);
+  assert.ok(awaitRoster > markAuthenticated);
+  assert.ok(applyRoster > awaitRoster);
+  assert.ok(hideSkeleton > applyRoster);
+  assert.doesNotMatch(adminClient.slice(unlockStart, hideSkeleton), /runServerMethod\("verifyAdminPassword"/);
+  assert.doesNotMatch(adminClient.slice(unlockStart, hideSkeleton), /showStartupLoader_|hideStartupLoader_/);
+  assert.match(adminClient, /runServerMethod\("getAdminWorkspaceBootstrap"/);
+  assert.match(adminClient, /isAdminWorkspaceBootstrapUnavailable_/);
   assert.doesNotMatch(adminClient, /refreshStartupLoader_\("Step [23] of 3"/);
 });
 

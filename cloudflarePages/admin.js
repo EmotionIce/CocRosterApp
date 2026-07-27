@@ -3030,6 +3030,75 @@
     }
   };
 
+  // Return whether the optimized startup contract is unavailable on an older backend.
+  const isAdminWorkspaceBootstrapUnavailable_ = (errRaw) => {
+    const message = toErrorMessage(errRaw).trim().toLowerCase();
+    return message.indexOf("unsupported admin method: getadminworkspacebootstrap") >= 0
+      || message.indexOf("server method is not available: getadminworkspacebootstrap") >= 0;
+  };
+
+  // Convert one backend bootstrap section into the same settled shape as Promise.allSettled.
+  const applyAdminWorkspaceBootstrapSection_ = (sectionRaw, stateKey, labelRaw) => {
+    const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
+    const label = toStr(labelRaw).trim() || "Admin setting";
+    if (section && section.ok === true) {
+      const value = section.value && typeof section.value === "object" ? section.value : null;
+      state[stateKey] = value;
+      return { status: "fulfilled", value };
+    }
+
+    state[stateKey] = null;
+    const message = toStr(section && section.error).trim() || (label + " failed to load.");
+    return { status: "rejected", reason: new Error(message) };
+  };
+
+  // Authenticate once and hydrate both refresh settings under one backend lock.
+  const loadAdminWorkspaceBootstrapSettings_ = async () => {
+    if (!state.password) {
+      throw new Error("Unlock admin first.");
+    }
+
+    state.autoRefreshBusy = true;
+    state.donationRefreshBusy = true;
+    renderAutoRefreshUi();
+    renderDonationRefreshUi();
+    try {
+      let bootstrap = null;
+      try {
+        bootstrap = await runServerMethod("getAdminWorkspaceBootstrap", [state.password]);
+      } catch (err) {
+        if (!isAdminWorkspaceBootstrapUnavailable_(err)) throw err;
+        await runServerMethod("verifyAdminPassword", [state.password]);
+        return Promise.allSettled([
+          loadAutoRefreshSettings(),
+          loadDonationRefreshSettings(),
+        ]);
+      }
+
+      if (!bootstrap || typeof bootstrap !== "object" || bootstrap.authenticated !== true) {
+        throw new Error("Admin workspace bootstrap returned an invalid authentication result.");
+      }
+
+      return [
+        applyAdminWorkspaceBootstrapSection_(
+          bootstrap.autoRefresh,
+          "autoRefreshSettings",
+          "Auto-refresh settings"
+        ),
+        applyAdminWorkspaceBootstrapSection_(
+          bootstrap.donationRefresh,
+          "donationRefreshSettings",
+          "Donation-refresh settings"
+        ),
+      ];
+    } finally {
+      state.autoRefreshBusy = false;
+      state.donationRefreshBusy = false;
+      renderAutoRefreshUi();
+      renderDonationRefreshUi();
+    }
+  };
+
   // Update auto refresh enabled.
   const updateAutoRefreshEnabled = async (enabled) => {
     if (!state.password) {
@@ -6981,6 +7050,38 @@
     }
   };
 
+  // Apply already-loaded active config to the admin preview.
+  const applyActiveConfigIntoPreview_ = (rosterData, statusOnSuccessRaw) => {
+    if (!rosterData || !Array.isArray(rosterData.rosters)) {
+      throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
+    }
+
+    state.lastRosterData = rosterData;
+    normalizeRosterOrderInData_(state.lastRosterData);
+    clearRosterStatuses();
+    state.benchMarksByRoster = {};
+    state.swapInMarksByRoster = {};
+    state.suggestionNotesByRoster = {};
+    clearCwlPreferenceApplySummary_();
+    reindexAllRosters();
+    normalizeAllRosterPublicLineupProjectionsLocal_();
+    setAddPreviewRosterStatus("", false);
+    setAddPlayerStatus("", false);
+    syncPublicConfigEditorFromState_({ preserveStatus: true });
+
+    if (state.importSession) {
+      alignImportMappingWithPreview();
+      invalidateImportComparison("Rosters changed after loading active config. Re-run compare with rosters.");
+    }
+
+    renderPreviewFromState();
+    notifyRosterDataChanged_();
+    const publishBtn = $("#publishBtn");
+    if (publishBtn) publishBtn.disabled = false;
+    setStatus(toStr(statusOnSuccessRaw).trim() || "Active config loaded.");
+    return rosterData;
+  };
+
   // Load active config into preview.
   const loadActiveConfigIntoPreview = async (optionsRaw) => {
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -6990,34 +7091,7 @@
     try {
       setStatus("Loading active config...");
       const rosterData = await loadActiveRosterData();
-      if (!rosterData || !Array.isArray(rosterData.rosters)) {
-        throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
-      }
-
-      state.lastRosterData = rosterData;
-      normalizeRosterOrderInData_(state.lastRosterData);
-      clearRosterStatuses();
-      state.benchMarksByRoster = {};
-      state.swapInMarksByRoster = {};
-      state.suggestionNotesByRoster = {};
-      clearCwlPreferenceApplySummary_();
-      reindexAllRosters();
-      normalizeAllRosterPublicLineupProjectionsLocal_();
-      setAddPreviewRosterStatus("", false);
-      setAddPlayerStatus("", false);
-      syncPublicConfigEditorFromState_({ preserveStatus: true });
-
-      if (state.importSession) {
-        alignImportMappingWithPreview();
-        invalidateImportComparison("Rosters changed after loading active config. Re-run compare with rosters.");
-      }
-
-      renderPreviewFromState();
-      notifyRosterDataChanged_();
-      const publishBtn = $("#publishBtn");
-      if (publishBtn) publishBtn.disabled = false;
-      setStatus(statusOnSuccess);
-      return rosterData;
+      return applyActiveConfigIntoPreview_(rosterData, statusOnSuccess);
     } catch (err) {
       setStatus("");
       if (!silentError) {
@@ -7099,15 +7173,17 @@
         loginBtn.textContent = "Unlocking...";
       }
       if (pwInput) pwInput.disabled = true;
-      showStartupLoader_("Step 1 of 3", "Verifying credentials...");
+      show("#adminPanel", true);
+      setAdminWorkspaceLoading_(true);
 
       try {
-        setLoginStatus("Verifying...");
-        await runServerMethod("verifyAdminPassword", [state.password]);
+        setLoginStatus("Verifying and loading workspace...");
+        const activeConfigFetchPromise = loadActiveRosterData()
+          .then((rosterData) => ({ ok: true, rosterData }))
+          .catch((loadErr) => ({ ok: false, error: loadErr }));
+        const settingsResults = await loadAdminWorkspaceBootstrapSettings_();
 
-        show("#adminPanel", true);
         setAuthCardUnlocked(true);
-        setAdminWorkspaceLoading_(true);
         setActiveAdminTab(state.activeAdminTab, { focusButton: false });
         queueAdminCompactTabsVisibilitySync();
         if (loginBtn) {
@@ -7117,22 +7193,21 @@
         if (pwInput) pwInput.disabled = true;
         refreshAdminWorkflowUi();
         setLoginStatus("Unlocked. Loading workspace...");
-        const settingsLoadPromise = Promise.allSettled([
-          loadAutoRefreshSettings(),
-          loadDonationRefreshSettings(),
-        ]);
-        const activeConfigLoadPromise = loadActiveConfigIntoPreview({
-            silentError: true,
-            statusOnSuccess: "Active config loaded.",
-          })
-          .then(() => ({ ok: true }))
-          .catch((loadErr) => ({ ok: false, error: loadErr }));
-        await hideStartupLoader_({ skipMinimumDelay: true });
-        const loadResults = await Promise.all([settingsLoadPromise, activeConfigLoadPromise]);
-        const settingsResults = Array.isArray(loadResults[0]) ? loadResults[0] : [];
-        const activeConfigResult = loadResults[1] && typeof loadResults[1] === "object"
-          ? loadResults[1]
-          : { ok: false };
+        const activeConfigFetchResult = await activeConfigFetchPromise;
+        let activeConfigResult = { ok: false };
+        if (activeConfigFetchResult && activeConfigFetchResult.ok) {
+          try {
+            applyActiveConfigIntoPreview_(
+              activeConfigFetchResult.rosterData,
+              "Active config loaded."
+            );
+            activeConfigResult = { ok: true };
+          } catch (loadErr) {
+            activeConfigResult = { ok: false, error: loadErr };
+          }
+        } else if (activeConfigFetchResult && typeof activeConfigFetchResult === "object") {
+          activeConfigResult = activeConfigFetchResult;
+        }
         const failedSettings = settingsResults.filter((result) => result && result.status === "rejected");
         if (failedSettings.length) {
           postUnlockWarning = failedSettings.map((result) => toErrorMessage(result.reason)).join(" | ");
@@ -7159,9 +7234,6 @@
         renderDonationRefreshUi();
         alert("Unlock failed: " + toErrorMessage(err));
       } finally {
-        if (!unlockSucceeded) {
-          await hideStartupLoader_({ skipMinimumDelay: true });
-        }
         if (!unlockSucceeded) {
           if (loginBtn) {
             loginBtn.disabled = false;

@@ -2413,6 +2413,118 @@ test("admin bridge materializes a legacy linked-account index idempotently", () 
   assert.equal(second.reason, "already-complete");
 });
 
+test("admin workspace bootstrap authenticates once and loads both settings under one lock", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  const calls = [];
+  let waitCount = 0;
+  let releaseCount = 0;
+  backend.LockService.getScriptLock = () => ({
+    waitLock() {
+      waitCount += 1;
+    },
+    releaseLock() {
+      releaseCount += 1;
+    },
+  });
+  backend.reconcileAutoRefreshTriggerState_ = () => {
+    calls.push("auto-reconcile");
+  };
+  backend.reconcileRegularWarFinalizationTriggerState_ = () => {
+    calls.push("war-reconcile");
+  };
+  backend.readAutoRefreshSettings_ = () => {
+    calls.push("auto-read");
+    return { enabled: true, intervalHours: 2 };
+  };
+  backend.reconcileDonationRefreshTriggerState_ = () => {
+    calls.push("donation-reconcile");
+  };
+  backend.readDonationRefreshSettings_ = () => {
+    calls.push("donation-read");
+    return { enabled: false, intervalMinutes: 30 };
+  };
+
+  const result = clone(backend.runAdminApiMethod_("getAdminWorkspaceBootstrap", ["secret"]));
+
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.authenticated, true);
+  assert.deepEqual(result.autoRefresh, {
+    ok: true,
+    value: { enabled: true, intervalHours: 2 },
+  });
+  assert.deepEqual(result.donationRefresh, {
+    ok: true,
+    value: { enabled: false, intervalMinutes: 30 },
+  });
+  assert.deepEqual(calls, [
+    "auto-reconcile",
+    "war-reconcile",
+    "auto-read",
+    "donation-reconcile",
+    "donation-read",
+  ]);
+  assert.equal(waitCount, 1);
+  assert.equal(releaseCount, 1);
+  assert.throws(
+    () => backend.runAdminApiMethod_("getAdminWorkspaceBootstrap", ["wrong"]),
+    /Authentication failed/,
+  );
+  assert.equal(waitCount, 1);
+});
+
+test("admin workspace bootstrap preserves partial settings failures", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  let donationReads = 0;
+  backend.reconcileAutoRefreshTriggerState_ = () => {
+    throw new Error("auto startup failed");
+  };
+  backend.reconcileDonationRefreshTriggerState_ = () => {};
+  backend.readDonationRefreshSettings_ = () => {
+    donationReads += 1;
+    return { enabled: true };
+  };
+
+  const result = clone(backend.runAdminApiMethod_("getAdminWorkspaceBootstrap", ["secret"]));
+
+  assert.equal(result.authenticated, true);
+  assert.deepEqual(result.autoRefresh, {
+    ok: false,
+    error: "auto startup failed",
+  });
+  assert.deepEqual(result.donationRefresh, {
+    ok: true,
+    value: { enabled: true },
+  });
+  assert.equal(donationReads, 1);
+});
+
+test("admin workspace bootstrap preserves unlock when the settings lock is busy", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  backend.LockService.getScriptLock = () => ({
+    waitLock() {
+      throw new Error("settings lock timeout");
+    },
+    releaseLock() {
+      assert.fail("An unacquired script lock must not be released.");
+    },
+  });
+
+  const result = clone(backend.runAdminApiMethod_("getAdminWorkspaceBootstrap", ["secret"]));
+
+  assert.equal(result.authenticated, true);
+  assert.deepEqual(result.autoRefresh, {
+    ok: false,
+    error: "settings lock timeout",
+  });
+  assert.deepEqual(result.donationRefresh, {
+    ok: false,
+    error: "settings lock timeout",
+  });
+});
+
 test("season event signup does not match an ID-linked account by username collision", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.reconcileCurrentSeasonEvents({ manualSeason: seasonFixture }, "secret");
