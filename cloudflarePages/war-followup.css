@@ -1022,6 +1022,10 @@
   width: min(560px, 100%);
 }
 
+.wfu-ignore-modal {
+  width: min(600px, 100%);
+}
+
 .wfu-modal__head {
   position: sticky;
   z-index: 2;
@@ -1092,6 +1096,53 @@
   font-weight: 780;
 }
 
+.wfu-ignore-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.45fr);
+  gap: 8px;
+  padding: 14px 16px 10px;
+}
+
+.wfu-ignore-error {
+  margin: 0 16px 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(244, 63, 94, 0.34);
+  border-radius: 12px;
+  background: rgba(159, 18, 57, 0.18);
+  color: #ffe4e6;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.wfu-ignore-results {
+  display: grid;
+  gap: 7px;
+  max-height: 480px;
+  overflow-y: auto;
+  padding: 0 16px 16px;
+}
+
+.wfu-ignore-group {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding: 8px 2px 3px;
+  background: var(--wfu-panel-strong);
+  color: var(--wfu-muted);
+  font-size: 0.68rem;
+  font-weight: 850;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.wfu-ignore-row__copy {
+  min-width: 0;
+}
+
+.wfu-ignore-restore {
+  flex: 0 0 auto;
+}
+
 @media (max-width: 700px) {
   .wfu-status-more__panel {
     right: auto;
@@ -1106,6 +1157,10 @@
 
   .wfu-decision-grid .wfu-decision-btn:last-child {
     grid-column: auto;
+  }
+
+  .wfu-ignore-controls {
+    grid-template-columns: 1fr;
   }
 }
 

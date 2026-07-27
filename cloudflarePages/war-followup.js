@@ -282,6 +282,39 @@
     return { byTag, players: Object.values(byTag), rosters: rosterList, missingTags };
   };
 
+  const buildIgnoredPlayerEntries = (directoryRaw, settingsRaw, casesRaw) => {
+    const directory = directoryRaw && typeof directoryRaw === "object" ? directoryRaw : {};
+    const byTag = directory.byTag && typeof directory.byTag === "object" ? directory.byTag : {};
+    const cases = Array.isArray(casesRaw) ? casesRaw : [];
+    const caseByTag = {};
+    for (const raw of cases) {
+      const value = normalizeCase(raw);
+      if (value) caseByTag[value.tag] = value;
+    }
+    return sanitizeSettings(settingsRaw).trustedPlayerTags
+      .map((tag) => {
+        const player = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : null;
+        const caseValue = caseByTag[tag] || null;
+        const rosterId = toText(player && player.rosterId || caseValue && caseValue.sourceRosterId).trim();
+        const rosterTitle = toText(player && player.rosterTitle || caseValue && caseValue.sourceRosterTitle).trim();
+        return {
+          tag,
+          name: toText(player && player.name || caseValue && caseValue.name).trim() || tag,
+          discord: toText(player && player.discord || caseValue && caseValue.discord).trim(),
+          discordId: toText(player && player.discordId).trim(),
+          rosterId,
+          rosterTitle,
+          clanTag: normalizeTag(player && player.clanTag || caseValue && caseValue.sourceClanTag),
+          inCurrentRoster: !!player,
+        };
+      })
+      .sort((left, right) =>
+        (left.rosterTitle || "\uffff").localeCompare(right.rosterTitle || "\uffff") ||
+        left.name.localeCompare(right.name) ||
+        left.tag.localeCompare(right.tag)
+      );
+  };
+
   const buildRegularEvidence = (entryRaw, settingsRaw) => {
     const settings = sanitizeSettings(settingsRaw);
     const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
@@ -860,6 +893,8 @@
       clan: "",
       handler: "",
       search: "",
+      ignoredSearch: "",
+      ignoredClan: "",
       visibleLimit: 12,
       selectedTag: "",
       decisionMode: "",
@@ -1062,6 +1097,48 @@
         });
     };
 
+    const restoreIgnoredAccountInBackground = (entryRaw) => {
+      const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+      const tag = normalizeTag(entry.tag);
+      if (!tag || state.pendingIgnoreTags.has(tag)) return null;
+      const playerName = toText(entry.name).trim() || tag;
+
+      state.pendingIgnoreTags.add(tag);
+      setNotice("", false);
+      applyLocalIgnoreState(tag, false, "");
+      render();
+
+      const finishSaved = (result) => {
+        if (!result || normalizeTag(result.tag) !== tag || result.trusted !== false) {
+          throw new Error("The server did not confirm the account restore.");
+        }
+        state.pendingIgnoreTags.delete(tag);
+        applyLocalIgnoreState(tag, false, result.updatedAt);
+        render();
+        return result;
+      };
+
+      return Promise.resolve()
+        .then(() => callServer("setWarFollowupTrustedAccount", [tag, false, getPassword()]))
+        .then(finishSaved)
+        .catch(async (err) => {
+          // A response can be interrupted after the write commits. Confirm the
+          // stored value before returning the account to the ignored list.
+          try {
+            const status = await callServer("getWarFollowupTrustStatus", [tag, getPassword()]);
+            if (status && status.trusted === false) return finishSaved(status);
+          } catch {
+            // The original error below is the useful one to show.
+          }
+          state.pendingIgnoreTags.delete(tag);
+          applyLocalIgnoreState(tag, true, "");
+          const detail = err && err.message ? err.message : String(err);
+          setNotice(playerName + ": Could not restore account. " + detail, true, tag);
+          render();
+          return null;
+        });
+    };
+
     const getSelectedItem = () => state.work.items.find((item) => item.tag === state.selectedTag) || null;
 
     const statusForItem = (item) => item && STATUS_META[item.status] ? item.status : "needs_review";
@@ -1089,6 +1166,15 @@
         state.modal = "add";
         render();
       }));
+      const ignoredCount = state.privateState.settings.trustedPlayerTags.length;
+      actions.appendChild(createButton(
+        "Ignored players" + (ignoredCount ? " " + ignoredCount : ""),
+        "wfu-menu__item",
+        () => {
+          state.modal = "ignored";
+          render();
+        },
+      ));
       actions.appendChild(createButton("Rules", "wfu-menu__item", () => {
         state.modal = "settings";
         render();
@@ -2074,6 +2160,125 @@
       window.requestAnimationFrame(() => search.focus());
     };
 
+    const renderIgnoredModal = (mount) => {
+      const layer = createElement("div", "wfu-modal-layer");
+      const closeModal = () => {
+        state.modal = "";
+        state.ignoredSearch = "";
+        state.ignoredClan = "";
+        render();
+      };
+      const backdrop = createButton("Close", "wfu-modal-backdrop", closeModal);
+      const modal = createElement("div", "wfu-modal wfu-ignore-modal");
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+      modal.setAttribute("aria-label", "Ignored players");
+      const entries = buildIgnoredPlayerEntries(
+        state.work.directory,
+        state.privateState.settings,
+        state.privateState.cases,
+      );
+      const head = createElement("div", "wfu-modal__head");
+      head.appendChild(createElement(
+        "h2",
+        "wfu-modal__title",
+        "Ignored players" + (entries.length ? " " + entries.length : ""),
+      ));
+      head.appendChild(createButton("Close", "btn secondary", closeModal));
+      modal.appendChild(head);
+
+      const controls = createElement("div", "wfu-ignore-controls");
+      const search = createElement("input", "wfu-input");
+      search.type = "search";
+      search.placeholder = "Search name or tag";
+      search.value = state.ignoredSearch;
+      search.setAttribute("aria-label", "Search ignored players");
+      const clan = createElement("select", "wfu-select");
+      clan.setAttribute("aria-label", "Filter ignored players by clan");
+      addOption(clan, "", "All clans", !state.ignoredClan);
+      const rosterOptions = Array.from(new Map(
+        entries
+          .filter((entry) => entry.rosterId || entry.rosterTitle)
+          .map((entry) => [entry.rosterId || entry.rosterTitle, entry.rosterTitle || entry.rosterId])
+      ).entries()).sort((left, right) => left[1].localeCompare(right[1]));
+      for (const [value, label] of rosterOptions) {
+        addOption(clan, value, label, state.ignoredClan === value);
+      }
+      if (entries.some((entry) => !entry.rosterId && !entry.rosterTitle)) {
+        addOption(clan, "__other", "No current clan", state.ignoredClan === "__other");
+      }
+      controls.appendChild(search);
+      controls.appendChild(clan);
+      modal.appendChild(controls);
+
+      if (state.error && state.noticeTag) {
+        modal.appendChild(createElement("div", "wfu-ignore-error", state.error));
+      }
+      const results = createElement("div", "wfu-ignore-results");
+      modal.appendChild(results);
+
+      const renderResults = () => {
+        results.textContent = "";
+        const query = state.ignoredSearch.trim().toLowerCase();
+        const matching = entries.filter((entry) => {
+          const clanKey = entry.rosterId || entry.rosterTitle || "__other";
+          if (state.ignoredClan && clanKey !== state.ignoredClan) return false;
+          return !query || [
+            entry.name,
+            entry.tag,
+            entry.discord,
+            entry.discordId,
+            entry.rosterTitle,
+            entry.clanTag,
+          ].some((value) => toText(value).toLowerCase().includes(query));
+        });
+        let previousClan = "";
+        for (const entry of matching) {
+          const clanLabel = entry.rosterTitle || "No current clan";
+          if (clanLabel !== previousClan) {
+            results.appendChild(createElement("div", "wfu-ignore-group", clanLabel));
+            previousClan = clanLabel;
+          }
+          const row = createElement("div", "wfu-add-row wfu-ignore-row");
+          const copy = createElement("div", "wfu-ignore-row__copy");
+          copy.appendChild(createElement("div", "wfu-add-row__name", entry.name));
+          const discord = discordIdentityText(entry);
+          copy.appendChild(createElement(
+            "div",
+            "wfu-add-row__meta",
+            [discord, entry.tag].filter(Boolean).join(" \u00b7 "),
+          ));
+          row.appendChild(copy);
+          const restore = createButton("Restore", "btn secondary wfu-ignore-restore", () =>
+            restoreIgnoredAccountInBackground(entry)
+          );
+          restore.title = "Allow this account to appear in war follow-up again.";
+          row.appendChild(restore);
+          results.appendChild(row);
+        }
+        if (!matching.length) {
+          results.appendChild(createElement(
+            "div",
+            "wfu-empty__text",
+            entries.length ? "No matches." : "No ignored players.",
+          ));
+        }
+      };
+      search.addEventListener("input", () => {
+        state.ignoredSearch = search.value;
+        renderResults();
+      });
+      clan.addEventListener("change", () => {
+        state.ignoredClan = clan.value;
+        renderResults();
+      });
+      renderResults();
+      layer.appendChild(backdrop);
+      layer.appendChild(modal);
+      mount.appendChild(layer);
+      window.requestAnimationFrame(() => search.focus());
+    };
+
     const render = () => {
       const mount = getMount();
       if (!mount) return;
@@ -2097,6 +2302,7 @@
       renderDrawer(mount);
       if (state.modal === "settings") renderSettingsModal(mount);
       if (state.modal === "add") renderAddModal(mount);
+      if (state.modal === "ignored") renderIgnoredModal(mount);
     };
 
     const handleTabChange = (event) => {
@@ -2143,7 +2349,16 @@
       state.initialized = false;
     };
 
-    return { init, destroy, load, render, dismissInBackground, ignoreAccountInBackground, state };
+    return {
+      init,
+      destroy,
+      load,
+      render,
+      dismissInBackground,
+      ignoreAccountInBackground,
+      restoreIgnoredAccountInBackground,
+      state,
+    };
   };
 
   let defaultController = null;
@@ -2163,6 +2378,7 @@
     buildClanProfileLink,
     discordIdentityText,
     buildPlayerDirectory,
+    buildIgnoredPlayerEntries,
     buildEvidenceForTag,
     buildSignals,
     buildRecoveryProgress,

@@ -465,6 +465,32 @@ test("trusted accounts are ignored by automatic work, manual cases, and Discord 
   );
 });
 
+test("ignored-player entries stay searchable even when an account leaves the current roster", () => {
+  const rosterData = buildRosterData();
+  const settings = { trustedPlayerTags: ["#P0LYGQ", "#P0LYGC"] };
+  const directory = followup.buildPlayerDirectory(rosterData, settings);
+  const entries = followup.buildIgnoredPlayerEntries(directory, settings, [{
+    tag: "#P0LYGC",
+    name: "Former Filler",
+    discord: "former.filler",
+    sourceRosterId: "old-main",
+    sourceRosterTitle: "Old main",
+    sourceClanTag: "#OLD",
+  }]);
+  assert.deepEqual(
+    entries.map((entry) => ({
+      tag: entry.tag,
+      name: entry.name,
+      rosterTitle: entry.rosterTitle,
+      inCurrentRoster: entry.inCurrentRoster,
+    })),
+    [
+      { tag: "#P0LYGQ", name: "Player One", rosterTitle: "Main clan", inCurrentRoster: true },
+      { tag: "#P0LYGC", name: "Former Filler", rosterTitle: "Old main", inCurrentRoster: false },
+    ],
+  );
+});
+
 test("player cards can use the linked Discord username or fall back to its ID", () => {
   assert.equal(
     followup.discordIdentityText({ discord: "leader.alt", discordId: "123456789012345678" }),
@@ -651,6 +677,95 @@ test("a failed Always ignore save verifies storage, then restores the account", 
     assert.equal(controller.state.selectedTag, item.tag);
     assert.equal(controller.state.pendingIgnoreTags.has(item.tag), false);
     assert.match(controller.state.error, /Could not save Always ignore/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("Restore removes an account from ignored settings immediately and persists it", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let resolveSave;
+    let savedMethod = "";
+    let savedArgs = null;
+    const save = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        savedMethod = method;
+        savedArgs = args;
+        return save;
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      trustedPlayerTags: ["#P0LYGQ"],
+    });
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const entry = followup.buildIgnoredPlayerEntries(
+      controller.state.work.directory,
+      controller.state.privateState.settings,
+      controller.state.privateState.cases,
+    )[0];
+
+    const operation = controller.restoreIgnoredAccountInBackground(entry);
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(entry.tag), false);
+    assert.equal(controller.state.pendingIgnoreTags.has(entry.tag), true);
+    assert.equal(controller.restoreIgnoredAccountInBackground(entry), null, "a pending restore must not be submitted twice");
+
+    resolveSave({ tag: entry.tag, trusted: false, updatedAt: "2026-07-27T12:00:00.000Z" });
+    const result = await operation;
+    assert.equal(savedMethod, "setWarFollowupTrustedAccount");
+    assert.deepEqual(savedArgs, [entry.tag, false, "change-me"]);
+    assert.equal(result.trusted, false);
+    assert.equal(controller.state.pendingIgnoreTags.has(entry.tag), false);
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(entry.tag), false);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a failed Restore verifies storage and returns the account to the ignored list", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    const methods = [];
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => {
+        methods.push(method);
+        if (method === "setWarFollowupTrustedAccount") return Promise.reject(new Error("temporary network failure"));
+        return Promise.resolve({ tag: "#P0LYGQ", trusted: true });
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.modal = "ignored";
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      trustedPlayerTags: ["#P0LYGQ"],
+    });
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const entry = followup.buildIgnoredPlayerEntries(
+      controller.state.work.directory,
+      controller.state.privateState.settings,
+      controller.state.privateState.cases,
+    )[0];
+
+    const result = await controller.restoreIgnoredAccountInBackground(entry);
+    assert.equal(result, null);
+    assert.deepEqual(methods, ["setWarFollowupTrustedAccount", "getWarFollowupTrustStatus"]);
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(entry.tag), true);
+    assert.equal(controller.state.pendingIgnoreTags.has(entry.tag), false);
+    assert.equal(controller.state.modal, "ignored");
+    assert.match(controller.state.error, /Could not restore account/);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
