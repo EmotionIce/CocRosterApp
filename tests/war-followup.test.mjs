@@ -77,6 +77,35 @@ test("follow-up dates always use compact international English formatting", () =
   assert.equal(followup.formatDate("not-a-date"), "");
 });
 
+test("root UI snapshots keep their focus origin while an overlay or loader has focus", () => {
+  const original = {
+    openDetails: ["more"],
+    focusKey: "card:#P0LYGQ",
+    focusControlIndex: 7,
+    hadFocus: true,
+  };
+  const preserved = followup.mergeRootUiSnapshot(original, {
+    rootReady: false,
+    openDetails: [],
+    rootHadFocus: false,
+    focusKey: "",
+    focusControlIndex: -1,
+  });
+  assert.deepEqual(preserved, original);
+
+  const refreshed = followup.mergeRootUiSnapshot(preserved, {
+    rootReady: true,
+    openDetails: ["filters"],
+    rootHadFocus: false,
+  });
+  assert.deepEqual(refreshed, {
+    openDetails: ["filters"],
+    focusKey: "card:#P0LYGQ",
+    focusControlIndex: 7,
+    hadFocus: true,
+  });
+});
+
 test("candidate signals use only regular-war and CWL evidence with conservative result thresholds", () => {
   const rosterData = buildRosterData();
   const work = followup.buildWorkItems(rosterData, {
@@ -519,6 +548,451 @@ test("player cards can use the linked Discord username or fall back to its ID", 
   assert.equal(player.discordId, "123456789012345678");
 });
 
+test("optimistic cases mirror every visible workflow transition", () => {
+  const player = {
+    tag: "#P0LYGQ",
+    name: "Player One",
+    rosterId: "main",
+    rosterTitle: "Main clan",
+    clanTag: "#MAIN",
+  };
+  const build = (caseValue, action, patch = {}) => followup.buildOptimisticCase({
+    tag: player.tag,
+    player,
+    case: caseValue,
+    signalIds: ["signal-1"],
+  }, action, Object.assign({
+    tag: player.tag,
+    name: player.name,
+    signalIds: ["signal-1"],
+  }, patch), "test-" + action);
+
+  const watching = build(null, "watch", { watchWarTarget: 3 });
+  assert.equal(watching.status, "watching");
+  assert.equal(watching.watchWarTarget, 3);
+  assert.ok(watching.watchStartedAt);
+
+  const needsDm = build(null, "hero_down", {
+    targetRosterId: "training",
+    targetRosterTitle: "Hero-down clan",
+    targetClanTag: "#TRAIN",
+    recoveryWarTarget: 4,
+    reasonCodes: ["regular_missed"],
+    evidence: { regular: { missedAttacks: 2 } },
+    dmText: "Prepared decision",
+  });
+  assert.equal(needsDm.status, "needs_dm");
+  assert.equal(needsDm.recoveryWarTarget, 4);
+  assert.equal(needsDm.dmText, "Prepared decision");
+
+  const inRecovery = build(needsDm, "mark_dm_sent", { dmText: "Prepared decision" });
+  assert.equal(inRecovery.status, "hero_down");
+  assert.ok(inRecovery.dmSentAt);
+  assert.equal(inRecovery.recoveryStartedAt, inRecovery.dmSentAt);
+
+  const extended = build(inRecovery, "extend", {
+    recoveryWarTarget: 5,
+    dmText: "Extension decision",
+  });
+  assert.equal(extended.status, "needs_dm");
+  assert.equal(extended.recoveryWarTarget, 5);
+  assert.equal(extended.dmSentAt, "");
+  assert.equal(extended.recoveryStartedAt, "");
+
+  const noReturn = build(inRecovery, "close", { outcome: "no_return" });
+  assert.equal(noReturn.status, "closed");
+  assert.equal(noReturn.outcome, "no_return");
+
+  const approved = build(inRecovery, "approve_return");
+  assert.equal(approved.status, "closed");
+  assert.equal(approved.outcome, "approved_return");
+
+  const reopened = build(approved, "reopen");
+  assert.equal(reopened.status, "needs_review");
+  assert.equal(reopened.outcome, "");
+});
+
+test("form snapshots preserve unsaved values, checks, and text selection across background renders", () => {
+  const text = {
+    type: "textarea",
+    value: "custom DM wording",
+    checked: false,
+    selectionStart: 4,
+    selectionEnd: 9,
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    },
+  };
+  const checkbox = { type: "checkbox", value: "regular_missed", checked: true };
+  const select = { type: "select-one", value: "training", checked: false };
+  const controls = [text, checkbox, select];
+  const container = { querySelectorAll: () => controls };
+  const snapshot = followup.snapshotFormControls(container);
+
+  text.value = "";
+  text.selectionStart = 0;
+  text.selectionEnd = 0;
+  checkbox.checked = false;
+  select.value = "";
+  followup.restoreFormControls(container, snapshot);
+
+  assert.equal(text.value, "custom DM wording");
+  assert.deepEqual([text.selectionStart, text.selectionEnd], [4, 9]);
+  assert.equal(checkbox.checked, true);
+  assert.equal(select.value, "training");
+
+  const reasonA = {
+    type: "checkbox",
+    name: "wfu-reason",
+    value: "regular_missed",
+    checked: true,
+    dataset: {},
+  };
+  const reasonB = {
+    type: "checkbox",
+    name: "wfu-reason",
+    value: "cwl_missed",
+    checked: false,
+    dataset: {},
+  };
+  const dm = {
+    type: "textarea",
+    value: "keep this custom DM",
+    checked: false,
+    dataset: { wfuFocusKey: "field:decision-message" },
+    selectionStart: 0,
+    selectionEnd: 0,
+  };
+  let dynamicControls = [reasonA, reasonB, dm];
+  const dynamicContainer = { querySelectorAll: () => dynamicControls };
+  const dynamicSnapshot = followup.snapshotFormControls(dynamicContainer);
+  reasonA.checked = false;
+  reasonB.checked = true;
+  dm.value = "";
+  dynamicControls = [reasonB, reasonA, dm];
+  followup.restoreFormControls(dynamicContainer, dynamicSnapshot);
+  assert.equal(reasonA.checked, true, "the regular-war choice follows its identity after reordering");
+  assert.equal(reasonB.checked, false, "the CWL choice follows its identity after reordering");
+  assert.equal(dm.value, "keep this custom DM");
+});
+
+test("Start watching changes state immediately and reconciles the authoritative save", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let resolveSave;
+    let savedRequest = null;
+    const save = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        assert.equal(method, "mutateWarFollowupCase");
+        savedRequest = args[0];
+        return save;
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    controller.state.selectedTag = item.tag;
+    controller.state.decisionMode = "watch";
+
+    const operation = controller.mutateCase(item, "watch", { watchWarTarget: 3 });
+    const optimistic = controller.state.work.items.find((entry) => entry.tag === item.tag);
+    assert.equal(optimistic.status, "watching");
+    assert.equal(optimistic.case.watchWarTarget, 3);
+    assert.equal(controller.state.decisionMode, "");
+    assert.equal(controller.state.pendingCaseMutations.has(item.tag), true);
+    assert.equal(controller.mutateCase(optimistic, "reopen"), null, "the same player must not queue a stale second action");
+
+    await Promise.resolve();
+    assert.equal(savedRequest.expectedUpdatedAt, "");
+    assert.ok(savedRequest.mutationId);
+    resolveSave({
+      tag: item.tag,
+      name: item.player.name,
+      status: "watching",
+      watchWarTarget: 3,
+      watchStartedAt: "2026-07-28T12:00:00.000Z",
+      updatedAt: "2026-07-28T12:00:00.000Z",
+      mutationLedger: [{
+        mutationId: savedRequest.mutationId,
+        action: "watch",
+        updatedAt: "2026-07-28T12:00:00.000Z",
+      }],
+    });
+    const saved = await operation;
+    assert.equal(saved.status, "watching");
+    assert.equal(controller.state.pendingCaseMutations.has(item.tag), false);
+    assert.equal(
+      controller.state.work.items.find((entry) => entry.tag === item.tag).case.updatedAt,
+      "2026-07-28T12:00:00.000Z",
+    );
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("different-player optimistic changes dispatch immediately and reconcile independently", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    const rosterData = buildRosterData();
+    rosterData.rosters[0].main.push({
+      tag: "#P0LYGC",
+      name: "Player Two",
+      discord: "player-two",
+      th: 16,
+    });
+    rosterData.playerWarPerformance.byTag["#P0LYGC"] =
+      structuredClone(rosterData.playerWarPerformance.byTag["#P0LYGQ"]);
+    const calls = [];
+    const deferred = [];
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        assert.equal(method, "mutateWarFollowupCase");
+        calls.push(args[0]);
+        return new Promise((resolve) => deferred.push(resolve));
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const first = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    const second = controller.state.work.items.find((entry) => entry.tag === "#P0LYGC");
+
+    const firstOperation = controller.mutateCase(first, "watch", { watchWarTarget: 2 });
+    const secondOperation = controller.mutateCase(second, "watch", { watchWarTarget: 4 });
+    assert.equal(controller.state.pendingCaseMutations.size, 2);
+    assert.equal(controller.state.work.items.find((entry) => entry.tag === first.tag).status, "watching");
+    assert.equal(controller.state.work.items.find((entry) => entry.tag === second.tag).status, "watching");
+
+    await Promise.resolve();
+    assert.equal(calls.length, 2, "an unrelated slow save must not keep the next action only in browser memory");
+    deferred[1]({
+      tag: second.tag,
+      status: "watching",
+      watchWarTarget: 4,
+      watchStartedAt: "2026-07-28T12:00:00.000Z",
+      updatedAt: "2026-07-28T12:00:00.000Z",
+    });
+    await secondOperation;
+    assert.equal(controller.state.pendingCaseMutations.has(first.tag), true);
+    assert.equal(controller.state.pendingCaseMutations.has(second.tag), false);
+    deferred[0]({
+      tag: first.tag,
+      status: "watching",
+      watchWarTarget: 2,
+      watchStartedAt: "2026-07-28T12:00:01.000Z",
+      updatedAt: "2026-07-28T12:00:01.000Z",
+    });
+    await firstOperation;
+    assert.equal(controller.state.pendingCaseMutations.size, 0);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("leaving is guarded only while an optimistic save is still in flight", async () => {
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  const windowListeners = {};
+  globalThis.document = {
+    getElementById: () => null,
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  globalThis.window = {
+    addEventListener(type, listener) {
+      windowListeners[type] = listener;
+    },
+    removeEventListener(type) {
+      delete windowListeners[type];
+    },
+  };
+  try {
+    let resolveSave;
+    const save = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: () => save,
+    });
+    controller.init();
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    const operation = controller.mutateCase(item, "watch", { watchWarTarget: 2 });
+    await Promise.resolve();
+
+    let prevented = false;
+    const pendingEvent = {
+      returnValue: null,
+      preventDefault() {
+        prevented = true;
+      },
+    };
+    windowListeners.beforeunload(pendingEvent);
+    assert.equal(prevented, true);
+    assert.equal(pendingEvent.returnValue, "");
+
+    resolveSave({
+      tag: item.tag,
+      status: "watching",
+      watchWarTarget: 2,
+      watchStartedAt: "2026-07-28T12:00:00.000Z",
+      updatedAt: "2026-07-28T12:00:00.000Z",
+    });
+    await operation;
+    prevented = false;
+    windowListeners.beforeunload({
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    assert.equal(prevented, false);
+    controller.destroy();
+    assert.equal(windowListeners.beforeunload, undefined);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("a rejected optimistic mutation reconciles and rolls back before reopening the decision", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    const methods = [];
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => {
+        methods.push(method);
+        if (method === "mutateWarFollowupCase") {
+          return Promise.reject(new Error("This follow-up changed since it was opened."));
+        }
+        return Promise.resolve(null);
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    controller.state.selectedTag = item.tag;
+    controller.state.decisionMode = "watch";
+
+    const operation = controller.mutateCase(item, "watch", { watchWarTarget: 3 });
+    assert.equal(controller.state.work.items.find((entry) => entry.tag === item.tag).status, "watching");
+    assert.equal(await operation, null);
+    assert.deepEqual(methods, ["mutateWarFollowupCase", "getWarFollowupCase"]);
+    assert.equal(controller.state.privateState.cases.length, 0, "an absent base case must be removed again");
+    assert.equal(controller.state.work.items.find((entry) => entry.tag === item.tag).status, "needs_review");
+    assert.equal(controller.state.selectedTag, item.tag);
+    assert.equal(controller.state.decisionMode, "watch");
+    assert.equal(controller.state.pendingCaseMutations.has(item.tag), false);
+    assert.match(controller.state.error, /changed since it was opened/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a background failure never steals a different player's open drawer", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    const rosterData = buildRosterData();
+    rosterData.rosters[0].main.push({
+      tag: "#P0LYGC",
+      name: "Player Two",
+      discord: "player-two",
+      th: 16,
+    });
+    rosterData.playerWarPerformance.byTag["#P0LYGC"] =
+      structuredClone(rosterData.playerWarPerformance.byTag["#P0LYGQ"]);
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => method === "mutateWarFollowupCase"
+        ? Promise.reject(new Error("temporary failure"))
+        : Promise.resolve(null),
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const first = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+    const second = controller.state.work.items.find((entry) => entry.tag === "#P0LYGC");
+    controller.state.selectedTag = first.tag;
+    controller.state.decisionMode = "watch";
+
+    const operation = controller.mutateCase(first, "watch", { watchWarTarget: 2 });
+    controller.state.selectedTag = second.tag;
+    controller.state.decisionMode = "";
+    assert.equal(await operation, null);
+    assert.equal(controller.state.selectedTag, second.tag);
+    assert.equal(controller.state.noticeTag, first.tag);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a lost mutation response is accepted when reconciliation finds its mutation ID", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let mutationRequest = null;
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        if (method === "mutateWarFollowupCase") {
+          mutationRequest = args[0];
+          return Promise.reject(new Error("temporary response failure"));
+        }
+        return Promise.resolve({
+          tag: mutationRequest.tag,
+          status: "watching",
+          watchWarTarget: 2,
+          watchStartedAt: "2026-07-28T12:00:00.000Z",
+          updatedAt: "2026-07-28T12:00:00.000Z",
+          mutationLedger: [{
+            mutationId: mutationRequest.mutationId,
+            action: "watch",
+            updatedAt: "2026-07-28T12:00:00.000Z",
+          }],
+        });
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+
+    const result = await controller.mutateCase(item, "watch", { watchWarTarget: 2 });
+    assert.equal(result.status, "watching");
+    assert.equal(controller.state.work.items.find((entry) => entry.tag === item.tag).status, "watching");
+    assert.equal(controller.state.error, "");
+    assert.equal(controller.state.pendingCaseMutations.size, 0);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("No action closes immediately while its save continues in the background", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = { getElementById: () => null };
@@ -635,13 +1109,21 @@ test("Always ignore hides an account immediately and persists outside the refres
     assert.equal(controller.state.selectedTag, "");
     assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(item.tag), true);
     assert.equal(controller.state.work.items.some((entry) => entry.tag === item.tag), false);
+    const immediateOrder = controller.state.work.items.map((entry) => entry.tag + ":" + entry.status);
 
     resolveSave({ tag: item.tag, trusted: true, updatedAt: "2026-07-26T12:00:00.000Z" });
     const result = await operation;
     assert.equal(savedMethod, "setWarFollowupTrustedAccount");
-    assert.deepEqual(savedArgs, [item.tag, true, "change-me"]);
+    assert.deepEqual(savedArgs.slice(0, 3), [item.tag, true, "change-me"]);
+    assert.match(savedArgs[3], /^wfu-/);
     assert.equal(result.trusted, true);
     assert.equal(controller.state.pendingIgnoreTags.has(item.tag), false);
+    assert.equal(controller.state.message, "", "success must not insert a late in-flow notice");
+    assert.deepEqual(
+      controller.state.work.items.map((entry) => entry.tag + ":" + entry.status),
+      immediateOrder,
+      "server confirmation must not reorder the already-updated list",
+    );
 
     controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
     assert.equal(
@@ -649,6 +1131,216 @@ test("Always ignore hides an account immediately and persists outside the refres
       false,
       "the account must stay excluded when roster data is recomputed",
     );
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a trust change received during initial loading overlays the older state response", async () => {
+  const previousDocument = globalThis.document;
+  const listeners = {};
+  globalThis.document = {
+    getElementById: () => null,
+    addEventListener(type, listener) {
+      listeners[type] = listener;
+    },
+    removeEventListener(type) {
+      delete listeners[type];
+    },
+  };
+  try {
+    let resolveState;
+    const stateResponse = new Promise((resolve) => {
+      resolveState = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => {
+        assert.equal(method, "getWarFollowupState");
+        return stateResponse;
+      },
+    });
+    controller.init();
+    const loading = controller.load(false);
+    await Promise.resolve();
+    listeners["admin:warfollowuptrustchange"]({
+      detail: {
+        tag: "#P0LYGQ",
+        trusted: true,
+        updatedAt: "2026-07-28T12:00:02.000Z",
+      },
+    });
+    resolveState({
+      settings: {
+        trustedPlayerTags: [],
+        updatedAt: "2026-07-28T12:00:01.000Z",
+      },
+      cases: [],
+    });
+    await loading;
+
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes("#P0LYGQ"), true);
+    assert.equal(controller.state.work.items.some((entry) => entry.tag === "#P0LYGQ"), false);
+    controller.destroy();
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("an older ignore response cannot overwrite a newer trust decision in the UI", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let resolveSave;
+    const save = new Promise((resolve) => {
+      resolveSave = resolve;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: () => save,
+    });
+    controller.state.loaded = true;
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      trustedPlayerTags: [],
+      updatedAt: "2026-07-28T12:00:00.000Z",
+    });
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+
+    const operation = controller.ignoreAccountInBackground(item);
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      trustedPlayerTags: [],
+      updatedAt: "2026-07-28T12:00:02.000Z",
+    });
+    controller.state.trustUpdatedAtByTag[item.tag] = "2026-07-28T12:00:02.000Z";
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    resolveSave({
+      tag: item.tag,
+      trusted: true,
+      updatedAt: "2026-07-28T12:00:01.000Z",
+    });
+    await operation;
+
+    assert.equal(
+      controller.state.privateState.settings.trustedPlayerTags.includes(item.tag),
+      false,
+      "the later restore must remain authoritative",
+    );
+    assert.equal(controller.state.privateState.settings.updatedAt, "2026-07-28T12:00:02.000Z");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a stale Rules response preserves newer completed trust decisions and concurrent notices", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let savedArgs = null;
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method, args) => {
+        assert.equal(method, "saveWarFollowupSettings");
+        savedArgs = args;
+        return Promise.resolve({
+          regularLookbackWars: 5,
+          trustedPlayerTags: ["#P0LYGJ"],
+          rulesUpdatedAt: "2026-07-28T12:00:02.000Z",
+          updatedAt: "2026-07-28T12:00:02.000Z",
+        });
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      trustedPlayerTags: ["#P0LYGQ"],
+      rulesUpdatedAt: "2026-07-28T12:00:00.000Z",
+      updatedAt: "2026-07-28T12:00:04.000Z",
+    });
+    controller.state.trustBaselineUpdatedAt = "2026-07-28T12:00:00.000Z";
+    controller.state.trustUpdatedAtByTag["#P0LYGQ"] = "2026-07-28T12:00:03.000Z";
+    controller.state.trustUpdatedAtByTag["#P0LYGJ"] = "2026-07-28T12:00:04.000Z";
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+
+    const operation = controller.saveRulesInBackground(
+      { regularLookbackWars: 5 },
+      "2026-07-28T12:00:00.000Z",
+    );
+    controller.state.error = "A different player change failed.";
+    controller.state.noticeTag = "#OTHER";
+    controller.state.noticeOwner = "";
+    assert.equal(await operation, true);
+
+    assert.equal(savedArgs[2], "2026-07-28T12:00:00.000Z");
+    assert.match(savedArgs[3], /^wfu-/);
+    assert.deepEqual(
+      controller.state.privateState.settings.trustedPlayerTags,
+      ["#P0LYGQ"],
+      "the newer ignore and restore must both win over the older Rules snapshot",
+    );
+    assert.equal(controller.state.error, "A different player change failed.");
+    assert.equal(controller.state.noticeTag, "#OTHER");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a failed background Rules save keeps a newer overlay open and retains its draft", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => {
+        if (method === "saveWarFollowupSettings") {
+          return Promise.reject(new Error("Rules could not be saved."));
+        }
+        assert.equal(method, "getWarFollowupRulesStatus");
+        return Promise.resolve({
+          committed: false,
+          settings: {
+            regularLookbackWars: 8,
+            rulesUpdatedAt: "2026-07-28T12:00:00.000Z",
+            updatedAt: "2026-07-28T12:00:00.000Z",
+          },
+        });
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.modal = "settings";
+    controller.state.modalUiByName.settings = {
+      controls: [{ key: "data:rules-regular-lookback", type: "number", value: "5" }],
+    };
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      rulesUpdatedAt: "2026-07-28T12:00:00.000Z",
+      updatedAt: "2026-07-28T12:00:00.000Z",
+    });
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+
+    const operation = controller.saveRulesInBackground(
+      { regularLookbackWars: 5 },
+      "2026-07-28T12:00:00.000Z",
+    );
+    assert.equal(controller.state.modal, "", "Rules closes optimistically");
+    controller.state.modal = "add";
+    assert.equal(await operation, false);
+
+    assert.equal(controller.state.modal, "add", "the newer modal must not be interrupted");
+    assert.equal(controller.state.modalUiByName.settings.controls[0].value, "5");
+    assert.equal(controller.state.noticeTag, "");
+    assert.match(controller.state.noticeOwner, /^rules:wfu-/);
+    assert.match(controller.state.error, /Rules could not be saved/);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -682,6 +1374,48 @@ test("a failed Always ignore save verifies storage, then restores the account", 
     assert.equal(controller.state.selectedTag, item.tag);
     assert.equal(controller.state.pendingIgnoreTags.has(item.tag), false);
     assert.match(controller.state.error, /Could not save Always ignore/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("an unrelated settings update does not prevent rollback of a failed ignore", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null };
+  try {
+    let rejectSave;
+    const save = new Promise((resolve, reject) => {
+      rejectSave = reject;
+    });
+    const rosterData = buildRosterData();
+    const controller = followup.createController({
+      getRosterData: () => rosterData,
+      getPassword: () => "change-me",
+      callServer: (method) => {
+        if (method === "setWarFollowupTrustedAccount") return save;
+        return Promise.reject(new Error("status unavailable"));
+      },
+    });
+    controller.state.loaded = true;
+    controller.state.privateState.settings = followup.sanitizeSettings({
+      updatedAt: "2026-07-28T12:00:00.000Z",
+    });
+    controller.state.trustBaselineUpdatedAt = "2026-07-28T12:00:00.000Z";
+    controller.state.work = followup.buildWorkItems(rosterData, controller.state.privateState);
+    const item = controller.state.work.items.find((entry) => entry.tag === "#P0LYGQ");
+
+    const operation = controller.ignoreAccountInBackground(item);
+    controller.state.privateState.settings = followup.sanitizeSettings(Object.assign(
+      {},
+      controller.state.privateState.settings,
+      { updatedAt: "2026-07-28T12:00:02.000Z" },
+    ));
+    controller.state.trustBaselineUpdatedAt = "2026-07-28T12:00:02.000Z";
+    rejectSave(new Error("write failed"));
+    assert.equal(await operation, null);
+    assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(item.tag), false);
+    assert.equal(controller.state.work.items.some((entry) => entry.tag === item.tag), true);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -727,7 +1461,8 @@ test("Restore removes an account from ignored settings immediately and persists 
     resolveSave({ tag: entry.tag, trusted: false, updatedAt: "2026-07-27T12:00:00.000Z" });
     const result = await operation;
     assert.equal(savedMethod, "setWarFollowupTrustedAccount");
-    assert.deepEqual(savedArgs, [entry.tag, false, "change-me"]);
+    assert.deepEqual(savedArgs.slice(0, 3), [entry.tag, false, "change-me"]);
+    assert.match(savedArgs[3], /^wfu-/);
     assert.equal(result.trusted, false);
     assert.equal(controller.state.pendingIgnoreTags.has(entry.tag), false);
     assert.equal(controller.state.privateState.settings.trustedPlayerTags.includes(entry.tag), false);

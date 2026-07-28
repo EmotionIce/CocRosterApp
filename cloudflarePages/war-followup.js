@@ -28,6 +28,7 @@
     missingDiscordEnabled: true,
     moderatorNames: [],
     trustedPlayerTags: [],
+    rulesUpdatedAt: "",
   };
 
   const STATUS_ORDER = ["needs_review", "needs_dm", "hero_down", "ready", "watching", "closed"];
@@ -133,6 +134,7 @@
           .map(normalizeTag)
           .filter(Boolean)
       )).sort().slice(0, 1000),
+      rulesUpdatedAt: toText(value.rulesUpdatedAt).trim(),
       updatedAt: toText(value.updatedAt).trim(),
     };
   };
@@ -647,9 +649,188 @@
       handledBy: "",
       reasonCodes: [],
       dismissedSignalIds: [],
+      mutationLedger: [],
       evidence: { regular: emptyStats(), cwl: emptyStats(), regularEvents: [], cwlEvents: [] },
       activity: [],
     }, value, { tag });
+  };
+
+  const cloneValue = (value) => {
+    if (value == null) return value;
+    return JSON.parse(JSON.stringify(value));
+  };
+
+  const nextOptimisticTimestamp = (previousRaw) => {
+    const previous = parseMs(previousRaw);
+    return new Date(Math.max(Date.now(), previous + 1)).toISOString();
+  };
+
+  const optimisticActivityDetails = (action, value, request) => {
+    switch (action) {
+      case "manual_review":
+        return ["manual_review", "Added for review."];
+      case "dismiss":
+        return ["dismissed", "Reviewed with no action."];
+      case "watch":
+        return [
+          "watching",
+          "Watching for " + value.watchWarTarget + " regular war" + (value.watchWarTarget === 1 ? "." : "s."),
+        ];
+      case "hero_down":
+        return [
+          "hero_down_decision",
+          "Hero-down period selected: " + value.recoveryWarTarget + " regular war" +
+            (value.recoveryWarTarget === 1 ? "." : "s."),
+        ];
+      case "mark_dm_sent":
+        return ["dm_sent", "Decision DM marked as sent."];
+      case "approve_return":
+        return ["approved_return", "Approved to return to regular wars."];
+      case "extend":
+        return [
+          "extended",
+          "Hero-down period extended to " + value.recoveryWarTarget + " regular war" +
+            (value.recoveryWarTarget === 1 ? "." : "s."),
+        ];
+      case "close":
+        return [
+          "closed",
+          request.outcome === "no_return"
+            ? "Closed without return to regular wars."
+            : "Follow-up closed.",
+        ];
+      case "reopen":
+        return ["reopened", "Follow-up reopened."];
+      case "add_note":
+        return ["note", toText(request.note).trim()];
+      case "set_handler":
+        return [
+          "handler",
+          value.handledBy ? ("Assigned to " + value.handledBy + ".") : "Assignment cleared.",
+        ];
+      default:
+        return ["", ""];
+    }
+  };
+
+  const buildOptimisticCase = (itemRaw, actionRaw, requestRaw, mutationIdRaw) => {
+    const item = itemRaw && typeof itemRaw === "object" ? itemRaw : {};
+    const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
+    const action = toText(actionRaw).trim().toLowerCase();
+    const tag = normalizeTag(request.tag || item.tag);
+    if (!tag || !action) return null;
+    const current = normalizeCase(item.case);
+    const nowIso = nextOptimisticTimestamp(current && current.updatedAt);
+    const value = current ? cloneValue(current) : normalizeCase({
+      tag,
+      status: "needs_review",
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      activity: [],
+    });
+    if (!value) return null;
+
+    for (const field of [
+      "name",
+      "discord",
+      "sourceRosterId",
+      "sourceRosterTitle",
+      "targetRosterId",
+      "targetRosterTitle",
+      "handledBy",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(request, field)) value[field] = toText(request[field]).trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request, "sourceClanTag")) value.sourceClanTag = normalizeTag(request.sourceClanTag);
+    if (Object.prototype.hasOwnProperty.call(request, "targetClanTag")) value.targetClanTag = normalizeTag(request.targetClanTag);
+
+    if (action === "manual_review") {
+      value.status = "needs_review";
+      value.outcome = "";
+      value.reasonCodes = Array.from(new Set(
+        (Array.isArray(request.reasonCodes) ? request.reasonCodes : []).concat(["manual"])
+      ));
+      value.closedAt = "";
+    } else if (action === "dismiss") {
+      value.status = "dismissed";
+      value.outcome = "no_action";
+      value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
+      value.closedAt = nowIso;
+    } else if (action === "watch") {
+      value.status = "watching";
+      value.outcome = "";
+      value.watchStartedAt = nowIso;
+      value.watchWarTarget = Math.floor(clamp(request.watchWarTarget, 1, 8, 2));
+      value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
+      value.closedAt = "";
+    } else if (action === "hero_down") {
+      value.status = "needs_dm";
+      value.outcome = "";
+      value.reasonCodes = Array.isArray(request.reasonCodes) ? request.reasonCodes.slice() : [];
+      value.evidence = cloneValue(request.evidence || {});
+      value.dmText = toText(request.dmText).trim();
+      value.recoveryWarTarget = Math.floor(clamp(request.recoveryWarTarget, 1, 8, 3));
+      value.requireNoMisses = request.requireNoMisses == null ? true : !!request.requireNoMisses;
+      value.dmSentAt = "";
+      value.recoveryStartedAt = "";
+      value.closedAt = "";
+    } else if (action === "mark_dm_sent") {
+      value.status = "hero_down";
+      value.dmText = toText(request.dmText != null ? request.dmText : value.dmText).trim();
+      value.dmSentAt = nowIso;
+      value.recoveryStartedAt = nowIso;
+    } else if (action === "approve_return") {
+      value.status = "closed";
+      value.outcome = "approved_return";
+      value.closedAt = nowIso;
+      value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
+    } else if (action === "extend") {
+      value.status = "needs_dm";
+      value.outcome = "";
+      value.recoveryWarTarget = Math.floor(clamp(
+        request.recoveryWarTarget,
+        1,
+        8,
+        toInt(value.recoveryWarTarget) || 3,
+      ));
+      value.requireNoMisses = request.requireNoMisses == null ? value.requireNoMisses !== false : !!request.requireNoMisses;
+      value.dmText = toText(request.dmText).trim();
+      value.dmSentAt = "";
+      value.recoveryStartedAt = "";
+    } else if (action === "close") {
+      value.status = "closed";
+      value.outcome = request.outcome === "no_return" ? "no_return" : "closed";
+      value.closedAt = nowIso;
+      value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
+    } else if (action === "reopen") {
+      value.status = "needs_review";
+      value.outcome = "";
+      value.closedAt = "";
+    }
+
+    const actor = toText(request.actor || request.handledBy || value.handledBy).trim();
+    const activityDetails = optimisticActivityDetails(action, value, request);
+    if (activityDetails[0]) {
+      if (!Array.isArray(value.activity)) value.activity = [];
+      value.activity.push({
+        id: "pending-" + toText(mutationIdRaw),
+        at: nowIso,
+        type: activityDetails[0],
+        actor,
+        text: activityDetails[1],
+      });
+      value.activity = value.activity.slice(-80);
+    }
+    const mutationId = toText(mutationIdRaw).trim();
+    if (mutationId) {
+      value.mutationLedger = (Array.isArray(value.mutationLedger) ? value.mutationLedger : [])
+        .filter((entry) => entry && entry.mutationId !== mutationId)
+        .concat([{ mutationId, action, updatedAt: nowIso }])
+        .slice(-16);
+    }
+    if (!value.createdAt) value.createdAt = nowIso;
+    value.updatedAt = nowIso;
+    return normalizeCase(value);
   };
 
   const eventsAfter = (eventsRaw, timestampRaw, clanTagRaw) => {
@@ -828,9 +1009,15 @@
     return node;
   };
 
+  const focusKey = (prefixRaw, valueRaw) => {
+    const value = toText(valueRaw).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    return value ? (toText(prefixRaw).trim() + ":" + value) : "";
+  };
+
   const createButton = (text, className, onClick) => {
     const button = createElement("button", className || "btn secondary", text);
     button.type = "button";
+    button.dataset.wfuFocusKey = focusKey("button", text);
     if (onClick) button.addEventListener("click", onClick);
     return button;
   };
@@ -840,9 +1027,118 @@
     return parent;
   };
 
+  const formControlKey = (control, indexRaw) => {
+    const index = Number(indexRaw) || 0;
+    const dataset = control && control.dataset ? control.dataset : {};
+    const explicit = toText(dataset.wfuDraftKey || dataset.wfuFocusKey).trim();
+    if (explicit) return explicit;
+    const type = toText(control && (control.type || control.tagName)).toLowerCase();
+    const name = toText(control && control.name).trim();
+    const value = toText(control && control.value).trim();
+    if ((type === "checkbox" || type === "radio") && name && value) {
+      return "choice:" + name + ":" + value;
+    }
+    const id = toText(control && control.id).trim();
+    if (id) return "id:" + id;
+    const ariaLabel = control && typeof control.getAttribute === "function"
+      ? toText(control.getAttribute("aria-label")).trim()
+      : "";
+    return ariaLabel ? ("aria:" + ariaLabel) : ("position:" + index + ":" + type);
+  };
+
+  const snapshotFormControls = (container) => {
+    if (!container || typeof container.querySelectorAll !== "function") return [];
+    return Array.from(container.querySelectorAll("input, select, textarea")).map((control, index) => {
+      const selectionStart = typeof control.selectionStart === "number" ? control.selectionStart : null;
+      const selectionEnd = typeof control.selectionEnd === "number" ? control.selectionEnd : null;
+      return {
+        key: formControlKey(control, index),
+        type: toText(control.type || control.tagName).toLowerCase(),
+        value: toText(control.value),
+        checked: !!control.checked,
+        selectionStart,
+        selectionEnd,
+      };
+    });
+  };
+
+  const restoreFormControls = (container, snapshotRaw) => {
+    if (!container || typeof container.querySelectorAll !== "function" || !Array.isArray(snapshotRaw)) return;
+    const controls = Array.from(container.querySelectorAll("input, select, textarea"));
+    const snapshotsByKey = new Map();
+    for (let index = 0; index < snapshotRaw.length; index++) {
+      const snapshot = snapshotRaw[index] && typeof snapshotRaw[index] === "object"
+        ? snapshotRaw[index]
+        : null;
+      if (!snapshot) continue;
+      const key = toText(snapshot.key).trim();
+      if (key && !snapshotsByKey.has(key)) snapshotsByKey.set(key, snapshot);
+    }
+    for (let index = 0; index < controls.length; index++) {
+      const control = controls[index];
+      const key = formControlKey(control, index);
+      const positional = snapshotRaw[index] && typeof snapshotRaw[index] === "object"
+        ? snapshotRaw[index]
+        : null;
+      const positionalKey = toText(positional && positional.key).trim();
+      const snapshot = snapshotsByKey.get(key) || (
+        key.startsWith("position:") &&
+        (!positionalKey || positionalKey.startsWith("position:"))
+          ? positional
+          : null
+      );
+      if (!snapshot) continue;
+      const currentType = toText(control.type || control.tagName).toLowerCase();
+      if (snapshot.type && snapshot.type !== currentType) continue;
+      if (currentType === "checkbox" || currentType === "radio") control.checked = !!snapshot.checked;
+      else control.value = toText(snapshot.value);
+      if (
+        snapshot.selectionStart != null &&
+        snapshot.selectionEnd != null &&
+        typeof control.setSelectionRange === "function"
+      ) {
+        try {
+          control.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+        } catch {
+          // Number/select controls do not support text selection.
+        }
+      }
+    }
+  };
+
+  const mergeRootUiSnapshot = (previousRaw, snapshotRaw) => {
+    const previous = previousRaw && typeof previousRaw === "object" ? previousRaw : {};
+    const snapshot = snapshotRaw && typeof snapshotRaw === "object" ? snapshotRaw : {};
+    const rootReady = !!snapshot.rootReady;
+    const rootHadFocus = !!snapshot.rootHadFocus;
+    return {
+      openDetails: rootReady
+        ? (Array.isArray(snapshot.openDetails) ? snapshot.openDetails.slice() : [])
+        : (Array.isArray(previous.openDetails) ? previous.openDetails.slice() : []),
+      focusKey: rootHadFocus
+        ? toText(snapshot.focusKey).trim()
+        : toText(previous.focusKey).trim(),
+      focusControlIndex: rootHadFocus && Number.isInteger(snapshot.focusControlIndex)
+        ? snapshot.focusControlIndex
+        : (Number.isInteger(previous.focusControlIndex) ? previous.focusControlIndex : -1),
+      hadFocus: rootHadFocus || !!previous.hadFocus,
+    };
+  };
+
+  const setControlKey = (control, keyRaw) => {
+    const key = toText(keyRaw).trim();
+    if (!control || !control.dataset || !key) return control;
+    control.dataset.wfuDraftKey = key;
+    control.dataset.wfuFocusKey = "field:" + key;
+    return control;
+  };
+
   const setField = (labelText, control) => {
     const label = createElement("label", "wfu-field");
     label.appendChild(createElement("span", "wfu-field__label", labelText));
+    if (control && control.dataset && !control.dataset.wfuFocusKey) {
+      control.dataset.wfuFocusKey = focusKey("field", labelText);
+    }
     label.appendChild(control);
     return label;
   };
@@ -906,8 +1202,22 @@
       message: "",
       error: "",
       noticeTag: "",
+      noticeOwner: "",
+      pendingCaseMutations: new Map(),
       pendingDismissTags: new Set(),
       pendingIgnoreTags: new Set(),
+      pendingTrustValues: new Map(),
+      trustUpdatedAtByTag: {},
+      trustBaselineUpdatedAt: "",
+      queuedTrustEvents: new Map(),
+      drawerUiByTag: {},
+      skipDrawerDraftCaptureTags: new Set(),
+      modalUiByName: {},
+      skipModalDraftCapture: "",
+      ignoredModalScrollTop: 0,
+      ignoredModalFocusIndex: -1,
+      rootUi: { openDetails: [], focusKey: "", focusControlIndex: -1, hadFocus: false },
+      restoreRootFocus: false,
     };
 
     const getMount = () => document.getElementById("warFollowupMount");
@@ -917,27 +1227,80 @@
       if (typeof options.callServer !== "function") return Promise.reject(new Error("Admin API is unavailable."));
       return options.callServer(method, args);
     };
+    const pendingWrites = new Set();
+    let mutationSequence = 0;
+
+    const createMutationId = () => {
+      mutationSequence += 1;
+      if (
+        typeof crypto !== "undefined" &&
+        crypto &&
+        typeof crypto.randomUUID === "function"
+      ) {
+        return "wfu-" + crypto.randomUUID();
+      }
+      return "wfu-" + Date.now().toString(36) + "-" + mutationSequence.toString(36) + "-" +
+        Math.random().toString(36).slice(2, 10);
+    };
+
+    const runWrite = (task) => {
+      const operation = Promise.resolve().then(task);
+      pendingWrites.add(operation);
+      operation.then(
+        () => pendingWrites.delete(operation),
+        () => pendingWrites.delete(operation),
+      );
+      return operation;
+    };
+
+    const waitForPendingWrites = async () => {
+      while (pendingWrites.size) {
+        await Promise.allSettled(Array.from(pendingWrites));
+      }
+    };
+
+    const clearDrawerDrafts = (tagRaw) => {
+      const tag = normalizeTag(tagRaw);
+      if (!tag || !state.drawerUiByTag[tag]) return;
+      state.drawerUiByTag[tag].draftsByKey = {};
+      state.skipDrawerDraftCaptureTags.add(tag);
+    };
+
+    const discardModalDraft = (nameRaw) => {
+      const name = toText(nameRaw).trim();
+      if (!name) return;
+      delete state.modalUiByName[name];
+      state.skipModalDraftCapture = name;
+    };
 
     const recompute = () => {
       state.work = buildWorkItems(getRosterData(), state.privateState);
     };
 
-    const setNotice = (message, error, tagRaw) => {
+    const setNotice = (message, error, tagRaw, ownerRaw) => {
       state.message = error ? "" : toText(message);
       state.error = error ? toText(message) : "";
       state.noticeTag = error ? normalizeTag(tagRaw) : "";
+      state.noticeOwner = state.message || state.error ? toText(ownerRaw).trim() : "";
     };
 
-    const upsertLocalCase = (caseRaw) => {
+    const replaceLocalCase = (tagRaw, caseRaw) => {
+      const tag = normalizeTag(tagRaw || (caseRaw && caseRaw.tag));
+      if (!tag) return;
       const value = normalizeCase(caseRaw);
-      if (!value) return;
       const list = Array.isArray(state.privateState.cases) ? state.privateState.cases.slice() : [];
-      const index = list.findIndex((entry) => normalizeTag(entry && entry.tag) === value.tag);
-      if (index >= 0) list[index] = value;
-      else list.push(value);
+      const index = list.findIndex((entry) => normalizeTag(entry && entry.tag) === tag);
+      if (value) {
+        if (index >= 0) list[index] = value;
+        else list.push(value);
+      } else if (index >= 0) {
+        list.splice(index, 1);
+      }
       state.privateState.cases = list;
       recompute();
     };
+
+    const upsertLocalCase = (caseRaw) => replaceLocalCase(caseRaw && caseRaw.tag, caseRaw);
 
     const load = async (forceRaw) => {
       if (state.loading || (state.loaded && !forceRaw)) {
@@ -947,6 +1310,7 @@
       }
       const password = getPassword();
       if (!password) return;
+      if (forceRaw && pendingWrites.size) await waitForPendingWrites();
       state.loading = true;
       state.error = "";
       render();
@@ -956,7 +1320,13 @@
           settings: sanitizeSettings(result && result.settings),
           cases: Array.isArray(result && result.cases) ? result.cases.map(normalizeCase).filter(Boolean) : [],
         };
+        state.trustUpdatedAtByTag = {};
+        state.trustBaselineUpdatedAt = toText(state.privateState.settings.updatedAt).trim();
         state.loaded = true;
+        for (const detail of state.queuedTrustEvents.values()) {
+          applyLocalIgnoreState(detail.tag, detail.trusted, detail.updatedAt);
+        }
+        state.queuedTrustEvents.clear();
         recompute();
       } catch (err) {
         setNotice(err && err.message ? err.message : String(err), true);
@@ -983,82 +1353,262 @@
       };
     };
 
-    const mutate = async (item, action, patchRaw) => {
-      if (state.saving) return null;
+    const caseHasMutation = (caseRaw, mutationIdRaw) => {
+      const value = normalizeCase(caseRaw);
+      const mutationId = toText(mutationIdRaw).trim();
+      return !!(
+        value &&
+        mutationId &&
+        Array.isArray(value.mutationLedger) &&
+        value.mutationLedger.some((entry) => entry && entry.mutationId === mutationId)
+      );
+    };
+
+    const mutate = (itemRaw, actionRaw, patchRaw, behaviorRaw) => {
+      const item = itemRaw && typeof itemRaw === "object" ? itemRaw : {};
+      const tag = normalizeTag(item.tag);
+      const action = toText(actionRaw).trim().toLowerCase();
+      if (
+        !tag ||
+        !action ||
+        state.pendingCaseMutations.has(tag) ||
+        state.pendingIgnoreTags.has(tag)
+      ) return null;
       const patch = patchRaw && typeof patchRaw === "object" ? patchRaw : {};
-      state.saving = true;
+      const behavior = behaviorRaw && typeof behaviorRaw === "object" ? behaviorRaw : {};
+      const mutationId = createMutationId();
+      const request = Object.assign({}, mutationBase(item), patch, {
+        action,
+        mutationId,
+      });
+      const baseCase = item.case ? cloneValue(normalizeCase(item.case)) : null;
+      const optimisticCase = buildOptimisticCase(item, action, request, mutationId);
+      if (!optimisticCase) return null;
+      const operationState = {
+        action,
+        mutationId,
+        baseCase,
+        previousSelectedTag: state.selectedTag,
+        previousDecisionMode: state.decisionMode,
+        errorPrefix: toText(behavior.errorPrefix).trim() || "Could not save this change.",
+      };
+      state.pendingCaseMutations.set(tag, operationState);
+      if (action === "dismiss") state.pendingDismissTags.add(tag);
       setNotice("", false);
+      upsertLocalCase(optimisticCase);
+      state.selectedTag = behavior.closeDrawer ? "" : tag;
+      state.decisionMode = "";
       render();
-      try {
-        const request = Object.assign({}, mutationBase(item), patch, { action });
-        const result = await callServer("mutateWarFollowupCase", [request, getPassword()]);
-        upsertLocalCase(result);
-        state.selectedTag = normalizeTag(result && result.tag) || state.selectedTag;
-        state.decisionMode = "";
-        return result;
-      } catch (err) {
-        setNotice(err && err.message ? err.message : String(err), true);
-        return null;
-      } finally {
-        state.saving = false;
+
+      const finishSaved = (resultRaw) => {
+        const result = normalizeCase(resultRaw);
+        if (!result || result.tag !== tag) {
+          throw new Error("The server returned an invalid follow-up result.");
+        }
+        state.pendingCaseMutations.delete(tag);
+        state.pendingDismissTags.delete(tag);
+        clearDrawerDrafts(tag);
+        replaceLocalCase(tag, result);
         render();
-      }
+        return result;
+      };
+
+      return runWrite(async () => {
+        try {
+          return finishSaved(await callServer("mutateWarFollowupCase", [request, getPassword()]));
+        } catch (err) {
+          let authoritativeCase = null;
+          let authoritativeRead = false;
+          try {
+            authoritativeCase = await callServer("getWarFollowupCase", [tag, getPassword()]);
+            authoritativeRead = true;
+            if (caseHasMutation(authoritativeCase, mutationId)) return finishSaved(authoritativeCase);
+          } catch {
+            // The original mutation error remains the useful error to report.
+          }
+
+          state.pendingCaseMutations.delete(tag);
+          state.pendingDismissTags.delete(tag);
+          replaceLocalCase(tag, authoritativeRead ? authoritativeCase : baseCase);
+          const currentItem = state.work.items.find((entry) => entry.tag === tag);
+          const anotherDrawerIsActive = !!state.selectedTag && state.selectedTag !== tag;
+          if (!anotherDrawerIsActive) {
+            if (currentItem) {
+              state.selectedTag = tag;
+              const authoritativeRevision = toText(authoritativeCase && authoritativeCase.updatedAt).trim();
+              const baseRevision = toText(baseCase && baseCase.updatedAt).trim();
+              state.decisionMode = !authoritativeRead || authoritativeRevision === baseRevision
+                ? operationState.previousDecisionMode
+                : "";
+            } else {
+              state.selectedTag = "";
+              state.decisionMode = "";
+            }
+          }
+          const detail = err && err.message ? err.message : String(err);
+          setNotice(operationState.errorPrefix + " " + detail, true, tag);
+          render();
+          return null;
+        }
+      });
     };
 
     const dismissInBackground = (item) => {
       const tag = normalizeTag(item && item.tag);
-      if (!tag || state.saving || state.pendingDismissTags.has(tag)) return null;
+      if (!tag || state.pendingCaseMutations.has(tag) || state.pendingDismissTags.has(tag)) return null;
       const playerName = toText(item && item.player && item.player.name).trim() || tag;
-      const request = Object.assign({}, mutationBase(item), { action: "dismiss" });
-
-      state.pendingDismissTags.add(tag);
-      state.selectedTag = "";
-      state.decisionMode = "";
-      setNotice("", false);
-      render();
-
-      return Promise.resolve()
-        .then(() => callServer("mutateWarFollowupCase", [request, getPassword()]))
-        .then((result) => {
-          if (!normalizeCase(result)) throw new Error("The server returned an invalid follow-up result.");
-          upsertLocalCase(result);
-          state.pendingDismissTags.delete(tag);
-          render();
-          return result;
-        })
-        .catch((err) => {
-          state.pendingDismissTags.delete(tag);
-          recompute();
-          if (state.work.items.some((entry) => entry.tag === tag)) {
-            state.selectedTag = tag;
-            state.decisionMode = "";
-          }
-          const detail = err && err.message ? err.message : String(err);
-          setNotice(playerName + ": Could not save No action. " + detail, true, tag);
-          render();
-          return null;
-        });
+      return mutate(item, "dismiss", {}, {
+        closeDrawer: true,
+        errorPrefix: playerName + ": Could not save No action.",
+      });
     };
 
     const applyLocalIgnoreState = (tagRaw, ignoredRaw, updatedAtRaw) => {
       const tag = normalizeTag(tagRaw);
-      if (!tag) return;
+      if (!tag) return false;
+      const updatedAt = toText(updatedAtRaw).trim();
+      const currentTagUpdatedAt = toText(state.trustUpdatedAtByTag[tag]).trim();
+      const baselineUpdatedAt = toText(state.trustBaselineUpdatedAt).trim();
+      const currentUpdatedAt = toText(state.privateState.settings.updatedAt).trim();
+      const currentTrustMs = Math.max(parseMs(currentTagUpdatedAt), parseMs(baselineUpdatedAt));
+      if (
+        updatedAt &&
+        parseMs(updatedAt) > 0 &&
+        currentTrustMs > parseMs(updatedAt)
+      ) {
+        return false;
+      }
       const tags = new Set(state.privateState.settings.trustedPlayerTags);
       if (ignoredRaw) tags.add(tag);
       else tags.delete(tag);
       state.privateState.settings = sanitizeSettings(Object.assign({}, state.privateState.settings, {
         trustedPlayerTags: Array.from(tags),
-        updatedAt: toText(updatedAtRaw).trim() || state.privateState.settings.updatedAt,
+        updatedAt: parseMs(updatedAt) > parseMs(currentUpdatedAt) ? updatedAt : currentUpdatedAt,
       }));
+      if (updatedAt) state.trustUpdatedAtByTag[tag] = updatedAt;
       recompute();
+      return true;
+    };
+
+    const applyAuthoritativeRulesSettings = (settingsRaw) => {
+      const current = state.privateState.settings;
+      const incoming = sanitizeSettings(settingsRaw);
+      const currentUpdatedAt = toText(current.updatedAt).trim();
+      const incomingUpdatedAt = toText(incoming.updatedAt).trim();
+      const baselineUpdatedAt = toText(state.trustBaselineUpdatedAt).trim();
+      const currentTrustTags = new Set(current.trustedPlayerTags);
+      const trustTags = new Set(
+        parseMs(incomingUpdatedAt) >= parseMs(baselineUpdatedAt)
+          ? incoming.trustedPlayerTags
+          : current.trustedPlayerTags
+      );
+      for (const [tagRaw, trustUpdatedAtRaw] of Object.entries(state.trustUpdatedAtByTag)) {
+        const tag = normalizeTag(tagRaw);
+        if (!tag || parseMs(trustUpdatedAtRaw) <= parseMs(incomingUpdatedAt)) continue;
+        if (currentTrustTags.has(tag)) trustTags.add(tag);
+        else trustTags.delete(tag);
+      }
+      for (const [tag, trusted] of state.pendingTrustValues.entries()) {
+        if (trusted) trustTags.add(tag);
+        else trustTags.delete(tag);
+      }
+      state.privateState.settings = sanitizeSettings(Object.assign({}, incoming, {
+        // Trust writes can be in flight independently from a Rules save.
+        trustedPlayerTags: Array.from(trustTags),
+        updatedAt: parseMs(currentUpdatedAt) > parseMs(incomingUpdatedAt)
+          ? currentUpdatedAt
+          : incomingUpdatedAt,
+      }));
+      if (parseMs(incomingUpdatedAt) >= parseMs(baselineUpdatedAt)) {
+        state.trustBaselineUpdatedAt = incomingUpdatedAt;
+      }
+      recompute();
+    };
+
+    const saveRulesInBackground = (nextRaw, expectedRulesUpdatedAtRaw) => {
+      if (state.saving) return null;
+      const next = nextRaw && typeof nextRaw === "object" ? nextRaw : {};
+      const previousSettings = cloneValue(state.privateState.settings);
+      const mutationId = createMutationId();
+      const noticeOwner = "rules:" + mutationId;
+      state.saving = true;
+      state.modal = "";
+      if (state.noticeOwner.startsWith("rules:")) setNotice("", false);
+      state.privateState.settings = sanitizeSettings(Object.assign(
+        {},
+        state.privateState.settings,
+        next,
+      ));
+      recompute();
+      render();
+
+      return runWrite(async () => {
+        let savedSuccessfully = false;
+        try {
+          try {
+            const saved = await callServer("saveWarFollowupSettings", [
+              next,
+              getPassword(),
+              toText(expectedRulesUpdatedAtRaw).trim(),
+              mutationId,
+            ]);
+            applyAuthoritativeRulesSettings(saved);
+            savedSuccessfully = true;
+          } catch (err) {
+            let status = null;
+            try {
+              status = await callServer("getWarFollowupRulesStatus", [mutationId, getPassword()]);
+            } catch {
+              // Keep the original write error; it best explains the failed action.
+            }
+            if (status && status.settings) {
+              applyAuthoritativeRulesSettings(status.settings);
+              savedSuccessfully = !!status.committed;
+            } else {
+              state.privateState.settings = sanitizeSettings(Object.assign({}, previousSettings, {
+                trustedPlayerTags: state.privateState.settings.trustedPlayerTags,
+                updatedAt: state.privateState.settings.updatedAt,
+              }));
+              recompute();
+            }
+            if (!savedSuccessfully) {
+              const newerOverlayIsActive = !!state.selectedTag || !!state.modal;
+              if (!newerOverlayIsActive) state.modal = "settings";
+              if (
+                (!state.message && !state.error) ||
+                state.noticeOwner === noticeOwner
+              ) {
+                setNotice(
+                  err && err.message ? err.message : String(err),
+                  true,
+                  "",
+                  noticeOwner,
+                );
+              }
+            }
+          }
+        } finally {
+          state.saving = false;
+          if (savedSuccessfully) {
+            delete state.modalUiByName.settings;
+            if (state.noticeOwner === noticeOwner) setNotice("", false);
+          }
+          render();
+        }
+        return savedSuccessfully;
+      });
     };
 
     const ignoreAccountInBackground = (item) => {
       const tag = normalizeTag(item && item.tag);
-      if (!tag || state.saving || state.pendingIgnoreTags.has(tag)) return null;
+      if (!tag || state.pendingCaseMutations.has(tag) || state.pendingIgnoreTags.has(tag)) return null;
       const playerName = toText(item && item.player && item.player.name).trim() || tag;
+      const mutationId = createMutationId();
+      const previousIgnored = state.privateState.settings.trustedPlayerTags.includes(tag);
+      const previousTrustUpdatedAt = toText(state.trustUpdatedAtByTag[tag]).trim();
 
       state.pendingIgnoreTags.add(tag);
+      state.pendingTrustValues.set(tag, true);
       state.selectedTag = "";
       state.decisionMode = "";
       setNotice("", false);
@@ -1070,27 +1620,47 @@
           throw new Error("The server did not confirm the account exclusion.");
         }
         state.pendingIgnoreTags.delete(tag);
+        state.pendingTrustValues.delete(tag);
+        clearDrawerDrafts(tag);
         applyLocalIgnoreState(tag, true, result.updatedAt);
-        setNotice(playerName + " will stay out of war follow-up.", false);
         render();
         return result;
       };
 
-      return Promise.resolve()
-        .then(() => callServer("setWarFollowupTrustedAccount", [tag, true, getPassword()]))
-        .then(finishSaved)
-        .catch(async (err) => {
+      return runWrite(async () => {
+        try {
+          return finishSaved(await callServer("setWarFollowupTrustedAccount", [tag, true, getPassword(), mutationId]));
+        } catch (err) {
           // If the write committed but its response was interrupted, verify the
           // saved value before putting the player back into the moderator's way.
+          let authoritativeStatus = null;
           try {
-            const status = await callServer("getWarFollowupTrustStatus", [tag, getPassword()]);
-            if (status && status.trusted === true) return finishSaved(status);
+            const status = await callServer("getWarFollowupTrustStatus", [tag, getPassword(), mutationId]);
+            if (status && normalizeTag(status.tag) === tag) {
+              authoritativeStatus = status;
+              state.pendingIgnoreTags.delete(tag);
+              state.pendingTrustValues.delete(tag);
+              applyLocalIgnoreState(tag, !!status.trusted, status.updatedAt);
+              if (status.committed || status.trusted === true) {
+                render();
+                return status;
+              }
+            }
           } catch {
             // The original error below is the useful one to show.
           }
           state.pendingIgnoreTags.delete(tag);
-          applyLocalIgnoreState(tag, false, "");
-          if (state.work.items.some((entry) => entry.tag === tag)) {
+          state.pendingTrustValues.delete(tag);
+          if (
+            !authoritativeStatus &&
+            toText(state.trustUpdatedAtByTag[tag]).trim() === previousTrustUpdatedAt
+          ) {
+            applyLocalIgnoreState(tag, previousIgnored, "");
+          }
+          if (
+            (!state.selectedTag || state.selectedTag === tag) &&
+            state.work.items.some((entry) => entry.tag === tag)
+          ) {
             state.selectedTag = tag;
             state.decisionMode = "";
           }
@@ -1098,7 +1668,8 @@
           setNotice(playerName + ": Could not save Always ignore. " + detail, true, tag);
           render();
           return null;
-        });
+        }
+      });
     };
 
     const restoreIgnoredAccountInBackground = (entryRaw) => {
@@ -1106,8 +1677,12 @@
       const tag = normalizeTag(entry.tag);
       if (!tag || state.pendingIgnoreTags.has(tag)) return null;
       const playerName = toText(entry.name).trim() || tag;
+      const mutationId = createMutationId();
+      const previousIgnored = state.privateState.settings.trustedPlayerTags.includes(tag);
+      const previousTrustUpdatedAt = toText(state.trustUpdatedAtByTag[tag]).trim();
 
       state.pendingIgnoreTags.add(tag);
+      state.pendingTrustValues.set(tag, false);
       setNotice("", false);
       applyLocalIgnoreState(tag, false, "");
       render();
@@ -1117,39 +1692,90 @@
           throw new Error("The server did not confirm the account restore.");
         }
         state.pendingIgnoreTags.delete(tag);
+        state.pendingTrustValues.delete(tag);
         applyLocalIgnoreState(tag, false, result.updatedAt);
         render();
         return result;
       };
 
-      return Promise.resolve()
-        .then(() => callServer("setWarFollowupTrustedAccount", [tag, false, getPassword()]))
-        .then(finishSaved)
-        .catch(async (err) => {
+      return runWrite(async () => {
+        try {
+          return finishSaved(await callServer("setWarFollowupTrustedAccount", [tag, false, getPassword(), mutationId]));
+        } catch (err) {
           // A response can be interrupted after the write commits. Confirm the
           // stored value before returning the account to the ignored list.
+          let authoritativeStatus = null;
           try {
-            const status = await callServer("getWarFollowupTrustStatus", [tag, getPassword()]);
-            if (status && status.trusted === false) return finishSaved(status);
+            const status = await callServer("getWarFollowupTrustStatus", [tag, getPassword(), mutationId]);
+            if (status && normalizeTag(status.tag) === tag) {
+              authoritativeStatus = status;
+              state.pendingIgnoreTags.delete(tag);
+              state.pendingTrustValues.delete(tag);
+              applyLocalIgnoreState(tag, !!status.trusted, status.updatedAt);
+              if (status.committed || status.trusted === false) {
+                render();
+                return status;
+              }
+            }
           } catch {
             // The original error below is the useful one to show.
           }
           state.pendingIgnoreTags.delete(tag);
-          applyLocalIgnoreState(tag, true, "");
+          state.pendingTrustValues.delete(tag);
+          if (
+            !authoritativeStatus &&
+            toText(state.trustUpdatedAtByTag[tag]).trim() === previousTrustUpdatedAt
+          ) {
+            applyLocalIgnoreState(tag, previousIgnored, "");
+          }
           const detail = err && err.message ? err.message : String(err);
           setNotice(playerName + ": Could not restore account. " + detail, true, tag);
           render();
           return null;
-        });
+        }
+      });
     };
 
     const getSelectedItem = () => state.work.items.find((item) => item.tag === state.selectedTag) || null;
 
     const statusForItem = (item) => item && STATUS_META[item.status] ? item.status : "needs_review";
 
+    const pendingWriteCount = () => {
+      const tags = new Set([
+        ...Array.from(state.pendingCaseMutations.keys()),
+        ...Array.from(state.pendingIgnoreTags),
+      ]);
+      return tags.size + (state.saving ? 1 : 0);
+    };
+
+    const renderSyncStatus = (mount) => {
+      const count = pendingWriteCount();
+      if (!count) return;
+      const status = createElement("div", "wfu-sync-status");
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      status.appendChild(createElement("span", "wfu-sync-status__dot"));
+      status.appendChild(createElement(
+        "span",
+        "",
+        count === 1 ? "Saving change\u2026" : ("Saving " + count + " changes\u2026"),
+      ));
+      mount.appendChild(status);
+    };
+
     const renderNotice = (mount) => {
       if (!state.message && !state.error) return;
-      const notice = createElement("div", "wfu-notice " + (state.error ? "is-error" : "is-success"), state.error || state.message);
+      const errorIsShownInContext = !!(
+        state.error &&
+        state.noticeTag &&
+        (state.selectedTag === state.noticeTag || state.modal === "ignored")
+      );
+      if (errorIsShownInContext) return;
+      const notice = createElement(
+        "div",
+        "wfu-notice " + (state.error ? "is-error is-floating-error" : "is-success"),
+        state.error || state.message,
+      );
       const close = createButton("\u00d7", "wfu-notice__close", () => {
         setNotice("", false);
         render();
@@ -1164,25 +1790,39 @@
       const copy = createElement("div", "wfu-header__copy");
       copy.appendChild(createElement("h2", "wfu-title", "War follow-up"));
       const menu = createElement("details", "wfu-menu");
-      menu.appendChild(createElement("summary", "wfu-menu__summary", "More"));
+      menu.dataset.wfuRootDetails = "more";
+      const menuSummary = createElement("summary", "wfu-menu__summary", "More");
+      menuSummary.dataset.wfuFocusKey = focusKey("summary", "More actions");
+      menu.appendChild(menuSummary);
       const actions = createElement("div", "wfu-menu__panel");
-      actions.appendChild(createButton("Add player", "wfu-menu__item", () => {
+      const addPlayerButton = createButton("Add player", "wfu-menu__item", () => {
+        menu.open = false;
         state.modal = "add";
         render();
-      }));
+      });
+      addPlayerButton.dataset.wfuFocusKey = menuSummary.dataset.wfuFocusKey;
+      actions.appendChild(addPlayerButton);
       const ignoredCount = state.privateState.settings.trustedPlayerTags.length;
-      actions.appendChild(createButton(
+      const ignoredPlayersButton = createButton(
         "Ignored players" + (ignoredCount ? " " + ignoredCount : ""),
         "wfu-menu__item",
         () => {
+          menu.open = false;
           state.modal = "ignored";
           render();
         },
-      ));
-      actions.appendChild(createButton("Rules", "wfu-menu__item", () => {
+      );
+      ignoredPlayersButton.dataset.wfuFocusKey = menuSummary.dataset.wfuFocusKey;
+      actions.appendChild(ignoredPlayersButton);
+      const rulesButton = createButton("Rules", "wfu-menu__item", () => {
+        menu.open = false;
         state.modal = "settings";
         render();
-      }));
+      });
+      rulesButton.dataset.wfuFocusKey = menuSummary.dataset.wfuFocusKey;
+      rulesButton.disabled = state.saving;
+      if (state.saving) rulesButton.title = "Rules are saving.";
+      actions.appendChild(rulesButton);
       menu.appendChild(actions);
       header.appendChild(copy);
       header.appendChild(menu);
@@ -1229,6 +1869,8 @@
           meta.label + (counts[key] ? " " + counts[key] : ""),
           "wfu-status-tab" + (state.status === key ? " is-active" : ""),
           () => {
+            const parentDetails = typeof button.closest === "function" ? button.closest("details") : null;
+            if (parentDetails) parentDetails.open = false;
             state.status = key;
             state.visibleLimit = 12;
             render();
@@ -1243,8 +1885,11 @@
       }
       const secondaryKeys = ["watching", "closed"];
       const more = createElement("details", "wfu-status-more" + (secondaryKeys.includes(state.status) ? " is-active" : ""));
+      more.dataset.wfuRootDetails = "status-more";
       const activeSecondary = secondaryKeys.includes(state.status) ? STATUS_META[state.status].label : "More";
-      more.appendChild(createElement("summary", "wfu-status-more__summary", activeSecondary));
+      const moreSummary = createElement("summary", "wfu-status-more__summary", activeSecondary);
+      moreSummary.dataset.wfuFocusKey = focusKey("summary", "More statuses");
+      more.appendChild(moreSummary);
       const panel = createElement("div", "wfu-status-more__panel");
       for (const key of secondaryKeys) appendStatusButton(panel, key);
       more.appendChild(panel);
@@ -1269,6 +1914,7 @@
       search.placeholder = "Search";
       search.value = state.search;
       search.setAttribute("aria-label", "Search players");
+      search.dataset.wfuFocusKey = focusKey("field", "Work search");
       search.addEventListener("input", () => {
         state.search = search.value;
         state.visibleLimit = 12;
@@ -1278,17 +1924,22 @@
 
       const activeFilterCount = (state.clan ? 1 : 0) + (includeHandler && state.handler ? 1 : 0);
       const filters = createElement("details", "wfu-filter-menu" + (activeFilterCount ? " is-active" : ""));
-      filters.appendChild(createElement(
+      filters.dataset.wfuRootDetails = "filters";
+      const filtersSummary = createElement(
         "summary",
         "wfu-filter-menu__summary",
         "Filters" + (activeFilterCount ? " " + activeFilterCount : ""),
-      ));
+      );
+      filtersSummary.dataset.wfuFocusKey = focusKey("summary", "Work filters");
+      filters.appendChild(filtersSummary);
       const filterPanel = createElement("div", "wfu-filter-menu__panel");
       const clan = createSelect("wfu-select");
       addOption(clan, "", "All clans", !state.clan);
       for (const option of getClanOptions()) addOption(clan, option.value, option.label, option.value === state.clan);
       clan.setAttribute("aria-label", "Filter by clan");
+      clan.dataset.wfuFocusKey = focusKey("field", "Work clan filter");
       clan.addEventListener("change", () => {
+        filters.open = false;
         state.clan = clan.value;
         state.visibleLimit = 12;
         render();
@@ -1300,7 +1951,9 @@
         addOption(handler, "", "Anyone", !state.handler);
         for (const name of state.work.settings.moderatorNames) addOption(handler, name, name, name === state.handler);
         handler.setAttribute("aria-label", "Filter by moderator");
+        handler.dataset.wfuFocusKey = focusKey("field", "Work moderator filter");
         handler.addEventListener("change", () => {
+          filters.open = false;
           state.handler = handler.value;
           state.visibleLimit = 12;
           render();
@@ -1309,6 +1962,7 @@
       }
       if (activeFilterCount) {
         filterPanel.appendChild(createButton("Clear filters", "wfu-filter-clear", () => {
+          filters.open = false;
           state.clan = "";
           if (includeHandler) state.handler = "";
           state.visibleLimit = 12;
@@ -1351,6 +2005,12 @@
       const meta = STATUS_META[statusForItem(item)];
       const card = createElement("article", "wfu-card");
       card.dataset.status = item.status;
+      card.dataset.tag = item.tag;
+      card.dataset.wfuFocusKey = focusKey("card", item.tag);
+      if (state.pendingCaseMutations.has(item.tag)) {
+        card.classList.add("is-pending");
+        card.setAttribute("aria-busy", "true");
+      }
       card.tabIndex = 0;
       card.setAttribute("role", "button");
       card.setAttribute("aria-label", "Open war follow-up for " + (player.name || item.tag));
@@ -1562,7 +2222,10 @@
         .concat((evidence.cwlEvents || []).map((event) => ({ event, kind: "cwl" })));
       if (events.length) {
         const details = createElement("details", "wfu-details");
-        details.appendChild(createElement("summary", "wfu-details__summary", "War details"));
+        details.dataset.wfuDetails = "war-details";
+        const summary = createElement("summary", "wfu-details__summary", "War details");
+        summary.dataset.wfuFocusKey = focusKey("summary", "War details");
+        details.appendChild(summary);
         const rows = createElement("div", "wfu-event-list");
         for (const entry of events) rows.appendChild(eventRow(entry.event, entry.kind));
         details.appendChild(rows);
@@ -1624,6 +2287,7 @@
       const submit = createElement("button", "btn");
       submit.type = "submit";
       submit.textContent = "Start watching";
+      submit.dataset.wfuFocusKey = focusKey("button", submit.textContent);
       actions.appendChild(submit);
       form.appendChild(actions);
       form.addEventListener("submit", async (event) => {
@@ -1709,6 +2373,7 @@
       const submit = createElement("button", "btn");
       submit.type = "submit";
       submit.textContent = extending ? "Prepare extension DM" : "Prepare DM";
+      submit.dataset.wfuFocusKey = focusKey("button", submit.textContent);
       actions.appendChild(submit);
       form.appendChild(actions);
       form.addEventListener("submit", async (event) => {
@@ -1746,7 +2411,9 @@
       section.appendChild(createElement("h3", "wfu-drawer-section__title", "Send the DM"));
       const message = createElement("textarea", "wfu-textarea wfu-dm-textarea");
       message.rows = 8;
+      message.required = true;
       message.value = toText(item.case && item.case.dmText);
+      message.addEventListener("input", () => message.setCustomValidity(""));
       section.appendChild(setField("Decision message", message));
       const actions = createElement("div", "wfu-form-actions");
       actions.appendChild(createButton("Copy message", "btn secondary", async () => {
@@ -1759,10 +2426,19 @@
         }
       }));
       actions.appendChild(createButton("Change decision", "btn secondary", () => mutate(item, "reopen")));
-      actions.appendChild(createButton("Mark DM sent", "btn", () => mutate(item, "mark_dm_sent", {
-        dmText: message.value,
-        actor: toText(item.case && item.case.handledBy),
-      })));
+      actions.appendChild(createButton("Mark DM sent", "btn", () => {
+        if (!message.value.trim()) {
+          message.setCustomValidity("Add the decision message first.");
+          message.reportValidity();
+          message.focus();
+          return;
+        }
+        message.setCustomValidity("");
+        mutate(item, "mark_dm_sent", {
+          dmText: message.value,
+          actor: toText(item.case && item.case.handledBy),
+        });
+      }));
       section.appendChild(actions);
     };
 
@@ -1816,13 +2492,21 @@
       section.appendChild(createElement("h3", "wfu-drawer-section__title", "Follow-up closed"));
       const outcome = item.case && item.case.outcome === "approved_return"
         ? "Approved to return to regular wars."
-        : (item.case && item.case.outcome === "no_action" ? "Reviewed with no action." : "No further action is scheduled.");
+        : (item.case && item.case.outcome === "no_action"
+          ? "Reviewed with no action."
+          : (item.case && item.case.outcome === "no_return"
+            ? "Closed without return to regular wars."
+            : "No further action is scheduled."));
       section.appendChild(createElement("div", "wfu-closed-copy", outcome));
       section.appendChild(createButton("Reopen", "btn secondary", () => mutate(item, "reopen")));
     };
 
     const renderCaseAction = (item) => {
-      const section = createElement("section", "wfu-drawer-section");
+      const section = createElement(
+        "section",
+        "wfu-drawer-section wfu-case-action" +
+          (state.pendingCaseMutations.has(item.tag) ? " is-pending" : ""),
+      );
       if (state.decisionMode === "watch") renderWatchForm(section, item);
       else if (state.decisionMode === "hero_down") renderHeroDownForm(section, item, false);
       else if (state.decisionMode === "extend") renderHeroDownForm(section, item, true);
@@ -1831,12 +2515,20 @@
       else if (item.status === "hero_down" || item.status === "ready") renderTrial(section, item);
       else if (item.status === "watching") renderWatching(section, item);
       else renderClosed(section, item);
+      const heading = section.querySelector(".wfu-drawer-section__title");
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.dataset.wfuFocusKey = focusKey("drawer", "Current state");
+      }
       return section;
     };
 
     const renderNotesAndActivity = (item) => {
       const details = createElement("details", "wfu-details wfu-coordination");
-      details.appendChild(createElement("summary", "wfu-details__summary", "Coordination"));
+      details.dataset.wfuDetails = "coordination";
+      const summary = createElement("summary", "wfu-details__summary", "Coordination");
+      summary.dataset.wfuFocusKey = focusKey("summary", "Coordination");
+      details.appendChild(summary);
       const section = createElement("div", "wfu-coordination__body");
       if (item.case) {
         const assignmentForm = createElement("form", "wfu-form");
@@ -1845,6 +2537,7 @@
         const assignmentSave = createElement("button", "btn secondary");
         assignmentSave.type = "submit";
         assignmentSave.textContent = "Save assignment";
+        assignmentSave.dataset.wfuFocusKey = focusKey("button", assignmentSave.textContent);
         assignmentActions.appendChild(assignmentSave);
         assignmentForm.appendChild(setField("Assigned to", assignment));
         assignmentForm.appendChild(assignmentActions);
@@ -1864,6 +2557,7 @@
         const save = createElement("button", "btn secondary");
         save.type = "submit";
         save.textContent = "Add note";
+        save.dataset.wfuFocusKey = focusKey("button", save.textContent);
         noteForm.appendChild(note);
         noteForm.appendChild(save);
         noteForm.addEventListener("submit", async (event) => {
@@ -1895,17 +2589,22 @@
       return details;
     };
 
-    const renderDrawer = (mount) => {
+    const renderDrawer = (mount, previousDrawerTagRaw) => {
       const item = getSelectedItem();
       if (!item) return;
       const layer = createElement("div", "wfu-drawer-layer");
       const backdrop = createButton("Close", "wfu-drawer-backdrop", () => {
         state.selectedTag = "";
         state.decisionMode = "";
+        state.restoreRootFocus = true;
         render();
       });
       backdrop.setAttribute("aria-label", "Close follow-up details");
       const drawer = createElement("aside", "wfu-drawer");
+      drawer.dataset.tag = item.tag;
+      drawer.dataset.wfuUiKey = state.decisionMode
+        ? ("mode:" + state.decisionMode)
+        : ("status:" + statusForItem(item));
       drawer.setAttribute("role", "dialog");
       drawer.setAttribute("aria-modal", "true");
       drawer.setAttribute("aria-label", "War follow-up for " + item.player.name);
@@ -1921,6 +2620,7 @@
       const close = createButton("\u00d7", "btn secondary wfu-drawer__close", () => {
         state.selectedTag = "";
         state.decisionMode = "";
+        state.restoreRootFocus = true;
         render();
       });
       close.setAttribute("aria-label", "Close");
@@ -1933,33 +2633,73 @@
       body.appendChild(evidenceSection(item));
       body.appendChild(renderCaseAction(item));
       if (item.case) body.appendChild(renderNotesAndActivity(item));
+      const drawerUi = state.drawerUiByTag[item.tag] || {};
+      const draftsByKey = drawerUi.draftsByKey && typeof drawerUi.draftsByKey === "object"
+        ? drawerUi.draftsByKey
+        : {};
+      restoreFormControls(body, draftsByKey[drawer.dataset.wfuUiKey]);
+      const openDetails = new Set(Array.isArray(drawerUi.openDetails) ? drawerUi.openDetails : []);
+      for (const details of Array.from(body.querySelectorAll("details[data-wfu-details]"))) {
+        details.open = openDetails.has(details.dataset.wfuDetails);
+      }
+      if (state.pendingCaseMutations.has(item.tag)) {
+        for (const control of Array.from(body.querySelectorAll("button, input, select, textarea"))) {
+          if (control.disabled) continue;
+          control.disabled = true;
+          control.dataset.wfuPendingDisabled = "true";
+        }
+      }
       drawer.appendChild(body);
       layer.appendChild(backdrop);
       layer.appendChild(drawer);
       mount.appendChild(layer);
       window.requestAnimationFrame(() => {
-        const close = drawer.querySelector(".wfu-drawer__close");
-        if (close) close.focus();
+        body.scrollTop = Number(drawerUi.scrollTop) || 0;
+        const sameDrawer = normalizeTag(previousDrawerTagRaw) === item.tag;
+        if (sameDrawer && drawerUi.focusKey) {
+          const target = Array.from(drawer.querySelectorAll("[data-wfu-focus-key]"))
+            .find((node) => node.dataset.wfuFocusKey === drawerUi.focusKey);
+          if (target && !target.disabled && typeof target.focus === "function") {
+            target.focus();
+          } else {
+            const stateHeading = drawer.querySelector(
+              '[data-wfu-focus-key="' + focusKey("drawer", "Current state") + '"]'
+            );
+            const fallback = stateHeading || drawer.querySelector(".wfu-drawer__close");
+            if (fallback && typeof fallback.focus === "function") fallback.focus();
+          }
+        } else if (sameDrawer && Number.isInteger(drawerUi.focusControlIndex) && drawerUi.focusControlIndex >= 0) {
+          const controls = Array.from(drawer.querySelectorAll("button, input, select, textarea, summary"));
+          const target = controls[drawerUi.focusControlIndex];
+          const fallback = drawer.querySelector(
+            '[data-wfu-focus-key="' + focusKey("drawer", "Current state") + '"]'
+          );
+          if (target && !target.disabled && typeof target.focus === "function") target.focus();
+          else if (fallback && typeof fallback.focus === "function") fallback.focus();
+        } else if (!sameDrawer) {
+          const close = drawer.querySelector(".wfu-drawer__close");
+          if (close) close.focus();
+        }
       });
     };
 
-    const renderSettingsModal = (mount) => {
+    const renderSettingsModal = (mount, previousModalRaw) => {
       const settings = state.work.settings;
       const layer = createElement("div", "wfu-modal-layer");
-      const backdrop = createButton("Close", "wfu-modal-backdrop", () => {
+      const closeModal = () => {
+        discardModalDraft("settings");
         state.modal = "";
+        state.restoreRootFocus = true;
         render();
-      });
-      const modal = createElement("div", "wfu-modal");
+      };
+      const backdrop = createButton("Close", "wfu-modal-backdrop", closeModal);
+      const modal = createElement("div", "wfu-modal wfu-settings-modal");
       modal.setAttribute("role", "dialog");
       modal.setAttribute("aria-modal", "true");
       modal.setAttribute("aria-label", "War follow-up rules");
       const head = createElement("div", "wfu-modal__head");
       head.appendChild(createElement("h2", "wfu-modal__title", "Review rules"));
-      head.appendChild(createButton("Close", "btn secondary", () => {
-        state.modal = "";
-        render();
-      }));
+      head.appendChild(createButton("Close", "btn secondary", closeModal));
       modal.appendChild(head);
       const form = createElement("form", "wfu-settings-form");
 
@@ -1976,6 +2716,11 @@
       regStars.type = "number"; regStars.min = "0.5"; regStars.max = "3"; regStars.step = "0.1"; regStars.value = settings.regularAverageStarsThreshold;
       const regDestruction = createElement("input", "wfu-input");
       regDestruction.type = "number"; regDestruction.min = "25"; regDestruction.max = "100"; regDestruction.step = "1"; regDestruction.value = settings.regularAverageDestructionThreshold;
+      setControlKey(regLookback, "rules-regular-lookback");
+      setControlKey(regMissed, "rules-regular-missed");
+      setControlKey(regMin, "rules-regular-minimum");
+      setControlKey(regStars, "rules-regular-stars");
+      setControlKey(regDestruction, "rules-regular-destruction");
       appendChildren(regularGrid, [
         setField("Recent wars", regLookback),
         setField("Missed attacks", regMissed),
@@ -1986,6 +2731,7 @@
       const regPerfLabel = createElement("label", "wfu-check");
       const regPerf = createElement("input");
       regPerf.type = "checkbox"; regPerf.checked = settings.regularPerformanceEnabled;
+      setControlKey(regPerf, "rules-regular-performance");
       regPerfLabel.appendChild(regPerf); regPerfLabel.appendChild(createElement("span", "", "Flag poor results"));
       regular.appendChild(regularGrid);
       regular.appendChild(regPerfLabel);
@@ -2004,6 +2750,11 @@
       cwlStars.type = "number"; cwlStars.min = "0.5"; cwlStars.max = "3"; cwlStars.step = "0.1"; cwlStars.value = settings.cwlAverageStarsThreshold;
       const cwlDestruction = createElement("input", "wfu-input");
       cwlDestruction.type = "number"; cwlDestruction.min = "25"; cwlDestruction.max = "100"; cwlDestruction.step = "1"; cwlDestruction.value = settings.cwlAverageDestructionThreshold;
+      setControlKey(cwlLookback, "rules-cwl-lookback");
+      setControlKey(cwlMissed, "rules-cwl-missed");
+      setControlKey(cwlMin, "rules-cwl-minimum");
+      setControlKey(cwlStars, "rules-cwl-stars");
+      setControlKey(cwlDestruction, "rules-cwl-destruction");
       appendChildren(cwlGrid, [
         setField("Recent seasons", cwlLookback),
         setField("Missed attacks", cwlMissed),
@@ -2014,6 +2765,7 @@
       const cwlPerfLabel = createElement("label", "wfu-check");
       const cwlPerf = createElement("input");
       cwlPerf.type = "checkbox"; cwlPerf.checked = settings.cwlPerformanceEnabled;
+      setControlKey(cwlPerf, "rules-cwl-performance");
       cwlPerfLabel.appendChild(cwlPerf); cwlPerfLabel.appendChild(createElement("span", "", "Flag poor results"));
       cwl.appendChild(cwlGrid);
       cwl.appendChild(cwlPerfLabel);
@@ -2027,6 +2779,8 @@
       const target = createSelect("wfu-select");
       addOption(target, "", "Choose per case", !settings.defaultHeroDownRosterId);
       for (const roster of state.work.directory.rosters) addOption(target, roster.id, roster.title, roster.id === settings.defaultHeroDownRosterId);
+      setControlKey(recovery, "rules-default-recovery");
+      setControlKey(target, "rules-default-roster");
       appendChildren(workflowGrid, [
         setField("Default clean wars", recovery),
         setField("Default hero-down roster", target),
@@ -2035,26 +2789,26 @@
       const gapLabel = createElement("label", "wfu-check");
       const gaps = createElement("input");
       gaps.type = "checkbox"; gaps.checked = settings.missingDiscordEnabled;
+      setControlKey(gaps, "rules-discord-gaps");
       gapLabel.appendChild(gaps); gapLabel.appendChild(createElement("span", "", "Show Discord gaps"));
       workflow.appendChild(gapLabel);
       const moderators = createElement("textarea", "wfu-textarea");
       moderators.rows = 3;
       moderators.value = settings.moderatorNames.join("\n");
       moderators.placeholder = "One moderator per line";
+      setControlKey(moderators, "rules-moderators");
       workflow.appendChild(setField("Moderators", moderators));
       form.appendChild(workflow);
 
       const actions = createElement("div", "wfu-form-actions");
-      actions.appendChild(createButton("Cancel", "btn secondary", () => {
-        state.modal = "";
-        render();
-      }));
+      actions.appendChild(createButton("Cancel", "btn secondary", closeModal));
       const save = createElement("button", "btn");
       save.type = "submit";
       save.textContent = "Save rules";
+      save.dataset.wfuFocusKey = focusKey("button", save.textContent);
       actions.appendChild(save);
       form.appendChild(actions);
-      form.addEventListener("submit", async (event) => {
+      form.addEventListener("submit", (event) => {
         event.preventDefault();
         if (state.saving) return;
         const next = {
@@ -2074,49 +2828,68 @@
           defaultHeroDownRosterId: target.value,
           missingDiscordEnabled: gaps.checked,
           moderatorNames: moderators.value.split(/\r?\n/).map((name) => name.trim()).filter(Boolean),
-          trustedPlayerTags: settings.trustedPlayerTags,
         };
-        state.saving = true;
-        render();
-        try {
-          state.privateState.settings = sanitizeSettings(await callServer("saveWarFollowupSettings", [next, getPassword()]));
-          state.modal = "";
-          recompute();
-          setNotice("Rules saved.", false);
-        } catch (err) {
-          setNotice(err && err.message ? err.message : String(err), true);
-        } finally {
-          state.saving = false;
-          render();
-        }
+        saveRulesInBackground(next, settings.rulesUpdatedAt);
       });
       modal.appendChild(form);
+      const modalUi = state.modalUiByName.settings || {};
+      restoreFormControls(modal, modalUi.controls);
       layer.appendChild(backdrop);
       layer.appendChild(modal);
       mount.appendChild(layer);
+      window.requestAnimationFrame(() => {
+        const sameModal = previousModalRaw === "settings";
+        const restoreScroll = () => {
+          modal.scrollTop = Number(modalUi.scrollTop) || 0;
+        };
+        if (sameModal && modalUi.focusKey) {
+          const target = Array.from(modal.querySelectorAll("[data-wfu-focus-key]"))
+            .find((node) => node.dataset.wfuFocusKey === modalUi.focusKey);
+          if (target && !target.disabled && typeof target.focus === "function") {
+            target.focus({ preventScroll: true });
+            restoreScroll();
+            return;
+          }
+        }
+        if (sameModal && Number.isInteger(modalUi.focusControlIndex) && modalUi.focusControlIndex >= 0) {
+          const controls = Array.from(modal.querySelectorAll("button, input, select, textarea, summary"));
+          const target = controls[modalUi.focusControlIndex];
+          if (target && !target.disabled && typeof target.focus === "function") {
+            target.focus({ preventScroll: true });
+            restoreScroll();
+            return;
+          }
+        }
+        if (!sameModal) {
+          const first = modal.querySelector("input, select, textarea");
+          if (first && typeof first.focus === "function") first.focus();
+        }
+        restoreScroll();
+      });
     };
 
-    const renderAddModal = (mount) => {
+    const renderAddModal = (mount, previousModalRaw) => {
       const layer = createElement("div", "wfu-modal-layer");
-      const backdrop = createButton("Close", "wfu-modal-backdrop", () => {
+      const closeModal = () => {
+        discardModalDraft("add");
         state.modal = "";
+        state.restoreRootFocus = true;
         render();
-      });
+      };
+      const backdrop = createButton("Close", "wfu-modal-backdrop", closeModal);
       const modal = createElement("div", "wfu-modal wfu-add-modal");
       modal.setAttribute("role", "dialog");
       modal.setAttribute("aria-modal", "true");
       modal.setAttribute("aria-label", "Add player for review");
       const head = createElement("div", "wfu-modal__head");
       head.appendChild(createElement("h2", "wfu-modal__title", "Add player"));
-      head.appendChild(createButton("Close", "btn secondary", () => {
-        state.modal = "";
-        render();
-      }));
+      head.appendChild(createButton("Close", "btn secondary", closeModal));
       modal.appendChild(head);
       const search = createElement("input", "wfu-input");
       search.type = "search";
       search.placeholder = "Name or player tag";
       search.setAttribute("aria-label", "Search roster players");
+      search.dataset.wfuFocusKey = focusKey("field", "Add player search");
       modal.appendChild(search);
       const results = createElement("div", "wfu-add-results");
       modal.appendChild(results);
@@ -2134,7 +2907,7 @@
           copy.appendChild(createElement("div", "wfu-add-row__name", player.name));
           copy.appendChild(createElement("div", "wfu-add-row__meta", [player.rosterTitle, player.tag].filter(Boolean).join(" · ")));
           row.appendChild(copy);
-          row.appendChild(createButton("Add", "btn secondary", async () => {
+          row.appendChild(createButton("Add", "btn secondary", () => {
             const existing = state.work.items.find((item) => item.tag === player.tag);
             const item = existing || {
               tag: player.tag,
@@ -2145,31 +2918,50 @@
               signalIds: [],
               status: "needs_review",
             };
+            discardModalDraft("add");
             state.modal = "";
-            const result = await mutate(item, "manual_review", { reasonCodes: ["manual"] });
-            if (result) {
-              state.selectedTag = player.tag;
-              render();
-            }
+            mutate(item, "manual_review", { reasonCodes: ["manual"] });
           }));
           results.appendChild(row);
         }
         if (!players.length) results.appendChild(createElement("div", "wfu-empty__text", "No matching roster player."));
       };
       search.addEventListener("input", renderResults);
+      const modalUi = state.modalUiByName.add || {};
+      restoreFormControls(modal, modalUi.controls);
       renderResults();
       layer.appendChild(backdrop);
       layer.appendChild(modal);
       mount.appendChild(layer);
-      window.requestAnimationFrame(() => search.focus());
+      window.requestAnimationFrame(() => {
+        const sameModal = previousModalRaw === "add";
+        const restoreScroll = () => {
+          results.scrollTop = Number(modalUi.resultsScrollTop) || 0;
+        };
+        if (sameModal && modalUi.focusKey) {
+          const target = Array.from(modal.querySelectorAll("[data-wfu-focus-key]"))
+            .find((node) => node.dataset.wfuFocusKey === modalUi.focusKey);
+          if (target && !target.disabled && typeof target.focus === "function") {
+            target.focus({ preventScroll: true });
+            restoreScroll();
+            return;
+          }
+        }
+        search.focus();
+        restoreScroll();
+      });
     };
 
-    const renderIgnoredModal = (mount) => {
+    const renderIgnoredModal = (mount, previousModalRaw) => {
       const layer = createElement("div", "wfu-modal-layer");
       const closeModal = () => {
+        discardModalDraft("ignored");
         state.modal = "";
+        state.restoreRootFocus = true;
         state.ignoredSearch = "";
         state.ignoredClan = "";
+        state.ignoredModalScrollTop = 0;
+        state.ignoredModalFocusIndex = -1;
         render();
       };
       const backdrop = createButton("Close", "wfu-modal-backdrop", closeModal);
@@ -2197,8 +2989,10 @@
       search.placeholder = "Search name or tag";
       search.value = state.ignoredSearch;
       search.setAttribute("aria-label", "Search ignored players");
+      search.dataset.wfuFocusKey = focusKey("field", "Ignored player search");
       const clan = createElement("select", "wfu-select");
       clan.setAttribute("aria-label", "Filter ignored players by clan");
+      clan.dataset.wfuFocusKey = focusKey("field", "Ignored player clan");
       addOption(clan, "", "All clans", !state.ignoredClan);
       const rosterOptions = Array.from(new Map(
         entries
@@ -2256,6 +3050,7 @@
           const restore = createButton("Restore", "btn secondary wfu-ignore-restore", () =>
             restoreIgnoredAccountInBackground(entry)
           );
+          restore.dataset.wfuFocusKey = focusKey("ignored", entry.tag);
           restore.title = "Allow this account to appear in war follow-up again.";
           row.appendChild(restore);
           results.appendChild(row);
@@ -2270,25 +3065,204 @@
       };
       search.addEventListener("input", () => {
         state.ignoredSearch = search.value;
+        state.ignoredModalScrollTop = 0;
         renderResults();
+        results.scrollTop = 0;
       });
       clan.addEventListener("change", () => {
         state.ignoredClan = clan.value;
+        state.ignoredModalScrollTop = 0;
         renderResults();
+        results.scrollTop = 0;
       });
       renderResults();
       layer.appendChild(backdrop);
       layer.appendChild(modal);
       mount.appendChild(layer);
-      window.requestAnimationFrame(() => search.focus());
+      window.requestAnimationFrame(() => {
+        results.scrollTop = Number(state.ignoredModalScrollTop) || 0;
+        if (previousModalRaw !== "ignored") {
+          search.focus();
+          return;
+        }
+        const modalUi = state.modalUiByName.ignored || {};
+        if (modalUi.focusKey) {
+          const target = Array.from(modal.querySelectorAll("[data-wfu-focus-key]"))
+            .find((node) => node.dataset.wfuFocusKey === modalUi.focusKey);
+          if (target && !target.disabled && typeof target.focus === "function") {
+            target.focus();
+            return;
+          }
+        }
+        const restoreButtons = Array.from(modal.querySelectorAll(".wfu-ignore-restore"));
+        if (state.ignoredModalFocusIndex >= 0 && restoreButtons.length) {
+          const target = restoreButtons[Math.min(state.ignoredModalFocusIndex, restoreButtons.length - 1)];
+          if (target && !target.disabled && typeof target.focus === "function") {
+            target.focus();
+            return;
+          }
+        }
+        search.focus();
+      });
+    };
+
+    const captureTransientUi = (mount) => {
+      if (!mount || typeof mount.querySelector !== "function") return { drawerTag: "", modal: "" };
+      const activeElement = typeof document !== "undefined" ? document.activeElement : null;
+      const rootDetails = Array.from(mount.querySelectorAll("details[data-wfu-root-details][open]"))
+        .map((details) => toText(details.dataset.wfuRootDetails).trim())
+        .filter(Boolean);
+      const rootReady = !!mount.querySelector(".wfu-view-switch");
+      const rootControls = Array.from(
+        mount.querySelectorAll("button, input, select, textarea, summary, [tabindex]")
+      ).filter((node, index, list) => (
+        list.indexOf(node) === index &&
+        !(typeof node.closest === "function" && node.closest(".wfu-drawer-layer, .wfu-modal-layer"))
+      ));
+      const rootHadFocus = !!(
+        activeElement &&
+        typeof mount.contains === "function" &&
+        mount.contains(activeElement) &&
+        rootControls.includes(activeElement)
+      );
+      state.rootUi = mergeRootUiSnapshot(state.rootUi, {
+        rootReady,
+        openDetails: rootDetails,
+        focusKey: rootHadFocus && activeElement.dataset
+          ? toText(activeElement.dataset.wfuFocusKey).trim()
+          : "",
+        focusControlIndex: rootHadFocus ? rootControls.indexOf(activeElement) : -1,
+        rootHadFocus,
+      });
+      const drawer = mount.querySelector(".wfu-drawer[data-tag]");
+      const drawerTag = normalizeTag(drawer && drawer.dataset && drawer.dataset.tag);
+      if (drawerTag) {
+        const body = drawer.querySelector(".wfu-drawer__body");
+        const uiKey = toText(drawer.dataset.wfuUiKey).trim();
+        const openDetails = Array.from(drawer.querySelectorAll("details[data-wfu-details][open]"))
+          .map((details) => toText(details.dataset.wfuDetails).trim())
+          .filter(Boolean);
+        const previous = state.drawerUiByTag[drawerTag] || {};
+        const active = activeElement;
+        const activeFocusKey = active && drawer.contains(active) && active.dataset
+          ? toText(active.dataset.wfuFocusKey).trim()
+          : "";
+        const focusControls = Array.from(
+          drawer.querySelectorAll("button, input, select, textarea, summary")
+        );
+        const focusControlIndex = active && drawer.contains(active)
+          ? focusControls.indexOf(active)
+          : -1;
+        const draftsByKey = Object.assign(
+          {},
+          previous.draftsByKey && typeof previous.draftsByKey === "object"
+            ? previous.draftsByKey
+            : {},
+        );
+        if (uiKey && body && !state.skipDrawerDraftCaptureTags.has(drawerTag)) {
+          draftsByKey[uiKey] = snapshotFormControls(body);
+        }
+        state.drawerUiByTag[drawerTag] = {
+          scrollTop: body ? body.scrollTop : 0,
+          openDetails,
+          focusKey: activeFocusKey || toText(previous.focusKey).trim(),
+          focusControlIndex,
+          draftsByKey,
+        };
+      }
+      state.skipDrawerDraftCaptureTags.clear();
+      const modal = mount.querySelector(".wfu-modal");
+      const modalName = !modal
+        ? ""
+        : (modal.classList.contains("wfu-ignore-modal")
+          ? "ignored"
+          : (modal.classList.contains("wfu-add-modal")
+            ? "add"
+            : (modal.classList.contains("wfu-settings-modal") ? "settings" : state.modal)));
+      if (modalName) {
+        const active = activeElement;
+        const modalControls = Array.from(
+          modal.querySelectorAll("button, input, select, textarea, summary")
+        );
+        const activeFocusKey = active && modal.contains(active) && active.dataset
+          ? toText(active.dataset.wfuFocusKey).trim()
+          : "";
+        if (state.skipModalDraftCapture === modalName) {
+          delete state.modalUiByName[modalName];
+        } else {
+          const previous = state.modalUiByName[modalName] || {};
+          const modalHasFocus = !!(active && modal.contains(active));
+          state.modalUiByName[modalName] = {
+            controls: snapshotFormControls(modal),
+            focusKey: modalHasFocus ? activeFocusKey : toText(previous.focusKey).trim(),
+            focusControlIndex: modalHasFocus
+              ? modalControls.indexOf(active)
+              : (Number.isInteger(previous.focusControlIndex) ? previous.focusControlIndex : -1),
+            scrollTop: modalName === "settings"
+              ? modal.scrollTop
+              : (Number(previous.scrollTop) || 0),
+            resultsScrollTop: modalName === "add"
+              ? Number((modal.querySelector(".wfu-add-results") || {}).scrollTop) || 0
+              : (Number(previous.resultsScrollTop) || 0),
+          };
+        }
+      }
+      if (modalName === "ignored") {
+        const results = modal.querySelector(".wfu-ignore-results");
+        state.ignoredModalScrollTop = results ? results.scrollTop : 0;
+        const restoreButtons = Array.from(modal.querySelectorAll(".wfu-ignore-restore"));
+        const active = activeElement;
+        state.ignoredModalFocusIndex = restoreButtons.indexOf(active);
+      }
+      state.skipModalDraftCapture = "";
+      const placeholderOnly = !rootReady && !!mount.querySelector(".wfu-loading");
+      return {
+        drawerTag: drawerTag || (placeholderOnly ? normalizeTag(state.selectedTag) : ""),
+        modal: modalName || (placeholderOnly ? toText(state.modal).trim() : ""),
+        rootHadFocus,
+      };
+    };
+
+    const restoreRootUi = (mount, previousUiRaw) => {
+      const rootUi = state.rootUi && typeof state.rootUi === "object" ? state.rootUi : {};
+      const openDetails = new Set(Array.isArray(rootUi.openDetails) ? rootUi.openDetails : []);
+      for (const details of Array.from(mount.querySelectorAll("details[data-wfu-root-details]"))) {
+        details.open = openDetails.has(toText(details.dataset.wfuRootDetails).trim());
+      }
+      const previousUi = previousUiRaw && typeof previousUiRaw === "object" ? previousUiRaw : {};
+      const shouldRestoreFocus = !!(previousUi.rootHadFocus || state.restoreRootFocus);
+      if (!shouldRestoreFocus || state.selectedTag || state.modal) return;
+      state.restoreRootFocus = false;
+      window.requestAnimationFrame(() => {
+        if (state.selectedTag || state.modal) return;
+        const controls = Array.from(
+          mount.querySelectorAll("button, input, select, textarea, summary, [tabindex]")
+        ).filter((node, index, list) => (
+          list.indexOf(node) === index &&
+          !(typeof node.closest === "function" && node.closest(".wfu-drawer-layer, .wfu-modal-layer"))
+        ));
+        let target = null;
+        if (rootUi.focusKey) {
+          target = controls.find((node) => (
+            node.dataset && node.dataset.wfuFocusKey === rootUi.focusKey
+          )) || null;
+        }
+        if (!target && Number.isInteger(rootUi.focusControlIndex) && rootUi.focusControlIndex >= 0) {
+          target = controls[rootUi.focusControlIndex] || null;
+        }
+        if (target && !target.disabled && typeof target.focus === "function") target.focus();
+      });
     };
 
     const render = () => {
       const mount = getMount();
       if (!mount) return;
+      const previousUi = captureTransientUi(mount);
+      mount.classList.toggle("wfu-has-pending-writes", pendingWriteCount() > 0);
       mount.textContent = "";
       renderHeader(mount);
       renderNotice(mount);
+      renderSyncStatus(mount);
       if (state.loading) {
         const loading = createElement("div", "wfu-loading");
         loading.appendChild(createElement("span", "wfu-loading__dot"));
@@ -2303,10 +3277,11 @@
       renderViewSwitch(mount);
       if (state.view === "discord" && state.work.settings.missingDiscordEnabled) renderDiscordGaps(mount);
       else renderWorkList(mount);
-      renderDrawer(mount);
-      if (state.modal === "settings") renderSettingsModal(mount);
-      if (state.modal === "add") renderAddModal(mount);
-      if (state.modal === "ignored") renderIgnoredModal(mount);
+      renderDrawer(mount, previousUi.drawerTag);
+      if (state.modal === "settings") renderSettingsModal(mount, previousUi.modal);
+      if (state.modal === "add") renderAddModal(mount, previousUi.modal);
+      if (state.modal === "ignored") renderIgnoredModal(mount, previousUi.modal);
+      restoreRootUi(mount, previousUi);
     };
 
     const handleTabChange = (event) => {
@@ -2321,20 +3296,37 @@
     };
 
     const handleTrustChange = (event) => {
-      if (!state.loaded) return;
       const detail = event && event.detail && typeof event.detail === "object" ? event.detail : {};
       const tag = normalizeTag(detail.tag);
       if (!tag) return;
-      const tags = new Set(state.privateState.settings.trustedPlayerTags);
-      if (detail.trusted) tags.add(tag);
-      else tags.delete(tag);
-      state.privateState.settings = sanitizeSettings(Object.assign({}, state.privateState.settings, {
-        trustedPlayerTags: Array.from(tags),
-        updatedAt: toText(detail.updatedAt).trim() || state.privateState.settings.updatedAt,
-      }));
+      if (!state.loaded) {
+        const next = {
+          tag,
+          trusted: !!detail.trusted,
+          updatedAt: toText(detail.updatedAt).trim(),
+        };
+        const previous = state.queuedTrustEvents.get(tag);
+        if (
+          !previous ||
+          !next.updatedAt ||
+          !previous.updatedAt ||
+          parseMs(next.updatedAt) >= parseMs(previous.updatedAt)
+        ) {
+          state.queuedTrustEvents.set(tag, next);
+        }
+        return;
+      }
+      const applied = applyLocalIgnoreState(tag, !!detail.trusted, detail.updatedAt);
+      if (!applied) return;
       if (detail.trusted && state.selectedTag === tag) state.selectedTag = "";
-      recompute();
       render();
+    };
+
+    const handleBeforeUnload = (event) => {
+      if (!pendingWriteCount()) return;
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
     };
 
     const init = () => {
@@ -2343,6 +3335,9 @@
       document.addEventListener("admin:tabchange", handleTabChange);
       document.addEventListener("admin:rosterdatachange", handleRosterDataChange);
       document.addEventListener("admin:warfollowuptrustchange", handleTrustChange);
+      if (typeof window !== "undefined" && window.addEventListener) {
+        window.addEventListener("beforeunload", handleBeforeUnload);
+      }
       render();
     };
 
@@ -2350,6 +3345,9 @@
       document.removeEventListener("admin:tabchange", handleTabChange);
       document.removeEventListener("admin:rosterdatachange", handleRosterDataChange);
       document.removeEventListener("admin:warfollowuptrustchange", handleTrustChange);
+      if (typeof window !== "undefined" && window.removeEventListener) {
+        window.removeEventListener("beforeunload", handleBeforeUnload);
+      }
       state.initialized = false;
     };
 
@@ -2358,9 +3356,11 @@
       destroy,
       load,
       render,
+      mutateCase: mutate,
       dismissInBackground,
       ignoreAccountInBackground,
       restoreIgnoredAccountInBackground,
+      saveRulesInBackground,
       state,
     };
   };
@@ -2390,6 +3390,10 @@
     buildWatchProgress,
     buildWorkItems,
     buildDmText,
+    buildOptimisticCase,
+    snapshotFormControls,
+    restoreFormControls,
+    mergeRootUiSnapshot,
     createController,
     initialize,
   };

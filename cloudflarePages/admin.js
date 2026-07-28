@@ -5458,11 +5458,17 @@
       }
       trustBusy = true;
       renderTrustControl();
+      const requestedTrusted = !trustedAccount;
+      const trustMutationId =
+        typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function"
+          ? ("wfu-" + crypto.randomUUID())
+          : ("wfu-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10));
       try {
         const result = await runServerMethod("setWarFollowupTrustedAccount", [
           playerTag,
-          !trustedAccount,
+          requestedTrusted,
           state.password,
+          trustMutationId,
         ]);
         trustedAccount = !!(result && result.trusted);
         dispatchAdminEvent_("admin:warfollowuptrustchange", {
@@ -5471,7 +5477,26 @@
           updatedAt: toStr(result && result.updatedAt).trim(),
         });
       } catch (err) {
-        alert("Follow-up ignore update failed: " + toErrorMessage(err));
+        let reconciled = null;
+        try {
+          reconciled = await runServerMethod("getWarFollowupTrustStatus", [
+            playerTag,
+            state.password,
+            trustMutationId,
+          ]);
+        } catch {
+          // The original write error is the useful message below.
+        }
+        if (reconciled && (reconciled.committed || !!reconciled.trusted === requestedTrusted)) {
+          trustedAccount = !!reconciled.trusted;
+          dispatchAdminEvent_("admin:warfollowuptrustchange", {
+            tag: playerTag,
+            trusted: trustedAccount,
+            updatedAt: toStr(reconciled.updatedAt).trim(),
+          });
+        } else {
+          alert("Follow-up ignore update failed: " + toErrorMessage(err));
+        }
       } finally {
         trustBusy = false;
         renderTrustControl();

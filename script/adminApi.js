@@ -143,12 +143,16 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return setPlayerWarTrackingRolloutStage(args[0], args[1]);
 		case "getWarFollowupState":
 			return getWarFollowupState(args[0]);
+		case "getWarFollowupCase":
+			return getWarFollowupCase(args[0], args[1]);
 		case "saveWarFollowupSettings":
-			return saveWarFollowupSettings(args[0], args[1]);
+			return saveWarFollowupSettings(args[0], args[1], args[2], args[3]);
+		case "getWarFollowupRulesStatus":
+			return getWarFollowupRulesStatus(args[0], args[1]);
 		case "getWarFollowupTrustStatus":
-			return getWarFollowupTrustStatus(args[0], args[1]);
+			return getWarFollowupTrustStatus(args[0], args[1], args[2]);
 		case "setWarFollowupTrustedAccount":
-			return setWarFollowupTrustedAccount(args[0], args[1], args[2]);
+			return setWarFollowupTrustedAccount(args[0], args[1], args[2], args[3]);
 		case "mutateWarFollowupCase":
 			return mutateWarFollowupCase(args[0], args[1]);
 		default:

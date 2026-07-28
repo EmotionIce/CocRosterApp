@@ -9,6 +9,11 @@ const WAR_FOLLOWUP_PRIVATE_PATH = "private/warFollowup/v1";
 const WAR_FOLLOWUP_SETTINGS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/settings";
 const WAR_FOLLOWUP_CASES_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/cases";
 const WAR_FOLLOWUP_MAX_ACTIVITY = 80;
+const WAR_FOLLOWUP_MAX_CASE_MUTATIONS = 16;
+const WAR_FOLLOWUP_MAX_RULE_MUTATIONS = 32;
+// This ledger is global to settings rather than per player. Keep enough history
+// that a delayed HTTP fallback cannot be evicted by unrelated account toggles.
+const WAR_FOLLOWUP_MAX_TRUST_MUTATIONS = 128;
 
 const WAR_FOLLOWUP_STATUS_SET = {
 	needs_review: true,
@@ -103,6 +108,45 @@ function sanitizeWarFollowupTagList_(listRaw) {
 	return out;
 }
 
+function sanitizeWarFollowupTrustMutationLedger_(ledgerRaw) {
+	const ledger = Array.isArray(ledgerRaw) ? ledgerRaw : [];
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < ledger.length; i++) {
+		const item = ledger[i] && typeof ledger[i] === "object" ? ledger[i] : {};
+		const mutationId = sanitizeWarFollowupText_(item.mutationId, 120);
+		const tag = normalizeTag_(item.tag);
+		const updatedAt = sanitizeWarFollowupTimestamp_(item.updatedAt);
+		if (!mutationId || !tag || !isValidPlayerTag_(tag) || !updatedAt || seen[mutationId]) continue;
+		seen[mutationId] = true;
+		out.push({
+			mutationId: mutationId,
+			tag: tag,
+			trusted: toBooleanFlag_(item.trusted),
+			updatedAt: updatedAt,
+		});
+	}
+	return out.slice(Math.max(0, out.length - WAR_FOLLOWUP_MAX_TRUST_MUTATIONS));
+}
+
+function sanitizeWarFollowupRulesMutationLedger_(ledgerRaw) {
+	const ledger = Array.isArray(ledgerRaw) ? ledgerRaw : [];
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < ledger.length; i++) {
+		const item = ledger[i] && typeof ledger[i] === "object" ? ledger[i] : {};
+		const mutationId = sanitizeWarFollowupText_(item.mutationId, 120);
+		const updatedAt = sanitizeWarFollowupTimestamp_(item.updatedAt);
+		if (!mutationId || !updatedAt || seen[mutationId]) continue;
+		seen[mutationId] = true;
+		out.push({
+			mutationId: mutationId,
+			updatedAt: updatedAt,
+		});
+	}
+	return out.slice(Math.max(0, out.length - WAR_FOLLOWUP_MAX_RULE_MUTATIONS));
+}
+
 function createDefaultWarFollowupSettings_() {
 	return {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
@@ -123,6 +167,9 @@ function createDefaultWarFollowupSettings_() {
 		missingDiscordEnabled: true,
 		moderatorNames: [],
 		trustedPlayerTags: [],
+		trustMutationLedger: [],
+		rulesMutationLedger: [],
+		rulesUpdatedAt: "",
 		updatedAt: "",
 	};
 }
@@ -155,6 +202,9 @@ function sanitizeWarFollowupSettings_(settingsRaw) {
 			: toBooleanFlag_(settings.missingDiscordEnabled),
 		moderatorNames: sanitizeWarFollowupStringList_(settings.moderatorNames, { maxItems: 40, maxLength: 80 }),
 		trustedPlayerTags: sanitizeWarFollowupTagList_(settings.trustedPlayerTags),
+		trustMutationLedger: sanitizeWarFollowupTrustMutationLedger_(settings.trustMutationLedger),
+		rulesMutationLedger: sanitizeWarFollowupRulesMutationLedger_(settings.rulesMutationLedger),
+		rulesUpdatedAt: sanitizeWarFollowupTimestamp_(settings.rulesUpdatedAt),
 		updatedAt: sanitizeWarFollowupTimestamp_(settings.updatedAt),
 	};
 }
@@ -243,6 +293,26 @@ function sanitizeWarFollowupActivity_(activityRaw) {
 	return out.slice(Math.max(0, out.length - WAR_FOLLOWUP_MAX_ACTIVITY));
 }
 
+function sanitizeWarFollowupMutationLedger_(ledgerRaw) {
+	const ledger = Array.isArray(ledgerRaw) ? ledgerRaw : [];
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < ledger.length; i++) {
+		const item = ledger[i] && typeof ledger[i] === "object" ? ledger[i] : {};
+		const mutationId = sanitizeWarFollowupText_(item.mutationId, 120);
+		const action = sanitizeWarFollowupText_(item.action, 40).toLowerCase();
+		const updatedAt = sanitizeWarFollowupTimestamp_(item.updatedAt);
+		if (!mutationId || !action || !updatedAt || seen[mutationId]) continue;
+		seen[mutationId] = true;
+		out.push({
+			mutationId: mutationId,
+			action: action,
+			updatedAt: updatedAt,
+		});
+	}
+	return out.slice(Math.max(0, out.length - WAR_FOLLOWUP_MAX_CASE_MUTATIONS));
+}
+
 function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 	const value = caseRaw && typeof caseRaw === "object" ? caseRaw : {};
 	const tag = normalizeTag_(value.tag || fallbackTagRaw);
@@ -283,6 +353,7 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		updatedAt: sanitizeWarFollowupTimestamp_(value.updatedAt),
 		closedAt: sanitizeWarFollowupTimestamp_(value.closedAt),
 		activity: sanitizeWarFollowupActivity_(value.activity),
+		mutationLedger: sanitizeWarFollowupMutationLedger_(value.mutationLedger),
 	};
 }
 
@@ -304,6 +375,19 @@ function readWarFollowupCase_(tagRaw) {
 	const encoded = firebaseRequestJson_(path, "GET");
 	if (!encoded || typeof encoded !== "object" || Array.isArray(encoded)) return null;
 	return sanitizeWarFollowupCase_(decodeFirebaseObjectKeysRecursive_(encoded), tag);
+}
+
+function getWarFollowupCase(tagRaw, password) {
+	assertAdminPassword_(password);
+	const lock = LockService.getScriptLock();
+	lock.waitLock(30000);
+	try {
+		// Reconciliation reads share the writer lock so an interrupted response
+		// cannot observe the state halfway through a still-finishing mutation.
+		return readWarFollowupCase_(tagRaw);
+	} finally {
+		lock.releaseLock();
+	}
 }
 
 function appendWarFollowupActivity_(caseRaw, typeRaw, textRaw, actorRaw, nowIsoRaw) {
@@ -354,12 +438,19 @@ function getWarFollowupState(password) {
 	const keys = Object.keys(decodedCases);
 	for (let i = 0; i < keys.length; i++) {
 		const value = sanitizeWarFollowupCase_(decodedCases[keys[i]], keys[i]);
-		if (value) cases.push(value);
+		if (value) {
+			// Idempotency metadata is only needed by single-case reconciliation
+			// and mutation retries, not the normal workspace bootstrap.
+			delete value.mutationLedger;
+			cases.push(value);
+		}
 	}
 	cases.sort(function (left, right) {
 		return String(right.updatedAt || right.createdAt).localeCompare(String(left.updatedAt || left.createdAt)) ||
 			String(left.tag).localeCompare(String(right.tag));
 	});
+	delete settings.trustMutationLedger;
+	delete settings.rulesMutationLedger;
 	return {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
 		settings: settings,
@@ -367,19 +458,49 @@ function getWarFollowupState(password) {
 	};
 }
 
-function saveWarFollowupSettings(settingsRaw, password) {
+function saveWarFollowupSettings(settingsRaw, password, expectedRulesUpdatedAtRaw, mutationIdRaw) {
 	assertAdminPassword_(password);
 	const lock = LockService.getScriptLock();
 	lock.waitLock(30000);
 	try {
 		const current = readWarFollowupSettings_();
+		const hasMutationId = mutationIdRaw != null;
+		const mutationId = sanitizeWarFollowupText_(mutationIdRaw, 120);
+		if (hasMutationId && !mutationId) throw new Error("War follow-up rules mutation ID is required.");
+		if (mutationId) {
+			const ledger = sanitizeWarFollowupRulesMutationLedger_(current.rulesMutationLedger);
+			for (let i = 0; i < ledger.length; i++) {
+				if (ledger[i].mutationId === mutationId) return current;
+			}
+		}
+		const hasExpectedRulesUpdatedAt = expectedRulesUpdatedAtRaw != null;
+		const expectedRaw = expectedRulesUpdatedAtRaw == null ? "" : String(expectedRulesUpdatedAtRaw).trim();
+		const expectedRulesUpdatedAt = sanitizeWarFollowupTimestamp_(expectedRaw);
+		if (hasExpectedRulesUpdatedAt && expectedRaw && !expectedRulesUpdatedAt) {
+			throw new Error("Invalid war follow-up rules timestamp.");
+		}
+		if (hasExpectedRulesUpdatedAt && expectedRulesUpdatedAt !== current.rulesUpdatedAt) {
+			throw new Error("War follow-up rules changed since they were opened. Reload and try again.");
+		}
 		const incoming = settingsRaw && typeof settingsRaw === "object" ? settingsRaw : {};
 		const settings = sanitizeWarFollowupSettings_(Object.assign({}, current, incoming, {
-			trustedPlayerTags: Object.prototype.hasOwnProperty.call(incoming, "trustedPlayerTags")
-				? incoming.trustedPlayerTags
-				: current.trustedPlayerTags,
+			// Account exclusions have their own atomic endpoint. A stale Rules
+			// form must never replace them or its retry ledger.
+			trustedPlayerTags: current.trustedPlayerTags,
+			trustMutationLedger: current.trustMutationLedger,
+			rulesMutationLedger: current.rulesMutationLedger,
 		}));
-		settings.updatedAt = new Date().toISOString();
+		const currentUpdatedMs = parseIsoToMs_(current.updatedAt);
+		settings.updatedAt = new Date(Math.max(Date.now(), currentUpdatedMs + 1)).toISOString();
+		settings.rulesUpdatedAt = settings.updatedAt;
+		if (mutationId) {
+			settings.rulesMutationLedger = sanitizeWarFollowupRulesMutationLedger_(
+				(Array.isArray(settings.rulesMutationLedger) ? settings.rulesMutationLedger : []).concat([{
+					mutationId: mutationId,
+					updatedAt: settings.updatedAt,
+				}]),
+			);
+		}
 		firebaseRequestJson_(
 			WAR_FOLLOWUP_SETTINGS_PATH,
 			"PUT",
@@ -391,27 +512,80 @@ function saveWarFollowupSettings(settingsRaw, password) {
 	}
 }
 
-function getWarFollowupTrustStatus(tagRaw, password) {
+function getWarFollowupRulesStatus(mutationIdRaw, password) {
 	assertAdminPassword_(password);
-	const tag = normalizeTag_(tagRaw);
-	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
-	const settings = readWarFollowupSettings_();
-	return {
-		tag: tag,
-		trusted: settings.trustedPlayerTags.indexOf(tag) >= 0,
-		updatedAt: settings.updatedAt,
-	};
-}
-
-function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password) {
-	assertAdminPassword_(password);
-	const tag = normalizeTag_(tagRaw);
-	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
-	const trusted = toBooleanFlag_(trustedRaw);
+	const mutationId = sanitizeWarFollowupText_(mutationIdRaw, 120);
+	if (!mutationId) throw new Error("War follow-up rules mutation ID is required.");
 	const lock = LockService.getScriptLock();
 	lock.waitLock(30000);
 	try {
 		const settings = readWarFollowupSettings_();
+		const ledger = sanitizeWarFollowupRulesMutationLedger_(settings.rulesMutationLedger);
+		const committed = ledger.some(function (entry) {
+			return entry.mutationId === mutationId;
+		});
+		delete settings.trustMutationLedger;
+		delete settings.rulesMutationLedger;
+		return {
+			committed: committed,
+			settings: settings,
+		};
+	} finally {
+		lock.releaseLock();
+	}
+}
+
+function getWarFollowupTrustStatus(tagRaw, password, mutationIdRaw) {
+	assertAdminPassword_(password);
+	const tag = normalizeTag_(tagRaw);
+	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
+	const lock = LockService.getScriptLock();
+	lock.waitLock(30000);
+	try {
+		const settings = readWarFollowupSettings_();
+		const mutationId = sanitizeWarFollowupText_(mutationIdRaw, 120);
+		const ledger = mutationId
+			? sanitizeWarFollowupTrustMutationLedger_(settings.trustMutationLedger)
+			: [];
+		return {
+			tag: tag,
+			trusted: settings.trustedPlayerTags.indexOf(tag) >= 0,
+			updatedAt: settings.updatedAt,
+			committed: !!mutationId && ledger.some(function (entry) {
+				return entry.mutationId === mutationId && entry.tag === tag;
+			}),
+		};
+	} finally {
+		lock.releaseLock();
+	}
+}
+
+function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password, mutationIdRaw) {
+	assertAdminPassword_(password);
+	const tag = normalizeTag_(tagRaw);
+	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
+	const trusted = toBooleanFlag_(trustedRaw);
+	const hasMutationId = mutationIdRaw != null;
+	const mutationId = sanitizeWarFollowupText_(mutationIdRaw, 120);
+	if (hasMutationId && !mutationId) throw new Error("War follow-up trust mutation ID is required.");
+	const lock = LockService.getScriptLock();
+	lock.waitLock(30000);
+	try {
+		const settings = readWarFollowupSettings_();
+		if (mutationId) {
+			const ledger = sanitizeWarFollowupTrustMutationLedger_(settings.trustMutationLedger);
+			for (let i = 0; i < ledger.length; i++) {
+				if (ledger[i].mutationId !== mutationId) continue;
+				if (ledger[i].tag !== tag || ledger[i].trusted !== trusted) {
+					throw new Error("This war follow-up trust mutation ID was already used for another change.");
+				}
+				return {
+					tag: tag,
+					trusted: settings.trustedPlayerTags.indexOf(tag) >= 0,
+					updatedAt: settings.updatedAt,
+				};
+			}
+		}
 		const tagSet = {};
 		for (let i = 0; i < settings.trustedPlayerTags.length; i++) {
 			tagSet[settings.trustedPlayerTags[i]] = true;
@@ -419,7 +593,18 @@ function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password) {
 		if (trusted) tagSet[tag] = true;
 		else delete tagSet[tag];
 		settings.trustedPlayerTags = sanitizeWarFollowupTagList_(Object.keys(tagSet));
-		settings.updatedAt = new Date().toISOString();
+		const currentUpdatedMs = parseIsoToMs_(settings.updatedAt);
+		settings.updatedAt = new Date(Math.max(Date.now(), currentUpdatedMs + 1)).toISOString();
+		if (mutationId) {
+			settings.trustMutationLedger = sanitizeWarFollowupTrustMutationLedger_(
+				(Array.isArray(settings.trustMutationLedger) ? settings.trustMutationLedger : []).concat([{
+					mutationId: mutationId,
+					tag: tag,
+					trusted: trusted,
+					updatedAt: settings.updatedAt,
+				}]),
+			);
+		}
 		firebaseRequestJson_(
 			WAR_FOLLOWUP_SETTINGS_PATH,
 			"PUT",
@@ -447,16 +632,34 @@ function mutateWarFollowupCase(requestRaw, password) {
 	lock.waitLock(30000);
 	try {
 		const current = readWarFollowupCase_(tag);
+		const hasMutationId = Object.prototype.hasOwnProperty.call(request, "mutationId");
+		const mutationId = sanitizeWarFollowupText_(request.mutationId, 120);
+		if (hasMutationId && !mutationId) throw new Error("War follow-up mutation ID is required.");
+		if (current && mutationId) {
+			const mutationLedger = sanitizeWarFollowupMutationLedger_(current.mutationLedger);
+			for (let i = 0; i < mutationLedger.length; i++) {
+				if (mutationLedger[i].mutationId !== mutationId) continue;
+				if (mutationLedger[i].action !== action) {
+					throw new Error("This war follow-up mutation ID was already used for another action.");
+				}
+				return current;
+			}
+		}
 		const currentUpdatedMs = current ? parseIsoToMs_(current.updatedAt) : 0;
 		const nowIso = new Date(Math.max(Date.now(), currentUpdatedMs + 1)).toISOString();
-		const expectedUpdatedAt = sanitizeWarFollowupTimestamp_(request.expectedUpdatedAt);
-		if (
-			current &&
-			expectedUpdatedAt &&
-			current.updatedAt &&
-			expectedUpdatedAt !== current.updatedAt
-		) {
-			throw new Error("This follow-up changed since it was opened. Reload and try again.");
+		const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(request, "expectedUpdatedAt");
+		const expectedRaw = request.expectedUpdatedAt == null ? "" : String(request.expectedUpdatedAt).trim();
+		const expectedUpdatedAt = sanitizeWarFollowupTimestamp_(expectedRaw);
+		if (hasExpectedUpdatedAt && expectedRaw && !expectedUpdatedAt) {
+			throw new Error("Invalid war follow-up update timestamp.");
+		}
+		if (hasExpectedUpdatedAt) {
+			const versionMatches = expectedUpdatedAt
+				? !!current && current.updatedAt === expectedUpdatedAt
+				: !current;
+			if (!versionMatches) {
+				throw new Error("This follow-up changed since it was opened. Reload and try again.");
+			}
 		}
 		const value = current || createEmptyWarFollowupCase_(tag, nowIso);
 		applyWarFollowupIdentityPatch_(value, request);
@@ -593,6 +796,15 @@ function mutateWarFollowupCase(requestRaw, password) {
 
 		if (!value.createdAt) value.createdAt = nowIso;
 		value.updatedAt = nowIso;
+		if (mutationId) {
+			value.mutationLedger = sanitizeWarFollowupMutationLedger_(
+				(Array.isArray(value.mutationLedger) ? value.mutationLedger : []).concat([{
+					mutationId: mutationId,
+					action: action,
+					updatedAt: nowIso,
+				}]),
+			);
+		}
 		const sanitized = sanitizeWarFollowupCase_(value, tag);
 		const path = WAR_FOLLOWUP_CASES_PATH + "/" + encodeFirebaseObjectKey_(tag);
 		firebaseRequestJson_(path, "PUT", encodeFirebaseObjectKeysRecursive_(sanitized));

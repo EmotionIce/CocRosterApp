@@ -6113,8 +6113,9 @@ test("war follow-up state is authenticated, private, and independent from roster
   assert.equal(settings.regularLookbackWars, 8);
   assert.equal(settings.regularPerformanceEnabled, false);
   assert.deepEqual(Array.from(settings.moderatorNames), ["Alex", "Sam"]);
-  assert.deepEqual(Array.from(settings.trustedPlayerTags), ["#P0LYGQ"]);
+  assert.deepEqual(Array.from(settings.trustedPlayerTags), [], "rules saves must not edit ignored accounts");
 
+  backend.runAdminApiMethod_("setWarFollowupTrustedAccount", ["#P0LYGQ", true, "change-me"]);
   const initialTrust = backend.runAdminApiMethod_("getWarFollowupTrustStatus", ["#P0LYGQ", "change-me"]);
   assert.equal(initialTrust.trusted, true);
   const addedTrust = backend.runAdminApiMethod_("setWarFollowupTrustedAccount", ["#P0LYGJ", true, "change-me"]);
@@ -6124,8 +6125,13 @@ test("war follow-up state is authenticated, private, and independent from roster
 
   const legacySettingsSave = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
     regularMissedThreshold: 3,
+    trustedPlayerTags: ["#P0LYGQ"],
   }, "change-me"]);
-  assert.deepEqual(Array.from(legacySettingsSave.trustedPlayerTags), ["#P0LYGJ"], "older settings clients must not clear trusted accounts");
+  assert.deepEqual(
+    Array.from(legacySettingsSave.trustedPlayerTags),
+    ["#P0LYGJ"],
+    "a cached older Rules form must not replace dedicated trust decisions",
+  );
 
   const db = backend.__getFirebaseDb();
   assert.equal(db.activePublished.currentVersionId, "keep-this-version");
@@ -6137,6 +6143,130 @@ test("war follow-up state is authenticated, private, and independent from roster
   assert.equal(state.settings.defaultRecoveryWars, 4);
   assert.deepEqual(Array.from(state.settings.trustedPlayerTags), ["#P0LYGJ"]);
   assert.deepEqual(Array.from(state.cases), []);
+});
+
+test("war follow-up trust retries cannot overwrite a newer opposite decision", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const ignored = backend.runAdminApiMethod_("setWarFollowupTrustedAccount", [
+    tag,
+    true,
+    "change-me",
+    "trust-operation-ignore",
+  ]);
+  assert.equal(ignored.trusted, true);
+
+  const restored = backend.runAdminApiMethod_("setWarFollowupTrustedAccount", [
+    tag,
+    false,
+    "change-me",
+    "trust-operation-restore",
+  ]);
+  assert.equal(restored.trusted, false);
+
+  const tagAlphabet = "PYLQGRJCUV0289";
+  for (let index = 0; index < 40; index++) {
+    const unrelatedTag = "#Q" +
+      tagAlphabet[Math.floor(index / tagAlphabet.length)] +
+      tagAlphabet[index % tagAlphabet.length] +
+      "P";
+    backend.runAdminApiMethod_("setWarFollowupTrustedAccount", [
+      unrelatedTag,
+      true,
+      "change-me",
+      "unrelated-trust-operation-" + index,
+    ]);
+  }
+
+  const lateRetry = backend.runAdminApiMethod_("setWarFollowupTrustedAccount", [
+    tag,
+    true,
+    "change-me",
+    "trust-operation-ignore",
+  ]);
+  assert.equal(
+    lateRetry.trusted,
+    false,
+    "a delayed replay must not reapply its superseded value after many unrelated writes",
+  );
+  assert.equal(
+    backend.runAdminApiMethod_("getWarFollowupTrustStatus", [tag, "change-me"]).trusted,
+    false,
+  );
+  const committedStatus = backend.runAdminApiMethod_("getWarFollowupTrustStatus", [
+    tag,
+    "change-me",
+    "trust-operation-ignore",
+  ]);
+  assert.equal(committedStatus.committed, true);
+  assert.equal(committedStatus.trusted, false, "reconciliation returns the current truth after a superseding change");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("setWarFollowupTrustedAccount", [
+      tag,
+      true,
+      "change-me",
+      "trust-operation-restore",
+    ]),
+    /already used for another change/,
+  );
+  const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(state.settings, "trustMutationLedger"), false);
+});
+
+test("war follow-up rules reject stale forms without conflicting with trust updates", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const first = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+    regularMissedThreshold: 2,
+  }, "change-me", "", "rules-operation-first"]);
+  assert.ok(first.rulesUpdatedAt);
+  const firstReplay = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+    regularMissedThreshold: 8,
+  }, "change-me", "", "rules-operation-first"]);
+  assert.equal(firstReplay.regularMissedThreshold, 2, "an interrupted response can retry without applying twice");
+
+  backend.runAdminApiMethod_("setWarFollowupTrustedAccount", [
+    "#P0LYGQ",
+    true,
+    "change-me",
+    "rules-race-trust",
+  ]);
+  const second = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+    regularMissedThreshold: 3,
+  }, "change-me", first.rulesUpdatedAt, "rules-operation-second"]);
+  assert.equal(second.regularMissedThreshold, 3);
+  assert.deepEqual(Array.from(second.trustedPlayerTags), ["#P0LYGQ"]);
+  const lateFirstReplay = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+    regularMissedThreshold: 7,
+  }, "change-me", "", "rules-operation-first"]);
+  assert.equal(lateFirstReplay.regularMissedThreshold, 3, "an older replay must not replace newer rules");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("saveWarFollowupSettings", [{
+      regularMissedThreshold: 4,
+    }, "change-me", first.rulesUpdatedAt, "rules-operation-stale"]),
+    /rules changed since they were opened/,
+  );
+  const committed = backend.runAdminApiMethod_("getWarFollowupRulesStatus", [
+    "rules-operation-first",
+    "change-me",
+  ]);
+  assert.equal(committed.committed, true);
+  assert.equal(committed.settings.regularMissedThreshold, 3);
+  assert.equal(Object.prototype.hasOwnProperty.call(committed.settings, "rulesMutationLedger"), false);
+  const rejected = backend.runAdminApiMethod_("getWarFollowupRulesStatus", [
+    "rules-operation-stale",
+    "change-me",
+  ]);
+  assert.equal(rejected.committed, false);
+  assert.throws(
+    () => backend.runAdminApiMethod_("getWarFollowupRulesStatus", ["rules-operation-first", "wrong"]),
+    /Authentication failed/,
+  );
+  const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
+  assert.equal(state.settings.regularMissedThreshold, 3);
+  assert.deepEqual(Array.from(state.settings.trustedPlayerTags), ["#P0LYGQ"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(state.settings, "rulesMutationLedger"), false);
 });
 
 test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, and private history", () => {
@@ -6227,4 +6357,126 @@ test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, an
   assert.equal(state.cases[0].tag, tag);
   assert.equal(backend.__getFirebaseDb().activePublished.currentVersionId, "v-existing");
   assert.equal(backend.__getFirebaseDb().internal, undefined);
+});
+
+test("war follow-up mutations are idempotent and enforce exact optional case versions", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("getWarFollowupCase", [tag, "wrong"]),
+    /Authentication failed/,
+  );
+  assert.equal(
+    backend.runAdminApiMethod_("getWarFollowupCase", [tag, "change-me"]),
+    null,
+  );
+
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    name: "Player",
+    expectedUpdatedAt: "",
+    mutationId: "client-operation-1",
+  }, "change-me"]);
+  assert.equal(created.status, "needs_review");
+  assert.equal(created.activity.length, 1);
+  assert.deepEqual(
+    Array.from(created.mutationLedger, (entry) => entry.mutationId),
+    ["client-operation-1"],
+  );
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "reopen",
+      tag,
+      expectedUpdatedAt: "",
+      mutationId: "client-operation-2",
+    }, "change-me"]),
+    /changed since it was opened/,
+    "an explicit empty version is a create-only precondition",
+  );
+
+  const retry = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    name: "Player",
+    expectedUpdatedAt: "",
+    mutationId: "client-operation-1",
+  }, "change-me"]);
+  assert.equal(retry.updatedAt, created.updatedAt);
+  assert.equal(retry.activity.length, 1, "a retry must not append duplicate activity");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "close",
+      tag,
+      mutationId: "client-operation-1",
+    }, "change-me"]),
+    /already used for another action/,
+  );
+
+  const legacy = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "add_note",
+    tag,
+    note: "Legacy callers may omit expectedUpdatedAt.",
+  }, "change-me"]);
+  assert.equal(legacy.activity.at(-1).text, "Legacy callers may omit expectedUpdatedAt.");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "manual_review",
+      tag: "#P0LYGJ",
+      expectedUpdatedAt: created.updatedAt,
+      mutationId: "client-operation-3",
+    }, "change-me"]),
+    /changed since it was opened/,
+    "a timestamp cannot create a case that no longer matches its expected existence",
+  );
+
+  const current = backend.runAdminApiMethod_("getWarFollowupCase", [tag, "change-me"]);
+  assert.equal(current.updatedAt, legacy.updatedAt);
+  assert.equal(current.activity.length, 2);
+  const workspaceState = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(workspaceState.cases[0], "mutationLedger"),
+    false,
+    "normal workspace loads must not carry internal retry metadata",
+  );
+});
+
+test("war follow-up mutation id ledger stays bounded and deduplicates after later updates", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  let current = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    expectedUpdatedAt: "",
+    mutationId: "bounded-0",
+  }, "change-me"]);
+
+  for (let i = 1; i <= 45; i++) {
+    current = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "add_note",
+      tag,
+      expectedUpdatedAt: current.updatedAt,
+      mutationId: `bounded-${i}`,
+      note: `Note ${i}`,
+    }, "change-me"]);
+  }
+  assert.equal(current.mutationLedger.length, 16);
+  assert.equal(current.mutationLedger[0].mutationId, "bounded-30");
+  assert.equal(current.mutationLedger.at(-1).mutationId, "bounded-45");
+
+  const beforeRetryActivity = current.activity.length;
+  const retried = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "add_note",
+    tag,
+    expectedUpdatedAt: "2020-01-01T00:00:00.000Z",
+    mutationId: "bounded-45",
+    note: "This must not be added twice.",
+  }, "change-me"]);
+  assert.equal(retried.updatedAt, current.updatedAt);
+  assert.equal(retried.activity.length, beforeRetryActivity);
+  assert.equal(retried.activity.at(-1).text, "Note 45");
 });
