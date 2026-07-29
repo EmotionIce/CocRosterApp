@@ -821,34 +821,99 @@
       }
     }
 
-    .admin-command-bar {
-      padding: 12px;
+    body.admin-shell-page .admin-command-bar {
+      --admin-command-accent: #d6f76d;
+      padding: 10px 12px;
       position: sticky;
       top: 8px;
       top: calc(8px + env(safe-area-inset-top, 0px));
       z-index: 40;
-      border-color: rgba(245, 214, 125, 0.24);
-      background: linear-gradient(160deg, rgba(18, 28, 46, 0.9), rgba(10, 17, 30, 0.86));
-      backdrop-filter: blur(6px);
+      isolation: isolate;
+      overflow: clip;
+      margin-inline: 0;
+      border: 1px solid rgba(246, 232, 185, 0.2) !important;
+      border-radius: 11px !important;
+      background:
+        linear-gradient(135deg, rgba(21, 24, 30, 0.97), rgba(9, 12, 16, 0.95)) !important;
+      box-shadow:
+        0 1px 0 rgba(255, 247, 214, 0.05),
+        0 16px 36px rgba(0, 0, 0, 0.3) !important;
+      backdrop-filter: blur(18px) saturate(125%);
+      -webkit-backdrop-filter: blur(18px) saturate(125%);
+    }
+
+    body.admin-shell-page .admin-command-bar::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      z-index: 1;
+      height: 2px;
+      pointer-events: none;
+      background: linear-gradient(90deg, #d6f76d, #6ed6c6 58%, rgba(255, 121, 214, 0.72));
     }
 
     .admin-command-grid {
       display: grid;
-      gap: 8px;
-    }
-
-    .admin-command-row {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      gap: 0;
       min-width: 0;
     }
 
-    .admin-command-public-link {
-      margin-left: auto;
+    .admin-command-row {
+      display: grid;
+      grid-template-columns: minmax(132px, 0.65fr) auto auto;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .admin-command-context {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      padding-right: 12px;
+      border-right: 1px solid rgba(246, 232, 185, 0.12);
+    }
+
+    .admin-command-eyebrow {
+      color: #a8a38f;
+      font-size: 9px;
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .admin-command-section {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      color: #fff7d6;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .admin-command-section::before {
+      content: "";
+      width: 7px;
+      height: 7px;
       flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--admin-command-accent);
+      box-shadow: 0 0 0 4px rgba(214, 247, 109, 0.09);
+    }
+
+    .admin-command-section strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .admin-command-public-link {
+      justify-self: end;
+      flex: 0 0 auto;
+      min-height: 36px;
+      white-space: nowrap;
     }
 
     .admin-field {
@@ -866,104 +931,112 @@
     }
 
     .admin-command-actions {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(3, max-content);
       gap: 8px;
       align-items: center;
+      justify-content: center;
       min-width: 0;
     }
 
-    .admin-command-actions .btn {
+    body.admin-shell-page .admin-command-bar .admin-command-btn {
       min-height: 36px;
-    }
-
-    .admin-command-btn {
-      min-height: 34px;
-      padding: 7px 11px;
-      border-radius: 10px;
-      font-size: 12px;
+      padding: 7px 12px;
+      border-radius: 7px !important;
+      font-size: 11px;
+      font-weight: 780;
       line-height: 1.1;
-    }
-
-    .admin-command-actions .admin-command-btn {
-      min-height: 34px;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
     }
 
     .admin-command-actions--compact {
-      justify-content: flex-start;
       align-items: center;
-      gap: 6px;
-    }
-
-    .admin-command-actions--compact .btn {
-      flex: 0 0 auto;
+      gap: 7px;
     }
 
     .admin-command-tabs {
       display: grid;
       grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 5px;
+      gap: 6px;
       max-height: 0;
-      margin-top: -4px;
-      margin-bottom: -4px;
+      margin: 0;
+      padding-top: 0;
+      border-top: 1px solid transparent;
       opacity: 0;
       overflow: hidden;
+      visibility: hidden;
       pointer-events: none;
-      transform: translateY(-5px);
-      transition: max-height 180ms ease, margin 180ms ease, opacity 160ms ease, transform 180ms ease;
+      transform: translateY(-4px);
+      transition:
+        max-height 180ms ease,
+        margin 180ms ease,
+        padding 180ms ease,
+        opacity 140ms ease,
+        transform 180ms ease,
+        visibility 0s linear 180ms;
       will-change: max-height, opacity, transform;
     }
 
     .admin-command-bar.is-compact-tabs-visible .admin-command-tabs {
-      max-height: 38px;
-      margin-top: 0;
-      margin-bottom: 4px;
+      max-height: 48px;
+      margin-top: 9px;
+      padding-top: 9px;
+      border-top-color: rgba(246, 232, 185, 0.12);
       opacity: 1;
+      visibility: visible;
       pointer-events: auto;
       transform: translateY(0);
+      transition-delay: 0s;
     }
 
     .admin-command-tab {
+      position: relative;
       min-width: 0;
-      min-height: 30px;
-      padding: 5px 7px;
-      border: 1px solid rgba(51, 65, 85, 0.92);
-      border-radius: 9px;
-      background: rgba(15, 23, 42, 0.74);
-      color: #cbd5e1;
+      min-height: 29px;
+      padding: 5px 9px;
+      border: 1px solid rgba(246, 232, 185, 0.13);
+      border-radius: 6px !important;
+      background: rgba(10, 13, 18, 0.72) !important;
+      color: #c9c4b4 !important;
       cursor: pointer;
-      font-size: 11px;
-      font-weight: 760;
+      font-size: 10.5px;
+      font-weight: 780;
       line-height: 1.1;
       overflow: hidden;
       text-overflow: ellipsis;
-      transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 140ms ease;
+      transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
       white-space: nowrap;
     }
 
-    .admin-command-tab:hover {
-      border-color: rgba(245, 214, 125, 0.42);
-      background: rgba(30, 41, 59, 0.88);
-      color: #f8fafc;
+    body.admin-shell-page .admin-command-bar .admin-command-tab:hover {
+      border-color: rgba(110, 214, 198, 0.36) !important;
+      background: rgba(246, 232, 185, 0.06) !important;
+      color: #fff7d6 !important;
+      transform: none;
     }
 
     .admin-command-tab:focus-visible {
       outline: none;
-      border-color: rgba(252, 235, 178, 0.82);
-      box-shadow: 0 0 0 3px rgba(245, 214, 125, 0.18);
+      border-color: rgba(110, 214, 198, 0.72);
+      box-shadow: 0 0 0 3px rgba(110, 214, 198, 0.13);
     }
 
-    .admin-command-tab.is-active {
-      border-color: rgba(245, 214, 125, 0.68);
-      background: linear-gradient(160deg, rgba(245, 214, 125, 0.2), rgba(30, 41, 59, 0.58));
-      color: #f8fafc;
+    body.admin-shell-page .admin-command-bar .admin-command-tab.is-active {
+      border-color: rgba(214, 247, 109, 0.38) !important;
+      background:
+        linear-gradient(180deg, rgba(214, 247, 109, 0.12), rgba(110, 214, 198, 0.04)),
+        #12161a !important;
+      color: #fff7d6 !important;
+      box-shadow: inset 0 -2px 0 rgba(214, 247, 109, 0.82) !important;
     }
 
     .admin-command-footer {
       display: grid;
       gap: 4px;
-      border-top: 1px solid #1f2937;
-      padding-top: 8px;
+      margin-top: 9px;
+      border-top: 1px solid rgba(246, 232, 185, 0.12);
+      padding: 8px 2px 0;
       min-width: 0;
     }
 
@@ -2023,6 +2096,97 @@
       }
     }
 
+    @media (max-width: 900px) {
+      .admin-command-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .admin-command-context {
+        padding-right: 0;
+        border-right: 0;
+      }
+
+      .admin-command-actions {
+        grid-row: 2;
+        grid-column: 1 / -1;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        justify-content: stretch;
+        padding-top: 9px;
+        border-top: 1px solid rgba(246, 232, 185, 0.12);
+      }
+
+      .admin-command-public-link {
+        grid-row: 1;
+        grid-column: 2;
+      }
+    }
+
+    @media (max-width: 680px) {
+      body.admin-shell-page .admin-command-bar {
+        padding: 9px 10px;
+        border-radius: 9px !important;
+      }
+
+      .admin-command-row {
+        gap: 8px;
+      }
+
+      .admin-command-eyebrow {
+        display: none;
+      }
+
+      .admin-command-section {
+        font-size: 12px;
+      }
+
+      .admin-command-actions {
+        gap: 6px;
+      }
+
+      body.admin-shell-page .admin-command-bar .admin-command-btn {
+        min-height: 38px;
+        padding: 6px 8px;
+        font-size: 10.5px;
+        white-space: normal;
+        text-wrap: balance;
+      }
+
+      body.admin-shell-page .admin-command-bar .admin-command-public-link {
+        min-height: 34px;
+        padding-inline: 10px;
+        font-size: 10.5px;
+      }
+
+      .admin-command-tabs {
+        display: flex;
+        max-width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        overscroll-behavior-inline: contain;
+        scrollbar-width: none;
+      }
+
+      .admin-command-tabs::-webkit-scrollbar {
+        display: none;
+      }
+
+      .admin-command-tab {
+        flex: 0 0 auto;
+        min-width: 88px;
+      }
+    }
+
+    @media (max-width: 420px) {
+      .admin-command-section {
+        gap: 6px;
+        font-size: 11.5px;
+      }
+
+      .admin-command-tab {
+        min-width: 82px;
+      }
+    }
+
     @media (max-width: 760px) {
       body.admin-shell-page .container.admin-shell-container {
         margin-top: 14px;
@@ -2151,9 +2315,15 @@
           </div>
         </div>
       </div>
-      <section class="card admin-command-bar">
+      <section class="card admin-command-bar" aria-label="Admin workspace controls">
         <div class="admin-command-grid">
           <div class="admin-command-row">
+            <div class="admin-command-context">
+              <span class="admin-command-eyebrow">Admin workspace</span>
+              <span class="admin-command-section">
+                <strong id="adminCommandActiveSection">Roster setup</strong>
+              </span>
+            </div>
             <div class="admin-command-actions admin-command-actions--compact">
               <button id="loadActiveBtn" class="btn secondary admin-command-btn" type="button" disabled>Reload active config</button>
               <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>Refresh all</button>
@@ -2165,15 +2335,15 @@
           </div>
 
           <nav id="adminCommandCompactTabs" class="admin-command-tabs" aria-label="Compact admin sections" aria-hidden="true">
-            <button class="admin-command-tab" type="button" data-admin-compact-tab="rosters" aria-label="Roster setup" tabindex="-1">Setup</button>
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="rosters" aria-label="Roster setup" tabindex="-1">Roster setup</button>
             <button class="admin-command-tab" type="button" data-admin-compact-tab="import" aria-label="Import" tabindex="-1">Import</button>
             <button class="admin-command-tab" type="button" data-admin-compact-tab="preview" aria-label="Rosters" tabindex="-1">Rosters</button>
-            <button class="admin-command-tab" type="button" data-admin-compact-tab="followup" aria-label="War follow-up" tabindex="-1">Review</button>
+            <button class="admin-command-tab" type="button" data-admin-compact-tab="followup" aria-label="War follow-up" tabindex="-1">War review</button>
             <button class="admin-command-tab" type="button" data-admin-compact-tab="website" aria-label="Website" tabindex="-1">Website</button>
           </nav>
 
-          <div class="admin-command-footer">
-            <div id="status" class="small admin-global-status"></div>
+          <div class="admin-command-footer hidden">
+            <div id="status" class="small admin-global-status" role="status" aria-live="polite"></div>
           </div>
         </div>
       </section>
@@ -2482,7 +2652,7 @@
   <script src="./generator.js?v=20260408c"></script>
   <script src="./client.js?v=20260729a"></script>
   <script src="./war-followup.js?v=20260727d"></script>
-  <script src="./admin.js?v=20260729a"></script>
+  <script src="./admin.js?v=20260729b"></script>
 </body>
 
 </html>

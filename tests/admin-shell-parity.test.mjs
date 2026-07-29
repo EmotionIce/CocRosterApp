@@ -34,9 +34,38 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
     assert.match(html, /Verifying admin access and loading the workspace\./, name);
-    assert.match(html, /admin\.js\?v=[^"]*20260729a/, name);
+    const adminAssetVersion = name === "script/Admin.html" ? "20260729a" : "20260729b";
+    assert.match(html, new RegExp(`admin\\.js\\?v=[^"]*${adminAssetVersion}`), name);
     assert.match(html, /client\.js\?v=[^"]*20260729a/, name);
   }
+});
+
+test("Cloudflare admin shells share the responsive command bar", () => {
+  const adminHtml = readShell("admin.html");
+  const consoleHtml = readShell("console.html");
+  const extractCommandBar = (html) => {
+    const start = html.indexOf('<section class="card admin-command-bar"');
+    const end = html.indexOf("</section>", start);
+    assert.ok(start >= 0 && end > start);
+    return html.slice(start, end + "</section>".length);
+  };
+
+  assert.equal(extractCommandBar(adminHtml), extractCommandBar(consoleHtml));
+  for (const [name, html] of [["admin.html", adminHtml], ["console.html", consoleHtml]]) {
+    assert.equal((html.match(/id="adminCommandActiveSection"/g) || []).length, 1, name);
+    assert.equal((html.match(/data-admin-compact-tab=/g) || []).length, 5, name);
+    assert.match(html, /class="admin-command-footer hidden"/, name);
+    assert.match(html, /@media \(max-width: 680px\)[\s\S]*?\.admin-command-tabs \{[\s\S]*?overflow-x: auto;/, name);
+    assert.match(html, /admin\.js\?v=20260729b/, name);
+  }
+
+  const adminClient = readShell("admin.js");
+  const visibilityStart = adminClient.indexOf("const syncAdminCompactTabsVisibility = () =>");
+  const visibilityEnd = adminClient.indexOf("// Queue compact admin tab visibility sync.", visibilityStart);
+  const visibilityFlow = adminClient.slice(visibilityStart, visibilityEnd);
+  assert.ok(visibilityStart >= 0 && visibilityEnd > visibilityStart);
+  assert.match(visibilityFlow, /const navHasLeftViewport = tabsRect\.bottom <= viewportTop \+ 1;/);
+  assert.doesNotMatch(visibilityFlow, /commandRect\.bottom|viewportHeight/);
 });
 
 test("every admin shell exposes the guarded active-config recovery action", () => {

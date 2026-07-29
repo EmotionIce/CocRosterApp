@@ -55,7 +55,11 @@
   // Set the global status message.
   const setStatus = (msg) => {
     const el = $("#status");
-    if (el) el.textContent = msg || "";
+    if (!el) return;
+    const text = toStr(msg);
+    el.textContent = text;
+    const footer = el.closest(".admin-command-footer");
+    if (footer) footer.classList.toggle("hidden", !text.trim());
   };
 
   // Notify optional admin modules without coupling them to roster rendering.
@@ -2070,6 +2074,13 @@
   };
 
   const ADMIN_TAB_KEYS = ["rosters", "import", "preview", "followup", "website"];
+  const ADMIN_TAB_LABELS = {
+    rosters: "Roster setup",
+    import: "Import",
+    preview: "Rosters",
+    followup: "War review",
+    website: "Website",
+  };
   // Normalize admin tab key.
   const normalizeAdminTabKey_ = (tabKeyRaw) => toStr(tabKeyRaw).trim().toLowerCase();
   // Get admin tab buttons.
@@ -2117,12 +2128,33 @@
   const syncAdminCompactTabsUi = () => {
     const buttons = getAdminCompactTabButtons();
     const activeTab = normalizeAdminTabKey_(state.activeAdminTab);
+    const activeSection = $("#adminCommandActiveSection");
+    if (activeSection) {
+      activeSection.textContent = ADMIN_TAB_LABELS[activeTab] || "Admin workspace";
+    }
+
+    let activeButton = null;
     for (const btn of buttons) {
       const key = normalizeAdminTabKey_(btn && btn.dataset && btn.dataset.adminCompactTab);
       const active = key === activeTab;
       btn.classList.toggle("is-active", active);
-      if (active) btn.setAttribute("aria-current", "page");
-      else btn.removeAttribute("aria-current");
+      if (active) {
+        btn.setAttribute("aria-current", "page");
+        activeButton = btn;
+      } else {
+        btn.removeAttribute("aria-current");
+      }
+    }
+
+    const compactTabs = $("#adminCommandCompactTabs");
+    if (activeButton && compactTabs && compactTabs.clientWidth > 0) {
+      const tabsRect = compactTabs.getBoundingClientRect();
+      const buttonRect = activeButton.getBoundingClientRect();
+      if (buttonRect.left < tabsRect.left) {
+        compactTabs.scrollLeft += buttonRect.left - tabsRect.left - 6;
+      } else if (buttonRect.right > tabsRect.right) {
+        compactTabs.scrollLeft += buttonRect.right - tabsRect.right + 6;
+      }
     }
   };
 
@@ -2131,12 +2163,14 @@
     const visible = !!visibleRaw;
     const commandBar = $(".admin-command-bar");
     const compactTabs = $("#adminCommandCompactTabs");
+    const wasVisible = !!(commandBar && commandBar.classList.contains("is-compact-tabs-visible"));
     if (commandBar) commandBar.classList.toggle("is-compact-tabs-visible", visible);
     if (compactTabs) compactTabs.setAttribute("aria-hidden", visible ? "false" : "true");
     const buttons = getAdminCompactTabButtons();
     for (const btn of buttons) {
       btn.tabIndex = visible ? 0 : -1;
     }
+    if (visible && !wasVisible) syncAdminCompactTabsUi();
   };
 
   // Sync compact admin tabs visibility with the primary navigation position.
@@ -2152,15 +2186,9 @@
 
     const commandRect = commandBar.getBoundingClientRect();
     const tabsRect = primaryTabs.getBoundingClientRect();
-    const viewportHeight = Math.max(
-      1,
-      (typeof window !== "undefined" && window.innerHeight) ||
-      (document.documentElement && document.documentElement.clientHeight) ||
-      1
-    );
-    const navHasScrolledPastBar = tabsRect.bottom <= commandRect.bottom + 1;
-    const navIsNotBelowViewport = tabsRect.bottom <= viewportHeight;
-    setAdminCompactTabsVisible_(navHasScrolledPastBar && navIsNotBelowViewport);
+    const viewportTop = Math.max(0, Number.isFinite(commandRect.top) ? commandRect.top : 0);
+    const navHasLeftViewport = tabsRect.bottom <= viewportTop + 1;
+    setAdminCompactTabsVisible_(navHasLeftViewport);
   };
 
   // Queue compact admin tab visibility sync.
@@ -2214,6 +2242,7 @@
     }
     syncAdminCompactTabsUi();
     dispatchAdminEvent_("admin:tabchange", { key: nextTab });
+    queueAdminCompactTabsVisibilitySync();
   };
 
   // Set auth card unlocked.
