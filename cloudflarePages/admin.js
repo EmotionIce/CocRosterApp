@@ -2179,13 +2179,25 @@
     const commandBar = $(".admin-command-bar");
     const primaryTabs = $(".admin-shell > .admin-tabs") || $(".admin-tabs");
     const compactTabs = $("#adminCommandCompactTabs");
-    if (!panel || panel.classList.contains("hidden") || !commandBar || !primaryTabs || !compactTabs) {
+    if (
+      !panel ||
+      panel.classList.contains("hidden") ||
+      panel.classList.contains("is-loading-workspace") ||
+      !commandBar ||
+      !primaryTabs ||
+      !compactTabs
+    ) {
       setAdminCompactTabsVisible_(false);
       return;
     }
 
     const commandRect = commandBar.getBoundingClientRect();
     const tabsRect = primaryTabs.getBoundingClientRect();
+    const navHasLayout = tabsRect.width > 0 && tabsRect.height > 0 && primaryTabs.getClientRects().length > 0;
+    if (!navHasLayout) {
+      setAdminCompactTabsVisible_(false);
+      return;
+    }
     const viewportTop = Math.max(0, Number.isFinite(commandRect.top) ? commandRect.top : 0);
     const navHasLeftViewport = tabsRect.bottom <= viewportTop + 1;
     setAdminCompactTabsVisible_(navHasLeftViewport);
@@ -2357,6 +2369,11 @@
     if (skeleton) {
       skeleton.classList.toggle("hidden", !loading);
       skeleton.setAttribute("aria-hidden", loading ? "false" : "true");
+    }
+    if (loading) {
+      setAdminCompactTabsVisible_(false);
+    } else {
+      queueAdminCompactTabsVisibilitySync();
     }
   };
 

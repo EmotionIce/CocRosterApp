@@ -910,6 +910,10 @@
     }
 
     .admin-command-public-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
       justify-self: end;
       flex: 0 0 auto;
       min-height: 36px;
@@ -940,6 +944,10 @@
     }
 
     body.admin-shell-page .admin-command-bar .admin-command-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
       min-height: 36px;
       padding: 7px 12px;
       border-radius: 7px !important;
@@ -948,6 +956,17 @@
       line-height: 1.1;
       letter-spacing: 0.01em;
       white-space: nowrap;
+    }
+
+    .admin-command-icon {
+      flex: 0 0 auto;
+      font-size: 14px;
+      line-height: 1;
+      filter: saturate(1.08);
+    }
+
+    .admin-command-label {
+      min-width: 0;
     }
 
     .admin-command-actions--compact {
@@ -2325,12 +2344,22 @@
               </span>
             </div>
             <div class="admin-command-actions admin-command-actions--compact">
-              <button id="loadActiveBtn" class="btn secondary admin-command-btn" type="button" disabled>Reload active config</button>
-              <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>Refresh all</button>
-              <button id="publishBtn" class="btn admin-command-btn" type="button" disabled>Publish</button>
+              <button id="loadActiveBtn" class="btn secondary admin-command-btn" type="button" disabled>
+                <span class="admin-command-icon" aria-hidden="true">📥</span>
+                <span class="admin-command-label">Reload active config</span>
+              </button>
+              <button id="refreshAllBtn" class="btn secondary admin-command-btn" type="button" disabled>
+                <span class="admin-command-icon" aria-hidden="true">🔄</span>
+                <span class="admin-command-label">Refresh all</span>
+              </button>
+              <button id="publishBtn" class="btn admin-command-btn" type="button" disabled>
+                <span class="admin-command-icon" aria-hidden="true">🚀</span>
+                <span class="admin-command-label">Publish</span>
+              </button>
             </div>
             <a id="backToPublicBtn" class="btn secondary admin-page-head-link admin-command-public-link" href="/" aria-label="Back to public roster">
-              Public Page
+              <span class="admin-command-icon" aria-hidden="true">🌐</span>
+              <span class="admin-command-label">Public Page</span>
             </a>
           </div>
 
@@ -2652,7 +2681,7 @@
   <script src="./generator.js?v=20260408c"></script>
   <script src="./client.js?v=20260729a"></script>
   <script src="./war-followup.js?v=20260727d"></script>
-  <script src="./admin.js?v=20260729b"></script>
+  <script src="./admin.js?v=20260729c"></script>
 </body>
 
 </html>

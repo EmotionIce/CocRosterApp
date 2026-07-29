@@ -34,7 +34,7 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
     assert.match(html, /Verifying admin access and loading the workspace\./, name);
-    const adminAssetVersion = name === "script/Admin.html" ? "20260729a" : "20260729b";
+    const adminAssetVersion = name === "script/Admin.html" ? "20260729a" : "20260729c";
     assert.match(html, new RegExp(`admin\\.js\\?v=[^"]*${adminAssetVersion}`), name);
     assert.match(html, /client\.js\?v=[^"]*20260729a/, name);
   }
@@ -54,9 +54,11 @@ test("Cloudflare admin shells share the responsive command bar", () => {
   for (const [name, html] of [["admin.html", adminHtml], ["console.html", consoleHtml]]) {
     assert.equal((html.match(/id="adminCommandActiveSection"/g) || []).length, 1, name);
     assert.equal((html.match(/data-admin-compact-tab=/g) || []).length, 5, name);
+    assert.equal((html.match(/class="admin-command-icon"/g) || []).length, 4, name);
+    for (const icon of ["📥", "🔄", "🚀", "🌐"]) assert.ok(html.includes(icon), `${name} is missing ${icon}`);
     assert.match(html, /class="admin-command-footer hidden"/, name);
     assert.match(html, /@media \(max-width: 680px\)[\s\S]*?\.admin-command-tabs \{[\s\S]*?overflow-x: auto;/, name);
-    assert.match(html, /admin\.js\?v=20260729b/, name);
+    assert.match(html, /admin\.js\?v=20260729c/, name);
   }
 
   const adminClient = readShell("admin.js");
@@ -64,8 +66,17 @@ test("Cloudflare admin shells share the responsive command bar", () => {
   const visibilityEnd = adminClient.indexOf("// Queue compact admin tab visibility sync.", visibilityStart);
   const visibilityFlow = adminClient.slice(visibilityStart, visibilityEnd);
   assert.ok(visibilityStart >= 0 && visibilityEnd > visibilityStart);
+  assert.match(visibilityFlow, /panel\.classList\.contains\("is-loading-workspace"\)/);
+  assert.match(visibilityFlow, /const navHasLayout = tabsRect\.width > 0 && tabsRect\.height > 0/);
   assert.match(visibilityFlow, /const navHasLeftViewport = tabsRect\.bottom <= viewportTop \+ 1;/);
   assert.doesNotMatch(visibilityFlow, /commandRect\.bottom|viewportHeight/);
+
+  const loadingStart = adminClient.indexOf("const setAdminWorkspaceLoading_ = (loadingRaw) =>");
+  const loadingEnd = adminClient.indexOf("// Sync overlay body state.", loadingStart);
+  const loadingFlow = adminClient.slice(loadingStart, loadingEnd);
+  assert.ok(loadingStart >= 0 && loadingEnd > loadingStart);
+  assert.match(loadingFlow, /if \(loading\) \{[\s\S]*setAdminCompactTabsVisible_\(false\)/);
+  assert.match(loadingFlow, /else \{[\s\S]*queueAdminCompactTabsVisibilitySync\(\)/);
 });
 
 test("every admin shell exposes the guarded active-config recovery action", () => {
@@ -76,7 +87,7 @@ test("every admin shell exposes the guarded active-config recovery action", () =
   ];
   for (const [name, html] of shells) {
     assert.equal((html.match(/id="loadActiveBtn"/g) || []).length, 1, name);
-    assert.match(html, /id="loadActiveBtn"[^>]*disabled[^>]*>Reload active config</, name);
+    assert.match(html, /id="loadActiveBtn"[^>]*disabled[^>]*>[\s\S]*?Reload active config[\s\S]*?<\/button>/, name);
   }
   const adminClient = readShell("admin.js");
   assert.match(adminClient, /loadActiveBtn\.onclick = async \(\) =>/);
