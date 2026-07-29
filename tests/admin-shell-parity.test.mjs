@@ -34,34 +34,112 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
     assert.match(html, /Verifying admin access and loading the workspace\./, name);
-    assert.match(html, /admin\.js\?v=[^"]*20260727b/, name);
+    assert.match(html, /admin\.js\?v=[^"]*20260729a/, name);
+    assert.match(html, /client\.js\?v=[^"]*20260729a/, name);
   }
 });
 
-test("admin unlock overlaps authenticated settings bootstrap with an unapplied roster fetch", () => {
+test("every admin shell exposes the guarded active-config recovery action", () => {
+  const shells = [
+    ["admin.html", readShell("admin.html")],
+    ["console.html", readShell("console.html")],
+    ["script/Admin.html", readScriptShell()],
+  ];
+  for (const [name, html] of shells) {
+    assert.equal((html.match(/id="loadActiveBtn"/g) || []).length, 1, name);
+    assert.match(html, /id="loadActiveBtn"[^>]*disabled[^>]*>Reload active config</, name);
+  }
+  const adminClient = readShell("admin.js");
+  assert.match(adminClient, /loadActiveBtn\.onclick = async \(\) =>/);
+  assert.match(adminClient, /await loadActiveConfigIntoPreview\(/);
+  assert.match(adminClient, /state\.activeConfigReloadBusy/);
+  assert.match(adminClient, /state\.previewDirty[\s\S]*window\.confirm\("Reloading active config will discard/);
+});
+
+test("admin unlock V2 authenticates before exact roster hydration and never awaits runtime repair", () => {
   const adminClient = readShell("admin.js");
   const unlockStart = adminClient.indexOf("const handleUnlock = async () =>");
   const showSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(true)", unlockStart);
-  const rosterFetch = adminClient.indexOf("const activeConfigFetchPromise = loadActiveRosterData()", showSkeleton);
-  const settingsBootstrap = adminClient.indexOf("const settingsResults = await loadAdminWorkspaceBootstrapSettings_()", rosterFetch);
-  const markAuthenticated = adminClient.indexOf("setAuthCardUnlocked(true)", settingsBootstrap);
-  const awaitRoster = adminClient.indexOf("const activeConfigFetchResult = await activeConfigFetchPromise", markAuthenticated);
-  const applyRoster = adminClient.indexOf("applyActiveConfigIntoPreview_(", awaitRoster);
+  const v2Branch = adminClient.indexOf("const useV2 =", showSkeleton);
+  const selectorRead = adminClient.indexOf("startAdminSelectorReadV2_(", v2Branch);
+  const controlRead = adminClient.indexOf("await loadAdminUnlockControlSnapshotV2_(password)", selectorRead);
+  const markAuthenticated = adminClient.indexOf("if (!showAuthenticatedWorkspace())", controlRead);
+  const runtimeRepair = adminClient.indexOf("startAdminRuntimeRepairV2_(", markAuthenticated);
+  const awaitSelector = adminClient.indexOf("await selectorPromise", runtimeRepair);
+  const exactRoster = adminClient.indexOf("loadAdminRosterForControlSnapshotV2_(", awaitSelector);
+  const applyRoster = adminClient.indexOf("applyActiveConfigIntoPreview_(", exactRoster);
   const hideSkeleton = adminClient.indexOf("setAdminWorkspaceLoading_(false)", applyRoster);
 
   assert.ok(unlockStart >= 0);
   assert.ok(showSkeleton > unlockStart);
-  assert.ok(rosterFetch > showSkeleton);
-  assert.ok(settingsBootstrap > rosterFetch);
-  assert.ok(markAuthenticated > settingsBootstrap);
-  assert.ok(awaitRoster > markAuthenticated);
-  assert.ok(applyRoster > awaitRoster);
+  assert.ok(v2Branch > showSkeleton);
+  assert.ok(selectorRead > v2Branch);
+  assert.ok(controlRead > selectorRead);
+  assert.ok(markAuthenticated > controlRead);
+  assert.ok(runtimeRepair > markAuthenticated);
+  assert.ok(awaitSelector > runtimeRepair);
+  assert.ok(exactRoster > awaitSelector);
+  assert.ok(applyRoster > exactRoster);
   assert.ok(hideSkeleton > applyRoster);
-  assert.doesNotMatch(adminClient.slice(unlockStart, hideSkeleton), /runServerMethod\("verifyAdminPassword"/);
-  assert.doesNotMatch(adminClient.slice(unlockStart, hideSkeleton), /showStartupLoader_|hideStartupLoader_/);
+  assert.doesNotMatch(adminClient.slice(runtimeRepair, exactRoster), /await\s+startAdminRuntimeRepairV2_/);
+  assert.doesNotMatch(adminClient.slice(v2Branch, controlRead), /loadActiveRosterData\(|getRosterData/);
+  assert.match(adminClient, /runServerMethod\("getAdminUnlockSnapshotV2"/);
+  assert.match(adminClient, /runServerMethod\("getAdminRosterSnapshotV2"/);
+  assert.match(adminClient, /loadExactActiveVersion\(expectedVersionId/);
+  assert.match(
+    adminClient,
+    /loadedSourceVersionId && loadedSourceVersionId !== expectedVersionId\) return null;/
+  );
+  assert.match(adminClient, /ADMIN_PUBLIC_SELECTOR_TIMEOUT_MS = 2500/);
+  assert.match(adminClient, /ADMIN_PUBLIC_EXACT_LOAD_TIMEOUT_MS = 4000/);
+  assert.match(adminClient, /runAdminPublicDataRequestWithTimeout_/);
+  assert.match(adminClient, /selectorResult\.selector\.currentVersionId\)\.trim\(\) === expectedVersionId/);
+  assert.match(adminClient, /attachAuthenticatedCwlLeagueSignupsV2_/);
+  assert.match(adminClient, /isAdminUnlockV2Unavailable_/);
+  assert.match(adminClient, /code === "ADMIN_UNLOCK_V2_DISABLED"/);
+  assert.match(adminClient, /admin unlock v2 is temporarily disabled/);
+  assert.match(adminClient, /state\.unlockContractVersion = ADMIN_UNLOCK_V2_SCHEMA_VERSION/);
+  assert.match(adminClient, /syncPublishButtonAvailability_/);
   assert.match(adminClient, /runServerMethod\("getAdminWorkspaceBootstrap"/);
-  assert.match(adminClient, /isAdminWorkspaceBootstrapUnavailable_/);
-  assert.doesNotMatch(adminClient, /refreshStartupLoader_\("Step [23] of 3"/);
+  assert.match(adminClient, /ROSTER_ADMIN_UNLOCK_V2_ENABLED === false/);
+  assert.doesNotMatch(adminClient, /resolveSharedActiveVersion|previousVersionId/);
+});
+
+test("admin V2 publish carries its exact source version and never falls back after a conflict", () => {
+  const adminClient = readShell("admin.js");
+  assert.match(
+    adminClient,
+    /runServerMethod\("publishRosterDataV2", \[[\s\S]*?publishPayload,[\s\S]*?expectedSourceVersionId,[\s\S]*?includeRosterDataInResult: true/,
+  );
+  assert.match(adminClient, /const activeVersionId = toStr\(publishResult && publishResult\.activeVersionId\)/);
+  assert.match(adminClient, /const canonicalRosterData = publishResult && publishResult\.rosterData/);
+  assert.match(adminClient, /applyActiveConfigIntoPreview_\(rebasedRosterData/);
+  assert.doesNotMatch(adminClient, /publishResult\.activeVersionId \|\| publishResult\.sourceVersionId/);
+  assert.match(adminClient, /const submittedPreviewRevision = state\.previewRevision/);
+  assert.match(adminClient, /const publishPayload = cloneJson\(state\.lastRosterData\)/);
+  assert.match(adminClient, /state\.publishBusy = true/);
+  assert.match(adminClient, /setAdminWorkspaceMutationBusy_\(true\)/);
+  assert.match(adminClient, /state\.previewRevision !== submittedPreviewRevision/);
+  assert.match(adminClient, /if \(v2PublishRequestStarted\) \{[\s\S]*publish result could not be confirmed/);
+  assert.match(adminClient, /if \(state\.publishBusy \|\| state\.activeConfigReloadBusy \|\| state\.bulkRefreshBusy\) return/);
+  assert.match(adminClient, /if \(state\.publishBusy \|\| state\.activeConfigReloadBusy\) \{[\s\S]*current publish or active-config load/);
+  assert.match(adminClient, /finally \{[\s\S]*state\.publishBusy = false[\s\S]*setAdminWorkspaceMutationBusy_\(false\)/);
+  assert.match(adminClient, /ADMIN_ACTIVE_VERSION_CONFLICT_CODE/);
+  assert.match(adminClient, /Nothing was written\. Reload active config before publishing\./);
+  const publishStart = adminClient.indexOf('$("#publishBtn").onclick = async () =>');
+  const publishEnd = adminClient.indexOf("document.addEventListener", publishStart);
+  const publishFlow = adminClient.slice(publishStart, publishEnd);
+  assert.equal((publishFlow.match(/publishRosterDataV2/g) || []).length, 1);
+  assert.equal((publishFlow.match(/publishRosterData"/g) || []).length, 1);
+  assert.doesNotMatch(publishFlow, /catch[\s\S]*publishRosterData"/);
+});
+
+test("admin V2 surfaces partial trigger-family repair failures", () => {
+  const adminClient = readShell("admin.js");
+  assert.match(adminClient, /result\.status === "partial"/);
+  assert.match(adminClient, /families\.permanent/);
+  assert.match(adminClient, /families\.regularWarFinalization/);
+  assert.match(adminClient, /Runtime verification completed partially/);
 });
 
 test("admin shells prefer the same-origin Worker API and retain Apps Script as fallback", () => {

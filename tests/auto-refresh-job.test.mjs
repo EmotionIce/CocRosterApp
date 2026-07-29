@@ -55,6 +55,7 @@ const loadBackend = () => {
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (key) => properties.has(key) ? properties.get(key) : null,
+        getProperties: () => Object.fromEntries(properties),
         setProperty: (key, value) => properties.set(key, String(value)),
         setProperties: (values) => {
           for (const [key, value] of Object.entries(values || {})) properties.set(key, String(value));
@@ -1512,6 +1513,7 @@ test("permanent watchdog performs local trigger repair with zero remote calls du
   backend.__properties.set("RUNTIME_URLFETCH_QUOTA_COOLDOWN_UNTIL", String(cooldownUntil));
   backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
   backend.__properties.set("DONATION_REFRESH_ENABLED", "1");
+  backend.__properties.set("REGULAR_WAR_FINALIZATION_TRIGGER_AT", new Date(Date.now() + 10 * 60 * 1000).toISOString());
   backend.__properties.set("CLOUDFLARE_PUBLICATION_MODE", "queued-v2");
   backend.__properties.set("CLOUDFLARE_PUBLIC_DATA_ENABLED", "true");
   backend.__properties.set("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR", JSON.stringify({ pending: true, activeVersionId: "version-pending", nextAttemptAt: "" }));
@@ -1536,6 +1538,7 @@ test("permanent watchdog performs local trigger repair with zero remote calls du
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "permanentSchedulerWatchdogTick").length, 1);
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshActiveRosterTick").length, 1);
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "donationRefreshTick").length, 1);
+  assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "regularWarFinalizationTick").length, 1);
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cwlSeasonEventRecoveryTick").length, 1);
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cloudflarePublishWorkerTick").length, 1);
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "cloudflarePublishWorkerRecoveryTick").length, 1);

@@ -11,6 +11,7 @@
     const DAY_MS = 24 * 60 * 60 * 1000;
     const PUBLIC_DATA_KEY_ENCODING_PREFIX = "__FB64__";
     const ACTIVE_PUBLISHED_CURRENT_VERSION_PATH = "activePublished/currentVersionId";
+    const PUBLIC_ACTIVE_SELECTOR_PATH = "activePublished/currentSelector";
     const ACTIVE_VERSIONS_PATH = "activeVersions";
     const PUBLIC_BOOTSTRAP_CURRENT_PATH = "bootstrap/current";
     const DONATION_REFRESH_BASE_PATH = "donationRefresh";
@@ -27,6 +28,9 @@
     const PUBLIC_DATA_BASE_FALLBACK_URL = "/api/public-data";
     const PUBLIC_DATA_IMMUTABLE_RETRY_DELAY_CAP_MS = 1250;
     const PUBLIC_DATA_BOOT_RETRY_BUDGET_MS = 2500;
+    const ADMIN_EXACT_ROSTER_SCHEMA_VERSION = 1;
+    const ADMIN_EXACT_PLAYER_METRICS_SCHEMA_VERSION = 1;
+    const ADMIN_EXACT_PLAYER_WAR_PERFORMANCE_SCHEMA_VERSION = 2;
     const STATIC_ASSET_BASE_FALLBACK_URL = "https://turtlecoc.4jbf82gng5.workers.dev/";
     const ROSTER_SNAPSHOT_CACHE_KEY = "roster.publicSnapshot.v1";
     const ROSTER_SNAPSHOT_IDB_DB_NAME = "roster-public-cache";
@@ -10399,18 +10403,34 @@
         }
     };
 
+    // Throw a consistent cancellation error before starting or retrying a
+    // public-data request.
+    const throwIfPublicDataRequestAborted_ = (signalRaw) => {
+        const signal = signalRaw && typeof signalRaw === "object" ? signalRaw : null;
+        if (!signal || signal.aborted !== true) return;
+        const error = new Error("Cloudflare public data request was aborted.");
+        error.name = "AbortError";
+        throw error;
+    };
+
     // Fetch Cloudflare public JSON.
-    const fetchCloudflarePublicJson = async (pathRaw) => {
+    const fetchCloudflarePublicJson = async (pathRaw, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const safePath = normalizePublicDataPath(pathRaw);
         const pathLabel = "/" + (safePath || "");
         if (typeof fetch !== "function") {
             throw new Error("window.fetch is unavailable for public data hydration.");
         }
-        const response = await fetch(buildCloudflarePublicJsonUrl(safePath), {
+        throwIfPublicDataRequestAborted_(options.signal);
+        const requestOptions = {
             method: "GET",
-            cache: "default",
+            cache: options.cache === "no-store" ? "no-store" : "default",
             credentials: "same-origin",
-        });
+        };
+        if (options.signal && typeof options.signal === "object") {
+            requestOptions.signal = options.signal;
+        }
+        const response = await fetch(buildCloudflarePublicJsonUrl(safePath), requestOptions);
         if (!response || !response.ok) {
             const error = new Error(
                 "Cloudflare public data fetch failed for " +
@@ -10552,12 +10572,43 @@
     const loadActivePublishedVersionIdViaCloudflarePublic = async () =>
         toStr(await fetchCloudflarePublicJson(ACTIVE_PUBLISHED_CURRENT_VERSION_PATH)).trim();
 
+    // Load the exact committed selector without reusing a browser-cached
+    // mutable pointer. This intentionally does not resolve or validate any
+    // current/previous version shards.
+    const loadCommittedActiveSelectorViaCloudflarePublic = async (optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const payload = decodePublicDataObjectKeysRecursive(await fetchCloudflarePublicJson(
+            PUBLIC_ACTIVE_SELECTOR_PATH,
+            { cache: "no-store", signal: options.signal }
+        ));
+        if (!isPlainObject_(payload)) {
+            throw new Error("Cloudflare committed selector is missing or invalid.");
+        }
+        const schemaVersion = Math.floor(Number(payload.schemaVersion) || 0);
+        const currentVersionId = toStr(payload.currentVersionId).trim();
+        if (schemaVersion < 1 || !currentVersionId) {
+            throw new Error("Cloudflare committed selector is missing required metadata.");
+        }
+        return {
+            schemaVersion: schemaVersion,
+            currentVersionId: currentVersionId,
+            previousVersionId: toStr(payload.previousVersionId).trim(),
+            generation: Math.max(0, Math.floor(Number(payload.generation) || 0)),
+            committedAt: toStr(payload.committedAt).trim(),
+        };
+    };
+
     // Load all schema-declared immutable shards for one exact version. The
     // manifest is read first; every remaining object uses the same version id.
-    const fetchPublishedActiveVersionShardsViaCloudflarePublic = async (versionIdRaw) => {
+    const fetchPublishedActiveVersionShardsViaCloudflarePublic = async (versionIdRaw, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const versionId = toStr(versionIdRaw).trim();
         if (!versionId) throw new Error("Missing active published version pointer.");
-        const manifestPayload = await fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, "manifest"));
+        throwIfPublicDataRequestAborted_(options.signal);
+        const manifestPayload = await fetchCloudflarePublicJson(
+            buildActiveVersionPublicPath(versionId, "manifest"),
+            { signal: options.signal }
+        );
         const manifest = decodePublicDataObjectKeysRecursive(manifestPayload);
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("Missing active version manifest.");
@@ -10567,7 +10618,10 @@
             Number(manifest.playerWarPerformanceSchemaVersion || 0) >= 2;
         const paths = requiresPerformance ? ["rosters", "playerMetrics", "playerWarPerformance"] : ["rosters", "playerMetrics"];
         const payloads = await Promise.all(paths.map((childPath) =>
-            fetchCloudflarePublicJson(buildActiveVersionPublicPath(versionId, childPath))
+            fetchCloudflarePublicJson(
+                buildActiveVersionPublicPath(versionId, childPath),
+                { signal: options.signal }
+            )
         ));
         return {
             manifestPayload: manifestPayload,
@@ -10577,7 +10631,10 @@
         };
     };
 
-    const waitForImmutablePublicRetry = async (errorRaw, deadlineMsRaw) => {
+    const waitForImmutablePublicRetry = async (errorRaw, deadlineMsRaw, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const signal = options.signal && typeof options.signal === "object" ? options.signal : null;
+        throwIfPublicDataRequestAborted_(signal);
         const error = errorRaw && typeof errorRaw === "object" ? errorRaw : {};
         const deadlineMs = Math.max(0, Number(deadlineMsRaw) || 0);
         const remainingMs = deadlineMs ? Math.max(0, deadlineMs - Date.now()) : PUBLIC_DATA_BOOT_RETRY_BUDGET_MS;
@@ -10586,63 +10643,287 @@
         const delayMs = Math.max(1, Math.min(PUBLIC_DATA_IMMUTABLE_RETRY_DELAY_CAP_MS, requestedMs, remainingMs));
         if (typeof setTimeout !== "function") {
             await Promise.resolve();
+            throwIfPublicDataRequestAborted_(signal);
             return true;
         }
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await new Promise((resolve, reject) => {
+            let timeoutId = 0;
+            let settled = false;
+            const onAbort = () => {
+                if (settled) return;
+                settled = true;
+                if (timeoutId) clearTimeout(timeoutId);
+                if (signal && typeof signal.removeEventListener === "function") {
+                    signal.removeEventListener("abort", onAbort);
+                }
+                const abortError = new Error("Cloudflare public data request was aborted.");
+                abortError.name = "AbortError";
+                reject(abortError);
+            };
+            timeoutId = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                if (signal && typeof signal.removeEventListener === "function") {
+                    signal.removeEventListener("abort", onAbort);
+                }
+                resolve();
+            }, delayMs);
+            if (signal && typeof signal.addEventListener === "function") {
+                signal.addEventListener("abort", onAbort, { once: true });
+                if (signal.aborted === true) onAbort();
+            }
+        });
+        throwIfPublicDataRequestAborted_(signal);
         return true;
+    };
+
+    // Validate the complete immutable generation used by authenticated admin
+    // editing. Public rendering remains backward-compatible and uses its
+    // existing projection rules.
+    const validateStrictPublishedActiveVersionShards_ = (versionIdRaw, shardsRaw) => {
+        const versionId = toStr(versionIdRaw).trim();
+        const shards = shardsRaw && typeof shardsRaw === "object" ? shardsRaw : {};
+        const versionLabel = "Cloudflare public data /activeVersions/" + versionId;
+        const manifest = decodePublicDataObjectKeysRecursive(shards.manifestPayload);
+        const rosterMap = decodePublicDataObjectKeysRecursive(shards.rostersPayload);
+        const playerMetrics = decodePublicDataObjectKeysRecursive(shards.playerMetricsPayload);
+        const playerWarPerformance = decodePublicDataObjectKeysRecursive(shards.playerWarPerformancePayload);
+        if (!isPlainObject_(manifest) || toStr(manifest.versionId).trim() !== versionId) {
+            throw new Error("Active version manifest does not match requested version '" + versionId + "'.");
+        }
+        if (Number(manifest.schemaVersion) !== ADMIN_EXACT_ROSTER_SCHEMA_VERSION) {
+            throw new Error(
+                "Active version uses unsupported admin editing schema " +
+                toStr(manifest.schemaVersion).trim() +
+                "; update the admin client before editing it."
+            );
+        }
+
+        const requiredShardsRaw = Array.isArray(manifest.requiredShards) ? manifest.requiredShards : null;
+        if (!requiredShardsRaw || !requiredShardsRaw.length) {
+            throw new Error("Active version manifest is missing requiredShards at " + versionLabel + ".");
+        }
+        const knownRequiredShards = ["manifest", "rosters", "playerMetrics", "playerWarPerformance"];
+        const requiredShards = [];
+        const requiredShardSeen = Object.create(null);
+        for (let i = 0; i < requiredShardsRaw.length; i++) {
+            const shardName = toStr(requiredShardsRaw[i]).trim();
+            if (!shardName || knownRequiredShards.indexOf(shardName) < 0) {
+                throw new Error("Active version manifest declares unsupported required shard '" + shardName + "'.");
+            }
+            if (requiredShardSeen[shardName]) {
+                throw new Error("Active version manifest declares duplicate required shard '" + shardName + "'.");
+            }
+            requiredShardSeen[shardName] = true;
+            requiredShards.push(shardName);
+        }
+        for (const mandatoryShard of ["manifest", "rosters", "playerMetrics"]) {
+            if (!requiredShardSeen[mandatoryShard]) {
+                throw new Error("Active version manifest is missing required shard '" + mandatoryShard + "'.");
+            }
+        }
+        const performanceMetadataKeys = [
+            "playerWarPerformanceSchemaVersion",
+            "playerWarPerformanceEntryCount",
+            "playerWarPerformanceHash",
+        ];
+        const hasPerformanceMetadata = performanceMetadataKeys.some((key) =>
+            Object.prototype.hasOwnProperty.call(manifest, key)
+        );
+        const requiresPerformance = requiredShardSeen.playerWarPerformance === true;
+        if (requiresPerformance !== hasPerformanceMetadata) {
+            throw new Error("Active version manifest has inconsistent playerWarPerformance metadata.");
+        }
+
+        if (!isPlainObject_(rosterMap)) {
+            throw new Error("Active version roster shard is invalid at " + versionLabel + ".");
+        }
+        if (!Array.isArray(manifest.rosterIds)) {
+            throw new Error("Active version manifest is missing rosterIds at " + versionLabel + ".");
+        }
+        const rosterIds = [];
+        const rosterIdSeen = Object.create(null);
+        for (let i = 0; i < manifest.rosterIds.length; i++) {
+            const rosterId = toStr(manifest.rosterIds[i]).trim();
+            if (!rosterId || rosterIdSeen[rosterId]) {
+                throw new Error("Active version manifest contains an invalid or duplicate roster id.");
+            }
+            rosterIdSeen[rosterId] = true;
+            rosterIds.push(rosterId);
+        }
+        const rosterMapKeys = Object.keys(rosterMap);
+        if (rosterMapKeys.length !== rosterIds.length) {
+            throw new Error("Active version roster map does not match manifest rosterIds.");
+        }
+        for (let i = 0; i < rosterMapKeys.length; i++) {
+            if (!rosterIdSeen[rosterMapKeys[i]]) {
+                throw new Error("Active version roster map contains an undeclared roster id '" + rosterMapKeys[i] + "'.");
+            }
+        }
+        const rosters = [];
+        for (let i = 0; i < rosterIds.length; i++) {
+            const rosterId = rosterIds[i];
+            const roster = rosterMap[rosterId];
+            if (!isPlainObject_(roster) || toStr(roster.id).trim() !== rosterId) {
+                throw new Error("Active version roster '" + rosterId + "' does not match its manifest identity.");
+            }
+            rosters.push(roster);
+        }
+
+        if (!Array.isArray(manifest.rosterOrder) || manifest.rosterOrder.length !== rosterIds.length) {
+            throw new Error("Active version rosterOrder does not cover every manifest roster.");
+        }
+        const rosterOrder = [];
+        const rosterOrderSeen = Object.create(null);
+        for (let i = 0; i < manifest.rosterOrder.length; i++) {
+            const rosterId = toStr(manifest.rosterOrder[i]).trim();
+            if (!rosterId || !rosterIdSeen[rosterId] || rosterOrderSeen[rosterId]) {
+                throw new Error("Active version rosterOrder is not a unique manifest roster permutation.");
+            }
+            rosterOrderSeen[rosterId] = true;
+            rosterOrder.push(rosterId);
+        }
+
+        if (!isPlainObject_(playerMetrics) || !isPlainObject_(playerMetrics.byTag)) {
+            throw new Error("Active version playerMetrics shard is invalid at " + versionLabel + ".");
+        }
+        const metricsSchemaVersion = Number(playerMetrics.schemaVersion);
+        const manifestMetricsSchemaVersion = Number(manifest.playerMetricsSchemaVersion);
+        if (
+            !Number.isFinite(metricsSchemaVersion) ||
+            !Number.isFinite(manifestMetricsSchemaVersion) ||
+            manifestMetricsSchemaVersion !== ADMIN_EXACT_PLAYER_METRICS_SCHEMA_VERSION ||
+            metricsSchemaVersion !== manifestMetricsSchemaVersion
+        ) {
+            throw new Error("Active version playerMetrics schema does not match its manifest.");
+        }
+        const manifestMetricEntryCount = Number(manifest.playerMetricEntryCount);
+        if (
+            !Number.isFinite(manifestMetricEntryCount) ||
+            manifestMetricEntryCount < 0 ||
+            Math.floor(manifestMetricEntryCount) !== manifestMetricEntryCount ||
+            Object.keys(playerMetrics.byTag).length !== manifestMetricEntryCount
+        ) {
+            throw new Error("Active version playerMetrics entry count does not match its manifest.");
+        }
+
+        if (requiresPerformance) {
+            if (!isPlainObject_(playerWarPerformance) || !isPlainObject_(playerWarPerformance.byTag)) {
+                throw new Error("Active version playerWarPerformance shard is invalid at " + versionLabel + ".");
+            }
+            const performanceSchemaVersion = Number(playerWarPerformance.schemaVersion);
+            const manifestPerformanceSchemaVersion = Number(manifest.playerWarPerformanceSchemaVersion);
+            if (
+                !Number.isFinite(performanceSchemaVersion) ||
+                !Number.isFinite(manifestPerformanceSchemaVersion) ||
+                manifestPerformanceSchemaVersion !== ADMIN_EXACT_PLAYER_WAR_PERFORMANCE_SCHEMA_VERSION ||
+                performanceSchemaVersion !== manifestPerformanceSchemaVersion
+            ) {
+                throw new Error("Active version playerWarPerformance schema does not match its manifest.");
+            }
+            const manifestPerformanceEntryCount = Number(manifest.playerWarPerformanceEntryCount);
+            if (
+                !Number.isFinite(manifestPerformanceEntryCount) ||
+                manifestPerformanceEntryCount < 0 ||
+                Math.floor(manifestPerformanceEntryCount) !== manifestPerformanceEntryCount ||
+                Object.keys(playerWarPerformance.byTag).length !== manifestPerformanceEntryCount
+            ) {
+                throw new Error("Active version playerWarPerformance entry count does not match its manifest.");
+            }
+            const manifestPerformanceHash = toStr(manifest.playerWarPerformanceHash).trim();
+            const performanceHash = toStr(playerWarPerformance.contentHash).trim();
+            if (!manifestPerformanceHash || !performanceHash || performanceHash !== manifestPerformanceHash) {
+                throw new Error("Active version playerWarPerformance hash does not match its manifest.");
+            }
+        }
+
+        return {
+            manifest: manifest,
+            rosterMap: rosterMap,
+            rosterIds: rosterIds,
+            rosterOrder: rosterOrder,
+            rosters: rosters,
+            playerMetrics: playerMetrics,
+            playerWarPerformance: requiresPerformance ? playerWarPerformance : null,
+            requiredShards: requiredShards,
+        };
     };
 
     // Load roster data from one published active version. A failed immutable
     // generation is retried as a whole so no response can mix shard versions.
     const loadPublishedActiveVersionViaCloudflarePublic = async (versionIdRaw, optionsRaw) => {
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        throwIfPublicDataRequestAborted_(options.signal);
         const versionId = toStr(versionIdRaw).trim() || await loadActivePublishedVersionIdViaCloudflarePublic();
         if (!versionId) throw new Error("Missing active published version pointer.");
         const versionLabel = "Cloudflare public data /activeVersions/" + versionId;
         const retryCount = Math.max(0, Math.min(2, Number(options.retryCount) || 0));
         const retryDeadlineMs = Math.max(Date.now(), Number(options.retryDeadlineMs) || (Date.now() + PUBLIC_DATA_BOOT_RETRY_BUDGET_MS));
         let shards = null;
+        let strictValidatedShards = null;
         let lastError = null;
         const maximumAttempts = retryCount > 0 ? retryCount + 2 : 1;
         for (let attempt = 0; attempt < maximumAttempts; attempt++) {
             try {
-                shards = await fetchPublishedActiveVersionShardsViaCloudflarePublic(versionId);
+                const candidateShards = await fetchPublishedActiveVersionShardsViaCloudflarePublic(
+                    versionId,
+                    { signal: options.signal }
+                );
+                const candidateStrictValidation = options.strictExactVersion === true
+                    ? validateStrictPublishedActiveVersionShards_(versionId, candidateShards)
+                    : null;
+                shards = candidateShards;
+                strictValidatedShards = candidateStrictValidation;
                 break;
             } catch (err) {
                 lastError = err;
-                if (attempt + 1 < maximumAttempts && !(await waitForImmutablePublicRetry(err, retryDeadlineMs))) break;
+                throwIfPublicDataRequestAborted_(options.signal);
+                if (
+                    attempt + 1 < maximumAttempts &&
+                    !(await waitForImmutablePublicRetry(err, retryDeadlineMs, { signal: options.signal }))
+                ) break;
             }
         }
         if (!shards) throw lastError || new Error("Immutable version shards are unavailable at " + versionLabel + ".");
-        const manifestPayload = shards.manifestPayload;
-        const rostersPayload = shards.rostersPayload;
-        const playerMetricsPayload = shards.playerMetricsPayload;
-        const playerWarPerformancePayload = shards.playerWarPerformancePayload;
-        const manifest = decodePublicDataObjectKeysRecursive(manifestPayload);
-        const rosterMap = decodePublicDataObjectKeysRecursive(rostersPayload);
-        const playerMetrics = decodePublicDataObjectKeysRecursive(playerMetricsPayload || {});
-        const playerWarPerformance = decodePublicDataObjectKeysRecursive(playerWarPerformancePayload || null);
+        const manifest = strictValidatedShards
+            ? strictValidatedShards.manifest
+            : decodePublicDataObjectKeysRecursive(shards.manifestPayload);
+        const rosterMap = strictValidatedShards
+            ? strictValidatedShards.rosterMap
+            : decodePublicDataObjectKeysRecursive(shards.rostersPayload);
+        const playerMetrics = strictValidatedShards
+            ? strictValidatedShards.playerMetrics
+            : decodePublicDataObjectKeysRecursive(shards.playerMetricsPayload || {});
+        const playerWarPerformance = strictValidatedShards
+            ? strictValidatedShards.playerWarPerformance
+            : decodePublicDataObjectKeysRecursive(shards.playerWarPerformancePayload || null);
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("Missing active version manifest at " + versionLabel + ".");
         }
         if (!rosterMap || typeof rosterMap !== "object" || Array.isArray(rosterMap)) {
             throw new Error("Missing active version roster shards at " + versionLabel + ".");
         }
-        const rosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds : Object.keys(rosterMap);
-        const rosters = [];
-        for (let i = 0; i < rosterIds.length; i++) {
-            const rosterId = toStr(rosterIds[i]).trim();
-            if (!rosterId) continue;
-            const roster = rosterMap[rosterId];
-            if (!roster || typeof roster !== "object" || Array.isArray(roster)) {
-                throw new Error("Missing active version roster shard '" + rosterId + "' at " + versionLabel + ".");
+        const rosterIds = strictValidatedShards
+            ? strictValidatedShards.rosterIds
+            : (Array.isArray(manifest.rosterIds) ? manifest.rosterIds : Object.keys(rosterMap));
+        const rosters = strictValidatedShards ? strictValidatedShards.rosters : [];
+        if (!strictValidatedShards) {
+            for (let i = 0; i < rosterIds.length; i++) {
+                const rosterId = toStr(rosterIds[i]).trim();
+                if (!rosterId) continue;
+                const roster = rosterMap[rosterId];
+                if (!roster || typeof roster !== "object" || Array.isArray(roster)) {
+                    throw new Error("Missing active version roster shard '" + rosterId + "' at " + versionLabel + ".");
+                }
+                rosters.push(roster);
             }
-            rosters.push(roster);
         }
         const data = {
             schemaVersion: Number.isFinite(Number(manifest.schemaVersion)) ? Number(manifest.schemaVersion) : 1,
             pageTitle: toStr(manifest.pageTitle),
-            rosterOrder: Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder.slice() : rosterIds.slice(),
+            rosterOrder: strictValidatedShards
+                ? strictValidatedShards.rosterOrder.slice()
+                : (Array.isArray(manifest.rosterOrder) ? manifest.rosterOrder.slice() : rosterIds.slice()),
             rosters: rosters,
             playerMetrics: playerMetrics && typeof playerMetrics === "object" && !Array.isArray(playerMetrics) ? playerMetrics : {},
         };
@@ -10657,6 +10938,22 @@
             data: assertValidRosterPayload(data, versionLabel),
             activeVersionId: versionId,
         };
+    };
+
+    // Load one explicit immutable version for authenticated admin editing.
+    // Unlike the public bootstrap loader, this never consults a current pointer,
+    // browser snapshot cache, or previous-version fallback.
+    const loadExactActiveVersionViaCloudflarePublic = async (versionIdRaw, optionsRaw) => {
+        const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+        const versionId = toStr(versionIdRaw).trim();
+        if (!versionId) throw new Error("Exact active version id is required.");
+        const retryCount = options.retryCount == null ? 1 : options.retryCount;
+        return loadPublishedActiveVersionViaCloudflarePublic(versionId, {
+            retryCount: retryCount,
+            retryDeadlineMs: options.retryDeadlineMs,
+            signal: options.signal,
+            strictExactVersion: true,
+        });
     };
 
     // Load the composed public bootstrap bundle.
@@ -11176,6 +11473,13 @@
 
     window.renderRosterData = render;
     window.showRosterError = showError;
+    window.RosterPublicData = Object.freeze({
+        schemaVersion: 1,
+        loadCommittedSelector: (optionsRaw) =>
+            loadCommittedActiveSelectorViaCloudflarePublic(optionsRaw),
+        loadExactActiveVersion: (versionIdRaw, optionsRaw) =>
+            loadExactActiveVersionViaCloudflarePublic(versionIdRaw, optionsRaw),
+    });
     window.ROSTER_OPEN_PLAYER_PROFILE = (payload) => {
         const tag = normalizeClanTag(payload && payload.tag);
         if (!tag) return;

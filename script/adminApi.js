@@ -11,6 +11,12 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return verifyAdminPassword(args[0]);
 		case "getAdminWorkspaceBootstrap":
 			return getAdminWorkspaceBootstrap(args[0]);
+		case "getAdminUnlockSnapshotV2":
+			return getAdminUnlockSnapshotV2(args[0]);
+		case "getAdminRosterSnapshotV2":
+			return getAdminRosterSnapshotV2(args[0], args[1]);
+		case "repairAdminRuntimeState":
+			return repairAdminRuntimeState(args[0], args[1]);
 		case "getAutoRefreshSettings":
 			return getAutoRefreshSettings(args[0]);
 		case "getAutoRefreshDiagnostics":
@@ -33,6 +39,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return refreshAllRosters(args[0], args[1], args[2]);
 		case "publishRosterData":
 			return publishRosterData(args[0], args[1]);
+		case "publishRosterDataV2":
+			return publishRosterDataV2(args[0], args[1], args[2], args[3]);
 		case "getPlayerProfile":
 			return getPlayerProfile(args[0], args[1]);
 		case "deleteDiscordIdentityLink":
@@ -683,6 +691,292 @@ function getAdminWorkspaceBootstrap(password) {
 	}
 }
 
+function readAdminScriptPropertiesSnapshot_() {
+	const props = PropertiesService.getScriptProperties();
+	if (typeof props.getProperties === "function") return props.getProperties();
+	const keys = [
+		ADMIN_UNLOCK_V2_DISABLED_PROPERTY,
+		AUTO_REFRESH_ENABLED_PROPERTY,
+		AUTO_REFRESH_TRIGGER_ID_PROPERTY,
+		AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY,
+		AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY,
+		PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY,
+		AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY,
+		AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY,
+		AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY,
+		AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY,
+		AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY,
+		AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY,
+		AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY,
+		ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY,
+		AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY,
+		REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY,
+		REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY,
+		DONATION_REFRESH_ENABLED_PROPERTY,
+		DONATION_REFRESH_TRIGGER_ID_PROPERTY,
+		DONATION_REFRESH_LAST_RUN_STARTED_AT_PROPERTY,
+		DONATION_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY,
+		DONATION_REFRESH_LAST_RUN_STATUS_PROPERTY,
+		DONATION_REFRESH_LAST_RUN_SUMMARY_PROPERTY,
+		DONATION_REFRESH_LAST_RUN_ERROR_PROPERTY,
+		DONATION_REFRESH_LAST_SEASON_ID_PROPERTY,
+		DONATION_REFRESH_LAST_WRITE_AT_PROPERTY,
+	];
+	const result = {};
+	for (let i = 0; i < keys.length; i++) result[keys[i]] = props.getProperty(keys[i]);
+	return result;
+}
+
+function isAdminUnlockV2DisabledFromProperties_(propertiesRaw) {
+	const properties = propertiesRaw && typeof propertiesRaw === "object" ? propertiesRaw : {};
+	const raw = String(properties[ADMIN_UNLOCK_V2_DISABLED_PROPERTY] || "").trim().toLowerCase();
+	return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function buildAdminV2DisabledError_() {
+	return createRosterBackendError_("ADMIN_UNLOCK_V2_DISABLED", "Admin Unlock V2 is temporarily disabled.");
+}
+
+function buildAdminActiveVersionConflictError_() {
+	return createRosterBackendError_(
+		"ADMIN_ACTIVE_VERSION_CONFLICT",
+		"The active roster version changed while this admin workspace was loading. Reload before publishing.",
+	);
+}
+
+// Authenticate without reconstructing the roster or mutating runtime state.
+function getAdminUnlockSnapshotV2(password) {
+	const startedMs = Date.now();
+	assertAdminPassword_(password);
+	const propertiesStartedMs = Date.now();
+	const properties = readAdminScriptPropertiesSnapshot_();
+	const propertiesMs = Math.max(0, Date.now() - propertiesStartedMs);
+	if (isAdminUnlockV2DisabledFromProperties_(properties)) throw buildAdminV2DisabledError_();
+
+	const autoRefresh = settleAdminWorkspaceBootstrapSection_(function () {
+		return readAutoRefreshSettingsFromProperties_(properties, { runtimeVerified: false });
+	});
+	const donationRefresh = settleAdminWorkspaceBootstrapSection_(function () {
+		return readDonationRefreshSettingsFromProperties_(properties, { runtimeVerified: false });
+	});
+
+	const firebaseStartedMs = Date.now();
+	let activeVersionId = "";
+	let activeRoster = null;
+	let cwlLeagueSignups = null;
+	try {
+		const values = firebaseBatchGetJson_([
+			FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH,
+			CWL_LEAGUE_SIGNUPS_ACTIVE_PATH,
+		]);
+		try {
+			activeVersionId = requireExactSafeActiveVersionId_(
+				values[FIREBASE_ACTIVE_PUBLISHED_CURRENT_VERSION_PATH],
+				"Published active version id",
+			);
+			activeRoster = { ok: true, value: { versionId: activeVersionId } };
+		} catch (err) {
+			activeRoster = { ok: false, error: errorMessage_(err) };
+		}
+		cwlLeagueSignups = settleAdminWorkspaceBootstrapSection_(function () {
+			return sanitizeCwlLeagueSignupsPayload_(
+				decodeFirebaseObjectKeysRecursive_(values[CWL_LEAGUE_SIGNUPS_ACTIVE_PATH]),
+			);
+		});
+	} catch (err) {
+		const message = errorMessage_(err);
+		activeRoster = { ok: false, error: message };
+		cwlLeagueSignups = { ok: false, error: message };
+		if (!isFirebaseDailyUrlFetchQuotaError_(err)) {
+			try {
+				activeVersionId = requireExactSafeActiveVersionId_(
+					readPublishedActiveVersionIdRaw_(),
+					"Published active version id",
+				);
+				activeRoster = { ok: true, value: { versionId: activeVersionId }, recovered: true };
+			} catch (pointerErr) {
+				activeRoster = { ok: false, error: errorMessage_(pointerErr) };
+			}
+		}
+	}
+	const firebaseMs = Math.max(0, Date.now() - firebaseStartedMs);
+	return {
+		schemaVersion: 2,
+		authenticated: true,
+		activeVersionId: activeVersionId,
+		activeRoster: activeRoster,
+		autoRefresh: autoRefresh,
+		donationRefresh: donationRefresh,
+		cwlLeagueSignups: cwlLeagueSignups,
+		timings: {
+			propertiesMs: propertiesMs,
+			firebaseMs: firebaseMs,
+			totalMs: Math.max(0, Date.now() - startedMs),
+		},
+	};
+}
+
+// Authenticated canonical fallback for an exact generation. A final pointer
+// check prevents returning a generation that changed during reconstruction.
+function getAdminRosterSnapshotV2(password, expectedVersionIdRaw) {
+	const startedMs = Date.now();
+	assertAdminPassword_(password);
+	const expectedVersionId = requireExactSafeActiveVersionId_(expectedVersionIdRaw, "Expected source version id");
+	const snapshot = readExactPublishedActiveRosterSnapshot_(expectedVersionId);
+	const finalVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+	if (finalVersionId !== expectedVersionId) throw buildAdminActiveVersionConflictError_();
+	return {
+		schemaVersion: 2,
+		authenticated: true,
+		sourceVersionId: expectedVersionId,
+		rosterData: snapshot.rosterData,
+		timings: {
+			totalMs: Math.max(0, Date.now() - startedMs),
+		},
+	};
+}
+
+function buildAdminRuntimeBusyResult_(expectedVersionIdRaw) {
+	const properties = readAdminScriptPropertiesSnapshot_();
+	return {
+		schemaVersion: 2,
+		authenticated: true,
+		status: "busy",
+		activeVersionId: String(expectedVersionIdRaw || ""),
+		autoRefresh: {
+			ok: true,
+			value: readAutoRefreshSettingsFromProperties_(properties, { runtimeVerified: false }),
+		},
+		donationRefresh: {
+			ok: true,
+			value: readDonationRefreshSettingsFromProperties_(properties, { runtimeVerified: false }),
+		},
+		families: {
+			runtime: { ok: false, busy: true, error: "Runtime verification is already busy." },
+		},
+	};
+}
+
+// Verify and repair only the admin settings-related trigger families. Roster
+// data is loaded before taking the script lock; its generation is rechecked
+// while locked before regular-war scheduling can use it.
+function repairAdminRuntimeState(password, expectedVersionIdRaw) {
+	assertAdminPassword_(password);
+	let expectedVersionId = "";
+	let layoutSection = null;
+	try {
+		expectedVersionId = requireExactSafeActiveVersionId_(expectedVersionIdRaw, "Expected source version id");
+		const layoutSnapshot = readActiveRosterLayoutSnapshotFromVersion_(expectedVersionId);
+		if (
+			!layoutSnapshot ||
+			!layoutSnapshot.manifest ||
+			String(layoutSnapshot.manifest.versionId || "").trim() !== expectedVersionId ||
+			Number(layoutSnapshot.manifest.schemaVersion) !== ADMIN_EDITING_ROSTER_SCHEMA_VERSION
+		) {
+			throw new Error("Exact roster layout manifest is not supported for this admin runtime.");
+		}
+		layoutSection = {
+			ok: true,
+			value: layoutSnapshot,
+		};
+	} catch (err) {
+		layoutSection = { ok: false, error: errorMessage_(err) };
+	}
+
+	const scriptLock = LockService.getScriptLock();
+	let didLock = false;
+	try {
+		didLock = typeof scriptLock.tryLock === "function"
+			? scriptLock.tryLock(1000)
+			: (scriptLock.waitLock(1000), true);
+	} catch (err) {
+		didLock = false;
+	}
+	if (!didLock) return buildAdminRuntimeBusyResult_(expectedVersionId);
+
+	let inventory = null;
+	let observedActiveVersionId = expectedVersionId;
+	const families = {};
+	try {
+		try {
+			inventory = createProjectTriggerInventory_();
+		} catch (err) {
+			const properties = readAdminScriptPropertiesSnapshot_();
+			return {
+				schemaVersion: 2,
+				authenticated: true,
+				status: "partial",
+				activeVersionId: expectedVersionId,
+				autoRefresh: { ok: false, error: errorMessage_(err) },
+				donationRefresh: { ok: false, error: errorMessage_(err) },
+				families: { inventory: { ok: false, error: errorMessage_(err) } },
+			};
+		}
+
+		families.permanent = settleAdminWorkspaceBootstrapSection_(function () {
+			return ensurePermanentSchedulerWatchdogTrigger_(inventory);
+		});
+		families.autoRefresh = settleAdminWorkspaceBootstrapSection_(function () {
+			return reconcileAutoRefreshTriggerState_(inventory);
+		});
+		families.donationRefresh = settleAdminWorkspaceBootstrapSection_(function () {
+			return reconcileDonationRefreshTriggerState_(inventory);
+		});
+		families.regularWarFinalization = settleAdminWorkspaceBootstrapSection_(function () {
+			if (!layoutSection || layoutSection.ok !== true) {
+				throw new Error(String((layoutSection && layoutSection.error) || "Exact roster layout is unavailable."));
+			}
+			const currentVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+			if (currentVersionId) observedActiveVersionId = currentVersionId;
+			if (currentVersionId !== expectedVersionId) {
+				throw buildAdminActiveVersionConflictError_();
+			}
+			const activeJob = readActiveRosterJobLockState_();
+			if (activeJob && Number(activeJob.expiresAt) > Date.now()) {
+				throw new Error("Regular-war runtime verification deferred because an active roster write is running.");
+			}
+			return reconcileRegularWarFinalizationTriggerStateValidated_(
+				layoutSection.value.rosterData,
+				inventory,
+			);
+		});
+
+		const properties = readAdminScriptPropertiesSnapshot_();
+		const autoRefresh = families.autoRefresh.ok
+			? {
+				ok: true,
+				value: readAutoRefreshSettingsFromProperties_(properties, { runtimeVerified: true }),
+			}
+			: { ok: false, error: families.autoRefresh.error };
+		const donationRefresh = families.donationRefresh.ok
+			? {
+				ok: true,
+				value: readDonationRefreshSettingsFromProperties_(properties, { runtimeVerified: true }),
+			}
+			: { ok: false, error: families.donationRefresh.error };
+		const familyKeys = Object.keys(families);
+		const partial = familyKeys.some(function (key) {
+			const section = families[key];
+			const value = section && section.value && typeof section.value === "object" ? section.value : null;
+			return !section ||
+				section.ok !== true ||
+				!!(value && value.ok === false) ||
+				!!(value && value.scheduled === false && value.degraded === true);
+		});
+		return {
+			schemaVersion: 2,
+			authenticated: true,
+			status: partial ? "partial" : "ok",
+			activeVersionId: observedActiveVersionId,
+			autoRefresh: autoRefresh,
+			donationRefresh: donationRefresh,
+			families: families,
+		};
+	} finally {
+		scriptLock.releaseLock();
+	}
+}
+
 // Get auto refresh settings.
 function getAutoRefreshSettings(password) {
 	assertAdminPassword_(password);
@@ -764,6 +1058,41 @@ function publishRosterData(rosterData, password) {
 		const meta = writePublishedRosterData_(rosterData);
 		markPublish_();
 		return { ok: true, publishedAt: meta.publishedAt, playerCount: meta.playerCount, noteCount: meta.noteCount, metricEntryCount: meta.metricEntryCount };
+	});
+}
+
+// Version-guarded manual publish used by Admin Unlock V2.
+function publishRosterDataV2(rosterData, password, expectedSourceVersionIdRaw, optionsRaw) {
+	assertAdminPassword_(password);
+	const expectedSourceVersionId = requireExactSafeActiveVersionId_(
+		expectedSourceVersionIdRaw,
+		"Expected source version id",
+	);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const includeRosterDataInResult = options.includeRosterDataInResult === true;
+	return withActiveRosterJobLock_("manual-publish-v2", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+		const sourceSnapshot = readExactPublishedActiveRosterSnapshot_(expectedSourceVersionId);
+		const stableSourceVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+		if (stableSourceVersionId !== expectedSourceVersionId) throw buildAdminActiveVersionConflictError_();
+		checkPublishCooldown_();
+		const meta = writePublishedRosterData_(rosterData, {
+			sourceSnapshot: sourceSnapshot,
+			includeRosterDataInResult: includeRosterDataInResult,
+		});
+		let activeVersionId = String(meta.activeVersionId || "").trim();
+		if (!activeVersionId) activeVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+		markPublish_();
+		const result = {
+			ok: true,
+			sourceVersionId: expectedSourceVersionId,
+			activeVersionId: activeVersionId,
+			publishedAt: meta.publishedAt,
+			playerCount: meta.playerCount,
+			noteCount: meta.noteCount,
+			metricEntryCount: meta.metricEntryCount,
+		};
+		if (includeRosterDataInResult) result.rosterData = meta.rosterData;
+		return result;
 	});
 }
 

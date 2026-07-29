@@ -702,8 +702,8 @@ function isDonationRefreshEnabled_() {
 	return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
-function listDonationRefreshTriggers_() {
-	const all = ScriptApp.getProjectTriggers();
+function listDonationRefreshTriggers_(inventoryRaw) {
+	const all = getProjectTriggersFromInventory_(inventoryRaw);
 	return all.filter((trigger) => {
 		try {
 			return String(trigger.getHandlerFunction() || "") === DONATION_REFRESH_HANDLER_NAME;
@@ -713,12 +713,12 @@ function listDonationRefreshTriggers_() {
 	});
 }
 
-function removeDonationRefreshTriggers_() {
-	const triggers = listDonationRefreshTriggers_();
+function removeDonationRefreshTriggers_(inventoryRaw) {
+	const triggers = listDonationRefreshTriggers_(inventoryRaw).slice();
 	let removed = 0;
 	for (let i = 0; i < triggers.length; i++) {
 		try {
-			ScriptApp.deleteTrigger(triggers[i]);
+			deleteProjectTriggerFromInventory_(inventoryRaw, triggers[i]);
 			removed++;
 		} catch (err) {
 			Logger.log("Unable to delete donation-refresh trigger: %s", errorMessage_(err));
@@ -728,10 +728,10 @@ function removeDonationRefreshTriggers_() {
 	return removed;
 }
 
-function ensureSingleDonationRefreshTrigger_() {
+function ensureSingleDonationRefreshTrigger_(inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
 	const configuredId = String(props.getProperty(DONATION_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
-	const triggers = listDonationRefreshTriggers_();
+	const triggers = listDonationRefreshTriggers_(inventoryRaw).slice();
 	let keep = null;
 	if (configuredId) {
 		for (let i = 0; i < triggers.length; i++) {
@@ -749,7 +749,7 @@ function ensureSingleDonationRefreshTrigger_() {
 		const isKeptTrigger = !!keep && ((keepId && triggerId === keepId) || (!keepId && trigger === keep));
 		if (isKeptTrigger) continue;
 		try {
-			ScriptApp.deleteTrigger(trigger);
+			deleteProjectTriggerFromInventory_(inventoryRaw, trigger);
 		} catch (err) {
 			Logger.log("Unable to delete duplicate donation-refresh trigger: %s", errorMessage_(err));
 		}
@@ -759,42 +759,68 @@ function ensureSingleDonationRefreshTrigger_() {
 		const cadenceBuilder = typeof timeBuilder.everyMinutes === "function"
 			? timeBuilder.everyMinutes(DONATION_REFRESH_INTERVAL_MINUTES)
 			: timeBuilder.everyHours(1);
-		keep = cadenceBuilder.create();
+		keep = noteProjectTriggerCreated_(inventoryRaw, cadenceBuilder.create());
 	}
 	return keep;
 }
 
-function reconcileDonationRefreshTriggerState_() {
+function reconcileDonationRefreshTriggerState_(inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
-	if (typeof ensurePermanentSchedulerWatchdogTrigger_ === "function") ensurePermanentSchedulerWatchdogTrigger_();
+	if (typeof ensurePermanentSchedulerWatchdogTrigger_ === "function") ensurePermanentSchedulerWatchdogTrigger_(inventoryRaw);
 	if (!isDonationRefreshEnabled_()) {
-		removeDonationRefreshTriggers_();
+		removeDonationRefreshTriggers_(inventoryRaw);
 		props.deleteProperty(DONATION_REFRESH_TRIGGER_ID_PROPERTY);
 		return { enabled: false, triggerId: "", hasTrigger: false };
 	}
-	const trigger = ensureSingleDonationRefreshTrigger_();
+	const trigger = ensureSingleDonationRefreshTrigger_(inventoryRaw);
 	const triggerId = getTriggerUniqueId_(trigger);
 	if (triggerId) props.setProperty(DONATION_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
 	else props.deleteProperty(DONATION_REFRESH_TRIGGER_ID_PROPERTY);
 	return { enabled: true, triggerId: triggerId, hasTrigger: !!triggerId };
 }
 
-function readDonationRefreshSettings_() {
-	const props = PropertiesService.getScriptProperties();
-	const triggerId = String(props.getProperty(DONATION_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
+function readDonationRefreshSettingsFromProperties_(propertiesRaw, optionsRaw) {
+	const properties = propertiesRaw && typeof propertiesRaw === "object" ? propertiesRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const get = function (key) {
+		return Object.prototype.hasOwnProperty.call(properties, key) ? properties[key] : "";
+	};
+	const enabledRaw = String(get(DONATION_REFRESH_ENABLED_PROPERTY) || "").trim().toLowerCase();
+	const triggerId = String(get(DONATION_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
 	return {
-		enabled: isDonationRefreshEnabled_(),
+		enabled: enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes" || enabledRaw === "on",
 		intervalMinutes: DONATION_REFRESH_INTERVAL_MINUTES,
 		triggerId: triggerId,
 		hasTrigger: !!triggerId,
-		lastRunStartedAt: String(props.getProperty(DONATION_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim(),
-		lastRunFinishedAt: String(props.getProperty(DONATION_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY) || "").trim(),
-		lastRunStatus: String(props.getProperty(DONATION_REFRESH_LAST_RUN_STATUS_PROPERTY) || "").trim(),
-		lastRunSummary: String(props.getProperty(DONATION_REFRESH_LAST_RUN_SUMMARY_PROPERTY) || "").trim(),
-		lastRunError: String(props.getProperty(DONATION_REFRESH_LAST_RUN_ERROR_PROPERTY) || "").trim(),
-		lastSeasonId: String(props.getProperty(DONATION_REFRESH_LAST_SEASON_ID_PROPERTY) || "").trim(),
-		lastWriteAt: String(props.getProperty(DONATION_REFRESH_LAST_WRITE_AT_PROPERTY) || "").trim(),
+		lastRunStartedAt: String(get(DONATION_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim(),
+		lastRunFinishedAt: String(get(DONATION_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY) || "").trim(),
+		lastRunStatus: String(get(DONATION_REFRESH_LAST_RUN_STATUS_PROPERTY) || "").trim(),
+		lastRunSummary: String(get(DONATION_REFRESH_LAST_RUN_SUMMARY_PROPERTY) || "").trim(),
+		lastRunError: String(get(DONATION_REFRESH_LAST_RUN_ERROR_PROPERTY) || "").trim(),
+		lastSeasonId: String(get(DONATION_REFRESH_LAST_SEASON_ID_PROPERTY) || "").trim(),
+		lastWriteAt: String(get(DONATION_REFRESH_LAST_WRITE_AT_PROPERTY) || "").trim(),
+		runtimeVerified: options.runtimeVerified === true,
 	};
+}
+
+function readDonationRefreshSettings_() {
+	const props = PropertiesService.getScriptProperties();
+	const properties = typeof props.getProperties === "function" ? props.getProperties() : {};
+	if (typeof props.getProperties !== "function") {
+		const keys = [
+			DONATION_REFRESH_ENABLED_PROPERTY,
+			DONATION_REFRESH_TRIGGER_ID_PROPERTY,
+			DONATION_REFRESH_LAST_RUN_STARTED_AT_PROPERTY,
+			DONATION_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY,
+			DONATION_REFRESH_LAST_RUN_STATUS_PROPERTY,
+			DONATION_REFRESH_LAST_RUN_SUMMARY_PROPERTY,
+			DONATION_REFRESH_LAST_RUN_ERROR_PROPERTY,
+			DONATION_REFRESH_LAST_SEASON_ID_PROPERTY,
+			DONATION_REFRESH_LAST_WRITE_AT_PROPERTY,
+		];
+		for (let i = 0; i < keys.length; i++) properties[keys[i]] = props.getProperty(keys[i]);
+	}
+	return readDonationRefreshSettingsFromProperties_(properties, { runtimeVerified: true });
 }
 
 function donationRefreshTickInternal_() {

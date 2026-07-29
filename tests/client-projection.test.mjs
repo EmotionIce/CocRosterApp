@@ -21,6 +21,9 @@ const loadClientInternals = (overrides = {}) => {
       "        loadRosterDataWithFallback,",
       "        loadRosterDataViaCloudflarePublic,",
       "        loadPublishedActiveVersionViaCloudflarePublic,",
+      "        loadExactActiveVersionViaCloudflarePublic,",
+      "        loadCommittedActiveSelectorViaCloudflarePublic,",
+      "        RosterPublicData: window.RosterPublicData,",
       "        loadCurrentSeasonEventsViaCloudflarePublic,",
       "        loadPreviousSeasonEventsViaCloudflarePublic,",
       "        readCachedRosterSnapshot,",
@@ -48,6 +51,7 @@ const loadClientInternals = (overrides = {}) => {
     TextEncoder,
     TextDecoder,
     setTimeout,
+    clearTimeout,
   };
   Object.assign(context, overrides.context || {});
   Object.assign(context.window, overrides.window || {});
@@ -745,6 +749,363 @@ test("loads published active version shards without requesting legacy active", a
   assert.equal(loaded.data.rosters[0].id, "main");
   assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].latestSnapshot.trophies, 5000);
   assert.equal(requested.includes("https://public-data.test/api/public-data/active.json"), false);
+});
+
+test("admin public-data facade reads only the committed selector with no-store semantics", async () => {
+  const selectorUrl = "https://public-data.test/api/public-data/activePublished/currentSelector.json";
+  const requests = [];
+  const controller = new AbortController();
+  const { RosterPublicData } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: {
+      fetch: async (url, options) => {
+        requests.push({ url, options });
+        return {
+          ok: url === selectorUrl,
+          status: url === selectorUrl ? 200 : 404,
+          text: async () => JSON.stringify({
+            schemaVersion: 1,
+            currentVersionId: "version-current",
+            previousVersionId: "version-previous",
+            generation: 42,
+            committedAt: "2026-07-29T12:00:00.000Z",
+          }),
+        };
+      },
+    },
+  });
+
+  assert.equal(Object.isFrozen(RosterPublicData), true);
+  assert.equal(RosterPublicData.schemaVersion, 1);
+  assert.equal(typeof RosterPublicData.loadCommittedSelector, "function");
+  assert.equal(typeof RosterPublicData.loadExactActiveVersion, "function");
+
+  const selector = await RosterPublicData.loadCommittedSelector({ signal: controller.signal });
+  assert.equal(selector.currentVersionId, "version-current");
+  assert.equal(selector.previousVersionId, "version-previous");
+  assert.equal(selector.generation, 42);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, selectorUrl);
+  assert.equal(requests[0].options.cache, "no-store");
+  assert.equal(requests[0].options.credentials, "same-origin");
+  assert.equal(requests[0].options.signal, controller.signal);
+});
+
+test("admin exact-version facade loads and validates one immutable generation without pointer fallback", async () => {
+  const base = "https://public-data.test/api/public-data/";
+  const versionId = "version-admin";
+  const responses = new Map([
+    [base + "activeVersions/" + versionId + "/manifest.json", {
+      versionId,
+      schemaVersion: 1,
+      pageTitle: "Admin exact",
+      rosterIds: ["bravo", "alpha"],
+      rosterOrder: ["alpha", "bravo"],
+      playerMetricsSchemaVersion: 1,
+      playerMetricEntryCount: 1,
+      playerWarPerformanceSchemaVersion: 2,
+      playerWarPerformanceEntryCount: 1,
+      playerWarPerformanceHash: "performance-hash",
+      requiredShards: ["manifest", "rosters", "playerMetrics", "playerWarPerformance"],
+    }],
+    [base + "activeVersions/" + versionId + "/rosters.json", {
+      bravo: { id: "bravo", title: "Bravo", main: [], subs: [], missing: [] },
+      alpha: { id: "alpha", title: "Alpha", main: [], subs: [], missing: [] },
+    }],
+    [base + "activeVersions/" + versionId + "/playerMetrics.json", {
+      schemaVersion: 1,
+      byTag: { "#PLAYER": { identity: { tag: "#PLAYER" } } },
+    }],
+    [base + "activeVersions/" + versionId + "/playerWarPerformance.json", {
+      schemaVersion: 2,
+      byTag: { "#PLAYER": { overall: {} } },
+      contentHash: "performance-hash",
+    }],
+  ]);
+  const requests = [];
+  const controller = new AbortController();
+  const { RosterPublicData } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: {
+      fetch: async (url, options) => {
+        requests.push({ url, options });
+        return {
+          ok: responses.has(url),
+          status: responses.has(url) ? 200 : 404,
+          headers: { get: () => null },
+          text: async () => JSON.stringify(responses.get(url)),
+        };
+      },
+    },
+  });
+
+  const loaded = await RosterPublicData.loadExactActiveVersion(versionId, {
+    retryCount: 0,
+    signal: controller.signal,
+  });
+
+  assert.equal(loaded.activeVersionId, versionId);
+  assert.equal(loaded.data.pageTitle, "Admin exact");
+  assert.deepEqual(Array.from(loaded.data.rosters, (roster) => roster.id), ["bravo", "alpha"]);
+  assert.deepEqual(Array.from(loaded.data.rosterOrder), ["alpha", "bravo"]);
+  assert.equal(loaded.data.playerMetrics.byTag["#PLAYER"].identity.tag, "#PLAYER");
+  assert.equal(loaded.data.playerWarPerformance.contentHash, "performance-hash");
+  assert.deepEqual(
+    requests.map((item) => item.url).sort(),
+    Array.from(responses.keys()).sort(),
+  );
+  assert.equal(requests.some((item) => /previous|currentVersionId|bootstrap\/current/.test(item.url)), false);
+  for (const request of requests) {
+    assert.equal(request.options.cache, "default");
+    assert.equal(request.options.signal, controller.signal);
+  }
+});
+
+test("admin exact-version validation rejects mismatched or incomplete immutable generations", async (t) => {
+  const baseUrl = "https://public-data.test/api/public-data";
+  const versionId = "version-strict";
+  const makeBundle = () => ({
+    manifest: {
+      versionId,
+      schemaVersion: 1,
+      pageTitle: "Strict",
+      rosterIds: ["main"],
+      rosterOrder: ["main"],
+      playerMetricsSchemaVersion: 1,
+      playerMetricEntryCount: 1,
+      playerWarPerformanceSchemaVersion: 2,
+      playerWarPerformanceEntryCount: 1,
+      playerWarPerformanceHash: "performance-hash",
+      requiredShards: ["manifest", "rosters", "playerMetrics", "playerWarPerformance"],
+    },
+    rosters: {
+      main: { id: "main", title: "Main", main: [], subs: [], missing: [] },
+    },
+    playerMetrics: {
+      schemaVersion: 1,
+      byTag: { "#PLAYER": { identity: { tag: "#PLAYER" } } },
+    },
+    playerWarPerformance: {
+      schemaVersion: 2,
+      byTag: { "#PLAYER": { overall: {} } },
+      contentHash: "performance-hash",
+    },
+  });
+  const cases = [
+    {
+      name: "manifest version id",
+      mutate: (bundle) => { bundle.manifest.versionId = "version-other"; },
+      pattern: /manifest does not match requested version/,
+    },
+    {
+      name: "future admin editing schema",
+      mutate: (bundle) => { bundle.manifest.schemaVersion = 2; },
+      pattern: /unsupported admin editing schema 2/,
+    },
+    {
+      name: "unknown required shard",
+      mutate: (bundle) => { bundle.manifest.requiredShards.push("futureShard"); },
+      pattern: /unsupported required shard 'futureShard'/,
+    },
+    {
+      name: "performance metadata without required shard",
+      mutate: (bundle) => {
+        bundle.manifest.requiredShards = ["manifest", "rosters", "playerMetrics"];
+      },
+      pattern: /inconsistent playerWarPerformance metadata/,
+    },
+    {
+      name: "roster map identity",
+      mutate: (bundle) => { bundle.rosters.main.id = "other"; },
+      pattern: /does not match its manifest identity/,
+    },
+    {
+      name: "roster order",
+      mutate: (bundle) => { bundle.manifest.rosterOrder = ["missing"]; },
+      pattern: /rosterOrder is not a unique manifest roster permutation/,
+    },
+    {
+      name: "metrics schema",
+      mutate: (bundle) => { bundle.playerMetrics.schemaVersion = 3; },
+      pattern: /playerMetrics schema does not match/,
+    },
+    {
+      name: "future matching metrics schema",
+      mutate: (bundle) => {
+        bundle.manifest.playerMetricsSchemaVersion = 2;
+        bundle.playerMetrics.schemaVersion = 2;
+      },
+      pattern: /playerMetrics schema does not match/,
+    },
+    {
+      name: "metrics count",
+      mutate: (bundle) => { bundle.manifest.playerMetricEntryCount = 2; },
+      pattern: /playerMetrics entry count does not match/,
+    },
+    {
+      name: "performance schema",
+      mutate: (bundle) => { bundle.playerWarPerformance.schemaVersion = 3; },
+      pattern: /playerWarPerformance schema does not match/,
+    },
+    {
+      name: "future matching performance schema",
+      mutate: (bundle) => {
+        bundle.manifest.playerWarPerformanceSchemaVersion = 3;
+        bundle.playerWarPerformance.schemaVersion = 3;
+      },
+      pattern: /playerWarPerformance schema does not match/,
+    },
+    {
+      name: "performance count",
+      mutate: (bundle) => { bundle.manifest.playerWarPerformanceEntryCount = 2; },
+      pattern: /playerWarPerformance entry count does not match/,
+    },
+    {
+      name: "performance hash",
+      mutate: (bundle) => { bundle.playerWarPerformance.contentHash = "different"; },
+      pattern: /playerWarPerformance hash does not match/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const bundle = makeBundle();
+      testCase.mutate(bundle);
+      const requested = [];
+      const { RosterPublicData } = loadClientInternals({
+        window: { ROSTER_PUBLIC_DATA_BASE_URL: baseUrl },
+        context: {
+          fetch: async (url) => {
+            requested.push(url);
+            const child = /\/(manifest|rosters|playerMetrics|playerWarPerformance)\.json$/.exec(url)?.[1];
+            return {
+              ok: !!child,
+              status: child ? 200 : 404,
+              headers: { get: () => null },
+              text: async () => JSON.stringify(bundle[child]),
+            };
+          },
+        },
+      });
+
+      await assert.rejects(
+        () => RosterPublicData.loadExactActiveVersion(versionId, { retryCount: 0 }),
+        testCase.pattern,
+      );
+      assert.equal(requested.some((url) => /previous|currentVersionId|bootstrap\/current/.test(url)), false);
+    });
+  }
+});
+
+test("admin exact-version validation retries the complete generation within a bounded budget", async () => {
+  const base = "https://public-data.test/api/public-data/";
+  const versionId = "version-revalidate";
+  const counts = new Map();
+  let generationAttempt = 0;
+  const manifest = {
+    versionId,
+    schemaVersion: 1,
+    pageTitle: "Retried strict generation",
+    rosterIds: ["main"],
+    rosterOrder: ["main"],
+    playerMetricsSchemaVersion: 1,
+    playerMetricEntryCount: 0,
+    requiredShards: ["manifest", "rosters", "playerMetrics"],
+  };
+  const payloads = {
+    rosters: { main: { id: "main", title: "Main", main: [], subs: [], missing: [] } },
+    playerMetrics: { schemaVersion: 1, byTag: {} },
+  };
+  const { RosterPublicData } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: {
+      fetch: async (url) => {
+        counts.set(url, (counts.get(url) || 0) + 1);
+        const child = /\/(manifest|rosters|playerMetrics)\.json$/.exec(url)?.[1];
+        if (child === "manifest") {
+          generationAttempt += 1;
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            text: async () => JSON.stringify(Object.assign({}, manifest, {
+              versionId: generationAttempt === 1 ? "temporarily-wrong" : versionId,
+            })),
+          };
+        }
+        return {
+          ok: !!child,
+          status: child ? 200 : 404,
+          headers: { get: () => null },
+          text: async () => JSON.stringify(payloads[child]),
+        };
+      },
+    },
+  });
+
+  const loaded = await RosterPublicData.loadExactActiveVersion(versionId, {
+    retryCount: 1,
+    retryDeadlineMs: Date.now() + 1000,
+  });
+
+  assert.equal(loaded.activeVersionId, versionId);
+  for (const child of ["manifest", "rosters", "playerMetrics"]) {
+    assert.equal(counts.get(base + "activeVersions/" + versionId + "/" + child + ".json"), 2);
+  }
+});
+
+test("admin exact-version facade honors an already-aborted signal without issuing reads", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let fetchCount = 0;
+  const { RosterPublicData } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: {
+      fetch: async () => {
+        fetchCount += 1;
+        throw new Error("fetch should not run");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => RosterPublicData.loadExactActiveVersion("version-aborted", { signal: controller.signal }),
+    (error) => error && error.name === "AbortError",
+  );
+  assert.equal(fetchCount, 0);
+});
+
+test("admin exact-version cancellation stops a pending whole-generation retry", async () => {
+  const controller = new AbortController();
+  let fetchCount = 0;
+  const { RosterPublicData } = loadClientInternals({
+    window: { ROSTER_PUBLIC_DATA_BASE_URL: "https://public-data.test/api/public-data" },
+    context: {
+      fetch: async () => {
+        fetchCount += 1;
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: (name) => String(name).toLowerCase() === "retry-after" ? "0.2" : null },
+          text: async () => "",
+        };
+      },
+    },
+  });
+
+  const pending = RosterPublicData.loadExactActiveVersion("version-cancel-retry", {
+    retryCount: 1,
+    retryDeadlineMs: Date.now() + 1000,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 10);
+
+  await assert.rejects(
+    () => pending,
+    (error) => error && error.name === "AbortError",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(fetchCount, 1);
 });
 
 test("uses bootstrap for current public state without granular event reads", async () => {

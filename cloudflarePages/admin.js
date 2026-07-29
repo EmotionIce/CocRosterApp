@@ -5,12 +5,24 @@
   const $ = (sel) => document.querySelector(sel);
   // Convert a value to a string safely.
   const toStr = (v) => (v == null ? "" : String(v));
-  const PREVIEW_NOT_READY_MESSAGE = "Roster data is not loaded yet. Refresh the page and unlock again.";
+  const PREVIEW_NOT_READY_MESSAGE = "Roster data is not loaded yet. Reload active config before continuing.";
 
   const state = {
     password: "",
+    authenticated: false,
     lastRosterData: null,
+    previewDirty: false,
+    previewRevision: 0,
+    unlockAttemptId: 0,
+    unlockAbortController: null,
+    unlockContractVersion: 0,
+    loadedSourceVersionId: "",
+    latestRuntimeVersionId: "",
+    sourceVersionDrifted: false,
+    activeConfigReloadBusy: false,
     publishCooldownUntil: 0,
+    publishAttemptId: 0,
+    publishBusy: false,
     bulkRefreshBusy: false,
     rosterStatusByRoster: {},
     benchMarksByRoster: {},
@@ -20,8 +32,14 @@
     pendingProfileReopen: null,
     autoRefreshSettings: null,
     autoRefreshBusy: false,
+    autoRefreshRuntimeError: "",
     donationRefreshSettings: null,
     donationRefreshBusy: false,
+    donationRefreshRuntimeError: "",
+    runtimeRepairBusy: false,
+    runtimeRepairRequestId: 0,
+    cwlLeagueSignupsAvailable: false,
+    cwlLeagueSignupsError: "",
     importSession: null,
     importCompareBusy: false,
     importApplyBusy: false,
@@ -76,6 +94,62 @@
 
   // Return whether a preview payload is loaded.
   const hasLoadedPreviewData_ = () => !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters));
+
+  // Keep publish availability tied to a loaded, version-safe workspace. This
+  // prevents later preview mutations from accidentally re-enabling publish
+  // after a V2 source drift or an incomplete unlock.
+  const syncPublishButtonAvailability_ = () => {
+    const publishBtn = $("#publishBtn");
+    if (!publishBtn) return false;
+    const hasPreview = hasLoadedPreviewData_();
+    const v2SourceIsSafe = state.unlockContractVersion < 2 || (
+      !state.sourceVersionDrifted &&
+      !!toStr(state.loadedSourceVersionId).trim() &&
+      /^[A-Za-z0-9_-]+$/.test(toStr(state.loadedSourceVersionId).trim())
+    );
+    const cooldownReady = Date.now() >= Math.max(0, Number(state.publishCooldownUntil) || 0);
+    const enabled = state.authenticated === true &&
+      !!state.password &&
+      hasPreview &&
+      v2SourceIsSafe &&
+      cooldownReady &&
+      !state.publishBusy &&
+      !state.activeConfigReloadBusy &&
+      !state.bulkRefreshBusy;
+    publishBtn.disabled = !enabled;
+    return enabled;
+  };
+
+  const syncLoadActiveButtonAvailability_ = () => {
+    const loadActiveBtn = $("#loadActiveBtn");
+    if (!loadActiveBtn) return false;
+    const enabled = state.authenticated === true &&
+      !!state.password &&
+      !state.activeConfigReloadBusy &&
+      !state.publishBusy &&
+      !state.bulkRefreshBusy;
+    loadActiveBtn.disabled = !enabled;
+    loadActiveBtn.textContent = state.activeConfigReloadBusy ? "Loading active config..." : "Reload active config";
+    return enabled;
+  };
+
+  const markPreviewDirty_ = () => {
+    if (hasLoadedPreviewData_()) {
+      state.previewDirty = true;
+      state.previewRevision += 1;
+    }
+    return syncPublishButtonAvailability_();
+  };
+
+  const setAdminWorkspaceMutationBusy_ = (busyRaw) => {
+    const panel = $("#adminPanel");
+    if (!panel) return;
+    const busy = !!busyRaw;
+    panel.classList.toggle("is-mutation-busy", busy);
+    panel.setAttribute("aria-busy", busy ? "true" : "false");
+    if (busy) panel.setAttribute("inert", "");
+    else panel.removeAttribute("inert");
+  };
 
   const WEBSITE_PAGE_TITLE_DEFAULT = "Roster Overview";
   const PUBLIC_LANDING_EDITOR_DEFAULTS = {
@@ -793,8 +867,7 @@
   // Apply a public config mutation to preview state.
   const applyPublicConfigMutation_ = (statusMessageRaw) => {
     renderPreviewFromState();
-    const publishBtn = $("#publishBtn");
-    if (publishBtn) publishBtn.disabled = false;
+    markPreviewDirty_();
     markReportStale("Rosters changed after website profile update. Re-run compare with rosters.");
     setStatus(toStr(statusMessageRaw).trim() || "Website profile updated.");
   };
@@ -2763,7 +2836,10 @@
     const btn = $("#refreshAllBtn");
     if (!btn) return;
     const hasLoadedPreview = !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters) && state.lastRosterData.rosters.length);
-    btn.disabled = !hasLoadedPreview || state.bulkRefreshBusy;
+    btn.disabled = !hasLoadedPreview ||
+      state.bulkRefreshBusy ||
+      state.publishBusy ||
+      state.activeConfigReloadBusy;
     btn.textContent = state.bulkRefreshBusy ? "Refreshing..." : "Refresh all";
   };
 
@@ -2783,6 +2859,13 @@
     const btn = $("#applyCwlPreferencesBtn");
     if (!btn) return;
     const hasLoadedPreview = !!(state.lastRosterData && Array.isArray(state.lastRosterData.rosters) && state.lastRosterData.rosters.length);
+    if (!state.cwlLeagueSignupsAvailable) {
+      btn.disabled = true;
+      btn.title = state.cwlLeagueSignupsError
+        ? ("CWL preferences are unavailable: " + state.cwlLeagueSignupsError)
+        : "CWL preferences are unavailable for this workspace snapshot.";
+      return;
+    }
     const preferenceCount = countLoadedCwlLeaguePreferences_();
     btn.disabled = !hasLoadedPreview || state.bulkRefreshBusy || preferenceCount < 1;
     btn.title = preferenceCount > 0
@@ -2947,13 +3030,23 @@
     if (toggle) {
       const enabled = !!(state.autoRefreshSettings && state.autoRefreshSettings.enabled);
       toggle.checked = enabled;
-      toggle.disabled = !state.password || state.autoRefreshBusy;
+      toggle.disabled = !state.password || state.autoRefreshBusy || state.runtimeRepairBusy;
     }
 
     if (statusEl) {
       if (state.autoRefreshBusy) {
         statusEl.textContent = "Updating...";
         statusEl.style.color = "#94a3b8";
+        return;
+      }
+      if (state.runtimeRepairBusy) {
+        statusEl.textContent = (state.autoRefreshSettings && state.autoRefreshSettings.enabled ? "Configured enabled" : "Configured disabled") + " — verifying runtime...";
+        statusEl.style.color = "#94a3b8";
+        return;
+      }
+      if (state.autoRefreshRuntimeError) {
+        statusEl.textContent = buildAutoRefreshStatusText(state.autoRefreshSettings) + " | Runtime verification: " + state.autoRefreshRuntimeError;
+        statusEl.style.color = "#fca5a5";
         return;
       }
       statusEl.textContent = buildAutoRefreshStatusText(state.autoRefreshSettings);
@@ -2971,20 +3064,30 @@
     if (toggle) {
       const enabled = !!(state.donationRefreshSettings && state.donationRefreshSettings.enabled);
       toggle.checked = enabled;
-      toggle.disabled = !state.password || state.donationRefreshBusy;
+      toggle.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy;
     }
     if (runBtn) {
-      runBtn.disabled = !state.password || state.donationRefreshBusy;
+      runBtn.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy;
       runBtn.textContent = state.donationRefreshBusy ? "Working..." : "Run now";
     }
     if (reloadBtn) {
-      reloadBtn.disabled = !state.password || state.donationRefreshBusy;
+      reloadBtn.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy;
     }
 
     if (statusEl) {
       if (state.donationRefreshBusy) {
         statusEl.textContent = "Updating...";
         statusEl.style.color = "#94a3b8";
+        return;
+      }
+      if (state.runtimeRepairBusy) {
+        statusEl.textContent = (state.donationRefreshSettings && state.donationRefreshSettings.enabled ? "Configured enabled" : "Configured disabled") + " — verifying runtime...";
+        statusEl.style.color = "#94a3b8";
+        return;
+      }
+      if (state.donationRefreshRuntimeError) {
+        statusEl.textContent = buildDonationRefreshStatusText(state.donationRefreshSettings) + " | Runtime verification: " + state.donationRefreshRuntimeError;
+        statusEl.style.color = "#fca5a5";
         return;
       }
       statusEl.textContent = buildDonationRefreshStatusText(state.donationRefreshSettings);
@@ -4412,8 +4515,7 @@
     clearCwlPreferenceApplySummary_();
     renderPreviewFromState();
     markReportStale();
-    const publishBtn = $("#publishBtn");
-    if (publishBtn) publishBtn.disabled = false;
+    markPreviewDirty_();
     setStatus(msg || "Rosters updated.");
   };
 
@@ -4765,6 +4867,11 @@
   const applyCwlLeaguePreferencesToPreview_ = () => {
     if (state.bulkRefreshBusy) throw new Error("Refresh all is already running.");
     if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    if (!state.cwlLeagueSignupsAvailable) {
+      throw new Error(state.cwlLeagueSignupsError
+        ? ("CWL preferences are unavailable: " + state.cwlLeagueSignupsError)
+        : "CWL preferences are unavailable for this workspace snapshot.");
+    }
     const planner = window.RosterGenerator && typeof window.RosterGenerator.planCwlLeaguePreferenceMoves === "function"
       ? window.RosterGenerator.planCwlLeaguePreferenceMoves
       : null;
@@ -6341,8 +6448,7 @@
       normalizeAllRosterPublicLineupProjectionsLocal_();
       clearSuggestionMarks_();
       renderPreviewFromState();
-      const publishBtn = $("#publishBtn");
-      if (publishBtn) publishBtn.disabled = false;
+      markPreviewDirty_();
 
       const appliedSummary = applied.applied && typeof applied.applied === "object" ? applied.applied : {};
       const updatedCount = Number.isFinite(Number(appliedSummary.updatedCount)) ? Number(appliedSummary.updatedCount) : 0;
@@ -6412,9 +6518,11 @@
   };
 
   // Create an admin API error.
-  const createAdminApiError = (messageRaw, retryableRaw) => {
+  const createAdminApiError = (messageRaw, retryableRaw, codeRaw) => {
     const err = new Error(toStr(messageRaw).trim() || "Admin API call failed.");
     err.retryable = !!retryableRaw;
+    const code = toStr(codeRaw).trim();
+    if (code) err.code = code;
     return err;
   };
 
@@ -6474,14 +6582,14 @@
       const upstreamNeedsAuthorization = payload && payload.code === "APPS_SCRIPT_AUTHORIZATION_REQUIRED";
       const retryable = endpointIsProxy && !upstreamNeedsAuthorization &&
         (response.status === 404 || response.status === 405 || response.status >= 500);
-      throw createAdminApiError(errMsg, retryable);
+      throw createAdminApiError(errMsg, retryable, payload && payload.code);
     }
     if (!payload || payload.ok !== true) {
       const errMsg = payload && payload.error
         ? toStr(payload.error).trim()
         : (inferUpstreamError() || ("Server method failed: " + methodName));
       const retryable = endpointIsProxy && !payload;
-      throw createAdminApiError(errMsg || ("Server method failed: " + methodName), retryable);
+      throw createAdminApiError(errMsg || ("Server method failed: " + methodName), retryable, payload && payload.code);
     }
     return payload.result;
   };
@@ -6526,7 +6634,16 @@
       if (window.google && google.script && google.script.run) {
         const runner = google.script.run
           .withSuccessHandler((r) => resolve(r))
-          .withFailureHandler((e) => reject(e && e.message ? new Error(e.message) : e));
+          .withFailureHandler((e) => {
+            if (!e || !e.message) {
+              reject(e);
+              return;
+            }
+            const error = new Error(e.message);
+            const code = toStr(e.code).trim();
+            if (code) error.code = code;
+            reject(error);
+          });
 
         if (!runner || typeof runner[methodName] !== "function") {
           reject(new Error("Server method is not available: " + methodName));
@@ -6540,6 +6657,376 @@
 
       runServerMethodViaHttp(methodName, args).then(resolve).catch(reject);
     });
+
+  const ADMIN_UNLOCK_V2_SCHEMA_VERSION = 2;
+  const ADMIN_ACTIVE_VERSION_CONFLICT_CODE = "ADMIN_ACTIVE_VERSION_CONFLICT";
+  const ADMIN_PUBLIC_SELECTOR_TIMEOUT_MS = 2500;
+  const ADMIN_PUBLIC_EXACT_LOAD_TIMEOUT_MS = 4000;
+
+  const isSafeAdminActiveVersionId_ = (versionIdRaw) => {
+    const versionId = toStr(versionIdRaw).trim();
+    return !!versionId && versionId.length <= 160 && /^[A-Za-z0-9_-]+$/.test(versionId);
+  };
+
+  const isCurrentAdminUnlockAttempt_ = (attemptIdRaw, passwordRaw) =>
+    state.unlockAttemptId === Number(attemptIdRaw) && state.password === toStr(passwordRaw);
+
+  const isAdminUnlockV2Unavailable_ = (errRaw) => {
+    const code = toStr(errRaw && errRaw.code).trim();
+    if (
+      code === "ADMIN_UNLOCK_V2_UNSUPPORTED_SCHEMA" ||
+      code === "ADMIN_UNLOCK_V2_DISABLED"
+    ) return true;
+    const message = toErrorMessage(errRaw).trim().toLowerCase();
+    return message.indexOf("unsupported admin method: getadminunlocksnapshotv2") >= 0
+      || message.indexOf("server method is not available: getadminunlocksnapshotv2") >= 0
+      || message.indexOf("admin unlock v2 is temporarily disabled") >= 0;
+  };
+
+  const isAdminActiveVersionConflict_ = (errRaw) => {
+    if (toStr(errRaw && errRaw.code).trim() === ADMIN_ACTIVE_VERSION_CONFLICT_CODE) return true;
+    const message = toErrorMessage(errRaw).trim().toLowerCase();
+    return message.indexOf("active version changed") >= 0
+      || message.indexOf("active roster version changed") >= 0
+      || message.indexOf("active roster changed while") >= 0
+      || message.indexOf("source version") >= 0 && message.indexOf("conflict") >= 0;
+  };
+
+  const getRosterPublicDataApi_ = () => {
+    const api = window && window.RosterPublicData && typeof window.RosterPublicData === "object"
+      ? window.RosterPublicData
+      : null;
+    return api && typeof api.loadCommittedSelector === "function" && typeof api.loadExactActiveVersion === "function"
+      ? api
+      : null;
+  };
+
+  const runAdminPublicDataRequestWithTimeout_ = (
+    callback,
+    outerSignalRaw,
+    timeoutMsRaw,
+    labelRaw
+  ) => new Promise((resolve, reject) => {
+    const outerSignal = outerSignalRaw && typeof outerSignalRaw === "object" ? outerSignalRaw : null;
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const requestSignal = controller ? controller.signal : outerSignal || undefined;
+    const timeoutMs = Math.max(250, Number(timeoutMsRaw) || 0);
+    const label = toStr(labelRaw).trim() || "Admin public-data request";
+    let settled = false;
+    let timerId = 0;
+    const cleanup = () => {
+      if (timerId) clearTimeout(timerId);
+      if (outerSignal && typeof outerSignal.removeEventListener === "function") {
+        outerSignal.removeEventListener("abort", onOuterAbort);
+      }
+    };
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      handler(value);
+    };
+    const onOuterAbort = () => {
+      if (controller) controller.abort();
+      const error = new Error(label + " was aborted.");
+      error.name = "AbortError";
+      finish(reject, error);
+    };
+    if (outerSignal && outerSignal.aborted === true) {
+      onOuterAbort();
+      return;
+    }
+    if (outerSignal && typeof outerSignal.addEventListener === "function") {
+      outerSignal.addEventListener("abort", onOuterAbort, { once: true });
+    }
+    timerId = setTimeout(() => {
+      const error = new Error(label + " timed out.");
+      error.name = "TimeoutError";
+      if (controller) controller.abort();
+      finish(reject, error);
+    }, timeoutMs);
+    Promise.resolve()
+      .then(() => callback(requestSignal))
+      .then(
+        (value) => finish(resolve, value),
+        (error) => finish(reject, error)
+      );
+  });
+
+  const loadAdminCommittedSelectorV2_ = async (signalRaw) => {
+    const api = getRosterPublicDataApi_();
+    if (!api) throw new Error("The exact public-data loader is unavailable.");
+    const selector = await api.loadCommittedSelector({ signal: signalRaw || undefined });
+    if (!selector || typeof selector !== "object" || Array.isArray(selector)) {
+      throw new Error("Cloudflare committed selector is invalid.");
+    }
+    const currentVersionId = toStr(selector.currentVersionId).trim();
+    if (!isSafeAdminActiveVersionId_(currentVersionId)) {
+      throw new Error("Cloudflare committed selector has no valid current version.");
+    }
+    return Object.assign({}, selector, { currentVersionId });
+  };
+
+  const startAdminSelectorReadV2_ = (signalRaw) =>
+    runAdminPublicDataRequestWithTimeout_(
+      (requestSignal) => loadAdminCommittedSelectorV2_(requestSignal),
+      signalRaw,
+      ADMIN_PUBLIC_SELECTOR_TIMEOUT_MS,
+      "Cloudflare committed selector"
+    )
+      .then((selector) => ({ ok: true, selector }))
+      .catch((error) => ({ ok: false, error }));
+
+  const validateAdminUnlockControlSnapshotV2_ = (snapshotRaw) => {
+    const snapshot = snapshotRaw && typeof snapshotRaw === "object" && !Array.isArray(snapshotRaw)
+      ? snapshotRaw
+      : null;
+    if (!snapshot || snapshot.authenticated !== true) {
+      throw new Error("Admin unlock V2 returned an invalid authentication result.");
+    }
+    if (Number(snapshot.schemaVersion) !== ADMIN_UNLOCK_V2_SCHEMA_VERSION) {
+      const error = new Error("Admin unlock V2 returned an unsupported schema.");
+      error.code = "ADMIN_UNLOCK_V2_UNSUPPORTED_SCHEMA";
+      throw error;
+    }
+    const activeVersionId = toStr(snapshot.activeVersionId).trim();
+    if (!isSafeAdminActiveVersionId_(activeVersionId)) {
+      throw new Error("Admin unlock V2 returned an invalid canonical active version.");
+    }
+    return Object.assign({}, snapshot, { activeVersionId });
+  };
+
+  const loadAdminUnlockControlSnapshotV2_ = async (passwordRaw) =>
+    validateAdminUnlockControlSnapshotV2_(
+      await runServerMethod("getAdminUnlockSnapshotV2", [toStr(passwordRaw)])
+    );
+
+  const applyAdminCwlLeagueSignupsSectionV2_ = (sectionRaw) => {
+    const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
+    if (section && section.ok === true && section.value && typeof section.value === "object" && !Array.isArray(section.value)) {
+      state.cwlLeagueSignupsAvailable = true;
+      state.cwlLeagueSignupsError = "";
+      return cloneJson(section.value);
+    }
+    state.cwlLeagueSignupsAvailable = false;
+    state.cwlLeagueSignupsError = toStr(section && section.error).trim() || "Authenticated CWL preferences failed to load.";
+    return null;
+  };
+
+  const applyAdminUnlockControlSectionsV2_ = (controlRaw) => {
+    const control = controlRaw && typeof controlRaw === "object" ? controlRaw : {};
+    const settingsResults = [
+      applyAdminWorkspaceBootstrapSection_(control.autoRefresh, "autoRefreshSettings", "Auto-refresh settings"),
+      applyAdminWorkspaceBootstrapSection_(control.donationRefresh, "donationRefreshSettings", "Donation-refresh settings"),
+    ];
+    const cwlLeagueSignups = applyAdminCwlLeagueSignupsSectionV2_(control.cwlLeagueSignups);
+    state.autoRefreshRuntimeError = settingsResults[0] && settingsResults[0].status === "rejected"
+      ? toErrorMessage(settingsResults[0].reason)
+      : "";
+    state.donationRefreshRuntimeError = settingsResults[1] && settingsResults[1].status === "rejected"
+      ? toErrorMessage(settingsResults[1].reason)
+      : "";
+    renderAutoRefreshUi();
+    renderDonationRefreshUi();
+    refreshCwlPreferenceApplyUi_();
+    return { settingsResults, cwlLeagueSignups };
+  };
+
+  const attachAuthenticatedCwlLeagueSignupsV2_ = (rosterDataRaw, cwlLeagueSignupsRaw) => {
+    const rosterData = rosterDataRaw && typeof rosterDataRaw === "object" && !Array.isArray(rosterDataRaw)
+      ? rosterDataRaw
+      : null;
+    if (!rosterData) throw new Error("Admin roster snapshot is invalid.");
+    if (Object.prototype.hasOwnProperty.call(rosterData, "cwlLeagueSignups")) {
+      delete rosterData.cwlLeagueSignups;
+    }
+    if (state.cwlLeagueSignupsAvailable && cwlLeagueSignupsRaw && typeof cwlLeagueSignupsRaw === "object") {
+      rosterData.cwlLeagueSignups = cwlLeagueSignupsRaw;
+    }
+    return rosterData;
+  };
+
+  const loadAdminRosterForControlSnapshotV2_ = async (controlRaw, selectorResultRaw, passwordRaw, signalRaw) => {
+    const control = validateAdminUnlockControlSnapshotV2_(controlRaw);
+    const expectedVersionId = control.activeVersionId;
+    const selectorResult = selectorResultRaw && typeof selectorResultRaw === "object" ? selectorResultRaw : {};
+    const api = getRosterPublicDataApi_();
+    let fallbackReason = "";
+
+    if (
+      api &&
+      selectorResult.ok === true &&
+      selectorResult.selector &&
+      toStr(selectorResult.selector.currentVersionId).trim() === expectedVersionId
+    ) {
+      try {
+        const loaded = await runAdminPublicDataRequestWithTimeout_(
+          (requestSignal) => api.loadExactActiveVersion(expectedVersionId, {
+            signal: requestSignal,
+            retryCount: 1,
+          }),
+          signalRaw,
+          ADMIN_PUBLIC_EXACT_LOAD_TIMEOUT_MS,
+          "Cloudflare exact active generation"
+        );
+        if (
+          !loaded ||
+          toStr(loaded.activeVersionId).trim() !== expectedVersionId ||
+          !loaded.data ||
+          !Array.isArray(loaded.data.rosters)
+        ) {
+          throw new Error("Exact public-data loader returned a different or invalid generation.");
+        }
+        return {
+          rosterData: loaded.data,
+          sourceVersionId: expectedVersionId,
+          dataSource: "cloudflare-exact",
+          fallbackReason: "",
+        };
+      } catch (err) {
+        if (err && toStr(err.name) === "AbortError") throw err;
+        fallbackReason = "exact-version-load-failed";
+      }
+    } else if (!api) {
+      fallbackReason = "exact-loader-unavailable";
+    } else if (!selectorResult.ok) {
+      fallbackReason = "selector-unavailable";
+    } else {
+      fallbackReason = "selector-version-mismatch";
+    }
+
+    const canonical = await runServerMethod("getAdminRosterSnapshotV2", [
+      toStr(passwordRaw),
+      expectedVersionId,
+    ]);
+    const sourceVersionId = toStr(canonical && canonical.sourceVersionId).trim();
+    const rosterData = canonical && canonical.rosterData;
+    if (
+      !canonical ||
+      canonical.authenticated !== true ||
+      Number(canonical.schemaVersion) !== ADMIN_UNLOCK_V2_SCHEMA_VERSION ||
+      sourceVersionId !== expectedVersionId ||
+      !rosterData ||
+      !Array.isArray(rosterData.rosters)
+    ) {
+      const error = new Error("Canonical admin roster snapshot did not match the authenticated active version.");
+      error.code = ADMIN_ACTIVE_VERSION_CONFLICT_CODE;
+      throw error;
+    }
+    return {
+      rosterData,
+      sourceVersionId,
+      dataSource: "apps-script-canonical",
+      fallbackReason: fallbackReason || "canonical-required",
+    };
+  };
+
+  const markAdminSourceVersionDriftIfNeeded_ = () => {
+    const loadedVersionId = toStr(state.loadedSourceVersionId).trim();
+    const runtimeVersionId = toStr(state.latestRuntimeVersionId).trim();
+    if (!loadedVersionId || !runtimeVersionId || loadedVersionId === runtimeVersionId) return false;
+    state.sourceVersionDrifted = true;
+    const publishBtn = $("#publishBtn");
+    if (publishBtn) publishBtn.disabled = true;
+    setStatus("Active data changed while this workspace was loading. Reload active config before publishing.");
+    return true;
+  };
+
+  const startAdminRuntimeRepairV2_ = (passwordRaw, expectedVersionIdRaw, attemptIdRaw) => {
+    const password = toStr(passwordRaw);
+    const expectedVersionId = toStr(expectedVersionIdRaw).trim();
+    const attemptId = Number(attemptIdRaw);
+    const repairRequestId = state.runtimeRepairRequestId + 1;
+    state.runtimeRepairRequestId = repairRequestId;
+    state.runtimeRepairBusy = true;
+    state.autoRefreshRuntimeError = "";
+    state.donationRefreshRuntimeError = "";
+    renderAutoRefreshUi();
+    renderDonationRefreshUi();
+
+    return runServerMethod("repairAdminRuntimeState", [password, expectedVersionId])
+      .then((resultRaw) => {
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password) || state.runtimeRepairRequestId !== repairRequestId) return null;
+        const loadedSourceVersionId = toStr(state.loadedSourceVersionId).trim();
+        if (loadedSourceVersionId && loadedSourceVersionId !== expectedVersionId) return null;
+        const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
+        state.latestRuntimeVersionId = toStr(result.activeVersionId).trim();
+        const busy = result.status === "busy" || result.busy === true;
+        if (busy) {
+          const message = "Runtime repair is busy; the permanent watchdog will retry.";
+          state.autoRefreshRuntimeError = message;
+          state.donationRefreshRuntimeError = message;
+          return result;
+        }
+        const applyVerified = (sectionRaw, stateKey, errorKey, labelRaw) => {
+          const section = sectionRaw && typeof sectionRaw === "object" ? sectionRaw : null;
+          if (section && section.ok === true && section.value && typeof section.value === "object") {
+            state[stateKey] = section.value;
+            state[errorKey] = "";
+            return;
+          }
+          state[errorKey] = toStr(section && section.error).trim() || (labelRaw + " runtime verification failed.");
+        };
+        applyVerified(result.autoRefresh, "autoRefreshSettings", "autoRefreshRuntimeError", "Auto-refresh");
+        applyVerified(result.donationRefresh, "donationRefreshSettings", "donationRefreshRuntimeError", "Donation-refresh");
+        if (result.status === "partial") {
+          const families = result.families && typeof result.families === "object" ? result.families : {};
+          const describeFamilyFailure = (familyRaw, labelRaw) => {
+            const family = familyRaw && typeof familyRaw === "object" ? familyRaw : null;
+            const value = family && family.value && typeof family.value === "object" ? family.value : null;
+            if (family && family.ok === true && !(value && (
+              value.ok === false ||
+              value.scheduled === false && value.degraded === true
+            ))) return "";
+            const detail = toStr(
+              (family && family.error) ||
+              (value && (value.error || value.reason))
+            ).trim();
+            return labelRaw + (detail ? (": " + detail) : " verification was incomplete.");
+          };
+          const appendWarning = (stateKey, warningRaw) => {
+            const warning = toStr(warningRaw).trim();
+            if (!warning) return;
+            state[stateKey] = state[stateKey]
+              ? (state[stateKey] + " | " + warning)
+              : warning;
+          };
+          const permanentWarning = describeFamilyFailure(families.permanent, "Permanent scheduler");
+          const regularWarWarning = describeFamilyFailure(
+            families.regularWarFinalization,
+            "Regular-war scheduler"
+          );
+          appendWarning("autoRefreshRuntimeError", permanentWarning);
+          appendWarning("donationRefreshRuntimeError", permanentWarning);
+          appendWarning("autoRefreshRuntimeError", regularWarWarning);
+          if (
+            !state.autoRefreshRuntimeError &&
+            !state.donationRefreshRuntimeError
+          ) {
+            const genericWarning = "Runtime verification completed partially.";
+            state.autoRefreshRuntimeError = genericWarning;
+            state.donationRefreshRuntimeError = genericWarning;
+          }
+        }
+        markAdminSourceVersionDriftIfNeeded_();
+        return result;
+      })
+      .catch((err) => {
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password) || state.runtimeRepairRequestId !== repairRequestId) return null;
+        const loadedSourceVersionId = toStr(state.loadedSourceVersionId).trim();
+        if (loadedSourceVersionId && loadedSourceVersionId !== expectedVersionId) return null;
+        const message = toErrorMessage(err) || "Runtime verification failed.";
+        state.autoRefreshRuntimeError = message;
+        state.donationRefreshRuntimeError = message;
+        return null;
+      })
+      .finally(() => {
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password) || state.runtimeRepairRequestId !== repairRequestId) return;
+        state.runtimeRepairBusy = false;
+        renderAutoRefreshUi();
+        renderDonationRefreshUi();
+      });
+  };
 
   // Load active roster data.
   const loadActiveRosterData = () => runServerMethod("getRosterData", []);
@@ -6559,8 +7046,7 @@
     renderPreviewFromState();
     notifyRosterDataChanged_();
     markReportStale();
-    const publishBtn = $("#publishBtn");
-    if (publishBtn) publishBtn.disabled = false;
+    markPreviewDirty_();
     if (statusMsg) setStatus(statusMsg);
   };
 
@@ -6847,8 +7333,7 @@
         tagInput.value = normalized;
         if (toStr(r.connectedClanTag).trim() !== normalized) {
           r.connectedClanTag = normalized;
-          const publishBtn = $("#publishBtn");
-          if (publishBtn) publishBtn.disabled = false;
+          markPreviewDirty_();
           setStatus("Connected clan tag updated for " + rosterId + ".");
           markReportStale("Rosters changed after updating connected clan tags.");
         }
@@ -6915,8 +7400,7 @@
           renderPreviewFromState();
           return;
         }
-        const publishBtn = $("#publishBtn");
-        if (publishBtn) publishBtn.disabled = false;
+        markPreviewDirty_();
         setStatus("Tracking mode updated for " + rosterId + ".");
         markReportStale("Rosters changed after tracking mode update. Re-run compare with rosters.");
         renderPreviewFromState();
@@ -6961,8 +7445,7 @@
         clearSavedBenchSuggestionsForRoster_(rosterId);
         clearSuggestionMarksForRoster_(rosterId);
         renderPreviewFromState();
-        const publishBtn = $("#publishBtn");
-        if (publishBtn) publishBtn.disabled = false;
+        markPreviewDirty_();
         markReportStale("Rosters changed after clearing marks. Re-run compare with rosters.");
         setRowStatus("saved suggestions cleared", false);
       };
@@ -6987,6 +7470,9 @@
     if (state.bulkRefreshBusy) {
       throw new Error("Refresh all is already running.");
     }
+    if (state.publishBusy || state.activeConfigReloadBusy) {
+      throw new Error("Wait for the current publish or active-config load to finish.");
+    }
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) {
       throw new Error(PREVIEW_NOT_READY_MESSAGE);
     }
@@ -7003,6 +7489,8 @@
 
     clearSuggestionMarks_();
     state.bulkRefreshBusy = true;
+    syncPublishButtonAvailability_();
+    syncLoadActiveButtonAvailability_();
     for (let i = 0; i < rosters.length; i++) {
       const rosterId = toStr(rosters[i] && rosters[i].id).trim();
       if (!rosterId) continue;
@@ -7071,17 +7559,43 @@
       throw err;
     } finally {
       state.bulkRefreshBusy = false;
+      syncPublishButtonAvailability_();
+      syncLoadActiveButtonAvailability_();
       refreshAdminWorkflowUi();
     }
   };
 
   // Apply already-loaded active config to the admin preview.
-  const applyActiveConfigIntoPreview_ = (rosterData, statusOnSuccessRaw) => {
+  const applyActiveConfigIntoPreview_ = (rosterData, statusOnSuccessRaw, optionsRaw) => {
     if (!rosterData || !Array.isArray(rosterData.rosters)) {
       throw new Error("Active roster data is invalid. Expected: { rosters: [...] }");
     }
 
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const contractVersion = Math.max(1, Number(options.contractVersion) || 1);
+    const sourceVersionId = toStr(options.sourceVersionId).trim();
+    if (contractVersion >= ADMIN_UNLOCK_V2_SCHEMA_VERSION && !isSafeAdminActiveVersionId_(sourceVersionId)) {
+      throw new Error("Active roster data is missing its canonical source version.");
+    }
     state.lastRosterData = rosterData;
+    state.previewDirty = false;
+    state.previewRevision += 1;
+    state.unlockContractVersion = contractVersion;
+    state.loadedSourceVersionId = sourceVersionId;
+    state.sourceVersionDrifted = false;
+    if (Object.prototype.hasOwnProperty.call(options, "cwlLeagueSignupsAvailable")) {
+      state.cwlLeagueSignupsAvailable = options.cwlLeagueSignupsAvailable === true;
+      state.cwlLeagueSignupsError = state.cwlLeagueSignupsAvailable
+        ? ""
+        : (toStr(options.cwlLeagueSignupsError).trim() || state.cwlLeagueSignupsError);
+    } else if (contractVersion < ADMIN_UNLOCK_V2_SCHEMA_VERSION) {
+      state.cwlLeagueSignupsAvailable = !!(
+        rosterData.cwlLeagueSignups &&
+        typeof rosterData.cwlLeagueSignups === "object" &&
+        !Array.isArray(rosterData.cwlLeagueSignups)
+      );
+      state.cwlLeagueSignupsError = state.cwlLeagueSignupsAvailable ? "" : "CWL preferences were not included in the legacy snapshot.";
+    }
     normalizeRosterOrderInData_(state.lastRosterData);
     clearRosterStatuses();
     state.benchMarksByRoster = {};
@@ -7101,9 +7615,9 @@
 
     renderPreviewFromState();
     notifyRosterDataChanged_();
-    const publishBtn = $("#publishBtn");
-    if (publishBtn) publishBtn.disabled = false;
+    syncPublishButtonAvailability_();
     setStatus(toStr(statusOnSuccessRaw).trim() || "Active config loaded.");
+    markAdminSourceVersionDriftIfNeeded_();
     return rosterData;
   };
 
@@ -7115,8 +7629,39 @@
 
     try {
       setStatus("Loading active config...");
+      if (state.unlockContractVersion >= ADMIN_UNLOCK_V2_SCHEMA_VERSION && state.password) {
+        let selectorPromise = startAdminSelectorReadV2_();
+        let control = await loadAdminUnlockControlSnapshotV2_(state.password);
+        let cwlLeagueSignups = applyAdminCwlLeagueSignupsSectionV2_(control.cwlLeagueSignups);
+        let loaded = null;
+        try {
+          loaded = await loadAdminRosterForControlSnapshotV2_(
+            control,
+            await selectorPromise,
+            state.password
+          );
+        } catch (err) {
+          if (!isAdminActiveVersionConflict_(err)) throw err;
+          selectorPromise = startAdminSelectorReadV2_();
+          control = await loadAdminUnlockControlSnapshotV2_(state.password);
+          cwlLeagueSignups = applyAdminCwlLeagueSignupsSectionV2_(control.cwlLeagueSignups);
+          loaded = await loadAdminRosterForControlSnapshotV2_(
+            control,
+            await selectorPromise,
+            state.password
+          );
+        }
+        state.latestRuntimeVersionId = "";
+        const rosterData = attachAuthenticatedCwlLeagueSignupsV2_(loaded.rosterData, cwlLeagueSignups);
+        return applyActiveConfigIntoPreview_(rosterData, statusOnSuccess, {
+          contractVersion: ADMIN_UNLOCK_V2_SCHEMA_VERSION,
+          sourceVersionId: loaded.sourceVersionId,
+          cwlLeagueSignupsAvailable: state.cwlLeagueSignupsAvailable,
+          cwlLeagueSignupsError: state.cwlLeagueSignupsError,
+        });
+      }
       const rosterData = await loadActiveRosterData();
-      return applyActiveConfigIntoPreview_(rosterData, statusOnSuccess);
+      return applyActiveConfigIntoPreview_(rosterData, statusOnSuccess, { contractVersion: 1 });
     } catch (err) {
       setStatus("");
       if (!silentError) {
@@ -7183,13 +7728,45 @@
 
     // Unlock state.
     const handleUnlock = async () => {
-      state.password = toStr($("#pw") && $("#pw").value).trim();
-      if (!state.password) {
+      const password = toStr($("#pw") && $("#pw").value).trim();
+      if (!password) {
         setLoginStatus("Password is empty.");
         renderAutoRefreshUi();
         renderDonationRefreshUi();
         return;
       }
+
+      state.unlockAttemptId += 1;
+      const attemptId = state.unlockAttemptId;
+      if (state.unlockAbortController && typeof state.unlockAbortController.abort === "function") {
+        state.unlockAbortController.abort();
+      }
+      const abortController = typeof AbortController === "function" ? new AbortController() : null;
+      state.unlockAbortController = abortController;
+      state.password = password;
+      state.authenticated = false;
+      state.activeConfigReloadBusy = true;
+      state.lastRosterData = null;
+      state.previewDirty = false;
+      state.previewRevision += 1;
+      state.publishBusy = false;
+      state.publishAttemptId += 1;
+      setAdminWorkspaceMutationBusy_(false);
+      state.unlockContractVersion = 0;
+      state.loadedSourceVersionId = "";
+      state.latestRuntimeVersionId = "";
+      state.sourceVersionDrifted = false;
+      state.runtimeRepairBusy = false;
+      state.runtimeRepairRequestId += 1;
+      state.autoRefreshRuntimeError = "";
+      state.donationRefreshRuntimeError = "";
+      state.cwlLeagueSignupsAvailable = false;
+      state.cwlLeagueSignupsError = "";
+      clearRosterStatuses();
+      clearSuggestionMarks_();
+      renderPreviewFromState();
+      syncPublishButtonAvailability_();
+      syncLoadActiveButtonAvailability_();
 
       let unlockSucceeded = false;
       let postUnlockWarning = "";
@@ -7201,13 +7778,9 @@
       show("#adminPanel", true);
       setAdminWorkspaceLoading_(true);
 
-      try {
-        setLoginStatus("Verifying and loading workspace...");
-        const activeConfigFetchPromise = loadActiveRosterData()
-          .then((rosterData) => ({ ok: true, rosterData }))
-          .catch((loadErr) => ({ ok: false, error: loadErr }));
-        const settingsResults = await loadAdminWorkspaceBootstrapSettings_();
-
+      const showAuthenticatedWorkspace = () => {
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return false;
+        state.authenticated = true;
         setAuthCardUnlocked(true);
         setActiveAdminTab(state.activeAdminTab, { focusButton: false });
         queueAdminCompactTabsVisibilitySync();
@@ -7218,13 +7791,25 @@
         if (pwInput) pwInput.disabled = true;
         refreshAdminWorkflowUi();
         setLoginStatus("Unlocked. Loading workspace...");
+        return true;
+      };
+
+      const runLegacyUnlock = async () => {
+        const activeConfigFetchPromise = loadActiveRosterData()
+          .then((rosterData) => ({ ok: true, rosterData }))
+          .catch((error) => ({ ok: false, error }));
+        const settingsResults = await loadAdminWorkspaceBootstrapSettings_();
+        state.unlockContractVersion = 1;
+        if (!showAuthenticatedWorkspace()) return { stale: true };
         const activeConfigFetchResult = await activeConfigFetchPromise;
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return { stale: true };
         let activeConfigResult = { ok: false };
         if (activeConfigFetchResult && activeConfigFetchResult.ok) {
           try {
             applyActiveConfigIntoPreview_(
               activeConfigFetchResult.rosterData,
-              "Active config loaded."
+              "Active config loaded.",
+              { contractVersion: 1 }
             );
             activeConfigResult = { ok: true };
           } catch (loadErr) {
@@ -7237,28 +7822,142 @@
         if (failedSettings.length) {
           postUnlockWarning = failedSettings.map((result) => toErrorMessage(result.reason)).join(" | ");
         }
+        return activeConfigResult;
+      };
+
+      try {
+        setLoginStatus("Verifying and loading workspace...");
+        let activeConfigResult = { ok: false };
+        const useV2 = !(window && window.ROSTER_ADMIN_UNLOCK_V2_ENABLED === false);
+        if (!useV2) {
+          activeConfigResult = await runLegacyUnlock();
+        } else {
+          let selectorPromise = startAdminSelectorReadV2_(abortController && abortController.signal);
+          let control = null;
+          try {
+            control = await loadAdminUnlockControlSnapshotV2_(password);
+          } catch (controlErr) {
+            if (!isAdminUnlockV2Unavailable_(controlErr)) throw controlErr;
+            if (abortController && typeof abortController.abort === "function") abortController.abort();
+            activeConfigResult = await runLegacyUnlock();
+          }
+
+          if (control) {
+            if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return;
+            // Authentication succeeded, but publishing remains fail-closed
+            // until an exact canonical generation has loaded.
+            state.unlockContractVersion = ADMIN_UNLOCK_V2_SCHEMA_VERSION;
+            state.loadedSourceVersionId = "";
+            syncPublishButtonAvailability_();
+            if (!showAuthenticatedWorkspace()) return;
+            let appliedControl = applyAdminUnlockControlSectionsV2_(control);
+            startAdminRuntimeRepairV2_(password, control.activeVersionId, attemptId);
+            let selectorResult = await selectorPromise;
+            let loaded = null;
+            try {
+              loaded = await loadAdminRosterForControlSnapshotV2_(
+                control,
+                selectorResult,
+                password,
+                abortController && abortController.signal
+              );
+            } catch (loadErr) {
+              if (!isAdminActiveVersionConflict_(loadErr)) {
+                activeConfigResult = { ok: false, error: loadErr };
+              } else {
+                try {
+                  selectorPromise = startAdminSelectorReadV2_(abortController && abortController.signal);
+                  control = await loadAdminUnlockControlSnapshotV2_(password);
+                  if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return;
+                  appliedControl = applyAdminUnlockControlSectionsV2_(control);
+                  selectorResult = await selectorPromise;
+                  loaded = await loadAdminRosterForControlSnapshotV2_(
+                    control,
+                    selectorResult,
+                    password,
+                    abortController && abortController.signal
+                  );
+                } catch (retryErr) {
+                  activeConfigResult = { ok: false, error: retryErr };
+                }
+              }
+            }
+
+            if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return;
+            if (loaded) {
+              try {
+                const rosterData = attachAuthenticatedCwlLeagueSignupsV2_(
+                  loaded.rosterData,
+                  appliedControl.cwlLeagueSignups
+                );
+                applyActiveConfigIntoPreview_(
+                  rosterData,
+                  loaded.dataSource === "cloudflare-exact"
+                    ? "Active config loaded from exact committed data."
+                    : "Active config loaded from the canonical backend.",
+                  {
+                    contractVersion: ADMIN_UNLOCK_V2_SCHEMA_VERSION,
+                    sourceVersionId: loaded.sourceVersionId,
+                    cwlLeagueSignupsAvailable: state.cwlLeagueSignupsAvailable,
+                    cwlLeagueSignupsError: state.cwlLeagueSignupsError,
+                  }
+                );
+                activeConfigResult = { ok: true };
+              } catch (loadErr) {
+                activeConfigResult = { ok: false, error: loadErr };
+              }
+            }
+          }
+        }
+
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return;
         if (activeConfigResult.ok) {
-          setLoginStatus("Unlocked.");
+          setLoginStatus(state.cwlLeagueSignupsAvailable || state.unlockContractVersion < ADMIN_UNLOCK_V2_SCHEMA_VERSION
+            ? "Unlocked."
+            : "Unlocked (CWL preferences unavailable).");
         } else {
           setLoginStatus("Unlocked (auto-load failed).");
-          setStatus("Auto-load failed. Refresh and unlock again.");
+          setStatus("Active config is unavailable. Reload it before using roster actions.");
         }
         setAdminWorkspaceLoading_(false);
+        state.activeConfigReloadBusy = false;
+        syncLoadActiveButtonAvailability_();
+        syncPublishButtonAvailability_();
+        refreshRefreshAllUi();
         unlockSucceeded = true;
       } catch (err) {
+        if (!isCurrentAdminUnlockAttempt_(attemptId, password)) return;
+        if (abortController && typeof abortController.abort === "function") abortController.abort();
         setAdminWorkspaceLoading_(false);
         show("#adminPanel", false);
         setAuthCardUnlocked(false);
         setLoginStatus("Authentication failed.");
         state.password = "";
+        state.authenticated = false;
+        state.activeConfigReloadBusy = false;
+        state.unlockContractVersion = 0;
+        state.loadedSourceVersionId = "";
+        state.latestRuntimeVersionId = "";
+        state.sourceVersionDrifted = false;
         state.autoRefreshSettings = null;
         state.autoRefreshBusy = false;
+        state.autoRefreshRuntimeError = "";
         state.donationRefreshSettings = null;
         state.donationRefreshBusy = false;
+        state.donationRefreshRuntimeError = "";
+        state.runtimeRepairBusy = false;
+        state.runtimeRepairRequestId += 1;
+        state.cwlLeagueSignupsAvailable = false;
+        state.cwlLeagueSignupsError = "";
         renderAutoRefreshUi();
         renderDonationRefreshUi();
+        refreshCwlPreferenceApplyUi_();
+        syncPublishButtonAvailability_();
+        syncLoadActiveButtonAvailability_();
+        refreshRefreshAllUi();
         alert("Unlock failed: " + toErrorMessage(err));
       } finally {
+        if (state.unlockAttemptId !== attemptId) return;
         if (!unlockSucceeded) {
           if (loginBtn) {
             loginBtn.disabled = false;
@@ -7273,6 +7972,7 @@
 
     const loginBtn = $("#loginBtn");
     const pwInput = $("#pw");
+    const loadActiveBtn = $("#loadActiveBtn");
     if (loginBtn) {
       loginBtn.disabled = false;
       loginBtn.textContent = "Unlock";
@@ -7287,6 +7987,36 @@
       });
     }
     setLoginStatus("");
+    syncLoadActiveButtonAvailability_();
+
+    if (loadActiveBtn) {
+      loadActiveBtn.onclick = async () => {
+        if (loadActiveBtn.disabled || !state.authenticated) return;
+        if (
+          state.previewDirty &&
+          typeof window.confirm === "function" &&
+          !window.confirm("Reloading active config will discard your unsaved preview changes. Continue?")
+        ) {
+          return;
+        }
+        state.activeConfigReloadBusy = true;
+        syncLoadActiveButtonAvailability_();
+        setAdminWorkspaceLoading_(true);
+        try {
+          await loadActiveConfigIntoPreview({
+            statusOnSuccess: "Active config reloaded. Review the current snapshot before publishing.",
+          });
+        } catch (err) {
+          // loadActiveConfigIntoPreview reports the actionable error.
+        } finally {
+          state.activeConfigReloadBusy = false;
+          setAdminWorkspaceLoading_(false);
+          syncLoadActiveButtonAvailability_();
+          syncPublishButtonAvailability_();
+          refreshRefreshAllUi();
+        }
+      };
+    }
 
     const refreshAllBtn = $("#refreshAllBtn");
     if (refreshAllBtn) {
@@ -7505,6 +8235,12 @@
     }
 
     $("#publishBtn").onclick = async () => {
+      if (state.publishBusy || state.activeConfigReloadBusy || state.bulkRefreshBusy) return;
+      const publishAttemptId = state.publishAttemptId + 1;
+      state.publishAttemptId = publishAttemptId;
+      let enteredPublishBusy = false;
+      let useV2Publish = false;
+      let v2PublishRequestStarted = false;
       try {
         if (!state.lastRosterData) throw new Error(PREVIEW_NOT_READY_MESSAGE);
         const now = Date.now();
@@ -7512,6 +8248,18 @@
 
         const pw = (state.password || toStr($("#pw") && $("#pw").value)).trim();
         if (!pw) throw new Error("Password is missing.");
+        useV2Publish = state.unlockContractVersion >= ADMIN_UNLOCK_V2_SCHEMA_VERSION;
+        const expectedSourceVersionId = toStr(state.loadedSourceVersionId).trim();
+        if (useV2Publish && state.sourceVersionDrifted) {
+          throw createAdminApiError(
+            "Active data changed after this workspace loaded. Reload active config before publishing.",
+            false,
+            ADMIN_ACTIVE_VERSION_CONFLICT_CODE
+          );
+        }
+        if (useV2Publish && !isSafeAdminActiveVersionId_(expectedSourceVersionId)) {
+          throw new Error("This workspace has no canonical source version. Reload active config before publishing.");
+        }
 
         syncRosterOrderFromCurrentArray_(state.lastRosterData);
         normalizeRosterOrderInData_(state.lastRosterData);
@@ -7519,12 +8267,67 @@
         reconcileAllActiveCwlPreparationAssignmentsLocal_();
         normalizeAllRosterPublicLineupProjectionsLocal_();
 
-        $("#publishBtn").disabled = true;
+        const submittedPreviewRevision = state.previewRevision;
+        const publishPayload = cloneJson(state.lastRosterData);
+        state.publishBusy = true;
+        enteredPublishBusy = true;
+        setAdminWorkspaceMutationBusy_(true);
+        syncPublishButtonAvailability_();
+        syncLoadActiveButtonAvailability_();
+        refreshRefreshAllUi();
         setStatus("Publishing...");
 
-        const publishResult = await runServerMethod("publishRosterData", [state.lastRosterData, pw]);
+        v2PublishRequestStarted = useV2Publish;
+        const publishResult = useV2Publish
+          ? await runServerMethod("publishRosterDataV2", [
+              publishPayload,
+              pw,
+              expectedSourceVersionId,
+              { includeRosterDataInResult: true },
+            ])
+          : await runServerMethod("publishRosterData", [publishPayload, pw]);
+
+        if (state.publishAttemptId !== publishAttemptId) return;
 
         state.publishCooldownUntil = Date.now() + 10_000;
+        if (useV2Publish) {
+          const activeVersionId = toStr(publishResult && publishResult.activeVersionId).trim();
+          const canonicalRosterData = publishResult && publishResult.rosterData;
+          if (
+            !isSafeAdminActiveVersionId_(activeVersionId) ||
+            !canonicalRosterData ||
+            !Array.isArray(canonicalRosterData.rosters)
+          ) {
+            state.loadedSourceVersionId = "";
+            state.sourceVersionDrifted = true;
+            $("#publishBtn").disabled = true;
+            setStatus("Published, but the canonical result was not confirmed. Reload active config before publishing again.");
+            alert("Publish completed, but the backend did not return the exact canonical result. Reload active config before making another publish.");
+            return;
+          }
+          state.latestRuntimeVersionId = activeVersionId;
+          if (state.previewRevision !== submittedPreviewRevision) {
+            state.sourceVersionDrifted = true;
+            setStatus("Published the submitted snapshot, but newer local edits were not included. Reload active config and reapply those edits before publishing again.");
+            alert("Publish completed, but the preview changed while it was running. Your newer local edits were not overwritten; reload active config and reapply them before publishing again.");
+            return;
+          }
+          const currentCwlLeagueSignups = state.cwlLeagueSignupsAvailable &&
+            publishPayload.cwlLeagueSignups &&
+            typeof publishPayload.cwlLeagueSignups === "object"
+              ? cloneJson(publishPayload.cwlLeagueSignups)
+              : null;
+          const rebasedRosterData = attachAuthenticatedCwlLeagueSignupsV2_(
+            canonicalRosterData,
+            currentCwlLeagueSignups
+          );
+          applyActiveConfigIntoPreview_(rebasedRosterData, "Published successfully.", {
+            contractVersion: ADMIN_UNLOCK_V2_SCHEMA_VERSION,
+            sourceVersionId: activeVersionId,
+            cwlLeagueSignupsAvailable: state.cwlLeagueSignupsAvailable,
+            cwlLeagueSignupsError: state.cwlLeagueSignupsError,
+          });
+        }
         const playerCount = publishResult && Number.isFinite(Number(publishResult.playerCount)) ? Number(publishResult.playerCount) : null;
         const noteCount = publishResult && Number.isFinite(Number(publishResult.noteCount)) ? Number(publishResult.noteCount) : null;
         const metricEntryCount = publishResult && Number.isFinite(Number(publishResult.metricEntryCount))
@@ -7539,13 +8342,35 @@
         }
 
         setTimeout(() => {
-          $("#publishBtn").disabled = false;
-          setStatus("Ready.");
-        }, 10_000);
+          if (state.publishAttemptId !== publishAttemptId) return;
+          if (syncPublishButtonAvailability_()) setStatus("Ready.");
+        }, 10_050);
       } catch (err) {
-        $("#publishBtn").disabled = false;
+        if (state.publishAttemptId !== publishAttemptId) return;
+        if (isAdminActiveVersionConflict_(err)) {
+          state.sourceVersionDrifted = true;
+          $("#publishBtn").disabled = true;
+          setStatus("Publish blocked because active data changed. Reload active config, review the new snapshot, and reapply your edits.");
+          alert("Publish blocked: active data changed after this workspace loaded. Nothing was written. Reload active config before publishing.");
+          return;
+        }
+        if (v2PublishRequestStarted) {
+          state.sourceVersionDrifted = true;
+          setStatus("The publish result could not be confirmed. Reload active config before publishing again; your local preview remains available for review.");
+          alert("Publish result unconfirmed: " + toErrorMessage(err) + " Reload active config before publishing again.");
+          return;
+        }
+        syncPublishButtonAvailability_();
         setStatus("");
         alert("Publish failed: " + toErrorMessage(err));
+      } finally {
+        if (enteredPublishBusy && state.publishAttemptId === publishAttemptId) {
+          state.publishBusy = false;
+          setAdminWorkspaceMutationBusy_(false);
+          syncLoadActiveButtonAvailability_();
+          syncPublishButtonAvailability_();
+          refreshRefreshAllUi();
+        }
       }
     };
   };

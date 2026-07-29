@@ -40,6 +40,7 @@ const loadBackend = () => {
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (key) => properties.has(key) ? properties.get(key) : null,
+        getProperties: () => Object.fromEntries(properties),
         setProperty: (key, value) => properties.set(key, String(value)),
         setProperties: (values) => {
           for (const [key, value] of Object.entries(values || {})) properties.set(key, String(value));
@@ -761,6 +762,29 @@ test("active reader reconstructs the published active version before legacy acti
   assert.equal(reads.includes("activeVersions/version-1/rosters"), false);
 });
 
+test("canonical active writes propagate their new immutable version id through every return path", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  backend.cleanupFirebaseStorageRetentionBestEffort_ = () => ({ ok: true });
+  backend.enqueueCloudflareActiveTarget_ = () => ({ ok: true, queued: true });
+
+  const replaced = backend.replaceActiveRosterData_(rosterData, {
+    sourceSnapshot: {
+      versionId: "source-version",
+      rosterData,
+      text: JSON.stringify(rosterData),
+    },
+  });
+
+  assert.equal(backend.isSafeActiveVersionId_(replaced.versionId), true);
+  assert.equal(backend.readPublishedActiveVersionIdRaw_(), replaced.versionId);
+
+  backend.deferActiveRosterLockAction_ = () => true;
+  const deferred = backend.putValidatedActiveRosterDataToFirebase_(rosterData);
+  assert.equal(backend.isSafeActiveVersionId_(deferred.versionId), true);
+  assert.equal(backend.readPublishedActiveVersionIdRaw_(), deferred.versionId);
+});
+
 test("storage retention cleanup keeps live active versions and deletes historical storage", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildValidRosterData());
@@ -993,8 +1017,41 @@ test("publish with only Discord identity still runs metrics recapture", () => {
 
   assert.equal(captureCalls, 1);
   assert.equal(meta.metricEntryCount, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(meta, "rosterData"), false);
   assert.equal(backend.countPlayerMetricDataEntries_(written.playerMetrics), 1);
   assert.equal(identity.discordUsername, "phuuni");
+});
+
+test("publish meta returns the exact canonical written roster only when requested", () => {
+  const backend = loadBackend();
+  const data = buildValidRosterData();
+  const sourceSnapshot = { rosterData: buildValidRosterData(), text: "{}" };
+  let canonicalWritten = null;
+
+  backend.readActiveRosterSnapshot_ = () => sourceSnapshot;
+  backend.createPublishArchiveBackupFromSnapshot_ = () => ({ created: false, key: "" });
+  backend.cleanupPublishArchiveBackups_ = () => 0;
+  backend.firebaseRequestJson_ = () => null;
+  backend.markActiveDataWriteSuccess_ = () => null;
+  backend.reconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.replaceActiveRosterData_ = (payload) => {
+    canonicalWritten = backend.validateRosterData_(payload);
+    canonicalWritten.pageTitle = "Canonical server result";
+    return {
+      validatedRosterData: canonicalWritten,
+      text: JSON.stringify(canonicalWritten),
+      versionId: "version-canonical",
+    };
+  };
+
+  const meta = backend.writePublishedRosterData_(data, {
+    sourceSnapshot,
+    includeRosterDataInResult: true,
+  });
+
+  assert.equal(meta.activeVersionId, "version-canonical");
+  assert.equal(meta.rosterData.pageTitle, "Canonical server result");
+  assert.deepEqual(clone(meta.rosterData), clone(canonicalWritten));
 });
 
 test("active contract prunes empty name-only playerMetrics entries", () => {
@@ -2523,6 +2580,430 @@ test("admin workspace bootstrap preserves unlock when the settings lock is busy"
     ok: false,
     error: "settings lock timeout",
   });
+});
+
+test("Admin Unlock V2 authenticates before one small control batch and performs no runtime or roster work", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  backend.PropertiesService.getScriptProperties().setProperty("AUTO_REFRESH_ENABLED", "1");
+  backend.PropertiesService.getScriptProperties().setProperty("DONATION_REFRESH_ENABLED", "1");
+  backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "version-control");
+  backend.firebaseRequestJson_("active/cwlLeagueSignups", "PUT", backend.encodeFirebaseObjectKeysRecursive_({
+    schemaVersion: 2,
+    signupId: "signup-control",
+    status: "open",
+    createdAt: "2026-07-29T00:00:00.000Z",
+    optionsByKey: {},
+    preferencesByTag: {},
+    audit: {},
+  }));
+
+  const realBatchGet = backend.firebaseBatchGetJson_;
+  const batches = [];
+  backend.firebaseBatchGetJson_ = (paths, options) => {
+    batches.push(Array.from(paths || [], String));
+    return realBatchGet(paths, options);
+  };
+  backend.readActiveRosterSnapshot_ = () => {
+    throw new Error("control snapshot must not reconstruct the roster");
+  };
+  backend.findLatestAutoRefreshArchiveDate_ = () => {
+    throw new Error("control snapshot must not scan archives");
+  };
+  backend.reconcileAutoRefreshTriggerState_ = () => {
+    throw new Error("control snapshot must not repair triggers");
+  };
+  backend.ScriptApp = {
+    getProjectTriggers() {
+      throw new Error("control snapshot must not enumerate triggers");
+    },
+  };
+
+  const result = clone(backend.runAdminApiMethod_("getAdminUnlockSnapshotV2", ["secret"]));
+
+  assert.equal(result.schemaVersion, 2);
+  assert.equal(result.authenticated, true);
+  assert.equal(result.activeVersionId, "version-control");
+  assert.equal(result.autoRefresh.ok, true);
+  assert.equal(result.autoRefresh.value.enabled, true);
+  assert.equal(result.autoRefresh.value.runtimeVerified, false);
+  assert.equal(result.donationRefresh.value.enabled, true);
+  assert.equal(result.cwlLeagueSignups.ok, true);
+  assert.equal(result.cwlLeagueSignups.value.signupId, "signup-control");
+  assert.deepEqual(batches, [[
+    "activePublished/currentVersionId",
+    "active/cwlLeagueSignups",
+  ]]);
+
+  let postAuthReads = 0;
+  backend.firebaseBatchGetJson_ = () => {
+    postAuthReads += 1;
+    return {};
+  };
+  assert.throws(
+    () => backend.runAdminApiMethod_("getAdminUnlockSnapshotV2", ["wrong"]),
+    /Authentication failed/,
+  );
+  assert.equal(postAuthReads, 0);
+});
+
+test("Admin Unlock V2 reports private signup failure while salvaging the canonical pointer", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  backend.firebaseBatchGetJson_ = () => {
+    throw new Error("signup transport failed");
+  };
+  backend.readPublishedActiveVersionIdRaw_ = () => "version-salvaged";
+
+  const result = clone(backend.getAdminUnlockSnapshotV2("secret"));
+
+  assert.equal(result.authenticated, true);
+  assert.equal(result.activeVersionId, "version-salvaged");
+  assert.equal(result.activeRoster.ok, true);
+  assert.equal(result.activeRoster.recovered, true);
+  assert.equal(result.cwlLeagueSignups.ok, false);
+  assert.match(result.cwlLeagueSignups.error, /signup transport failed/);
+});
+
+test("Admin roster V2 reads one exact immutable generation in two batches and rejects pointer drift", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  backend.writeActiveRosterVersionShards_("version-exact", rosterData, {
+    publish: true,
+    source: "test",
+  });
+  const realBatchGet = backend.firebaseBatchGetJson_;
+  const batches = [];
+  backend.firebaseBatchGetJson_ = (paths, options) => {
+    batches.push(Array.from(paths || [], String));
+    return realBatchGet(paths, options);
+  };
+  const reads = [];
+  const realRequest = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (path, method, payload, query) => {
+    if (String(method || "GET").toUpperCase() === "GET") reads.push(String(path || ""));
+    return realRequest(path, method, payload, query);
+  };
+
+  const result = backend.getAdminRosterSnapshotV2("secret", "version-exact");
+
+  assert.equal(result.sourceVersionId, "version-exact");
+  assert.equal(result.rosterData.rosters[0].id, "main");
+  assert.equal(batches.length, 2);
+  assert.deepEqual(batches[0], [
+    "activePublished/currentVersionId",
+    "activeVersions/version-exact/manifest",
+  ]);
+  assert.ok(batches[1].includes("activeVersions/version-exact/rosters"));
+  assert.ok(batches[1].includes("activeVersions/version-exact/playerMetrics"));
+  assert.equal(reads.includes("active"), false);
+
+  backend.readPublishedActiveVersionIdRaw_ = () => "version-newer";
+  const conflict = captureError(() => backend.getAdminRosterSnapshotV2("secret", "version-exact"));
+  assert.equal(conflict.code, "ADMIN_ACTIVE_VERSION_CONFLICT");
+
+  backend.readPublishedActiveVersionIdRaw_ = () => "version-exact";
+  backend.firebaseRequestJson_("activeVersions/version-exact/playerMetrics", "DELETE");
+  assert.throws(
+    () => backend.getAdminRosterSnapshotV2("secret", "version-exact"),
+    /Missing active version player metrics/,
+  );
+});
+
+test("Admin exact roster reader rejects malformed immutable manifest and shard contracts", async (t) => {
+  const cases = [
+    {
+      name: "mismatched manifest version",
+      mutate: ({ manifest }) => { manifest.versionId = "version-other"; },
+      pattern: /manifest does not match requested version/,
+    },
+    {
+      name: "future root roster schema",
+      mutate: ({ manifest }) => { manifest.schemaVersion = 2; },
+      pattern: /roster schema is unsupported for admin editing/,
+    },
+    {
+      name: "missing requiredShards",
+      mutate: ({ manifest }) => { delete manifest.requiredShards; },
+      pattern: /missing requiredShards/,
+    },
+    {
+      name: "duplicate required shard",
+      mutate: ({ manifest }) => { manifest.requiredShards.push("rosters"); },
+      pattern: /duplicate required shard 'rosters'/,
+    },
+    {
+      name: "unsupported required shard",
+      mutate: ({ manifest }) => { manifest.requiredShards.push("futureShard"); },
+      pattern: /unsupported required shard 'futureShard'/,
+    },
+    {
+      name: "missing mandatory shard declaration",
+      mutate: ({ manifest }) => {
+        manifest.requiredShards = manifest.requiredShards.filter((name) => name !== "playerMetrics");
+      },
+      pattern: /missing required shard 'playerMetrics'/,
+    },
+    {
+      name: "inconsistent performance metadata",
+      mutate: ({ manifest }) => {
+        manifest.requiredShards = manifest.requiredShards.filter((name) => name !== "playerWarPerformance");
+      },
+      pattern: /inconsistent playerWarPerformance metadata/,
+    },
+    {
+      name: "duplicate roster id",
+      mutate: ({ manifest }) => { manifest.rosterIds.push("main"); },
+      pattern: /invalid or duplicate roster id/,
+    },
+    {
+      name: "undeclared roster map entry",
+      mutate: ({ rosters }) => {
+        rosters.undeclared = { id: "undeclared", title: "Undeclared", main: [], subs: [], missing: [] };
+      },
+      pattern: /roster map does not match manifest rosterIds/,
+    },
+    {
+      name: "invalid roster order",
+      mutate: ({ manifest }) => { manifest.rosterOrder = ["missing"]; },
+      pattern: /rosterOrder is not a unique manifest roster permutation/,
+    },
+    {
+      name: "metrics schema mismatch",
+      mutate: ({ playerMetrics }) => { playerMetrics.schemaVersion = 2; },
+      pattern: /playerMetrics schema does not match its manifest/,
+    },
+    {
+      name: "missing metrics count",
+      mutate: ({ manifest }) => { delete manifest.playerMetricEntryCount; },
+      pattern: /playerMetrics entry count does not match its manifest/,
+    },
+    {
+      name: "performance schema mismatch",
+      mutate: ({ playerWarPerformance }) => { playerWarPerformance.schemaVersion = 3; },
+      pattern: /playerWarPerformance schema does not match its manifest/,
+    },
+    {
+      name: "performance count mismatch",
+      mutate: ({ manifest }) => { manifest.playerWarPerformanceEntryCount += 1; },
+      pattern: /playerWarPerformance entry count does not match its manifest/,
+    },
+    {
+      name: "performance hash mismatch",
+      mutate: ({ playerWarPerformance }) => { playerWarPerformance.contentHash = "different"; },
+      pattern: /playerWarPerformance hash does not match its manifest/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, () => {
+      const backend = installMemoryFirebase(loadBackend());
+      const versionId = "version-malformed";
+      const rosterData = buildValidRosterData();
+      rosterData.playerWarPerformance = backend.createEmptyPlayerWarPerformanceStore_();
+      backend.writeActiveRosterVersionShards_(
+        versionId,
+        backend.validateRosterData_(rosterData),
+        { source: "strict-contract-test" },
+      );
+
+      const readDecoded = (child) => backend.decodeFirebaseObjectKeysRecursive_(
+        backend.firebaseRequestJson_(`activeVersions/${versionId}/${child}`, "GET"),
+      );
+      const writeDecoded = (child, value) => backend.firebaseRequestJson_(
+        `activeVersions/${versionId}/${child}`,
+        "PUT",
+        backend.encodeFirebaseObjectKeysRecursive_(value),
+      );
+      const values = {
+        manifest: readDecoded("manifest"),
+        rosters: readDecoded("rosters"),
+        playerMetrics: readDecoded("playerMetrics"),
+        playerWarPerformance: readDecoded("playerWarPerformance"),
+      };
+      testCase.mutate(values);
+      writeDecoded("manifest", values.manifest);
+      writeDecoded("rosters", values.rosters);
+      writeDecoded("playerMetrics", values.playerMetrics);
+      writeDecoded("playerWarPerformance", values.playerWarPerformance);
+
+      assert.throws(
+        () => backend.readActiveRosterSnapshotFromVersionBatchedExact_(versionId),
+        testCase.pattern,
+      );
+    });
+  }
+});
+
+test("Admin runtime V2 uses one script lock and one mutable trigger inventory", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  backend.PropertiesService.getScriptProperties().setProperty("AUTO_REFRESH_ENABLED", "1");
+  backend.PropertiesService.getScriptProperties().setProperty("DONATION_REFRESH_ENABLED", "1");
+  const rosterData = backend.validateRosterData_(buildValidRosterData());
+  backend.writeActiveRosterVersionShards_("version-runtime", rosterData, {
+    publish: true,
+    source: "test",
+  });
+
+  const triggers = [];
+  let triggerId = 0;
+  let triggerReads = 0;
+  let lockReads = 0;
+  let releases = 0;
+  const createTrigger = (handler) => {
+    const trigger = {
+      handler,
+      id: "runtime-trigger-" + (++triggerId),
+      getHandlerFunction() { return this.handler; },
+      getUniqueId() { return this.id; },
+    };
+    triggers.push(trigger);
+    return trigger;
+  };
+  backend.ScriptApp = {
+    getProjectTriggers() {
+      triggerReads += 1;
+      return triggers.slice();
+    },
+    deleteTrigger(trigger) {
+      const index = triggers.indexOf(trigger);
+      if (index >= 0) triggers.splice(index, 1);
+    },
+    newTrigger(handler) {
+      return {
+        timeBased() {
+          const builder = {
+            everyHours() { return builder; },
+            everyMinutes() { return builder; },
+            at() { return builder; },
+            create() { return createTrigger(handler); },
+          };
+          return builder;
+        },
+      };
+    },
+  };
+  backend.LockService.getScriptLock = () => {
+    lockReads += 1;
+    return {
+      tryLock: () => true,
+      releaseLock() {
+        releases += 1;
+      },
+    };
+  };
+
+  const first = clone(backend.repairAdminRuntimeState("secret", "version-runtime"));
+  const second = clone(backend.repairAdminRuntimeState("secret", "version-runtime"));
+
+  assert.equal(first.status, "ok");
+  assert.equal(first.autoRefresh.value.runtimeVerified, true);
+  assert.equal(first.donationRefresh.value.runtimeVerified, true);
+  assert.equal(second.status, "ok");
+  assert.equal(triggerReads, 2);
+  assert.equal(lockReads, 2);
+  assert.equal(releases, 2);
+  assert.equal(triggers.filter(trigger => trigger.handler === "permanentSchedulerWatchdogTick").length, 1);
+  assert.equal(triggers.filter(trigger => trigger.handler === "autoRefreshActiveRosterTick").length, 1);
+  assert.equal(triggers.filter(trigger => trigger.handler === "donationRefreshTick").length, 1);
+
+  let busyTriggerReads = 0;
+  backend.ScriptApp.getProjectTriggers = () => {
+    busyTriggerReads += 1;
+    return [];
+  };
+  backend.LockService.getScriptLock = () => ({
+    tryLock: () => false,
+    releaseLock() {
+      assert.fail("busy runtime lock must not be released");
+    },
+  });
+  const busy = clone(backend.repairAdminRuntimeState("secret", "version-runtime"));
+  assert.equal(busy.status, "busy");
+  assert.equal(busyTriggerReads, 0);
+});
+
+test("Admin publish V2 checks the exact source inside the active lock and returns the new version", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  let inActiveLock = false;
+  let writeCalls = 0;
+  let markCalls = 0;
+  let steps = [];
+  backend.withActiveRosterJobLock_ = (_owner, _wait, callback) => {
+    inActiveLock = true;
+    try {
+      return callback();
+    } finally {
+      inActiveLock = false;
+    }
+  };
+  backend.checkPublishCooldown_ = () => {
+    assert.equal(inActiveLock, true);
+    steps.push("cooldown");
+  };
+  backend.readExactPublishedActiveRosterSnapshot_ = () => {
+    assert.equal(inActiveLock, true);
+    steps.push("source-guard");
+    const err = new Error("source changed");
+    err.code = "ADMIN_ACTIVE_VERSION_CONFLICT";
+    throw err;
+  };
+  backend.writePublishedRosterData_ = () => {
+    writeCalls += 1;
+    return {};
+  };
+  backend.markPublish_ = () => {
+    markCalls += 1;
+  };
+
+  const conflict = captureError(() => backend.publishRosterDataV2({}, "secret", "version-old"));
+  assert.equal(conflict.code, "ADMIN_ACTIVE_VERSION_CONFLICT");
+  assert.deepEqual(steps, ["source-guard"]);
+  assert.equal(writeCalls, 0);
+  assert.equal(markCalls, 0);
+
+  steps = [];
+  const sourceSnapshot = { versionId: "version-old", rosterData: buildValidRosterData() };
+  const canonicalRosterData = buildValidRosterData();
+  canonicalRosterData.pageTitle = "Canonical published roster";
+  backend.readExactPublishedActiveRosterSnapshot_ = () => {
+    steps.push("source-guard");
+    return sourceSnapshot;
+  };
+  backend.readPublishedActiveVersionIdRaw_ = () => {
+    steps.push("pointer-recheck");
+    return "version-old";
+  };
+  backend.writePublishedRosterData_ = (_payload, options) => {
+    writeCalls += 1;
+    assert.equal(inActiveLock, true);
+    assert.equal(options.sourceSnapshot, sourceSnapshot);
+    assert.equal(options.includeRosterDataInResult, true);
+    steps.push("write");
+    return {
+      activeVersionId: "version-new",
+      publishedAt: "2026-07-29T00:00:00.000Z",
+      playerCount: 1,
+      noteCount: 0,
+      metricEntryCount: 1,
+      rosterData: canonicalRosterData,
+    };
+  };
+  const success = clone(backend.publishRosterDataV2(
+    {},
+    "secret",
+    "version-old",
+    { includeRosterDataInResult: true },
+  ));
+  assert.equal(success.sourceVersionId, "version-old");
+  assert.equal(success.activeVersionId, "version-new");
+  assert.deepEqual(success.rosterData, clone(canonicalRosterData));
+  assert.deepEqual(steps, ["source-guard", "pointer-recheck", "cooldown", "write"]);
+  assert.equal(writeCalls, 1);
+  assert.equal(markCalls, 1);
 });
 
 test("season event signup does not match an ID-linked account by username collision", () => {

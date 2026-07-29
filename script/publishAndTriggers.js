@@ -3,7 +3,8 @@
 const AUTO_REFRESH_CWL_FINAL_CAPTURE_MAX_AGE_MS = 10 * 60 * 1000;
 
 // Handle write published roster data.
-function writePublishedRosterData_(rosterDataRaw) {
+function writePublishedRosterData_(rosterDataRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const publishedAt = new Date().toISOString();
 	let validationStepLabel = "prepare publish payload";
 	let duplicateDiagnosticsRosterData = rosterDataRaw;
@@ -14,13 +15,17 @@ function writePublishedRosterData_(rosterDataRaw) {
 		validated = withRosterLastUpdatedAt_(rosterDataRaw, publishedAt);
 		duplicateDiagnosticsRosterData = validated;
 
-		let activeSourceSnapshot = null;
-		let activeData = null;
-		try {
-			activeSourceSnapshot = readActiveRosterSnapshot_();
-			activeData = activeSourceSnapshot && activeSourceSnapshot.rosterData ? activeSourceSnapshot.rosterData : null;
-		} catch (err) {
-			Logger.log("publishRosterData: unable to read current active roster snapshot from Firebase: %s", errorMessage_(err));
+		let activeSourceSnapshot = options.sourceSnapshot && typeof options.sourceSnapshot === "object"
+			? options.sourceSnapshot
+			: null;
+		let activeData = activeSourceSnapshot && activeSourceSnapshot.rosterData ? activeSourceSnapshot.rosterData : null;
+		if (!activeSourceSnapshot) {
+			try {
+				activeSourceSnapshot = readActiveRosterSnapshot_();
+				activeData = activeSourceSnapshot && activeSourceSnapshot.rosterData ? activeSourceSnapshot.rosterData : null;
+			} catch (err) {
+				Logger.log("publishRosterData: unable to read current active roster snapshot from Firebase: %s", errorMessage_(err));
+			}
 		}
 
 		// Protect against accidental metric loss when preview payload has no real Clash metrics.
@@ -147,7 +152,7 @@ function writePublishedRosterData_(rosterDataRaw) {
 		const publishBackup = createPublishArchiveBackupFromSnapshot_(activeSourceSnapshot, publishedAt);
 		validationStepLabel = "validate payload before active write";
 		duplicateDiagnosticsRosterData = validated;
-		replaceActiveRosterData_(validated, { sourceSnapshot: activeSourceSnapshot });
+		const replaceResult = replaceActiveRosterData_(validated, { sourceSnapshot: activeSourceSnapshot });
 		const publishArchiveCleanupDeleted = cleanupPublishArchiveBackups_();
 
 		const counts = countRosterPayload_(validated);
@@ -160,10 +165,14 @@ function writePublishedRosterData_(rosterDataRaw) {
 			playerCount: counts.playerCount,
 			noteCount: counts.noteCount,
 			metricEntryCount: metricEntryCount,
+			activeVersionId: String((replaceResult && replaceResult.versionId) || ""),
 			publishArchiveCreated: !!publishBackup.created,
 			publishArchiveKey: String(publishBackup.key || ""),
 			publishArchiveCleanupDeleted: publishArchiveCleanupDeleted,
 		};
+		if (options.includeRosterDataInResult === true) {
+			meta.rosterData = replaceResult.validatedRosterData;
+		}
 		firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
 			layoutVersion: FIREBASE_LAYOUT_VERSION,
 			lastPublishAt: publishedAt,
@@ -5755,9 +5764,39 @@ function getTriggerUniqueId_(trigger) {
 	}
 }
 
+// A mutable trigger inventory lets one reconciliation pass inspect Apps Script
+// once and keep its view accurate as triggers are created or removed.
+function createProjectTriggerInventory_() {
+	return {
+		triggers: ScriptApp.getProjectTriggers().slice(),
+	};
+}
+
+function getProjectTriggersFromInventory_(inventoryRaw) {
+	if (inventoryRaw && typeof inventoryRaw === "object" && Array.isArray(inventoryRaw.triggers)) {
+		return inventoryRaw.triggers;
+	}
+	return ScriptApp.getProjectTriggers();
+}
+
+function noteProjectTriggerCreated_(inventoryRaw, trigger) {
+	if (!trigger || !inventoryRaw || typeof inventoryRaw !== "object" || !Array.isArray(inventoryRaw.triggers)) return trigger;
+	if (inventoryRaw.triggers.indexOf(trigger) < 0) inventoryRaw.triggers.push(trigger);
+	return trigger;
+}
+
+function deleteProjectTriggerFromInventory_(inventoryRaw, trigger) {
+	ScriptApp.deleteTrigger(trigger);
+	if (inventoryRaw && typeof inventoryRaw === "object" && Array.isArray(inventoryRaw.triggers)) {
+		const index = inventoryRaw.triggers.indexOf(trigger);
+		if (index >= 0) inventoryRaw.triggers.splice(index, 1);
+	}
+	return true;
+}
+
 // Handle list auto refresh triggers.
-function listAutoRefreshTriggers_() {
-	const all = ScriptApp.getProjectTriggers();
+function listAutoRefreshTriggers_(inventoryRaw) {
+	const all = getProjectTriggersFromInventory_(inventoryRaw);
 	return all.filter((trigger) => {
 		try {
 			return String(trigger.getHandlerFunction() || "") === AUTO_REFRESH_HANDLER_NAME;
@@ -5768,12 +5807,12 @@ function listAutoRefreshTriggers_() {
 }
 
 // Remove auto refresh triggers.
-function removeAutoRefreshTriggers_() {
-	const triggers = listAutoRefreshTriggers_();
+function removeAutoRefreshTriggers_(inventoryRaw) {
+	const triggers = listAutoRefreshTriggers_(inventoryRaw).slice();
 	let removed = 0;
 	for (let i = 0; i < triggers.length; i++) {
 		try {
-			ScriptApp.deleteTrigger(triggers[i]);
+			deleteProjectTriggerFromInventory_(inventoryRaw, triggers[i]);
 			removed++;
 		} catch (err) {
 			Logger.log("Unable to delete auto-refresh trigger: %s", errorMessage_(err));
@@ -5783,8 +5822,8 @@ function removeAutoRefreshTriggers_() {
 }
 
 // Handle list resumable auto-refresh resume triggers.
-function listAutoRefreshJobResumeTriggers_() {
-	const all = ScriptApp.getProjectTriggers();
+function listAutoRefreshJobResumeTriggers_(inventoryRaw) {
+	const all = getProjectTriggersFromInventory_(inventoryRaw);
 	return all.filter((trigger) => {
 		try {
 			const handler = String(trigger.getHandlerFunction() || "");
@@ -5904,15 +5943,15 @@ function consumeAutoRefreshFiredTrigger_(eventRaw) {
 	return { consumed: !!kind || !!fired, triggerId: firedId, kind: kind || "unknown" };
 }
 
-function removeAutoRefreshDynamicTriggerKind_(kindRaw) {
+function removeAutoRefreshDynamicTriggerKind_(kindRaw, inventoryRaw) {
 	const meta = getAutoRefreshDynamicTriggerProperties_(kindRaw);
 	const props = PropertiesService.getScriptProperties();
 	const triggerId = String(props.getProperty(meta.idProperty) || "").trim();
-	const triggers = listAutoRefreshJobResumeTriggers_();
+	const triggers = listAutoRefreshJobResumeTriggers_(inventoryRaw);
 	const trigger = findAutoRefreshTriggerById_(triggers, triggerId);
 	let removed = 0;
 	if (trigger) {
-		try { ScriptApp.deleteTrigger(trigger); removed = 1; } catch (err) { Logger.log("Unable to delete auto-refresh %s trigger: %s", meta.kind, errorMessage_(err)); }
+		try { deleteProjectTriggerFromInventory_(inventoryRaw, trigger); removed = 1; } catch (err) { Logger.log("Unable to delete auto-refresh %s trigger: %s", meta.kind, errorMessage_(err)); }
 	}
 	clearAutoRefreshDynamicTriggerProperties_(meta.kind);
 	return removed;
@@ -5920,11 +5959,11 @@ function removeAutoRefreshDynamicTriggerKind_(kindRaw) {
 
 // Terminal cleanup removes both dynamic paths. Ordinary scheduling below only
 // mutates its own kind and therefore preserves the other recovery path.
-function removeAutoRefreshJobResumeTriggers_() {
+function removeAutoRefreshJobResumeTriggers_(inventoryRaw) {
 	// Remove only the two trigger identities recorded for the current queue.
 	// Enumerating every worker trigger here can delete a newer owner's trigger
 	// when terminal cleanup races a newly-created run.
-	return removeAutoRefreshDynamicTriggerKind_("continuation") + removeAutoRefreshDynamicTriggerKind_("watchdog");
+	return removeAutoRefreshDynamicTriggerKind_("continuation", inventoryRaw) + removeAutoRefreshDynamicTriggerKind_("watchdog", inventoryRaw);
 }
 
 function ensureAutoRefreshDynamicTrigger_(kindRaw, desiredAtMsRaw, minimumAtMsRaw) {
@@ -6019,10 +6058,10 @@ function scheduleAutoRefreshJobWatchdog_() {
 }
 
 // Ensure single auto refresh trigger.
-function ensureSingleAutoRefreshTrigger_() {
+function ensureSingleAutoRefreshTrigger_(inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
 	const configuredId = String(props.getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
-	const triggers = listAutoRefreshTriggers_();
+	const triggers = listAutoRefreshTriggers_(inventoryRaw).slice();
 	let keep = null;
 
 	if (configuredId) {
@@ -6042,37 +6081,43 @@ function ensureSingleAutoRefreshTrigger_() {
 		const isKeptTrigger = !!keep && ((keepId && triggerId === keepId) || (!keepId && trigger === keep));
 		if (isKeptTrigger) continue;
 		try {
-			ScriptApp.deleteTrigger(trigger);
+			deleteProjectTriggerFromInventory_(inventoryRaw, trigger);
 		} catch (err) {
 			Logger.log("Unable to delete duplicate auto-refresh trigger: %s", errorMessage_(err));
 		}
 	}
 
 	if (!keep) {
-		keep = ScriptApp.newTrigger(AUTO_REFRESH_HANDLER_NAME).timeBased().everyHours(AUTO_REFRESH_INTERVAL_HOURS).create();
+		keep = noteProjectTriggerCreated_(
+			inventoryRaw,
+			ScriptApp.newTrigger(AUTO_REFRESH_HANDLER_NAME).timeBased().everyHours(AUTO_REFRESH_INTERVAL_HOURS).create(),
+		);
 	}
 	return keep;
 }
 
-function listPermanentSchedulerWatchdogTriggers_() {
-	const all = ScriptApp.getProjectTriggers();
+function listPermanentSchedulerWatchdogTriggers_(inventoryRaw) {
+	const all = getProjectTriggersFromInventory_(inventoryRaw);
 	return all.filter((trigger) => {
 		try { return String(trigger.getHandlerFunction() || "") === PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME; } catch (err) { return false; }
 	});
 }
 
-function ensurePermanentSchedulerWatchdogTrigger_() {
+function ensurePermanentSchedulerWatchdogTrigger_(inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
 	const configuredId = String(props.getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim();
-	const triggers = listPermanentSchedulerWatchdogTriggers_();
+	const triggers = listPermanentSchedulerWatchdogTriggers_(inventoryRaw).slice();
 	let keep = findAutoRefreshTriggerById_(triggers, configuredId);
 	if (!keep && triggers.length) keep = triggers[0];
 	if (!keep) {
 		try {
-			keep = ScriptApp.newTrigger(PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME)
-				.timeBased()
-				.everyHours(PERMANENT_SCHEDULER_WATCHDOG_INTERVAL_HOURS)
-				.create();
+			keep = noteProjectTriggerCreated_(
+				inventoryRaw,
+				ScriptApp.newTrigger(PERMANENT_SCHEDULER_WATCHDOG_HANDLER_NAME)
+					.timeBased()
+					.everyHours(PERMANENT_SCHEDULER_WATCHDOG_INTERVAL_HOURS)
+					.create(),
+			);
 		} catch (err) {
 			markRuntimeRecoveryNeeded_("permanentScheduler", "permanent-watchdog-create-failed", { error: errorMessage_(err).slice(0, 300) });
 			return { scheduled: false, degraded: true, error: errorMessage_(err) };
@@ -6082,7 +6127,7 @@ function ensurePermanentSchedulerWatchdogTrigger_() {
 	if (keepId) props.setProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY, keepId);
 	for (let i = 0; i < triggers.length; i++) {
 		if (triggers[i] === keep || getTriggerUniqueId_(triggers[i]) === keepId) continue;
-		try { ScriptApp.deleteTrigger(triggers[i]); } catch (err) {}
+		try { deleteProjectTriggerFromInventory_(inventoryRaw, triggers[i]); } catch (err) {}
 	}
 	if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("permanentScheduler");
 	return { scheduled: !!keepId, degraded: !keepId, triggerId: keepId, reused: triggers.length > 0 };
@@ -6378,6 +6423,7 @@ function reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(cooldownUnt
 		cooldownUntil: new Date(cooldownUntilMs).toISOString(),
 		permanent: null,
 		autoRefresh: null,
+		regularWarFinalization: null,
 		donationRefresh: null,
 		cwlRecovery: null,
 		cloudflare: null,
@@ -6390,6 +6436,10 @@ function reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(cooldownUnt
 	// available again.
 	try { result.autoRefresh = reconcileAutoRefreshTriggerState_(); }
 	catch (err) { result.ok = false; result.autoRefresh = { ok: false, error: errorMessage_(err) }; }
+	try {
+		result.regularWarFinalization = repairRegularWarFinalizationSchedulingFromPermanentWatchdog_({ localOnly: true });
+		if (result.regularWarFinalization && result.regularWarFinalization.ok === false) result.ok = false;
+	} catch (err) { result.ok = false; result.regularWarFinalization = { ok: false, error: errorMessage_(err) }; }
 	try { result.donationRefresh = reconcileDonationRefreshTriggerState_(); }
 	catch (err) { result.ok = false; result.donationRefresh = { ok: false, error: errorMessage_(err) }; }
 	try {
@@ -6415,6 +6465,7 @@ function permanentSchedulerWatchdogTickInternal_() {
 		ok: true,
 		permanent: ensurePermanentSchedulerWatchdogTrigger_(),
 		autoRefresh: null,
+		regularWarFinalization: null,
 		donationRefresh: null,
 		cwlRecovery: null,
 		cloudflare: null,
@@ -6435,6 +6486,14 @@ function permanentSchedulerWatchdogTickInternal_() {
 		result.ok = false;
 		result.autoRefresh = { ok: false, error: errorMessage_(err) };
 		markAutoRefreshSchedulerRepairNeeded_("continuation", "permanent-repair-failed:" + errorMessage_(err), 0);
+	}
+	try {
+		result.regularWarFinalization = repairRegularWarFinalizationSchedulingFromPermanentWatchdog_();
+		if (result.regularWarFinalization && result.regularWarFinalization.ok === false) result.ok = false;
+	} catch (err) {
+		if (isFirebaseDailyUrlFetchQuotaError_(err)) return reconcileProductionTriggerSchedulingDuringUrlFetchCooldown_(getRuntimeUrlFetchQuotaCooldownUntilMs_(), "urlFetchQuota");
+		result.ok = false;
+		result.regularWarFinalization = { ok: false, error: errorMessage_(err) };
 	}
 	try {
 		result.donationRefresh = reconcileDonationRefreshTriggerState_();
@@ -6471,18 +6530,18 @@ function permanentSchedulerWatchdogTick() {
 }
 
 // Handle reconcile auto refresh trigger state.
-function reconcileAutoRefreshTriggerState_() {
+function reconcileAutoRefreshTriggerState_(inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
-	ensurePermanentSchedulerWatchdogTrigger_();
+	ensurePermanentSchedulerWatchdogTrigger_(inventoryRaw);
 	const enabled = isAutoRefreshEnabled_();
 	if (!enabled) {
-		removeAutoRefreshTriggers_();
-		removeAutoRefreshJobResumeTriggers_();
+		removeAutoRefreshTriggers_(inventoryRaw);
+		removeAutoRefreshJobResumeTriggers_(inventoryRaw);
 		props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
 		return { enabled: false, triggerId: "", hasTrigger: false };
 	}
 
-	const trigger = ensureSingleAutoRefreshTrigger_();
+	const trigger = ensureSingleAutoRefreshTrigger_(inventoryRaw);
 	const triggerId = getTriggerUniqueId_(trigger);
 	if (triggerId) props.setProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY, triggerId);
 	else props.deleteProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY);
@@ -6596,8 +6655,8 @@ function repairAutoRefreshScheduler(payloadRaw, secretOrPasswordRaw) {
 }
 
 // Handle list regular-war finalization triggers.
-function listRegularWarFinalizationTriggers_() {
-	const all = ScriptApp.getProjectTriggers();
+function listRegularWarFinalizationTriggers_(inventoryRaw) {
+	const all = getProjectTriggersFromInventory_(inventoryRaw);
 	return all.filter((trigger) => {
 		try {
 			return String(trigger.getHandlerFunction() || "") === REGULAR_WAR_FINALIZATION_HANDLER_NAME;
@@ -6608,12 +6667,12 @@ function listRegularWarFinalizationTriggers_() {
 }
 
 // Remove regular-war finalization triggers.
-function removeRegularWarFinalizationTriggers_() {
-	const triggers = listRegularWarFinalizationTriggers_();
+function removeRegularWarFinalizationTriggers_(inventoryRaw) {
+	const triggers = listRegularWarFinalizationTriggers_(inventoryRaw).slice();
 	let removed = 0;
 	for (let i = 0; i < triggers.length; i++) {
 		try {
-			ScriptApp.deleteTrigger(triggers[i]);
+			deleteProjectTriggerFromInventory_(inventoryRaw, triggers[i]);
 			removed++;
 		} catch (err) {
 			Logger.log("Unable to delete regular-war finalization trigger: %s", errorMessage_(err));
@@ -6681,12 +6740,12 @@ function listDueRegularWarRosterIdsValidated_(validatedRosterData, nowIsoRaw) {
 }
 
 // Ensure one one-shot trigger exists for the next due regular-war finalization attempt.
-function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw) {
+function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw, inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
 	const dueAt = String(dueAtRaw == null ? "" : dueAtRaw).trim();
 	const configuredId = String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim();
 	const configuredDueAt = String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY) || "").trim();
-	const triggers = listRegularWarFinalizationTriggers_();
+	const triggers = listRegularWarFinalizationTriggers_(inventoryRaw).slice();
 	let keep = null;
 
 	if (configuredId && configuredDueAt === dueAt) {
@@ -6701,7 +6760,7 @@ function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw) {
 	if (!keep) {
 		for (let i = 0; i < triggers.length; i++) {
 			try {
-				ScriptApp.deleteTrigger(triggers[i]);
+				deleteProjectTriggerFromInventory_(inventoryRaw, triggers[i]);
 			} catch (err) {
 				Logger.log("Unable to delete stale regular-war finalization trigger: %s", errorMessage_(err));
 			}
@@ -6710,18 +6769,21 @@ function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw) {
 		if (!(dueMs > 0)) return null;
 		const earliestAllowedMs = Date.now() + REGULAR_WAR_FINALIZATION_MIN_TRIGGER_DELAY_MS;
 		const scheduledMs = Math.max(dueMs, earliestAllowedMs);
-		keep = ScriptApp.newTrigger(REGULAR_WAR_FINALIZATION_HANDLER_NAME).timeBased().at(new Date(scheduledMs)).create();
+		keep = noteProjectTriggerCreated_(
+			inventoryRaw,
+			ScriptApp.newTrigger(REGULAR_WAR_FINALIZATION_HANDLER_NAME).timeBased().at(new Date(scheduledMs)).create(),
+		);
 	}
 
 	const keepId = getTriggerUniqueId_(keep);
-	const dedupeTriggers = listRegularWarFinalizationTriggers_();
+	const dedupeTriggers = listRegularWarFinalizationTriggers_(inventoryRaw).slice();
 	for (let i = 0; i < dedupeTriggers.length; i++) {
 		const trigger = dedupeTriggers[i];
 		const triggerId = getTriggerUniqueId_(trigger);
 		const isKeptTrigger = !!keep && ((keepId && triggerId === keepId) || (!keepId && trigger === keep));
 		if (isKeptTrigger) continue;
 		try {
-			ScriptApp.deleteTrigger(trigger);
+			deleteProjectTriggerFromInventory_(inventoryRaw, trigger);
 		} catch (err) {
 			Logger.log("Unable to delete duplicate regular-war finalization trigger: %s", errorMessage_(err));
 		}
@@ -6731,10 +6793,10 @@ function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw) {
 }
 
 // Reconcile one-shot regular-war finalization trigger state against a caller-supplied payload.
-function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payloadAlreadyValidatedRaw) {
+function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payloadAlreadyValidatedRaw, inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
 	if (!isAutoRefreshEnabled_()) {
-		removeRegularWarFinalizationTriggers_();
+		removeRegularWarFinalizationTriggers_(inventoryRaw);
 		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
 		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
 		return { enabled: false, triggerId: "", triggerAt: "", hasTrigger: false };
@@ -6751,13 +6813,13 @@ function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payload
 			: findNextRegularWarFinalizationDueAt_(rosterData)
 		: "";
 	if (!nextDueAt) {
-		removeRegularWarFinalizationTriggers_();
+		removeRegularWarFinalizationTriggers_(inventoryRaw);
 		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
 		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
 		return { enabled: true, triggerId: "", triggerAt: "", hasTrigger: false };
 	}
 
-	const trigger = ensureSingleRegularWarFinalizationTrigger_(nextDueAt);
+	const trigger = ensureSingleRegularWarFinalizationTrigger_(nextDueAt, inventoryRaw);
 	const triggerId = getTriggerUniqueId_(trigger);
 	if (triggerId) props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY, triggerId);
 	else props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
@@ -6766,13 +6828,53 @@ function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payload
 }
 
 // Reconcile one-shot regular-war finalization trigger state against the active published payload.
-function reconcileRegularWarFinalizationTriggerState_(rosterDataRaw) {
-	return reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, false);
+function reconcileRegularWarFinalizationTriggerState_(rosterDataRaw, inventoryRaw) {
+	return reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, false, inventoryRaw);
 }
 
 // Trusted variant for callers that already hold a validated active payload.
-function reconcileRegularWarFinalizationTriggerStateValidated_(validatedRosterData) {
-	return reconcileRegularWarFinalizationTriggerStateCore_(validatedRosterData, true);
+function reconcileRegularWarFinalizationTriggerStateValidated_(validatedRosterData, inventoryRaw) {
+	return reconcileRegularWarFinalizationTriggerStateCore_(validatedRosterData, true, inventoryRaw);
+}
+
+// Repair only the concrete trigger represented by the already-persisted desired
+// due time. This path is safe during a UrlFetch quota cooldown because it never
+// reads roster state remotely.
+function repairRegularWarFinalizationTriggerStateFromStoredIntent_(inventoryRaw) {
+	const props = PropertiesService.getScriptProperties();
+	if (!isAutoRefreshEnabled_()) {
+		removeRegularWarFinalizationTriggers_(inventoryRaw);
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
+		return { ok: true, enabled: false, triggerId: "", triggerAt: "", hasTrigger: false, localOnly: true };
+	}
+	const dueAt = String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY) || "").trim();
+	if (!dueAt) {
+		removeRegularWarFinalizationTriggers_(inventoryRaw);
+		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+		return { ok: true, enabled: true, triggerId: "", triggerAt: "", hasTrigger: false, localOnly: true };
+	}
+	const trigger = ensureSingleRegularWarFinalizationTrigger_(dueAt, inventoryRaw);
+	const triggerId = getTriggerUniqueId_(trigger);
+	if (triggerId) props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY, triggerId);
+	else props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+	return { ok: !!triggerId, enabled: true, triggerId: triggerId, triggerAt: dueAt, hasTrigger: !!triggerId, localOnly: true };
+}
+
+function repairRegularWarFinalizationSchedulingFromPermanentWatchdog_(optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	try {
+		return withActiveRosterJobLock_("regular-war-scheduler-repair", 0, function () {
+			return options.localOnly === true
+				? repairRegularWarFinalizationTriggerStateFromStoredIntent_()
+				: reconcileRegularWarFinalizationTriggerState_();
+		});
+	} catch (err) {
+		if (isActiveRosterJobLockBusyError_(err)) {
+			return { ok: true, skipped: true, reason: "activeRosterBusy" };
+		}
+		throw err;
+	}
 }
 
 // Best-effort trigger reconciliation for background flows that should not fail because scheduling cleanup failed.
@@ -6796,44 +6898,87 @@ function tryReconcileRegularWarFinalizationTriggerStateValidated_(validatedRoste
 }
 
 // Handle read auto refresh settings.
-function readAutoRefreshSettings_() {
-	const props = PropertiesService.getScriptProperties();
-	const enabled = isAutoRefreshEnabled_();
-	const triggerId = String(props.getProperty(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
-	const lastRunIssueCount = Math.max(0, toNonNegativeInt_(props.getProperty(AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY)));
-	let lastArchiveDate = "";
-	try {
-		lastArchiveDate = findLatestAutoRefreshArchiveDate_();
-		if (lastArchiveDate) props.setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, lastArchiveDate);
-		else props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
-	} catch (err) {
-		lastArchiveDate = String(props.getProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY) || "").trim();
-		Logger.log("Unable to resolve latest auto-refresh archive date: %s", errorMessage_(err));
-	}
+function readAutoRefreshSettingsFromProperties_(propertiesRaw, optionsRaw) {
+	const properties = propertiesRaw && typeof propertiesRaw === "object" ? propertiesRaw : {};
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const get = function (key) {
+		return Object.prototype.hasOwnProperty.call(properties, key) ? properties[key] : "";
+	};
+	const enabledRaw = String(get(AUTO_REFRESH_ENABLED_PROPERTY) || "").trim().toLowerCase();
+	const enabled = enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes" || enabledRaw === "on";
+	const triggerId = String(get(AUTO_REFRESH_TRIGGER_ID_PROPERTY) || "").trim();
+	const resumeTriggerId = String(get(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || "").trim();
+	const watchdogTriggerId = String(get(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim();
+	const regularWarTriggerId = String(get(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim();
 	return {
 		enabled: enabled,
 		intervalHours: AUTO_REFRESH_INTERVAL_HOURS,
 		intervalMinutes: AUTO_REFRESH_INTERVAL_HOURS * 60,
 		triggerId: triggerId,
 		hasTrigger: !!triggerId,
-		resumeTriggerId: String(props.getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || "").trim(),
-		hasResumeTrigger: !!String(props.getProperty(AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY) || "").trim(),
-		watchdogTriggerId: String(props.getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
-		hasWatchdogTrigger: !!String(props.getProperty(AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
-		permanentWatchdogTriggerId: String(props.getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
-		lastRunStartedAt: String(props.getProperty(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim(),
-		lastRunFinishedAt: String(props.getProperty(AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY) || "").trim(),
-		lastRunStatus: String(props.getProperty(AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY) || "").trim(),
-		lastRunSummary: String(props.getProperty(AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY) || "").trim(),
-		lastIssueSummary: String(props.getProperty(AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY) || "").trim(),
-		lastRunError: String(props.getProperty(AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY) || "").trim(),
-		lastRunIssueCount: lastRunIssueCount,
-		lastSuccessfulActiveRefreshAt: getLastSuccessfulActiveWriteAt_(),
-		lastArchiveDate: lastArchiveDate,
-		regularWarFinalizationTriggerId: String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim(),
-		regularWarFinalizationTriggerAt: String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY) || "").trim(),
-		hasRegularWarFinalizationTrigger: !!String(props.getProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY) || "").trim(),
+		resumeTriggerId: resumeTriggerId,
+		hasResumeTrigger: !!resumeTriggerId,
+		watchdogTriggerId: watchdogTriggerId,
+		hasWatchdogTrigger: !!watchdogTriggerId,
+		permanentWatchdogTriggerId: String(get(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim(),
+		lastRunStartedAt: String(get(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim(),
+		lastRunFinishedAt: String(get(AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY) || "").trim(),
+		lastRunStatus: String(get(AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY) || "").trim(),
+		lastRunSummary: String(get(AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY) || "").trim(),
+		lastIssueSummary: String(get(AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY) || "").trim(),
+		lastRunError: String(get(AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY) || "").trim(),
+		lastRunIssueCount: Math.max(0, toNonNegativeInt_(get(AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY))),
+		lastSuccessfulActiveRefreshAt: String(get(ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY) || "").trim(),
+		lastArchiveDate: String(get(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY) || "").trim(),
+		regularWarFinalizationTriggerId: regularWarTriggerId,
+		regularWarFinalizationTriggerAt: String(get(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY) || "").trim(),
+		hasRegularWarFinalizationTrigger: !!regularWarTriggerId,
+		runtimeVerified: options.runtimeVerified === true,
 	};
+}
+
+// Handle read auto refresh settings. Legacy callers retain the archive
+// reconciliation side effect; Admin V2 uses the pure snapshot helper above.
+function readAutoRefreshSettings_() {
+	const props = PropertiesService.getScriptProperties();
+	try {
+		const lastArchiveDate = findLatestAutoRefreshArchiveDate_();
+		if (lastArchiveDate) props.setProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY, lastArchiveDate);
+		else props.deleteProperty(AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY);
+	} catch (err) {
+		Logger.log("Unable to resolve latest auto-refresh archive date: %s", errorMessage_(err));
+	}
+	// Preserve the legacy bootstrap's one-time backfill behavior. Admin V2
+	// deliberately skips this potentially remote lookup and reads only the
+	// property snapshot.
+	getLastSuccessfulActiveWriteAt_();
+	const properties = typeof props.getProperties === "function" ? props.getProperties() : {};
+	if (typeof props.getProperties !== "function") {
+		const keys = [
+			AUTO_REFRESH_ENABLED_PROPERTY,
+			AUTO_REFRESH_TRIGGER_ID_PROPERTY,
+			AUTO_REFRESH_JOB_TRIGGER_ID_PROPERTY,
+			AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID_PROPERTY,
+			PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY,
+			AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY,
+			AUTO_REFRESH_LAST_RUN_FINISHED_AT_PROPERTY,
+			AUTO_REFRESH_LAST_RUN_STATUS_PROPERTY,
+			AUTO_REFRESH_LAST_RUN_SUMMARY_PROPERTY,
+			AUTO_REFRESH_LAST_ISSUE_SUMMARY_PROPERTY,
+			AUTO_REFRESH_LAST_RUN_ERROR_PROPERTY,
+			AUTO_REFRESH_LAST_RUN_ISSUE_COUNT_PROPERTY,
+			ACTIVE_DATA_LAST_SUCCESSFUL_WRITE_AT_PROPERTY,
+			AUTO_REFRESH_LAST_ARCHIVE_DATE_PROPERTY,
+			REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY,
+			REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY,
+		];
+		for (let i = 0; i < keys.length; i++) properties[keys[i]] = props.getProperty(keys[i]);
+	}
+	const settings = readAutoRefreshSettingsFromProperties_(properties, { runtimeVerified: true });
+	if (!settings.lastSuccessfulActiveRefreshAt) {
+		settings.lastSuccessfulActiveRefreshAt = getLastSuccessfulActiveWriteAt_();
+	}
+	return settings;
 }
 
 function maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_(labelRaw, resultRaw) {
