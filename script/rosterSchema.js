@@ -568,9 +568,21 @@ function validateRosterData_(data) {
 			if (!playerTag) continue;
 			rosterUsableTagSet[playerTag] = true;
 		}
+		const cwlReserveTagSet = buildCwlPreparationReserveTagSet_({
+			main: outMain,
+			subs: outSubs,
+			missing: outMissing,
+			cwlPreparation: r.cwlPreparation,
+		});
+		const cwlActivePoolCount = Object.keys(rosterUsableTagSet)
+			.filter((playerTag) => !cwlReserveTagSet[playerTag]).length;
 		const sanitizedCwlPreparation = sanitizeRosterCwlPreparation_(r.cwlPreparation, rosterPoolTagSet, trackingMode, {
 			defaultRosterSize: normalizePreparationRosterSize_(outMain.length, CWL_PREPARATION_MIN_ROSTER_SIZE),
-			enforceLockedInLimit: true,
+			// Schema validation is passive: preserve returning reserve players and
+			// their lock intent even when the next global build must move one down.
+			enforceLockedInLimit: false,
+			reserveTagSet: cwlReserveTagSet,
+			activePoolCount: cwlActivePoolCount,
 		});
 		let sanitizedPublicLineupProjection = sanitizeRosterPublicLineupProjection_(r.publicLineupProjection, rosterPoolTagSet, trackingMode);
 		if (!shouldKeepRosterPublicLineupProjection_(sanitizedPublicLineupProjection, trackingMode, sanitizedCwlPreparation)) {

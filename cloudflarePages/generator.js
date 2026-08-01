@@ -1336,8 +1336,11 @@
     const rosterSize = Number.isFinite(rosterSizeRaw)
       ? Math.max(0, Math.min(50, Math.floor(rosterSizeRaw)))
       : Math.max(0, Math.min(50, Array.isArray(roster.main) ? roster.main.length : 0));
-    const poolCount = [roster.main, roster.subs, roster.missing]
-      .reduce((sum, players) => sum + (Array.isArray(players) ? players.length : 0), 0);
+    const clanAbsentTagSet = isObj(prep.clanAbsentTagSet) ? prep.clanAbsentTagSet : {};
+    const poolCount = [roster.main, roster.subs].reduce((sum, players) => {
+      const list = Array.isArray(players) ? players : [];
+      return sum + list.filter((player) => !clanAbsentTagSet[normalizeTag(player && player.tag)]).length;
+    }, 0);
     const fallbackSubs = Math.max(0, Math.min(50 - rosterSize, poolCount - rosterSize));
     const substituteCountRaw = Number(prep.substituteCount);
     const substituteCount = Number.isFinite(substituteCountRaw)
@@ -1402,6 +1405,7 @@
     const locationByTag = {};
     const roleByTag = {};
     const lockStateByTag = {};
+    const reserveTagSet = {};
     let globalOrder = 0;
 
     for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
@@ -1412,6 +1416,14 @@
       const node = { roster, rosterId, rosterIndex, tags: [] };
       nodes.push(node);
       nodesById[rosterId] = node;
+      const prep = isObj(roster.cwlPreparation) ? roster.cwlPreparation : {};
+      const prepActive = roster.trackingMode !== "regularWar" && prep.enabled === true;
+      const clanAbsentTagSet = {};
+      const rawClanAbsentTagSet = isObj(prep.clanAbsentTagSet) ? prep.clanAbsentTagSet : {};
+      for (const rawTag of Object.keys(rawClanAbsentTagSet)) {
+        const absentTag = normalizeTag(rawTag);
+        if (absentTag && rawClanAbsentTagSet[rawTag]) clanAbsentTagSet[absentTag] = true;
+      }
       const sections = [
         { role: "main", players: roster.main },
         { role: "sub", players: roster.subs },
@@ -1424,8 +1436,16 @@
           const playerTag = normalizeTag(player.tag);
           if (!playerTag) throw new Error("CWL prep distribution found a player without a tag in " + rosterId + ".");
           if (locationByTag[playerTag]) throw new Error("CWL prep distribution found duplicate player tag: " + playerTag);
-          node.tags.push(playerTag);
-          playerByTag[playerTag] = { player, globalOrder: globalOrder++ };
+          const reserveReason = section.role === "missing"
+            ? "missing-section"
+            : (prepActive && clanAbsentTagSet[playerTag] ? "not-in-connected-clan" : "");
+          if (reserveReason) reserveTagSet[playerTag] = true;
+          else node.tags.push(playerTag);
+          playerByTag[playerTag] = {
+            player,
+            globalOrder: globalOrder++,
+            reserveReason,
+          };
           locationByTag[playerTag] = node;
           roleByTag[playerTag] = section.role;
           lockStateByTag[playerTag] = getCwlPreferenceLockState(roster, playerTag);
@@ -1450,20 +1470,47 @@
     const rawPreferencePlan = planCwlLeaguePreferenceMoves({ rosterData });
     const preferencePlan = {
       preferenceCount: rawPreferencePlan.preferenceCount,
-      moves: (rawPreferencePlan.moves || []).map((item) => Object.assign({}, item)),
-      alreadyCorrect: (rawPreferencePlan.alreadyCorrect || []).map((item) => Object.assign({}, item)),
-      skipped: (rawPreferencePlan.skipped || []).map((item) => Object.assign({}, item)),
+      moves: [],
+      alreadyCorrect: [],
+      skipped: [],
       conflicts: [],
-      missingPlayers: (rawPreferencePlan.missingPlayers || []).map((item) => Object.assign({}, item)),
-      missingOptions: (rawPreferencePlan.missingOptions || []).map((item) => Object.assign({}, item)),
+      missingPlayers: [],
+      missingOptions: [],
       summary: null,
     };
+
+    // A signup vote must never silently reactivate a player who is not in a
+    // connected clan. Keep the record and vote for later, but do not let it
+    // consume capacity or move out of its reserve roster during this build.
+    const appendPreferenceResults = (itemsRaw, destinationKey) => {
+      const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+      for (const itemRaw of items) {
+        const item = isObj(itemRaw) ? itemRaw : {};
+        const playerTag = normalizeTag(item.playerTag);
+        if (playerTag && reserveTagSet[playerTag]) {
+          preferencePlan.skipped.push(Object.assign({}, item, {
+            reason: "missing-reserve",
+            reserveReason: playerByTag[playerTag] && playerByTag[playerTag].reserveReason,
+          }));
+          continue;
+        }
+        preferencePlan[destinationKey].push(Object.assign({}, item));
+      }
+    };
+    appendPreferenceResults(rawPreferencePlan.moves, "moves");
+    appendPreferenceResults(rawPreferencePlan.alreadyCorrect, "alreadyCorrect");
+    appendPreferenceResults(rawPreferencePlan.skipped, "skipped");
+    appendPreferenceResults(rawPreferencePlan.conflicts, "conflicts");
+    appendPreferenceResults(rawPreferencePlan.missingPlayers, "missingPlayers");
+    appendPreferenceResults(rawPreferencePlan.missingOptions, "missingOptions");
 
     // Locked-Out controls role selection, not roster placement. Convert a vote
     // that the standalone preference planner classified as a lock conflict back
     // into a real vote move for this distribution plan. Locked-In remains an
     // explicit placement override until hard requirements reject it.
-    for (const conflictRaw of rawPreferencePlan.conflicts || []) {
+    const unresolvedPreferenceConflicts = preferencePlan.conflicts.slice();
+    preferencePlan.conflicts = [];
+    for (const conflictRaw of unresolvedPreferenceConflicts) {
       const conflict = isObj(conflictRaw) ? conflictRaw : {};
       const playerTag = normalizeTag(conflict.playerTag);
       const location = locationByTag[playerTag];
@@ -1494,6 +1541,13 @@
     }
     const activeNodeIdSet = {};
     for (const node of activeNodes) activeNodeIdSet[node.rosterId] = true;
+    const activeReserveTags = Object.keys(reserveTagSet).filter((playerTag) => {
+      const location = locationByTag[playerTag];
+      return !!(location && activeNodeIdSet[location.rosterId]);
+    });
+    const archivedMissingReserveCount = activeReserveTags.filter((playerTag) =>
+      playerByTag[playerTag] && playerByTag[playerTag].reserveReason === "missing-section").length;
+    const clanAbsentReserveCount = activeReserveTags.length - archivedMissingReserveCount;
 
     // The standalone preference planner may legitimately target any configured
     // roster. The one-click prep builder cannot: moving a voter outside the
@@ -1537,6 +1591,7 @@
       const sourceNode = locationByTag[playerTag];
       const targetNode = nodesById[targetRosterId];
       if (!sourceNode || !targetNode) throw new Error("CWL prep distribution simulation could not locate " + playerTag + ".");
+      if (reserveTagSet[playerTag]) throw new Error("CWL prep distribution tried to move reserve player " + playerTag + ".");
       if (sourceNode === targetNode) return sourceNode;
       const sourceIndex = sourceNode.tags.indexOf(playerTag);
       if (sourceIndex < 0) throw new Error("CWL prep distribution simulation lost " + playerTag + ".");
@@ -1932,6 +1987,7 @@
       const expectedSubCount = activePlayerTags.filter((playerTag) =>
         assignmentByTag[playerTag].targetIndex === activeIndex && assignmentByTag[playerTag].role === "sub").length;
       const movesFromRoster = cascadeMoves.filter((move) => move.fromRosterId === node.rosterId);
+      const reserveCount = activeReserveTags.filter((playerTag) => locationByTag[playerTag] === node).length;
       const requirementMoves = movesFromRoster.filter((move) => move.reason === "requirements");
       const requirementFailureCounts = { minTownHall: 0, maxMissedAttacks: 0, maxMissedAttackRate: 0 };
       for (const move of requirementMoves) {
@@ -1948,7 +2004,9 @@
         capacity: distribution.capacity,
         requirements: requirementsByActiveIndex[activeIndex],
         beforeCount: node.tags.length,
+        beforeTotalCount: node.tags.length + reserveCount,
         afterCount: expectedMainCount + expectedSubCount,
+        reserveCount,
         expectedMainCount,
         expectedSubCount,
         targetMainCount: distribution.rosterSize,
@@ -1975,7 +2033,7 @@
         const node = locationByTag[playerTag];
         if (!node) throw new Error("CWL prep distribution lost " + playerTag + ".");
         finalRosterIdByTag[playerTag] = node.rosterId;
-        finalRoleByTag[playerTag] = roleByTag[playerTag] || "sub";
+        finalRoleByTag[playerTag] = reserveTagSet[playerTag] ? "missing" : (roleByTag[playerTag] || "sub");
       }
       finalTags.push(playerTag);
     }
@@ -1996,6 +2054,7 @@
       rosterResults,
       finalRosterIdByTag,
       finalRoleByTag,
+      reservePlayerTags: activeReserveTags.slice().sort(),
       summary: {
         playerCount: initialTags.length,
         preferenceMoveCount: preferencePlan.moves.length,
@@ -2009,6 +2068,9 @@
         allTargetsMet: targetMetCount === rosterResults.length,
         totalConfiguredCapacity,
         activePlayerCount,
+        reservePlayerCount: activeReserveTags.length,
+        archivedMissingReserveCount,
+        clanAbsentReserveCount,
         conserved: true,
       },
     };

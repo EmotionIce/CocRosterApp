@@ -734,6 +734,47 @@ test("active contract preserves and clamps CWL prep distribution settings", () =
   assert.equal(prep.assignedTagSet["#PLAYER"], true);
 });
 
+test("active contract preserves missing CWL reserve records without counting their locks or assignments", () => {
+  const backend = loadBackend();
+  const data = buildValidRosterData();
+  const makePlayer = (index) => ({
+    slot: index + 1,
+    name: "Player " + index,
+    discord: "player" + index,
+    th: 17,
+    tag: "#P" + String(index).padStart(3, "0"),
+    notes: ["history " + index],
+  });
+  data.rosters[0].main = Array.from({ length: 15 }, (_, index) => makePlayer(index));
+  const reserve = makePlayer(15);
+  reserve.slot = null;
+  reserve.name = "Missing reserve";
+  data.rosters[0].missing = [reserve];
+  const allTags = data.rosters[0].main.concat(data.rosters[0].missing).map((player) => player.tag);
+  data.rosters[0].trackingMode = "cwl";
+  data.rosters[0].cwlPreparation = {
+    enabled: true,
+    rosterSize: 15,
+    substituteCount: 0,
+    lockStateByTag: Object.fromEntries(allTags.map((tag) => [tag, "lockedIn"])),
+    assignedTagSet: Object.fromEntries(allTags.map((tag) => [tag, true])),
+    excludedTagSet: {},
+    clanAbsentTagSet: { [reserve.tag]: true },
+  };
+
+  const validated = backend.validateRosterData_(data);
+  const roster = validated.rosters[0];
+
+  assert.equal(roster.main.length, 15);
+  assert.equal(roster.missing.length, 1);
+  assert.equal(roster.missing[0].tag, reserve.tag);
+  assert.equal(roster.missing[0].name, "Missing reserve");
+  assert.deepEqual(Array.from(roster.missing[0].notes), ["history 15"]);
+  assert.equal(roster.cwlPreparation.lockStateByTag[reserve.tag], "lockedIn", "return-time intent is retained");
+  assert.equal(roster.cwlPreparation.assignedTagSet[reserve.tag], undefined, "reserve is not an active assignment");
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet[reserve.tag], true);
+});
+
 test("active contract defaults missing or null CWL prep requirements to disabled", () => {
   const backend = loadBackend();
   const buildData = (requirementsValue, includeRequirements) => {

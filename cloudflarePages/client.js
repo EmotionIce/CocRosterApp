@@ -8058,6 +8058,30 @@
                     data: rosterData,
                 }));
             }
+            // Missing CWL records stay out of the published roster itself. In
+            // admin preview only, expose the lossless reserve so a returning
+            // player can be inspected or manually added back to the pool.
+            if (
+                prepActive &&
+                missingPlayers.length > 0 &&
+                typeof window !== "undefined" &&
+                window.ROSTER_ADMIN_MODE
+            ) {
+                card.appendChild(renderCollapsibleMissingRosterSection("Missing reserve (excluded from build)", missingPlayers, {
+                    role: "missing",
+                    trackingMode,
+                    rosterId: roster.id,
+                    rosterTitle: roster.title,
+                    roster: roster,
+                    cwlStats: roster && roster.cwlStats,
+                    regularWarStats: roster && roster.regularWar,
+                    warPerformance: roster && roster.warPerformance,
+                    suggestionModel,
+                    hideSuggestions,
+                    data: rosterData,
+                    defaultExpanded: false,
+                }));
+            }
         }
 
         return card;

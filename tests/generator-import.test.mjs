@@ -629,6 +629,82 @@ test("CWL prep hard capacity makes a voter consume a slot without forcing them i
   assert.equal(plan.summary.conserved, true);
 });
 
+test("CWL prep excludes 77 unavailable records from a 130-player build while preserving all 207", () => {
+  const generator = loadGenerator();
+  const rosterOrder = ["r1", "r2", "r3", "r4"];
+  const liveCounts = [33, 33, 32, 32];
+  const absentCounts = [10, 10, 10, 9];
+  const archivedCounts = [10, 10, 9, 9];
+  const liveTags = [];
+  const absentTags = [];
+  const archivedTags = [];
+  const sourceRosterIdByTag = {};
+  let playerIndex = 0;
+  const nextPlayer = () => {
+    const tag = "#P" + String(playerIndex++).padStart(3, "0");
+    return makeCwlPrepPlayer(tag, 17);
+  };
+  const rosters = rosterOrder.map((rosterId, rosterIndex) => {
+    const live = Array.from({ length: liveCounts[rosterIndex] }, nextPlayer);
+    const absent = Array.from({ length: absentCounts[rosterIndex] }, nextPlayer);
+    const archived = Array.from({ length: archivedCounts[rosterIndex] }, nextPlayer);
+    liveTags.push(...live.map((player) => player.tag));
+    absentTags.push(...absent.map((player) => player.tag));
+    archivedTags.push(...archived.map((player) => player.tag));
+    for (const player of live.concat(absent, archived)) sourceRosterIdByTag[player.tag] = rosterId;
+    const clanAbsentTagSet = Object.fromEntries(absent.map((player) => [player.tag, true]));
+    return {
+      id: rosterId,
+      trackingMode: "cwl",
+      main: live.slice(0, 15),
+      subs: live.slice(15).concat(absent),
+      missing: archived,
+      cwlPreparation: {
+        ...makeCwlPrepConfig(15, 27, {
+          lockStateByTag: rosterIndex === 0 ? { [absent[0].tag]: "lockedIn" } : {},
+        }),
+        clanAbsentTagSet,
+      },
+    };
+  });
+  const votedReserveTag = absentTags[0];
+  const rosterData = {
+    rosterOrder,
+    rosters,
+    cwlLeagueSignups: {
+      preferencesByTag: {
+        [votedReserveTag]: {
+          playerTag: votedReserveTag,
+          targetRosterId: "r2",
+          leagueName: "Second",
+        },
+      },
+    },
+  };
+  const strengthByTag = Object.fromEntries(liveTags.map((tag, index) => [tag, { strengthScore: 1000 - index, th: 17 }]));
+  const before = JSON.stringify(rosterData);
+
+  const plan = generator.planCwlPrepRosterDistribution({ rosterData, strengthByTag });
+
+  assert.equal(JSON.stringify(rosterData), before, "reserve planning must remain pure");
+  assert.equal(plan.summary.totalConfiguredCapacity, 168);
+  assert.equal(plan.summary.activePlayerCount, 130);
+  assert.equal(plan.summary.reservePlayerCount, 77);
+  assert.equal(plan.summary.clanAbsentReserveCount, 39);
+  assert.equal(plan.summary.archivedMissingReserveCount, 38);
+  assert.equal(plan.summary.playerCount, 207);
+  assert.equal(plan.rosterResults.reduce((sum, result) => sum + result.reserveCount, 0), 77);
+  assert.equal(plan.preferencePlan.summary.validMoveCount, 0);
+  assert.equal(plan.preferencePlan.summary.skippedCount, 1);
+  assert.equal(plan.preferencePlan.skipped[0].reason, "missing-reserve");
+  for (const tag of absentTags.concat(archivedTags)) {
+    assert.equal(plan.finalRoleByTag[tag], "missing", `${tag} must stay out of the presented roster`);
+    assert.equal(plan.finalRosterIdByTag[tag], sourceRosterIdByTag[tag]);
+  }
+  assert.equal(Object.keys(plan.finalRosterIdByTag).length, 207);
+  assert.equal(plan.summary.conserved, true);
+});
+
 test("CWL prep Locked-In consumes main while Locked-Out can move and only occupy a sub slot", () => {
   const generator = loadGenerator();
   const rosterData = {

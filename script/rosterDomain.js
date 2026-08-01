@@ -587,13 +587,30 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 		delete assignedTagSet[tag];
 		delete clanAbsentTagSet[tag];
 	}
-	const assignedTags = Object.keys(assignedTagSet);
 	const clanAbsentTags = Object.keys(clanAbsentTagSet);
+	const reserveTagSet = {};
+	const rawReserveTagSet = options.reserveTagSet && typeof options.reserveTagSet === "object" ? options.reserveTagSet : {};
+	const rawReserveTags = Object.keys(rawReserveTagSet);
+	for (let i = 0; i < rawReserveTags.length; i++) {
+		const tag = normalizeTag_(rawReserveTags[i]);
+		if (tag && rosterPoolTagSet[tag] && toBooleanFlag_(rawReserveTagSet[rawReserveTags[i]])) reserveTagSet[tag] = true;
+	}
+	for (let i = 0; i < clanAbsentTags.length; i++) {
+		const tag = normalizeTag_(clanAbsentTags[i]);
+		if (tag) reserveTagSet[tag] = true;
+	}
+	const reserveTags = Object.keys(reserveTagSet);
+	for (let i = 0; i < reserveTags.length; i++) delete assignedTagSet[reserveTags[i]];
+	const assignedTags = Object.keys(assignedTagSet);
 	const rosterSize = normalizePreparationRosterSize_(raw && raw.rosterSize, defaultRosterSize);
 	const maxSubstituteCount = Math.max(0, CWL_PREPARATION_MAX_ROSTER_SIZE - rosterSize);
+	const activePoolCountRaw = Number(options.activePoolCount);
+	const activePoolCount = isFinite(activePoolCountRaw)
+		? Math.max(0, Math.floor(activePoolCountRaw))
+		: Object.keys(rosterPoolTagSet).filter((tag) => !reserveTagSet[normalizeTag_(tag)]).length;
 	const fallbackSubstituteCount = Math.max(
 		0,
-		Math.min(maxSubstituteCount, Object.keys(rosterPoolTagSet).length - rosterSize),
+		Math.min(maxSubstituteCount, activePoolCount - rosterSize),
 	);
 	const substituteCountRaw = Number(raw && raw.substituteCount);
 	const substituteCount = isFinite(substituteCountRaw)
@@ -601,7 +618,8 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 		: fallbackSubstituteCount;
 	const distributionMode = String((raw && raw.distributionMode) || "").trim().toLowerCase() === "fill" ? "fill" : "subs";
 	const requirements = sanitizeCwlPreparationRequirements_(raw && raw.requirements);
-	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
+	const lockedInCount = lockTags.filter((tag) =>
+		lockStateByTag[tag] === "lockedIn" && !reserveTagSet[normalizeTag_(tag)]).length;
 	if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
 		throw new Error("CWL Preparation Mode invalid: lockedIn count (" + lockedInCount + ") exceeds roster size (" + rosterSize + ").");
 	}
@@ -662,6 +680,28 @@ function collectRosterPoolPlayersWithSection_(rosterRaw) {
 	return out;
 }
 
+// Build the lossless CWL reserve set. Missing-section records and players
+// marked absent from the connected clan remain stored, but do not participate
+// in roster capacity, lock limits, or automatic strength selection.
+function buildCwlPreparationReserveTagSet_(rosterRaw, poolEntriesRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
+	const poolEntries = Array.isArray(poolEntriesRaw) ? poolEntriesRaw : collectRosterPoolPlayersWithSection_(roster);
+	const out = {};
+	for (let i = 0; i < poolEntries.length; i++) {
+		const entry = poolEntries[i] && typeof poolEntries[i] === "object" ? poolEntries[i] : {};
+		const tag = normalizeTag_(entry.tag);
+		if (tag && entry.sourceSection === "missing") out[tag] = true;
+	}
+	const prep = roster.cwlPreparation && typeof roster.cwlPreparation === "object" ? roster.cwlPreparation : {};
+	const clanAbsentTagSet = prep.clanAbsentTagSet && typeof prep.clanAbsentTagSet === "object" ? prep.clanAbsentTagSet : {};
+	const absentTags = Object.keys(clanAbsentTagSet);
+	for (let i = 0; i < absentTags.length; i++) {
+		const tag = normalizeTag_(absentTags[i]);
+		if (tag && toBooleanFlag_(clanAbsentTagSet[absentTags[i]])) out[tag] = true;
+	}
+	return out;
+}
+
 // Get roster CWL preparation.
 function getRosterCwlPreparation_(rosterRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
@@ -669,6 +709,8 @@ function getRosterCwlPreparation_(rosterRaw) {
 	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
 	const rosterPoolTagSet = {};
 	for (let i = 0; i < poolEntries.length; i++) rosterPoolTagSet[poolEntries[i].tag] = true;
+	const reserveTagSet = buildCwlPreparationReserveTagSet_(roster, poolEntries);
+	const activePoolCount = poolEntries.filter((entry) => !reserveTagSet[normalizeTag_(entry && entry.tag)]).length;
 	const fallbackRosterSize = normalizePreparationRosterSize_(
 		Array.isArray(roster.main) ? roster.main.length : 0,
 		CWL_PREPARATION_MIN_ROSTER_SIZE,
@@ -676,12 +718,17 @@ function getRosterCwlPreparation_(rosterRaw) {
 	const sanitized =
 		sanitizeRosterCwlPreparation_(roster.cwlPreparation, rosterPoolTagSet, trackingMode, {
 			defaultRosterSize: fallbackRosterSize,
-			enforceLockedInLimit: true,
+			// Reading persisted prep state must remain lossless when a previously
+			// missing Locked-In player returns to an already-full roster. Explicit
+			// edits and the global builder still enforce a realizable assignment.
+			enforceLockedInLimit: false,
+			reserveTagSet: reserveTagSet,
+			activePoolCount: activePoolCount,
 		}) || {
 			enabled: false,
 			rosterSize: fallbackRosterSize,
 			distributionMode: "subs",
-			substituteCount: Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - fallbackRosterSize, poolEntries.length - fallbackRosterSize)),
+			substituteCount: Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - fallbackRosterSize, activePoolCount - fallbackRosterSize)),
 			requirements: sanitizeCwlPreparationRequirements_(null),
 			lockStateByTag: {},
 			assignedTagSet: {},
@@ -718,9 +765,10 @@ function reconcileCwlPreparationAssignments_(rosterRaw) {
 
 	const assignedTagSet = {};
 	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
+	const reserveTagSet = buildCwlPreparationReserveTagSet_(roster, poolEntries);
 	for (let i = 0; i < poolEntries.length; i++) {
 		const tag = normalizeTag_(poolEntries[i] && poolEntries[i].tag);
-		if (!tag) continue;
+		if (!tag || reserveTagSet[tag]) continue;
 		assignedTagSet[tag] = true;
 		delete prep.excludedTagSet[tag];
 	}
@@ -728,7 +776,7 @@ function reconcileCwlPreparationAssignments_(rosterRaw) {
 	roster.cwlPreparation = prep;
 
 	const lockStateByTag = prep.lockStateByTag && typeof prep.lockStateByTag === "object" ? prep.lockStateByTag : {};
-	const lockTags = Object.keys(lockStateByTag);
+	const lockTags = Object.keys(lockStateByTag).filter((tag) => !reserveTagSet[normalizeTag_(tag)]);
 	const filledMainCount = Array.isArray(roster.main) ? roster.main.length : 0;
 	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
 	return {
@@ -859,6 +907,8 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 	const poolEntries = collectRosterPoolPlayersWithSection_(roster);
 	const rosterPoolTagSet = {};
 	for (let i = 0; i < poolEntries.length; i++) rosterPoolTagSet[poolEntries[i].tag] = true;
+	const reserveTagSet = buildCwlPreparationReserveTagSet_(roster, poolEntries);
+	const activePoolCount = poolEntries.filter((entry) => !reserveTagSet[normalizeTag_(entry && entry.tag)]).length;
 	const fallbackRosterSize = normalizePreparationRosterSize_(
 		Array.isArray(roster.main) ? roster.main.length : 0,
 		CWL_PREPARATION_MIN_ROSTER_SIZE,
@@ -867,11 +917,13 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 		sanitizeRosterCwlPreparation_(roster.cwlPreparation, rosterPoolTagSet, trackingMode, {
 			defaultRosterSize: fallbackRosterSize,
 			enforceLockedInLimit: options.enforceLockedInLimit !== false,
+			reserveTagSet: reserveTagSet,
+			activePoolCount: activePoolCount,
 		}) || {
 			enabled: false,
 			rosterSize: fallbackRosterSize,
 			distributionMode: "subs",
-			substituteCount: Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - fallbackRosterSize, poolEntries.length - fallbackRosterSize)),
+			substituteCount: Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - fallbackRosterSize, activePoolCount - fallbackRosterSize)),
 			requirements: sanitizeCwlPreparationRequirements_(null),
 			lockStateByTag: {},
 			assignedTagSet: {},
@@ -891,6 +943,7 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 	let lockedInCount = 0;
 	let lockedOutCount = 0;
 	for (let i = 0; i < lockTags.length; i++) {
+		if (reserveTagSet[normalizeTag_(lockTags[i])]) continue;
 		if (lockStateByTag[lockTags[i]] === "lockedIn") lockedInCount++;
 		else if (lockStateByTag[lockTags[i]] === "lockedOut") lockedOutCount++;
 	}
@@ -925,8 +978,13 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 
 	const excludedTagSet = prep.excludedTagSet && typeof prep.excludedTagSet === "object" ? prep.excludedTagSet : {};
 	const availablePoolEntries = [];
+	const reservePoolEntries = [];
 	for (let i = 0; i < poolEntries.length; i++) {
 		const tag = normalizeTag_(poolEntries[i] && poolEntries[i].tag);
+		if (tag && reserveTagSet[tag]) {
+			reservePoolEntries.push(poolEntries[i]);
+			continue;
+		}
 		if (!tag || excludedTagSet[tag]) continue;
 		availablePoolEntries.push(poolEntries[i]);
 	}
@@ -977,7 +1035,9 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 
 	roster.main = nextMain;
 	roster.subs = nextSubs;
-	roster.missing = [];
+	roster.missing = reservePoolEntries
+		.map((entry) => entry && entry.player)
+		.filter((player) => player && typeof player === "object");
 	normalizeRosterSlots_(roster);
 	const dedupeResult = dedupeRosterSectionsByTag_(roster);
 	if (dedupeResult.changed) {

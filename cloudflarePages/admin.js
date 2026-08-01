@@ -3196,7 +3196,7 @@
     } else if (activePrepCount < 2) {
       btn.title = "Enable CWL Preparation Mode on at least two ordered rosters.";
     } else {
-      btn.title = "Enforce each roster's hard main/sub limits and cascade every rejected player down without losing members.";
+      btn.title = "Build from players currently in connected clans. Missing records stay safely archived and return automatically after a roster refresh when they rejoin.";
     }
   };
 
@@ -3224,6 +3224,8 @@
     const requirementsMoveCount = toNonNegativeIntLocal_(summary.requirementsMoveCount);
     const capacityMoveCount = toNonNegativeIntLocal_(summary.capacityMoveCount);
     const playerCount = toNonNegativeIntLocal_(summary.playerCount);
+    const activePlayerCount = toNonNegativeIntLocal_(summary.activePlayerCount);
+    const reservePlayerCount = toNonNegativeIntLocal_(summary.reservePlayerCount);
     const head = document.createElement("div");
     const strong = document.createElement("strong");
     strong.textContent = "CWL rosters built safely: ";
@@ -3231,8 +3233,10 @@
     head.appendChild(document.createTextNode(
       preferenceMoveCount + " vote move" + (preferenceMoveCount === 1 ? "" : "s") + ", " +
       requirementsMoveCount + " requirement move" + (requirementsMoveCount === 1 ? "" : "s") + ", " +
-      capacityMoveCount + " cutoff move" + (capacityMoveCount === 1 ? "" : "s") + "; all " +
-      playerCount + " players conserved."
+      capacityMoveCount + " cutoff move" + (capacityMoveCount === 1 ? "" : "s") + "; " +
+      activePlayerCount + " active " + (activePlayerCount === 1 ? "player" : "players") + " placed, " +
+      reservePlayerCount + " unavailable " + (reservePlayerCount === 1 ? "player" : "players") +
+      " kept in reserve, all " + playerCount + " records conserved."
     ));
     el.appendChild(head);
     const rosterResults = Array.isArray(plan.rosterResults) ? plan.rosterResults : [];
@@ -3257,7 +3261,9 @@
         const suffix = result.nextRosterId
           ? (moveParts.length ? (", moved to " + result.nextRosterId + ": " + moveParts.join(", ")) : ", no moves down")
           : ", final roster verified";
-        item.textContent = result.rosterId + ": " + capacityLabel + " \u2192 " + result.expectedMainCount + " main + " + result.expectedSubCount + " subs" + targetStatus + suffix;
+        const reserveCount = toNonNegativeIntLocal_(result.reserveCount);
+        const reserveLabel = reserveCount > 0 ? (" + " + reserveCount + " missing reserve") : "";
+        item.textContent = result.rosterId + ": " + capacityLabel + " \u2192 " + result.expectedMainCount + " main + " + result.expectedSubCount + " subs" + reserveLabel + targetStatus + suffix;
         list.appendChild(item);
       }
       details.appendChild(list);
@@ -3863,7 +3869,7 @@
   // Default the retained sub count to the roster's current pool, capped at 50.
   const getInitialPreparationSubstituteCountLocal_ = (roster, rosterSizeRaw) => {
     const rosterSize = normalizePreparationRosterSizeLocal_(rosterSizeRaw, getInitialPreparationRosterSizeForEnableLocal_(roster));
-    const poolCount = [roster && roster.main, roster && roster.subs, roster && roster.missing]
+    const poolCount = [roster && roster.main, roster && roster.subs]
       .reduce((sum, players) => sum + (Array.isArray(players) ? players.length : 0), 0);
     return Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - rosterSize, poolCount - rosterSize));
   };
@@ -4036,14 +4042,6 @@
     );
     const rosterSize = normalizePreparationRosterSizeLocal_(source && source.rosterSize, defaultRosterSize);
     const maxSubstituteCount = Math.max(0, CWL_PREPARATION_MAX_ROSTER_SIZE - rosterSize);
-    const fallbackSubstituteCount = Math.max(
-      0,
-      Math.min(maxSubstituteCount, Object.keys(rosterPoolTagSet).length - rosterSize)
-    );
-    const substituteCountRaw = Number(source && source.substituteCount);
-    const substituteCount = Number.isFinite(substituteCountRaw)
-      ? Math.max(0, Math.min(maxSubstituteCount, Math.floor(substituteCountRaw)))
-      : fallbackSubstituteCount;
     const distributionMode = toStr(source && source.distributionMode).trim().toLowerCase() === "fill" ? "fill" : "subs";
     const requirements = sanitizeCwlPreparationRequirementsLocal_(source && source.requirements);
     const lockStateByTag = normalizePreparationLockStateLocal_(source && source.lockStateByTag, rosterPoolTagSet);
@@ -4073,7 +4071,27 @@
       delete assignedTagSet[tag];
       delete clanAbsentTagSet[tag];
     }
-    const lockedInCount = Object.keys(lockStateByTag).filter((tag) => lockStateByTag[tag] === "lockedIn").length;
+    const reserveTagSet = {};
+    const missingPlayers = Array.isArray(rosterSafe.missing) ? rosterSafe.missing : [];
+    for (let i = 0; i < missingPlayers.length; i++) {
+      const tag = normalizeTag(missingPlayers[i] && missingPlayers[i].tag);
+      if (tag) reserveTagSet[tag] = true;
+    }
+    const clanAbsentTags = Object.keys(clanAbsentTagSet);
+    for (let i = 0; i < clanAbsentTags.length; i++) reserveTagSet[normalizeTag(clanAbsentTags[i])] = true;
+    const reserveTags = Object.keys(reserveTagSet);
+    for (let i = 0; i < reserveTags.length; i++) delete assignedTagSet[reserveTags[i]];
+    const activePoolCount = rosterSafe.main.concat(rosterSafe.subs).filter((player) => {
+      const tag = normalizeTag(player && player.tag);
+      return !!tag && !reserveTagSet[tag];
+    }).length;
+    const fallbackSubstituteCount = Math.max(0, Math.min(maxSubstituteCount, activePoolCount - rosterSize));
+    const substituteCountRaw = Number(source && source.substituteCount);
+    const substituteCount = Number.isFinite(substituteCountRaw)
+      ? Math.max(0, Math.min(maxSubstituteCount, Math.floor(substituteCountRaw)))
+      : fallbackSubstituteCount;
+    const lockedInCount = Object.keys(lockStateByTag).filter((tag) =>
+      lockStateByTag[tag] === "lockedIn" && !reserveTagSet[normalizeTag(tag)]).length;
     if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
       throw new Error("Locked-In count exceeds roster size (" + lockedInCount + " > " + rosterSize + ").");
     }
@@ -4113,7 +4131,13 @@
   const getRosterCwlPreparationLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe) return null;
-    const prep = sanitizeRosterCwlPreparationLocal_(rosterSafe, Object.assign({ keepWhenEmpty: true }, optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {}));
+    // Passive reads must survive a returning Locked-In reserve temporarily
+    // exceeding this roster's local main size. Explicit edits and the global
+    // builder validate the state at the point where placement is decided.
+    const prep = sanitizeRosterCwlPreparationLocal_(rosterSafe, Object.assign({
+      keepWhenEmpty: true,
+      enforceLockedInLimit: false,
+    }, optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {}));
     return prep && typeof prep === "object" ? prep : null;
   };
 
@@ -4130,7 +4154,7 @@
   const reconcileCwlPreparationAssignmentsLocal_ = (roster) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
     if (!rosterSafe || getRosterTrackingMode(rosterSafe) !== "cwl") return null;
-    const prep = getRosterCwlPreparationLocal_(rosterSafe, { keepWhenEmpty: true, enforceLockedInLimit: true });
+    const prep = getRosterCwlPreparationLocal_(rosterSafe, { keepWhenEmpty: true, enforceLockedInLimit: false });
     if (!prep || !prep.enabled) return null;
     if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
 
@@ -4138,7 +4162,7 @@
     const poolEntries = getRosterPoolEntriesForPreparationLocal_(rosterSafe);
     for (let i = 0; i < poolEntries.length; i++) {
       const tag = normalizeTag(poolEntries[i] && poolEntries[i].tag);
-      if (!tag) continue;
+      if (!tag || poolEntries[i].sourceSection === "missing" || (prep.clanAbsentTagSet && prep.clanAbsentTagSet[tag])) continue;
       assignedTagSet[tag] = true;
       delete prep.excludedTagSet[tag];
     }
@@ -4260,10 +4284,24 @@
     if (!rosterSafe) return null;
     ensureRosterArrays(rosterSafe);
     const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const targetRoleByTag = options.targetRoleByTag && typeof options.targetRoleByTag === "object" && !Array.isArray(options.targetRoleByTag)
+      ? options.targetRoleByTag
+      : null;
+    const reserveTagSet = {};
+    if (targetRoleByTag) {
+      const plannedTags = Object.keys(targetRoleByTag);
+      for (let i = 0; i < plannedTags.length; i++) {
+        const tag = normalizeTag(plannedTags[i]);
+        if (tag && toStr(targetRoleByTag[plannedTags[i]]).trim() === "missing") reserveTagSet[tag] = true;
+      }
+    }
     const prep = sanitizeRosterCwlPreparationLocal_(rosterSafe, {
       defaultRosterSize: normalizePreparationRosterSizeLocal_(Array.isArray(rosterSafe.main) ? rosterSafe.main.length : 0, CWL_PREPARATION_MIN_ROSTER_SIZE),
       keepWhenEmpty: true,
-      enforceLockedInLimit: options.enforceLockedInLimit !== false,
+      // The global plan already validates active Locked-In players. A retained
+      // missing player may still carry their old lock for when they return and
+      // must not block this build while they are outside the active pool.
+      enforceLockedInLimit: targetRoleByTag ? false : options.enforceLockedInLimit !== false,
     }) || {
       enabled: false,
       rosterSize: normalizePreparationRosterSizeLocal_(Array.isArray(rosterSafe.main) ? rosterSafe.main.length : 0, CWL_PREPARATION_MIN_ROSTER_SIZE),
@@ -4309,19 +4347,30 @@
 
     const lockStateByTag = prep.lockStateByTag;
     const lockTags = Object.keys(lockStateByTag);
-    const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
-    const lockedOutCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedOut").length;
-    if (lockedInCount > prep.rosterSize) {
-      throw new Error("Locked-In count exceeds roster size (" + lockedInCount + " > " + prep.rosterSize + ").");
-    }
-
     const excludedTagSet = prep.excludedTagSet && typeof prep.excludedTagSet === "object" ? prep.excludedTagSet : {};
     const poolEntries = getRosterPoolEntriesForPreparationLocal_(rosterSafe);
     const availablePoolEntries = [];
+    const reservePoolEntries = [];
     for (let i = 0; i < poolEntries.length; i++) {
       const tag = normalizeTag(poolEntries[i] && poolEntries[i].tag);
+      const isReserve = !!tag && (
+        poolEntries[i].sourceSection === "missing" ||
+        (prep.clanAbsentTagSet && prep.clanAbsentTagSet[tag]) ||
+        (targetRoleByTag && reserveTagSet[tag])
+      );
+      if (isReserve) {
+        reserveTagSet[tag] = true;
+        reservePoolEntries.push(poolEntries[i]);
+        continue;
+      }
       if (!tag || excludedTagSet[tag]) continue;
       availablePoolEntries.push(poolEntries[i]);
+    }
+    const activeLockTags = lockTags.filter((tag) => !reserveTagSet[normalizeTag(tag)]);
+    const lockedInCount = activeLockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
+    const lockedOutCount = activeLockTags.filter((tag) => lockStateByTag[tag] === "lockedOut").length;
+    if (lockedInCount > prep.rosterSize) {
+      throw new Error("Locked-In count exceeds roster size (" + lockedInCount + " > " + prep.rosterSize + ").");
     }
     const ranking = buildCwlPreparationRankingLocal_(rosterSafe, { poolEntries: availablePoolEntries });
     const ranked = Array.isArray(ranking.ranked) ? ranking.ranked : [];
@@ -4329,9 +4378,6 @@
 
     const nextMain = [];
     const nextSubs = [];
-    const targetRoleByTag = options.targetRoleByTag && typeof options.targetRoleByTag === "object" && !Array.isArray(options.targetRoleByTag)
-      ? options.targetRoleByTag
-      : null;
     if (targetRoleByTag) {
       for (let i = 0; i < ranked.length; i++) {
         const entry = ranked[i];
@@ -4353,8 +4399,8 @@
     } else {
       const selectedSet = {};
       const lockedInEntries = [];
-      for (let i = 0; i < lockTags.length; i++) {
-        const tag = lockTags[i];
+      for (let i = 0; i < activeLockTags.length; i++) {
+        const tag = activeLockTags[i];
         if (lockStateByTag[tag] !== "lockedIn") continue;
         const entry = rankedByTag[tag];
         if (!entry || !entry.player) continue;
@@ -4393,7 +4439,9 @@
 
     rosterSafe.main = nextMain;
     rosterSafe.subs = nextSubs;
-    rosterSafe.missing = [];
+    rosterSafe.missing = reservePoolEntries
+      .map((entry) => entry && entry.player)
+      .filter((player) => player && typeof player === "object");
     if (options.recordAppliedAt !== false) {
       prep.lastAppliedAt = new Date().toISOString();
     }
@@ -4430,43 +4478,6 @@
       autoSelectedCount: Math.max(0, afterMainTags.length - lockedInCount),
       changed,
     };
-  };
-
-  // Migrate missing players to subs for CWL local.
-  const migrateMissingPlayersToSubsForCwlLocal_ = (roster) => {
-    const rosterSafe = roster && typeof roster === "object" ? roster : null;
-    if (!rosterSafe) return false;
-    ensureRosterArrays(rosterSafe);
-    const hadMissing = Array.isArray(rosterSafe.missing) && rosterSafe.missing.length > 0;
-    if (!hadMissing) {
-      rosterSafe.missing = [];
-      return false;
-    }
-    const tagSet = {};
-    // Mark tags in the current working set.
-    const mark = (playersRaw) => {
-      const players = Array.isArray(playersRaw) ? playersRaw : [];
-      for (let i = 0; i < players.length; i++) {
-        const tag = normalizeTag(players[i] && players[i].tag);
-        if (!tag) continue;
-        tagSet[tag] = true;
-      }
-    };
-    mark(rosterSafe.main);
-    mark(rosterSafe.subs);
-    const moved = [];
-    for (let i = 0; i < rosterSafe.missing.length; i++) {
-      const player = rosterSafe.missing[i] && typeof rosterSafe.missing[i] === "object" ? rosterSafe.missing[i] : {};
-      const tag = normalizeTag(player.tag);
-      if (!tag || tagSet[tag]) continue;
-      tagSet[tag] = true;
-      moved.push(player);
-    }
-    if (moved.length) {
-      rosterSafe.subs = rosterSafe.subs.concat(moved);
-    }
-    rosterSafe.missing = [];
-    return moved.length > 0;
   };
 
   // Handle transfer preparation state on explicit move local.
@@ -5100,7 +5111,7 @@
     const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
     const playerTag = normalizeTag(playerTagRaw);
     if (!roster || !playerTag) return "";
-    const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
+    const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: false });
     const lockState = prep && prep.lockStateByTag && typeof prep.lockStateByTag === "object"
       ? toStr(prep.lockStateByTag[playerTag]).trim()
       : "";
@@ -5108,8 +5119,9 @@
   };
 
   // Move one player for CWL preference apply without publishing or rendering.
-  const movePlayerToRosterForCwlPreferenceApply_ = (moveRaw) => {
+  const movePlayerToRosterForCwlPreferenceApply_ = (moveRaw, optionsRaw) => {
     const move = moveRaw && typeof moveRaw === "object" ? moveRaw : {};
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     const rosters = getRosters();
     const playerTag = normalizeTag(move.playerTag);
     const targetRosterId = toStr(move.targetRosterId).trim();
@@ -5166,7 +5178,9 @@
       if (!player) throw new Error("Failed to move player: " + playerTag);
       targetList.push(player);
 
-      transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
+      transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag, {
+        enforceLockedInLimit: options.enforceLockedInLimit !== false,
+      });
       reconcileCwlPreparationAssignmentsLocal_(sourceRoster);
       reconcileCwlPreparationAssignmentsLocal_(targetRoster);
       pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
@@ -5181,14 +5195,15 @@
   };
 
   // Execute an already-built preference plan without rendering or publishing.
-  const executeCwlPreferencePlanLocal_ = (planRaw) => {
+  const executeCwlPreferencePlanLocal_ = (planRaw, optionsRaw) => {
     const plan = planRaw && typeof planRaw === "object" ? planRaw : {};
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
     rebuildCwlPreferenceApplyPlanSummaryLocal_(plan);
     const plannedMoves = plan.moves.slice();
     plan.moves = [];
     let appliedMoveCount = 0;
     for (let i = 0; i < plannedMoves.length; i++) {
-      const result = movePlayerToRosterForCwlPreferenceApply_(plannedMoves[i]);
+      const result = movePlayerToRosterForCwlPreferenceApply_(plannedMoves[i], options);
       if (result.status === "moved") {
         plan.moves.push(result);
         appliedMoveCount++;
@@ -5298,7 +5313,7 @@
   };
 
   // Assert that a roster build preserved every player exactly once.
-  const assertCwlPrepPlayerInventoryConservedLocal_ = (beforeRaw, expectedRosterIdByTagRaw) => {
+  const assertCwlPrepPlayerInventoryConservedLocal_ = (beforeRaw, expectedRosterIdByTagRaw, expectedRoleByTagRaw) => {
     const before = beforeRaw && typeof beforeRaw === "object" ? beforeRaw : { tags: [], playerCount: 0 };
     const after = captureCwlPrepPlayerInventoryLocal_();
     if (before.playerCount !== after.playerCount || before.tags.join("|") !== after.tags.join("|")) {
@@ -5307,11 +5322,19 @@
     const expectedRosterIdByTag = expectedRosterIdByTagRaw && typeof expectedRosterIdByTagRaw === "object"
       ? expectedRosterIdByTagRaw
       : {};
+    const expectedRoleByTag = expectedRoleByTagRaw && typeof expectedRoleByTagRaw === "object"
+      ? expectedRoleByTagRaw
+      : {};
     for (const playerTag of before.tags) {
       const expectedRosterId = toStr(expectedRosterIdByTag[playerTag]).trim();
       const actualRosterId = toStr(after.byTag[playerTag] && after.byTag[playerTag].rosterId).trim();
       if (expectedRosterId && actualRosterId !== expectedRosterId) {
         throw new Error("CWL roster build placement check failed for " + playerTag + "; all changes were rolled back.");
+      }
+      const expectedRole = toStr(expectedRoleByTag[playerTag]).trim();
+      const actualRole = toStr(after.byTag[playerTag] && after.byTag[playerTag].role).trim();
+      if (expectedRole && actualRole !== expectedRole) {
+        throw new Error("CWL roster build reserve/role check failed for " + playerTag + "; all changes were rolled back.");
       }
       const expectedLockState = toStr(before.byTag && before.byTag[playerTag] && before.byTag[playerTag].lockState).trim();
       const actualLockState = toStr(after.byTag[playerTag] && after.byTag[playerTag].lockState).trim();
@@ -5339,22 +5362,26 @@
       ensureRosterArrays(roster);
       const actualMainCount = roster.main.length;
       const actualSubCount = roster.subs.length;
-      const actualTotal = actualMainCount + actualSubCount + roster.missing.length;
+      const actualActiveTotal = actualMainCount + actualSubCount;
+      const actualTotal = actualActiveTotal + roster.missing.length;
       const expectedMainCount = toNonNegativeIntLocal_(result.expectedMainCount);
       const expectedSubCount = toNonNegativeIntLocal_(result.expectedSubCount);
-      const expectedTotal = toNonNegativeIntLocal_(result.afterCount);
+      const expectedActiveTotal = toNonNegativeIntLocal_(result.afterCount);
+      const expectedReserveCount = toNonNegativeIntLocal_(result.reserveCount);
+      const expectedTotal = expectedActiveTotal + expectedReserveCount;
       const capacity = toNonNegativeIntLocal_(result.capacity);
       if (
-        roster.missing.length !== 0 ||
+        roster.missing.length !== expectedReserveCount ||
         actualMainCount !== expectedMainCount ||
         actualSubCount !== expectedSubCount ||
         actualTotal !== expectedTotal ||
-        actualTotal > capacity
+        actualActiveTotal > capacity
       ) {
         throw new Error(
           "CWL roster build count check failed for " + rosterId + ": expected " + expectedMainCount +
-          " main + " + expectedSubCount + " subs, got " + actualMainCount + " main + " + actualSubCount +
-          " subs; all changes were rolled back."
+          " main + " + expectedSubCount + " subs + " + expectedReserveCount + " reserve, got " +
+          actualMainCount + " main + " + actualSubCount + " subs + " + roster.missing.length +
+          " reserve; all changes were rolled back."
         );
       }
       const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
@@ -5380,7 +5407,17 @@
     const entries = [];
     const rosters = getRosters();
     for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
-      const ranking = buildCwlPreparationRankingLocal_(rosters[rosterIndex]);
+      const roster = rosters[rosterIndex];
+      if (!isCwlPreparationActiveLocal_(roster)) continue;
+      const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: false });
+      const clanAbsentTagSet = prep && prep.clanAbsentTagSet && typeof prep.clanAbsentTagSet === "object"
+        ? prep.clanAbsentTagSet
+        : {};
+      const activePoolEntries = getRosterPoolEntriesForPreparationLocal_(roster).filter((entry) => {
+        const tag = normalizeTag(entry && entry.tag);
+        return !!tag && entry.sourceSection !== "missing" && !clanAbsentTagSet[tag];
+      });
+      const ranking = buildCwlPreparationRankingLocal_(roster, { poolEntries: activePoolEntries });
       const ranked = Array.isArray(ranking.ranked) ? ranking.ranked : [];
       for (let rankIndex = 0; rankIndex < ranked.length; rankIndex++) {
         const entry = ranked[rankIndex] && typeof ranked[rankIndex] === "object" ? ranked[rankIndex] : {};
@@ -5481,7 +5518,12 @@
     });
     const previewSnapshot = cloneJson(state.lastRosterData);
     try {
-      const preferenceExecution = executeCwlPreferencePlanLocal_(distributionPlan.preferencePlan);
+      // The pure global plan already proved the final lock/main assignment.
+      // Preference moves can temporarily pass through a locally overfull
+      // roster, so enforce limits only after the complete cascade is applied.
+      const preferenceExecution = executeCwlPreferencePlanLocal_(distributionPlan.preferencePlan, {
+        enforceLockedInLimit: false,
+      });
       if (preferenceExecution.appliedMoveCount !== distributionPlan.summary.preferenceMoveCount) {
         throw new Error("CWL roster build preference plan changed during execution.");
       }
@@ -5500,11 +5542,17 @@
         });
       }
       assertCwlPrepDistributionPlanAppliedLocal_(distributionPlan, strengthByTag);
-      assertCwlPrepPlayerInventoryConservedLocal_(inventoryBefore, distributionPlan.finalRosterIdByTag);
+      assertCwlPrepPlayerInventoryConservedLocal_(
+        inventoryBefore,
+        distributionPlan.finalRosterIdByTag,
+        distributionPlan.finalRoleByTag
+      );
+      const reservePlayerCount = toNonNegativeIntLocal_(distributionPlan.summary.reservePlayerCount);
       applyPreviewMutation(
         "Built hard-limited CWL rosters: " + distributionPlan.summary.requirementsMoveCount + " by limits, " +
-        distributionPlan.summary.capacityMoveCount + " by cutoff; all " +
-        distributionPlan.summary.playerCount + " players conserved."
+        distributionPlan.summary.capacityMoveCount + " by cutoff; " + reservePlayerCount +
+        " unavailable " + (reservePlayerCount === 1 ? "player" : "players") + " held in reserve; all " +
+        distributionPlan.summary.playerCount + " player records conserved."
       );
       state.lastCwlPreferenceApplyPlan = distributionPlan.preferencePlan;
       state.lastCwlPrepDistributionPlan = distributionPlan;
@@ -5517,6 +5565,47 @@
       state.lastCwlPreferenceApplyPlan = null;
       state.lastCwlPrepDistributionPlan = null;
       renderPreviewFromState();
+      throw err;
+    }
+  };
+
+  // Explicitly return one archived player to this roster's active CWL pool.
+  // A normal clan refresh performs the same restoration automatically once
+  // the player is present in the connected clan again; this is the manual
+  // override for an admin who intentionally wants to plan them immediately.
+  const restoreMissingPlayerToCwlPoolLocal_ = (playerTagRaw) => {
+    const playerTag = normalizeTag(playerTagRaw);
+    if (!playerTag) throw new Error("Player tag is missing.");
+    const location = findPlayerLocationByTag(playerTag);
+    if (!location || location.role !== "missing") {
+      throw new Error("Player is not in the missing reserve: " + playerTag);
+    }
+    const rosters = getRosters();
+    const roster = rosters[location.rosterIndex];
+    if (!isCwlPreparationActiveLocal_(roster)) {
+      throw new Error("Enable CWL Preparation Mode before adding a reserve player back.");
+    }
+    ensureRosterArrays(roster);
+    const rosterSnapshot = cloneJson(roster);
+    try {
+      const removed = roster.missing.splice(location.index, 1);
+      if (!removed[0]) throw new Error("Failed to restore " + playerTag + ".");
+      roster.subs.push(removed[0]);
+      const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: false });
+      if (!prep.assignedTagSet || typeof prep.assignedTagSet !== "object") prep.assignedTagSet = {};
+      if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
+      if (!prep.clanAbsentTagSet || typeof prep.clanAbsentTagSet !== "object") prep.clanAbsentTagSet = {};
+      prep.assignedTagSet[playerTag] = true;
+      delete prep.excludedTagSet[playerTag];
+      delete prep.clanAbsentTagSet[playerTag];
+      if (!Object.keys(prep.clanAbsentTagSet).length) delete prep.clanAbsentUpdatedAt;
+      roster.cwlPreparation = prep;
+      reindexRoster(roster);
+      reconcileCwlPreparationAssignmentsLocal_(roster);
+      pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
+      applyPreviewMutation(playerTag + " added back to the CWL pool as a sub.");
+    } catch (err) {
+      rosters[location.rosterIndex] = rosterSnapshot;
       throw err;
     }
   };
@@ -6018,6 +6107,7 @@
     if (!ctx || !ctx.player) return null;
     if (!state.lastRosterData || !Array.isArray(state.lastRosterData.rosters)) return null;
     const trackingMode = toStr(ctx.trackingMode).trim() === "regularWar" ? "regularWar" : "cwl";
+    const playerRole = toStr(ctx.role).trim() === "missing" ? "missing" : (toStr(ctx.role).trim() === "main" ? "main" : "sub");
     const rosterId = toStr(ctx.rosterId).trim();
     const roster = rosterId ? getRosterById(rosterId) : null;
     const prepSummary = trackingMode === "cwl" ? getRosterPreparationSummaryLocal_(roster) : null;
@@ -6059,6 +6149,7 @@
         : "";
       if (prepActive && prepLockState === "lockedIn") addSummaryPill("prep In");
       if (prepActive && prepLockState === "lockedOut") addSummaryPill("prep Out");
+      if (prepActive && playerRole === "missing") addSummaryPill("reserve");
       const clanAbsentTagSet = prepActive && roster && roster.cwlPreparation && roster.cwlPreparation.clanAbsentTagSet && typeof roster.cwlPreparation.clanAbsentTagSet === "object"
         ? roster.cwlPreparation.clanAbsentTagSet
         : {};
@@ -6210,7 +6301,35 @@
     row.appendChild(moveBtn);
     tray.appendChild(row);
 
-    if (trackingMode === "cwl" && prepActive) {
+    if (trackingMode === "cwl" && prepActive && playerRole === "missing") {
+      const reservePanel = document.createElement("div");
+      reservePanel.className = "player-admin-settings cwl-prep-reserve-panel";
+
+      const reserveTitle = document.createElement("div");
+      reserveTitle.className = "player-admin-settings-title";
+      reserveTitle.textContent = "CWL missing reserve";
+      reservePanel.appendChild(reserveTitle);
+
+      const reserveCopy = document.createElement("div");
+      reserveCopy.className = "small muted";
+      reserveCopy.textContent = "Excluded from one-click roster builds. Refreshing this roster restores the player automatically after they rejoin its connected clan.";
+      reservePanel.appendChild(reserveCopy);
+
+      const restoreBtn = mkPlayerActionButton("Add back to CWL pool", "secondary");
+      restoreBtn.title = "Manually include this player before the next clan refresh.";
+      restoreBtn.onclick = () => {
+        try {
+          clearPendingProfileReopen();
+          restoreMissingPlayerToCwlPoolLocal_(playerTag);
+        } catch (err) {
+          alert("Restore failed: " + toErrorMessage(err));
+        }
+      };
+      reservePanel.appendChild(restoreBtn);
+      tray.appendChild(reservePanel);
+    }
+
+    if (trackingMode === "cwl" && prepActive && playerRole !== "missing") {
       const prepPanel = document.createElement("div");
       prepPanel.className = "player-admin-settings cwl-prep-lock-panel";
 
@@ -8112,12 +8231,10 @@
           clearSavedBenchSuggestionsForRoster_(rosterId);
           clearSuggestionMarksForRoster_(rosterId);
           if (nextMode === "cwl") {
-            migrateMissingPlayersToSubsForCwlLocal_(r);
             const prep = getRosterCwlPreparationLocal_(r, { keepWhenEmpty: true, enforceLockedInLimit: true });
             if (prep && prep.enabled) {
               applyCwlPreparationRebalanceLocal_(r, { enforceLockedInLimit: true, recordAppliedAt: false });
             } else {
-              r.missing = [];
               reindexRoster(r);
             }
           } else {

@@ -2710,6 +2710,77 @@ test("CWL prep sync clears absent marker when a player rejoins the connected cla
   assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], undefined);
 });
 
+test("CWL prep sync automatically restores a returning missing-reserve player to subs", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = buildPrepOutRosterData();
+  data.rosters[0].missing = data.rosters[0].subs;
+  data.rosters[0].subs = [];
+  data.rosters[0].cwlPreparation.clanAbsentTagSet = { "#8CCVV": true };
+  data.rosters[0].cwlPreparation.clanAbsentUpdatedAt = "2026-05-25T00:00:00.000Z";
+  const validated = backend.validateRosterData_(data);
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-26T00:00:00.000Z",
+    members: clanTag === "#2LUCULP" ? [{ tag: "#8CCVV", name: "Returned", th: 16 }] : [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(validated, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.restored, 1);
+  assert.deepEqual(playerTags(roster.main), []);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.subs[0].name, "Returned");
+  assert.equal(roster.cwlPreparation.lockStateByTag["#8CCVV"], "lockedOut");
+  assert.equal(roster.cwlPreparation.assignedTagSet["#8CCVV"], true);
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], undefined);
+});
+
+test("CWL prep sync preserves an overflowing Locked-In return for the global builder", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const data = buildPrepOutRosterData({ lockState: "lockedIn" });
+  const activeTags = [
+    "#P000", "#P002", "#P008", "#P009", "#P00P",
+    "#P00Y", "#P00L", "#P00Q", "#P00G", "#P00R",
+    "#P00J", "#P00C", "#P00U", "#P00V", "#P020",
+  ];
+  data.rosters[0].main = activeTags.map((tag, index) =>
+    buildRosterPlayer({ tag, name: `Active ${index + 1}`, th: 16 }));
+  data.rosters[0].missing = data.rosters[0].subs;
+  data.rosters[0].subs = [];
+  data.rosters[0].cwlPreparation.lockStateByTag = Object.fromEntries(
+    activeTags.concat("#8CCVV").map((tag) => [tag, "lockedIn"]),
+  );
+  data.rosters[0].cwlPreparation.assignedTagSet = Object.fromEntries(
+    activeTags.map((tag) => [tag, true]),
+  );
+  data.rosters[0].cwlPreparation.clanAbsentTagSet = { "#8CCVV": true };
+  data.rosters[0].cwlPreparation.clanAbsentUpdatedAt = "2026-05-25T00:00:00.000Z";
+  const validated = backend.validateRosterData_(data);
+  const liveMembers = activeTags.map((tag, index) => ({ tag, name: `Active ${index + 1}`, th: 16 }));
+  liveMembers.push({ tag: "#8CCVV", name: "Returned Locked In", th: 16 });
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    capturedAt: "2026-05-26T00:00:00.000Z",
+    members: clanTag === "#2LUCULP" ? liveMembers : [],
+    metricsMembers: [],
+  });
+
+  const result = backend.syncClanRosterPoolCore_(validated, "main");
+  const roster = result.rosterData.rosters.find((entry) => entry.id === "main");
+
+  assert.equal(result.result.restored, 1);
+  assert.equal(roster.main.length, 15);
+  assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
+  assert.deepEqual(playerTags(roster.missing), []);
+  assert.equal(roster.subs[0].name, "Returned Locked In");
+  assert.equal(roster.cwlPreparation.lockStateByTag["#8CCVV"], "lockedIn");
+  assert.equal(roster.cwlPreparation.assignedTagSet["#8CCVV"], true);
+  assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], undefined);
+});
+
 test("CWL prep sync keeps planned placement when the player is live in another connected clan", () => {
   const backend = installMemoryFirebase(loadBackend());
   const data = backend.validateRosterData_(buildPrepOutRosterData());
@@ -2728,7 +2799,7 @@ test("CWL prep sync keeps planned placement when the player is live in another c
   assert.deepEqual(playerTags(roster.subs), ["#8CCVV"]);
   assert.deepEqual(playerTags(roster.missing), []);
   assert.equal(roster.cwlPreparation.clanAbsentTagSet["#8CCVV"], true);
-  assert.equal(roster.cwlPreparation.assignedTagSet["#8CCVV"], true);
+  assert.equal(roster.cwlPreparation.assignedTagSet["#8CCVV"], undefined, "clan-absent records are reserve, not active assignments");
   assert.equal(roster.subs[0].name, "Live Elsewhere");
   assert.equal(roster.subs[0].th, 16);
 });
