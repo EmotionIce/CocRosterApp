@@ -13030,6 +13030,49 @@ body.admin-shell-page .roster-head__crest{
   line-height:1;
 }
 
+body.admin-shell-page .roster-head__toggle{
+  appearance:none;
+  padding:0;
+  font:inherit;
+  cursor:pointer;
+  transition:border-color .16s ease, background-color .16s ease;
+}
+
+body.admin-shell-page .roster-head__toggle::before{
+  content:"";
+  width:9px;
+  height:9px;
+  border-right:2px solid currentColor;
+  border-bottom:2px solid currentColor;
+  transform:translateY(-2px) rotate(45deg);
+  transition:transform .16s ease;
+}
+
+body.admin-shell-page .roster-head__toggle:hover{
+  border-color:rgba(246,232,185,.38);
+  background:rgba(246,232,185,.1);
+}
+
+body.admin-shell-page .roster-head__toggle:focus-visible{
+  outline:2px solid var(--turtle-gold);
+  outline-offset:2px;
+}
+
+body.admin-shell-page .roster-head__toggle[aria-expanded="false"]::before{
+  transform:translateX(-2px) rotate(-45deg);
+}
+
+body.admin-shell-page .roster-card--collapsed > .roster-head{
+  margin-bottom:0;
+  padding-bottom:0;
+  border-bottom:0;
+}
+
+body.admin-shell-page .roster-card--collapsed > .roster-head > :not(.roster-head__top),
+body.admin-shell-page .roster-card--collapsed > :not(.roster-head){
+  display:none;
+}
+
 body.admin-shell-page .roster-head__identity{
   flex:1 1 auto;
   min-width:0;

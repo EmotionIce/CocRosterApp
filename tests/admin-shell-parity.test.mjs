@@ -32,6 +32,7 @@ test("admin roster preview keeps its mobile layout compact and mirrored", () => 
   const adminHtml = readShell("admin.html");
   const consoleHtml = readShell("console.html");
   const styles = readShell("styles.css");
+  const clientCode = readShell("client.js");
   const verboseHelp = "CWL Prep: set retained subs or Fill to 50 on each roster";
   const extractPreviewMobileRules = (html) => {
     const start = html.indexOf("#adminTabPreview .admin-section-head--row");
@@ -43,13 +44,19 @@ test("admin roster preview keeps its mobile layout compact and mirrored", () => 
   assert.equal(extractPreviewMobileRules(adminHtml), extractPreviewMobileRules(consoleHtml));
   for (const [name, html] of [["admin.html", adminHtml], ["console.html", consoleHtml]]) {
     assert.ok(!html.includes(verboseHelp), name + " still exposes the verbose CWL helper");
-    assert.match(html, /styles\.css\?v=20260801a/, name);
+    assert.match(html, /styles\.css\?v=20260802a/, name);
+    assert.match(html, /client\.js\?v=20260802a/, name);
     assert.match(html, /#adminTabPreview \.admin-section-head--row \{\s*grid-template-columns: minmax\(0, 1fr\);/, name);
     assert.match(html, /#adminTabPreview \.admin-section-actions #buildCwlPrepRostersBtn \{\s*flex-basis: 100%;/, name);
   }
 
   assert.match(styles, /body\.admin-shell-page \.roster-head__compact\{\s*display:none;/);
   assert.match(styles, /body\.admin-shell-page \.roster-head-metric\{[\s\S]*?display:inline-flex;/);
+  assert.match(clientCode, /roster-head__toggle/);
+  assert.match(clientCode, /aria-expanded/);
+  assert.match(clientCode, /roster-card--collapsed/);
+  assert.match(styles, /body\.admin-shell-page \.roster-head__toggle\[aria-expanded="false"\]::before/);
+  assert.match(styles, /body\.admin-shell-page \.roster-card--collapsed > :not\(\.roster-head\)/);
   assert.match(
     styles,
     /@media \(max-width: 520px\)\{[\s\S]*?body\.admin-shell-page \.roster-player-card \.player-top\{[\s\S]*?grid-template-columns:minmax\(0, 1fr\);/,
@@ -69,7 +76,7 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.match(html, /Verifying admin access and loading the workspace\./, name);
     const adminAssetVersion = "20260801b";
     assert.match(html, new RegExp(`admin\\.js\\?v=[^"]*${adminAssetVersion}`), name);
-    assert.match(html, /client\.js\?v=[^"]*20260729a/, name);
+    assert.match(html, /client\.js\?v=[^"]*20260802a/, name);
   }
 });
 

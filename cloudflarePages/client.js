@@ -7787,6 +7787,7 @@
             && !(regularWarLiveUnavailable && regularWarAggregateStatusLevel !== "warning");
 
         const card = el("div", "card roster-card");
+        const isAdminMode = typeof window !== "undefined" && !!window.ROSTER_ADMIN_MODE;
         const headStateClass = currentWarPresentation ? (" roster-head--state-" + currentWarPresentation.state) : " roster-head--state-idle";
         const head = el(
             "div",
@@ -7797,8 +7798,14 @@
         );
         const headTop = el("div", "roster-head__top");
         const identityLead = el("div", "roster-head__identity-lead");
-        const crest = el("span", "roster-head__crest", prepActive ? "\u2713" : "⚔");
-        crest.setAttribute("aria-hidden", "true");
+        const crest = el(isAdminMode ? "button" : "span", "roster-head__crest", isAdminMode ? "" : (prepActive ? "\u2713" : "⚔"));
+        if (isAdminMode) {
+            crest.type = "button";
+            crest.classList.add("roster-head__toggle");
+            crest.setAttribute("aria-expanded", "true");
+        } else {
+            crest.setAttribute("aria-hidden", "true");
+        }
         const identity = el("div", "roster-head__identity");
         const eyebrowText = trackingMode === "regularWar"
             ? "Regular war roster"
@@ -7806,6 +7813,18 @@
         identity.appendChild(el("div", "roster-head__eyebrow", eyebrowText));
         const h2 = document.createElement("h2");
         const titleText = toStr(roster.title);
+
+        if (isAdminMode) {
+            const syncRosterExpandedState = (expanded) => {
+                card.classList.toggle("roster-card--collapsed", !expanded);
+                crest.setAttribute("aria-expanded", expanded ? "true" : "false");
+                crest.setAttribute("aria-label", (expanded ? "Collapse " : "Expand ") + titleText + " roster");
+            };
+            syncRosterExpandedState(true);
+            crest.addEventListener("click", () => {
+                syncRosterExpandedState(crest.getAttribute("aria-expanded") !== "true");
+            });
+        }
 
         if (clanProfileUrl) {
             const titleLink = document.createElement("a");
