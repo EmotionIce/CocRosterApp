@@ -152,7 +152,11 @@ function writePublishedRosterData_(rosterDataRaw, optionsRaw) {
 		const publishBackup = createPublishArchiveBackupFromSnapshot_(activeSourceSnapshot, publishedAt);
 		validationStepLabel = "validate payload before active write";
 		duplicateDiagnosticsRosterData = validated;
-		const replaceResult = replaceActiveRosterData_(validated, { sourceSnapshot: activeSourceSnapshot });
+		const replaceResult = replaceActiveRosterData_(validated, {
+			sourceSnapshot: activeSourceSnapshot,
+			activeVersionIdOverride: options.activeVersionIdOverride,
+			activeVersionSource: options.activeVersionSource || "admin-publish",
+		});
 		const publishArchiveCleanupDeleted = cleanupPublishArchiveBackups_();
 
 		const counts = countRosterPayload_(validated);

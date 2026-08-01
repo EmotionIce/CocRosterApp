@@ -939,6 +939,23 @@ test("canonical active writes propagate their new immutable version id through e
   const deferred = backend.putValidatedActiveRosterDataToFirebase_(rosterData);
   assert.equal(backend.isSafeActiveVersionId_(deferred.versionId), true);
   assert.equal(backend.readPublishedActiveVersionIdRaw_(), deferred.versionId);
+
+  const deterministicVersionId = "admin-publish-deterministic-test";
+  const deterministic = backend.replaceActiveRosterData_(rosterData, {
+    sourceSnapshot: {
+      versionId: deferred.versionId,
+      rosterData,
+      text: JSON.stringify(rosterData),
+    },
+    activeVersionIdOverride: deterministicVersionId,
+    activeVersionSource: "admin-publish-v2",
+  });
+  assert.equal(deterministic.versionId, deterministicVersionId);
+  assert.equal(backend.readPublishedActiveVersionIdRaw_(), deterministicVersionId);
+  const manifest = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("activeVersions/" + deterministicVersionId + "/manifest", "GET"),
+  );
+  assert.equal(manifest.source, "admin-publish-v2");
 });
 
 test("storage retention cleanup keeps live active versions and deletes historical storage", () => {
@@ -2857,7 +2874,7 @@ test("Admin roster V2 reads one exact immutable generation in two batches and re
 
   backend.readPublishedActiveVersionIdRaw_ = () => "version-newer";
   const conflict = captureError(() => backend.getAdminRosterSnapshotV2("secret", "version-exact"));
-  assert.equal(conflict.code, "ADMIN_ACTIVE_VERSION_CONFLICT");
+  assert.equal(conflict.code, "ADMIN_ACTIVE_VERSION_CONFLICT", conflict && conflict.stack);
 
   backend.readPublishedActiveVersionIdRaw_ = () => "version-exact";
   backend.firebaseRequestJson_("activeVersions/version-exact/playerMetrics", "DELETE");
@@ -3081,14 +3098,22 @@ test("Admin runtime V2 uses one script lock and one mutable trigger inventory", 
   assert.equal(busyTriggerReads, 0);
 });
 
-test("Admin publish V2 checks the exact source inside the active lock and returns the new version", () => {
+test("Admin publish V2 uses one deterministic version and confirms idempotent retries", () => {
   const backend = loadBackend();
   backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  const rosterData = buildValidRosterData();
+  const publishAttemptId = "publish-attempt-00000001";
+  const targetVersionId = "admin-publish-" + publishAttemptId;
+  let activeVersionId = "version-old";
   let inActiveLock = false;
   let writeCalls = 0;
   let markCalls = 0;
+  let lockCalls = 0;
   let steps = [];
-  backend.withActiveRosterJobLock_ = (_owner, _wait, callback) => {
+  backend.withActiveRosterJobLock_ = (owner, wait, callback) => {
+    lockCalls += 1;
+    assert.match(owner, /^manual-publish-v2-/);
+    assert.equal(wait, 0);
     inActiveLock = true;
     try {
       return callback();
@@ -3114,52 +3139,249 @@ test("Admin publish V2 checks the exact source inside the active lock and return
   backend.markPublish_ = () => {
     markCalls += 1;
   };
+  backend.readPublishedActiveVersionIdRaw_ = () => activeVersionId;
 
-  const conflict = captureError(() => backend.publishRosterDataV2({}, "secret", "version-old"));
+  const conflict = captureError(() => backend.publishRosterDataV2(
+    rosterData,
+    "secret",
+    "version-old",
+    { publishAttemptId },
+  ));
   assert.equal(conflict.code, "ADMIN_ACTIVE_VERSION_CONFLICT");
   assert.deepEqual(steps, ["source-guard"]);
   assert.equal(writeCalls, 0);
   assert.equal(markCalls, 0);
 
   steps = [];
-  const sourceSnapshot = { versionId: "version-old", rosterData: buildValidRosterData() };
-  const canonicalRosterData = buildValidRosterData();
-  canonicalRosterData.pageTitle = "Canonical published roster";
+  const sourceSnapshot = { versionId: "version-old", rosterData };
   backend.readExactPublishedActiveRosterSnapshot_ = () => {
+    assert.equal(inActiveLock, true);
     steps.push("source-guard");
     return sourceSnapshot;
   };
   backend.readPublishedActiveVersionIdRaw_ = () => {
     steps.push("pointer-recheck");
-    return "version-old";
+    return activeVersionId;
   };
   backend.writePublishedRosterData_ = (_payload, options) => {
     writeCalls += 1;
     assert.equal(inActiveLock, true);
     assert.equal(options.sourceSnapshot, sourceSnapshot);
-    assert.equal(options.includeRosterDataInResult, true);
+    assert.equal(options.includeRosterDataInResult, false);
+    assert.equal(options.activeVersionIdOverride, targetVersionId);
     steps.push("write");
+    activeVersionId = targetVersionId;
     return {
-      activeVersionId: "version-new",
+      activeVersionId: targetVersionId,
       publishedAt: "2026-07-29T00:00:00.000Z",
       playerCount: 1,
       noteCount: 0,
       metricEntryCount: 1,
-      rosterData: canonicalRosterData,
     };
   };
   const success = clone(backend.publishRosterDataV2(
-    {},
+    rosterData,
+    "secret",
+    "version-old",
+    { publishAttemptId, includeRosterDataInResult: true },
+  ));
+  assert.equal(success.status, "committed");
+  assert.equal(success.publishAttemptId, publishAttemptId);
+  assert.equal(success.sourceVersionId, "version-old");
+  assert.equal(success.activeVersionId, targetVersionId);
+  assert.equal(Object.prototype.hasOwnProperty.call(success, "rosterData"), false);
+  assert.ok(steps.includes("source-guard"));
+  assert.ok(steps.includes("cooldown"));
+  assert.ok(steps.includes("write"));
+  assert.equal(writeCalls, 1);
+  assert.equal(markCalls, 1);
+
+  backend.readAdminPublishCurrentManifest_ = () => ({
+    versionId: targetVersionId,
+    publishedAt: "2026-07-29T00:00:00.000Z",
+    rosterPlayerTags: ["#PLAYER"],
+    playerMetricEntryCount: 1,
+  });
+  const replay = clone(backend.publishRosterDataV2(
+    rosterData,
+    "secret",
+    "version-old",
+    { publishAttemptId },
+  ));
+  assert.equal(replay.status, "committed");
+  assert.equal(replay.activeVersionId, targetVersionId);
+  assert.equal(writeCalls, 1);
+  assert.equal(markCalls, 1);
+  assert.equal(lockCalls, 2);
+
+  const status = clone(backend.getAdminPublishStatusV2("secret", publishAttemptId, "version-old"));
+  assert.equal(status.status, "committed");
+  assert.equal(status.activeVersionId, targetVersionId);
+  assert.equal(status.canRetry, false);
+});
+
+test("Admin publish V2 reports refresh and donation overlap without losing its retry", () => {
+  const backend = loadBackend();
+  const props = backend.PropertiesService.getScriptProperties();
+  props.setProperty("ADMIN_PW", "secret");
+  props.setProperty("DONATION_REFRESH_LOCK", JSON.stringify({
+    token: "donation-token",
+    owner: "donation-refresh-trigger",
+    expiresAt: Date.now() + 60_000,
+  }));
+  const publishAttemptId = "publish-attempt-00000002";
+  let activeLock = {
+    token: "refresh-token",
+    owner: "auto-refresh-worker",
+    expiresAt: Date.now() + 60_000,
+  };
+  let writeCalls = 0;
+  backend.readPublishedActiveVersionIdRaw_ = () => "version-old";
+  backend.readActiveRosterJobLockState_ = () => activeLock;
+  backend.withActiveRosterJobLock_ = () => {
+    const err = new Error("Another active roster refresh/publish flow is running.");
+    err.code = "activeRosterJobLockBusy";
+    throw err;
+  };
+  backend.writePublishedRosterData_ = () => {
+    writeCalls += 1;
+    return {};
+  };
+
+  const busy = captureError(() => backend.publishRosterDataV2(
+    buildValidRosterData(),
+    "secret",
+    "version-old",
+    { publishAttemptId },
+  ));
+  assert.equal(busy.code, "ADMIN_PUBLISH_BUSY", busy && busy.stack);
+  assert.match(busy.message, /scheduled roster refresh/i);
+  assert.equal(writeCalls, 0);
+
+  const waiting = clone(backend.runAdminApiMethod_("getAdminPublishStatusV2", [
+    "secret",
+    publishAttemptId,
+    "version-old",
+  ]));
+  assert.equal(waiting.status, "waiting");
+  assert.equal(waiting.activity, "the scheduled roster refresh");
+  assert.equal(waiting.donationRefreshActive, true);
+  assert.equal(waiting.canRetry, false);
+
+  activeLock = null;
+  const retryable = clone(backend.getAdminPublishStatusV2("secret", publishAttemptId, "version-old"));
+  assert.equal(retryable.status, "retryable");
+  assert.equal(retryable.canRetry, true);
+  assert.equal(retryable.donationRefreshActive, true);
+
+  const receiptStore = JSON.parse(props.getProperty("ADMIN_PUBLISH_ATTEMPTS_V2"));
+  receiptStore.attempts[0].runningStartedAt = new Date(Date.now() - 8 * 60 * 1000).toISOString();
+  const ownOwner = backend.buildAdminPublishLockOwner_(publishAttemptId);
+  receiptStore.attempts[0].lockOwner = ownOwner;
+  props.setProperty("ADMIN_PUBLISH_ATTEMPTS_V2", JSON.stringify(receiptStore));
+  activeLock = { token: "stale-publish", owner: ownOwner, expiresAt: Date.now() + 60_000 };
+  backend.clearActiveRosterJobLockForOwners_ = (ownerMap, label) => {
+    assert.equal(ownerMap[ownOwner], true);
+    assert.equal(label, "stale admin publish recovery");
+    activeLock = null;
+    return { cleared: true, owner: ownOwner };
+  };
+  const recovered = clone(backend.getAdminPublishStatusV2("secret", publishAttemptId, "version-old"));
+  assert.equal(recovered.status, "retryable");
+  assert.equal(recovered.canRetry, true);
+  assert.match(recovered.message, /can now be retried safely/i);
+});
+
+test("Admin publish V2 recovers a committed pointer even when post-write work throws", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  const publishAttemptId = "publish-attempt-00000003";
+  const targetVersionId = "admin-publish-" + publishAttemptId;
+  let activeVersionId = "version-old";
+  let writeCalls = 0;
+  backend.withActiveRosterJobLock_ = (_owner, wait, callback) => {
+    assert.equal(wait, 0);
+    return callback();
+  };
+  backend.readPublishedActiveVersionIdRaw_ = () => activeVersionId;
+  backend.readExactPublishedActiveRosterSnapshot_ = () => ({
+    versionId: "version-old",
+    rosterData: buildValidRosterData(),
+  });
+  backend.checkPublishCooldown_ = () => {};
+  backend.writePublishedRosterData_ = (_payload, options) => {
+    writeCalls += 1;
+    assert.equal(options.activeVersionIdOverride, targetVersionId);
+    activeVersionId = targetVersionId;
+    throw new Error("simulated response-finalization failure after pointer commit");
+  };
+  backend.readAdminPublishCurrentManifest_ = () => ({
+    versionId: targetVersionId,
+    publishedAt: "2026-08-01T00:00:00.000Z",
+    rosterPlayerTags: ["#PLAYER"],
+    playerMetricEntryCount: 1,
+  });
+
+  const recovered = clone(backend.publishRosterDataV2(
+    buildValidRosterData(),
+    "secret",
+    "version-old",
+    { publishAttemptId },
+  ));
+  assert.equal(recovered.status, "committed");
+  assert.equal(recovered.activeVersionId, targetVersionId);
+  assert.equal(recovered.playerCount, 1);
+  assert.equal(writeCalls, 1);
+
+  let queuedVersionId = "";
+  backend.enqueueCloudflareActiveTarget_ = (versionId, reason) => {
+    queuedVersionId = versionId;
+    assert.equal(reason, "admin-publish-delivery-retry");
+    return { ok: true, queued: true, scheduled: true, nextAttemptAt: "" };
+  };
+  const delivery = clone(backend.runAdminApiMethod_("retryAdminPublishDeliveryV2", [
+    "secret",
+    publishAttemptId,
+  ]));
+  assert.equal(delivery.status, "queued");
+  assert.equal(delivery.activeVersionId, targetVersionId);
+  assert.equal(delivery.queued, true);
+  assert.equal(queuedVersionId, targetVersionId);
+});
+
+test("Admin publish V2 keeps the canonical-roster response for cached legacy clients", () => {
+  const backend = loadBackend();
+  backend.PropertiesService.getScriptProperties().setProperty("ADMIN_PW", "secret");
+  const rosterData = buildValidRosterData();
+  backend.withActiveRosterJobLock_ = (owner, wait, callback) => {
+    assert.equal(owner, "manual-publish-v2-legacy-client");
+    assert.equal(wait, 30_000);
+    return callback();
+  };
+  backend.readExactPublishedActiveRosterSnapshot_ = () => ({ versionId: "version-old", rosterData });
+  backend.readPublishedActiveVersionIdRaw_ = () => "version-old";
+  backend.checkPublishCooldown_ = () => {};
+  backend.markPublish_ = () => {};
+  backend.writePublishedRosterData_ = (_payload, options) => {
+    assert.equal(options.includeRosterDataInResult, true);
+    return {
+      activeVersionId: "version-new",
+      publishedAt: "2026-08-01T00:00:00.000Z",
+      playerCount: 1,
+      noteCount: 0,
+      metricEntryCount: 1,
+      rosterData,
+    };
+  };
+
+  const legacy = clone(backend.publishRosterDataV2(
+    rosterData,
     "secret",
     "version-old",
     { includeRosterDataInResult: true },
   ));
-  assert.equal(success.sourceVersionId, "version-old");
-  assert.equal(success.activeVersionId, "version-new");
-  assert.deepEqual(success.rosterData, clone(canonicalRosterData));
-  assert.deepEqual(steps, ["source-guard", "pointer-recheck", "cooldown", "write"]);
-  assert.equal(writeCalls, 1);
-  assert.equal(markCalls, 1);
+  assert.equal(legacy.activeVersionId, "version-new");
+  assert.deepEqual(legacy.rosterData, clone(rosterData));
 });
 
 test("season event signup does not match an ID-linked account by username collision", () => {

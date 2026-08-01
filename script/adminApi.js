@@ -41,6 +41,10 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return publishRosterData(args[0], args[1]);
 		case "publishRosterDataV2":
 			return publishRosterDataV2(args[0], args[1], args[2], args[3]);
+		case "getAdminPublishStatusV2":
+			return getAdminPublishStatusV2(args[0], args[1], args[2]);
+		case "retryAdminPublishDeliveryV2":
+			return retryAdminPublishDeliveryV2(args[0], args[1]);
 		case "getPlayerProfile":
 			return getPlayerProfile(args[0], args[1]);
 		case "deleteDiscordIdentityLink":
@@ -1061,39 +1065,499 @@ function publishRosterData(rosterData, password) {
 	});
 }
 
-// Version-guarded manual publish used by Admin Unlock V2.
-function publishRosterDataV2(rosterData, password, expectedSourceVersionIdRaw, optionsRaw) {
-	assertAdminPassword_(password);
+function requireAdminPublishAttemptId_(attemptIdRaw) {
+	const attemptId = String(attemptIdRaw == null ? "" : attemptIdRaw).trim();
+	if (!/^[A-Za-z0-9][A-Za-z0-9_-]{15,79}$/.test(attemptId)) {
+		throw createRosterBackendError_(
+			"ADMIN_PUBLISH_ATTEMPT_INVALID",
+			"Publish attempt id is missing or invalid. Reload the admin page before publishing.",
+		);
+	}
+	return attemptId;
+}
+
+function buildAdminPublishTargetVersionId_(attemptIdRaw) {
+	const attemptId = requireAdminPublishAttemptId_(attemptIdRaw);
+	const versionId = "admin-publish-" + attemptId;
+	if (!isSafeActiveVersionId_(versionId)) {
+		throw createRosterBackendError_("ADMIN_PUBLISH_ATTEMPT_INVALID", "Publish attempt id cannot form a safe active version.");
+	}
+	return versionId;
+}
+
+function buildAdminPublishLockOwner_(attemptIdRaw, executionTokenRaw) {
+	const attemptId = requireAdminPublishAttemptId_(attemptIdRaw);
+	const executionToken = String(executionTokenRaw == null ? "" : executionTokenRaw)
+		.trim()
+		.replace(/[^A-Za-z0-9_-]/g, "")
+		.slice(-12);
+	return "manual-publish-v2-" + attemptId.slice(-18) + (executionToken ? ("-" + executionToken) : "");
+}
+
+function parseAdminPublishAttemptStore_(raw) {
+	const text = String(raw == null ? "" : raw).trim();
+	if (!text) return { schemaVersion: 2, attempts: [] };
+	try {
+		const parsed = JSON.parse(text);
+		const attemptsRaw = parsed && Array.isArray(parsed.attempts) ? parsed.attempts : [];
+		const attempts = [];
+		const seen = {};
+		for (let i = 0; i < attemptsRaw.length; i++) {
+			const item = attemptsRaw[i] && typeof attemptsRaw[i] === "object" ? attemptsRaw[i] : null;
+			const attemptId = item ? String(item.attemptId || "").trim() : "";
+			if (!attemptId || seen[attemptId]) continue;
+			seen[attemptId] = true;
+			attempts.push(item);
+		}
+		return { schemaVersion: 2, attempts: attempts };
+	} catch (err) {
+		return { schemaVersion: 2, attempts: [] };
+	}
+}
+
+function readAdminPublishAttemptStore_() {
+	const raw = PropertiesService.getScriptProperties().getProperty(ADMIN_PUBLISH_ATTEMPTS_PROPERTY);
+	return parseAdminPublishAttemptStore_(raw);
+}
+
+function readAdminPublishAttemptReceipt_(attemptIdRaw) {
+	const attemptId = requireAdminPublishAttemptId_(attemptIdRaw);
+	const store = readAdminPublishAttemptStore_();
+	for (let i = 0; i < store.attempts.length; i++) {
+		const item = store.attempts[i] && typeof store.attempts[i] === "object" ? store.attempts[i] : null;
+		if (item && String(item.attemptId || "").trim() === attemptId) return item;
+	}
+	return null;
+}
+
+function mutateAdminPublishAttemptStore_(callback) {
+	if (typeof callback !== "function") throw new Error("Publish-attempt mutation callback is required.");
+	const lock = LockService.getScriptLock();
+	let didLock = false;
+	try {
+		didLock = typeof lock.tryLock === "function" ? lock.tryLock(5000) : (lock.waitLock(5000), true);
+	} catch (err) {
+		didLock = false;
+	}
+	if (!didLock) {
+		throw createRosterBackendError_("ADMIN_PUBLISH_STATUS_BUSY", "Publish status is briefly busy. Please try again.");
+	}
+	try {
+		const props = PropertiesService.getScriptProperties();
+		const store = parseAdminPublishAttemptStore_(props.getProperty(ADMIN_PUBLISH_ATTEMPTS_PROPERTY));
+		const result = callback(store);
+		const cutoffMs = Date.now() - ADMIN_PUBLISH_ATTEMPT_RETENTION_MS;
+		store.attempts = store.attempts
+			.filter(function (item) {
+				const updatedMs = new Date(String(item && item.updatedAt || "")).getTime();
+				return !isFinite(updatedMs) || updatedMs >= cutoffMs;
+			})
+			.sort(function (left, right) {
+				return (new Date(String(right && right.updatedAt || "")).getTime() || 0) -
+					(new Date(String(left && left.updatedAt || "")).getTime() || 0);
+			})
+			.slice(0, ADMIN_PUBLISH_ATTEMPT_HISTORY_LIMIT);
+		props.setProperty(ADMIN_PUBLISH_ATTEMPTS_PROPERTY, JSON.stringify({
+			schemaVersion: 2,
+			attempts: store.attempts,
+		}));
+		return result;
+	} finally {
+		lock.releaseLock();
+	}
+}
+
+function upsertAdminPublishAttemptReceipt_(attemptRaw, patchRaw) {
+	const attempt = attemptRaw && typeof attemptRaw === "object" ? attemptRaw : {};
+	const patch = patchRaw && typeof patchRaw === "object" ? patchRaw : {};
+	const attemptId = requireAdminPublishAttemptId_(attempt.attemptId);
+	return mutateAdminPublishAttemptStore_(function (store) {
+		let existing = null;
+		for (let i = 0; i < store.attempts.length; i++) {
+			if (String(store.attempts[i] && store.attempts[i].attemptId || "").trim() === attemptId) {
+				existing = store.attempts[i];
+				break;
+			}
+		}
+		if (existing) {
+			const expectedSourceVersionId = String(attempt.expectedSourceVersionId || "").trim();
+			const targetVersionId = String(attempt.targetVersionId || "").trim();
+			const payloadFingerprint = String(attempt.payloadFingerprint || "").trim();
+			if (
+				(expectedSourceVersionId && String(existing.expectedSourceVersionId || "").trim() !== expectedSourceVersionId) ||
+				(targetVersionId && String(existing.targetVersionId || "").trim() !== targetVersionId) ||
+				(payloadFingerprint && String(existing.payloadFingerprint || "").trim() && String(existing.payloadFingerprint || "").trim() !== payloadFingerprint)
+			) {
+				throw createRosterBackendError_(
+					"ADMIN_PUBLISH_ATTEMPT_MISMATCH",
+					"This publish attempt was already used for a different roster snapshot. Reload the admin page before publishing.",
+				);
+			}
+			if (payloadFingerprint && !String(existing.payloadFingerprint || "").trim()) {
+				existing.payloadFingerprint = payloadFingerprint;
+			}
+		} else {
+			existing = {
+				attemptId: attemptId,
+				expectedSourceVersionId: String(attempt.expectedSourceVersionId || "").trim(),
+				targetVersionId: String(attempt.targetVersionId || "").trim(),
+				payloadFingerprint: String(attempt.payloadFingerprint || "").trim(),
+				createdAt: new Date().toISOString(),
+			};
+			store.attempts.push(existing);
+		}
+		const patchKeys = Object.keys(patch);
+		for (let i = 0; i < patchKeys.length; i++) {
+			const key = patchKeys[i];
+			existing[key] = patch[key];
+		}
+		existing.updatedAt = new Date().toISOString();
+		return existing;
+	});
+}
+
+function describeAdminActiveRosterActivity_(ownerRaw) {
+	const owner = String(ownerRaw == null ? "" : ownerRaw).trim().toLowerCase();
+	if (!owner) return "another roster update";
+	if (owner.indexOf("auto-refresh") >= 0) return "the scheduled roster refresh";
+	if (owner.indexOf("manual-refresh-all") >= 0 || owner === "refresh-all") return "Refresh all";
+	if (owner.indexOf("manual-publish") >= 0) return "another roster publish";
+	if (owner.indexOf("regular-war") >= 0) return "the regular-war finalizer";
+	if (owner.indexOf("discord") >= 0) return "a Discord roster update";
+	if (owner.indexOf("cwl-league-signup") >= 0) return "a CWL signup update";
+	return "another roster update";
+}
+
+function buildAdminPublishPayloadFingerprint_(validatedRosterData) {
+	const normalized = normalizeActiveRosterForCompareValidated_(validatedRosterData);
+	if (typeof Utilities !== "undefined" && Utilities && typeof Utilities.computeDigest === "function") {
+		const algorithm = Utilities.DigestAlgorithm && Utilities.DigestAlgorithm.SHA_256
+			? Utilities.DigestAlgorithm.SHA_256
+			: "SHA_256";
+		const charset = Utilities.Charset && Utilities.Charset.UTF_8 ? Utilities.Charset.UTF_8 : "UTF-8";
+		return bytesToHex_(Utilities.computeDigest(algorithm, normalized, charset));
+	}
+	let hash = 2166136261;
+	for (let i = 0; i < normalized.length; i++) {
+		hash ^= normalized.charCodeAt(i);
+		hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+	}
+	return ("00000000" + (hash >>> 0).toString(16)).slice(-8);
+}
+
+function buildAdminPublishAttemptBase_(rosterData, expectedSourceVersionIdRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const attemptId = requireAdminPublishAttemptId_(options.publishAttemptId);
 	const expectedSourceVersionId = requireExactSafeActiveVersionId_(
 		expectedSourceVersionIdRaw,
 		"Expected source version id",
 	);
-	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
-	const includeRosterDataInResult = options.includeRosterDataInResult === true;
-	return withActiveRosterJobLock_("manual-publish-v2", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
-		const sourceSnapshot = readExactPublishedActiveRosterSnapshot_(expectedSourceVersionId);
-		const stableSourceVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
-		if (stableSourceVersionId !== expectedSourceVersionId) throw buildAdminActiveVersionConflictError_();
-		checkPublishCooldown_();
-		const meta = writePublishedRosterData_(rosterData, {
-			sourceSnapshot: sourceSnapshot,
-			includeRosterDataInResult: includeRosterDataInResult,
+	const validated = validateRosterData_(rosterData);
+	return {
+		attemptId: attemptId,
+		expectedSourceVersionId: expectedSourceVersionId,
+		targetVersionId: buildAdminPublishTargetVersionId_(attemptId),
+		payloadFingerprint: buildAdminPublishPayloadFingerprint_(validated),
+	};
+}
+
+function buildAdminPublishCommittedResult_(attemptRaw, receiptRaw, manifestRaw) {
+	const attempt = attemptRaw && typeof attemptRaw === "object" ? attemptRaw : {};
+	const receipt = receiptRaw && typeof receiptRaw === "object" ? receiptRaw : {};
+	const manifest = manifestRaw && typeof manifestRaw === "object" ? manifestRaw : {};
+	const rosterPlayerTags = Array.isArray(manifest.rosterPlayerTags) ? manifest.rosterPlayerTags : [];
+	return {
+		schemaVersion: 2,
+		ok: true,
+		status: "committed",
+		publishAttemptId: String(attempt.attemptId || ""),
+		sourceVersionId: String(attempt.expectedSourceVersionId || ""),
+		activeVersionId: String(attempt.targetVersionId || ""),
+		publishedAt: String(receipt.publishedAt || manifest.publishedAt || ""),
+		playerCount: Number.isFinite(Number(receipt.playerCount)) ? Math.max(0, Math.floor(Number(receipt.playerCount))) : rosterPlayerTags.length,
+		noteCount: Number.isFinite(Number(receipt.noteCount)) ? Math.max(0, Math.floor(Number(receipt.noteCount))) : null,
+		metricEntryCount: Number.isFinite(Number(receipt.metricEntryCount))
+			? Math.max(0, Math.floor(Number(receipt.metricEntryCount)))
+			: Math.max(0, Math.floor(Number(manifest.playerMetricEntryCount) || 0)),
+	};
+}
+
+function readAdminPublishCurrentManifest_(versionIdRaw) {
+	const versionId = String(versionIdRaw == null ? "" : versionIdRaw).trim();
+	const path = versionId
+		? buildActiveVersionPath_(requireExactSafeActiveVersionId_(versionId, "Published version id"), "manifest")
+		: FIREBASE_ACTIVE_PUBLISHED_CURRENT_MANIFEST_PATH;
+	const encoded = firebaseRequestJson_(path, "GET");
+	if (!encoded || typeof encoded !== "object" || Array.isArray(encoded)) return {};
+	return decodeFirebaseObjectKeysRecursive_(encoded);
+}
+
+function getAdminPublishStatusV2(password, publishAttemptIdRaw, expectedSourceVersionIdRaw) {
+	assertAdminPassword_(password);
+	const attemptId = requireAdminPublishAttemptId_(publishAttemptIdRaw);
+	const attempt = {
+		attemptId: attemptId,
+		expectedSourceVersionId: requireExactSafeActiveVersionId_(expectedSourceVersionIdRaw, "Expected source version id"),
+		targetVersionId: buildAdminPublishTargetVersionId_(attemptId),
+	};
+	const activeVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+	let receipt = readAdminPublishAttemptReceipt_(attemptId);
+	const props = PropertiesService.getScriptProperties();
+	const donationLock = parseDonationRefreshLockState_(props.getProperty(DONATION_REFRESH_LOCK_KEY));
+	const donationRefreshActive = !!(donationLock && donationLock.expiresAt > Date.now());
+	const base = {
+		schemaVersion: 2,
+		authenticated: true,
+		publishAttemptId: attemptId,
+		expectedSourceVersionId: attempt.expectedSourceVersionId,
+		targetVersionId: attempt.targetVersionId,
+		activeVersionId: activeVersionId,
+		donationRefreshActive: donationRefreshActive,
+	};
+	if (activeVersionId === attempt.targetVersionId) {
+		const manifest = readAdminPublishCurrentManifest_(attempt.targetVersionId);
+		if (!receipt || String(receipt.status || "") !== "committed") {
+			receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+				status: "committed",
+				publishedAt: String(manifest.publishedAt || ""),
+				lastError: "",
+			});
+		}
+		return Object.assign(base, buildAdminPublishCommittedResult_(attempt, receipt, manifest), {
+			canRetry: false,
+			retryAfterMs: 0,
 		});
-		let activeVersionId = String(meta.activeVersionId || "").trim();
-		if (!activeVersionId) activeVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
-		markPublish_();
-		const result = {
-			ok: true,
-			sourceVersionId: expectedSourceVersionId,
-			activeVersionId: activeVersionId,
-			publishedAt: meta.publishedAt,
-			playerCount: meta.playerCount,
-			noteCount: meta.noteCount,
-			metricEntryCount: meta.metricEntryCount,
-		};
-		if (includeRosterDataInResult) result.rosterData = meta.rosterData;
-		return result;
+	}
+	if (activeVersionId !== attempt.expectedSourceVersionId) {
+		return Object.assign(base, {
+			status: "conflict",
+			canRetry: false,
+			retryAfterMs: 0,
+			message: "Active roster data changed before this publish could commit.",
+		});
+	}
+
+	const activeLock = readActiveRosterJobLockState_();
+	if (activeLock && activeLock.expiresAt > Date.now()) {
+		const ownLockOwner = String(receipt && receipt.lockOwner || "").trim();
+		const ownAttempt = String(activeLock.owner || "") === ownLockOwner;
+		const runningStartedMs = new Date(String(receipt && receipt.runningStartedAt || "")).getTime();
+		if (
+			ownAttempt &&
+			isFinite(runningStartedMs) &&
+			Date.now() - runningStartedMs >= ADMIN_PUBLISH_ATTEMPT_STALE_MS
+		) {
+			const ownerMap = {};
+			ownerMap[ownLockOwner] = true;
+			const cleared = clearActiveRosterJobLockForOwners_(ownerMap, "stale admin publish recovery");
+			if (cleared && cleared.cleared === true) {
+				upsertAdminPublishAttemptReceipt_(attempt, {
+					status: "retryable",
+					lastError: "The previous publish execution ended before committing and its stale lock was recovered.",
+				});
+				return Object.assign(base, {
+					status: "retryable",
+					canRetry: true,
+					retryAfterMs: 0,
+					message: "The previous publish execution ended before committing and can now be retried safely.",
+				});
+			}
+		}
+		return Object.assign(base, {
+			status: ownAttempt ? "running" : "waiting",
+			canRetry: false,
+			retryAfterMs: ownAttempt ? 1500 : 2500,
+			activity: ownAttempt ? "this roster publish" : describeAdminActiveRosterActivity_(activeLock.owner),
+			message: ownAttempt
+				? "The roster snapshot is still being saved."
+				: ("Waiting for " + describeAdminActiveRosterActivity_(activeLock.owner) + " to finish."),
+		});
+	}
+
+	const receiptUpdatedMs = new Date(String(receipt && receipt.updatedAt || "")).getTime();
+	const receiptStatus = String(receipt && receipt.status || "").trim().toLowerCase();
+	if (
+		(receiptStatus === "accepted" || receiptStatus === "running") &&
+		isFinite(receiptUpdatedMs) &&
+		Date.now() - receiptUpdatedMs < ADMIN_PUBLISH_ATTEMPT_RUNNING_GRACE_MS
+	) {
+		return Object.assign(base, {
+			status: "running",
+			canRetry: false,
+			retryAfterMs: 1000,
+			activity: "this roster publish",
+			message: "The publish request is starting.",
+		});
+	}
+	return Object.assign(base, {
+		status: "retryable",
+		canRetry: true,
+		retryAfterMs: 0,
+		message: String(receipt && receipt.lastError || "").trim() || "The roster snapshot has not committed yet and can be retried safely.",
 	});
+}
+
+// Version-guarded manual publish used by Admin Unlock V2.
+function publishRosterDataV2(rosterData, password, expectedSourceVersionIdRaw, optionsRaw) {
+	assertAdminPassword_(password);
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	// Preserve the original V2 response contract for already-open/cached admin
+	// clients during rollout. New clients always send an idempotent attempt id.
+	if (!String(options.publishAttemptId || "").trim()) {
+		const expectedSourceVersionId = requireExactSafeActiveVersionId_(
+			expectedSourceVersionIdRaw,
+			"Expected source version id",
+		);
+		const includeRosterDataInResult = options.includeRosterDataInResult === true;
+		return withActiveRosterJobLock_("manual-publish-v2-legacy-client", ACTIVE_ROSTER_JOB_LOCK_WAIT_MS, function () {
+			const sourceSnapshot = readExactPublishedActiveRosterSnapshot_(expectedSourceVersionId);
+			const stableSourceVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+			if (stableSourceVersionId !== expectedSourceVersionId) throw buildAdminActiveVersionConflictError_();
+			checkPublishCooldown_();
+			const meta = writePublishedRosterData_(rosterData, {
+				sourceSnapshot: sourceSnapshot,
+				includeRosterDataInResult: includeRosterDataInResult,
+			});
+			let activeVersionId = String(meta.activeVersionId || "").trim();
+			if (!activeVersionId) activeVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+			markPublish_();
+			const legacyResult = {
+				ok: true,
+				sourceVersionId: expectedSourceVersionId,
+				activeVersionId: activeVersionId,
+				publishedAt: meta.publishedAt,
+				playerCount: meta.playerCount,
+				noteCount: meta.noteCount,
+				metricEntryCount: meta.metricEntryCount,
+			};
+			if (includeRosterDataInResult) legacyResult.rosterData = meta.rosterData;
+			return legacyResult;
+		});
+	}
+	const attempt = buildAdminPublishAttemptBase_(rosterData, expectedSourceVersionIdRaw, options);
+	const publishLockOwner = buildAdminPublishLockOwner_(attempt.attemptId, Utilities.getUuid());
+	let receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+		status: "accepted",
+		lastError: "",
+	});
+	const currentBeforeLock = String(readPublishedActiveVersionIdRaw_() || "").trim();
+	if (currentBeforeLock === attempt.targetVersionId) {
+		const manifest = readAdminPublishCurrentManifest_(attempt.targetVersionId);
+		receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+			status: "committed",
+			publishedAt: String(manifest.publishedAt || ""),
+			lastError: "",
+		});
+		return buildAdminPublishCommittedResult_(attempt, receipt, manifest);
+	}
+
+	try {
+		return withActiveRosterJobLock_(publishLockOwner, 0, function () {
+			const currentVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+			if (currentVersionId === attempt.targetVersionId) {
+				const manifest = readAdminPublishCurrentManifest_(attempt.targetVersionId);
+				receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+					status: "committed",
+					publishedAt: String(manifest.publishedAt || ""),
+					lastError: "",
+				});
+				return buildAdminPublishCommittedResult_(attempt, receipt, manifest);
+			}
+			if (currentVersionId !== attempt.expectedSourceVersionId) throw buildAdminActiveVersionConflictError_();
+
+			receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+				status: "running",
+				lockOwner: publishLockOwner,
+				runningStartedAt: new Date().toISOString(),
+				lastError: "",
+			});
+			const sourceSnapshot = readExactPublishedActiveRosterSnapshot_(attempt.expectedSourceVersionId);
+			const stableSourceVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+			if (stableSourceVersionId !== attempt.expectedSourceVersionId) throw buildAdminActiveVersionConflictError_();
+			checkPublishCooldown_();
+			const meta = writePublishedRosterData_(rosterData, {
+				sourceSnapshot: sourceSnapshot,
+				includeRosterDataInResult: false,
+				activeVersionIdOverride: attempt.targetVersionId,
+				activeVersionSource: "admin-publish-v2",
+			});
+			const activeVersionId = String(meta.activeVersionId || "").trim();
+			if (activeVersionId !== attempt.targetVersionId) {
+				throw new Error("Published active version did not match its idempotent target.");
+			}
+			markPublish_();
+			receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+				status: "committed",
+				publishedAt: String(meta.publishedAt || ""),
+				playerCount: Math.max(0, Math.floor(Number(meta.playerCount) || 0)),
+				noteCount: Math.max(0, Math.floor(Number(meta.noteCount) || 0)),
+				metricEntryCount: Math.max(0, Math.floor(Number(meta.metricEntryCount) || 0)),
+				lastError: "",
+			});
+			return buildAdminPublishCommittedResult_(attempt, receipt, {});
+		});
+	} catch (err) {
+		let currentAfterError = "";
+		try { currentAfterError = String(readPublishedActiveVersionIdRaw_() || "").trim(); } catch (readErr) {}
+		if (currentAfterError === attempt.targetVersionId) {
+			let manifest = {};
+			try { manifest = readAdminPublishCurrentManifest_(attempt.targetVersionId); } catch (manifestErr) {}
+			receipt = upsertAdminPublishAttemptReceipt_(attempt, {
+				status: "committed",
+				publishedAt: String(manifest.publishedAt || receipt.publishedAt || ""),
+				lastError: "",
+			});
+			return buildAdminPublishCommittedResult_(attempt, receipt, manifest);
+		}
+		if (isActiveRosterJobLockBusyError_(err)) {
+			const activeLock = readActiveRosterJobLockState_();
+			const activity = describeAdminActiveRosterActivity_(activeLock && activeLock.owner);
+			upsertAdminPublishAttemptReceipt_(attempt, {
+				status: "waiting",
+				lastError: "Waiting for " + activity + " to finish.",
+			});
+			throw createRosterBackendError_(
+				"ADMIN_PUBLISH_BUSY",
+				"Publish is waiting for " + activity + " to finish. The roster snapshot can be retried safely.",
+			);
+		}
+		const conflict = String(err && err.code || "") === "ADMIN_ACTIVE_VERSION_CONFLICT";
+		upsertAdminPublishAttemptReceipt_(attempt, {
+			status: conflict ? "conflict" : "retryable",
+			lastError: errorMessage_(err).slice(0, 400),
+		});
+		throw err;
+	}
+}
+
+function retryAdminPublishDeliveryV2(password, publishAttemptIdRaw) {
+	assertAdminPassword_(password);
+	const attemptId = requireAdminPublishAttemptId_(publishAttemptIdRaw);
+	const targetVersionId = buildAdminPublishTargetVersionId_(attemptId);
+	try {
+		return withActiveRosterJobLock_("admin-publish-delivery-retry-" + attemptId.slice(-16), 0, function () {
+			const activeVersionId = String(readPublishedActiveVersionIdRaw_() || "").trim();
+			if (activeVersionId !== targetVersionId) throw buildAdminActiveVersionConflictError_();
+			const queueResult = enqueueCloudflareActiveTarget_(targetVersionId, "admin-publish-delivery-retry");
+			return {
+				schemaVersion: 2,
+				ok: queueResult && queueResult.ok !== false,
+				status: "queued",
+				activeVersionId: targetVersionId,
+				queued: !!(queueResult && queueResult.queued),
+				scheduled: !!(queueResult && queueResult.scheduled),
+				nextAttemptAt: String(queueResult && queueResult.nextAttemptAt || ""),
+			};
+		});
+	} catch (err) {
+		if (isActiveRosterJobLockBusyError_(err)) {
+			throw createRosterBackendError_(
+				"ADMIN_PUBLISH_BUSY",
+				"Public delivery retry is waiting for the current roster update to finish.",
+			);
+		}
+		throw err;
+	}
 }
 
 // Asset route remains for active roster JSON compatibility.

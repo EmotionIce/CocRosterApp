@@ -23,6 +23,8 @@
     publishCooldownUntil: 0,
     publishAttemptId: 0,
     publishBusy: false,
+    publishDeliveryBusy: false,
+    pendingPublish: null,
     bulkRefreshBusy: false,
     rosterStatusByRoster: {},
     benchMarksByRoster: {},
@@ -54,13 +56,46 @@
   let adminCompactTabsVisibilityRaf = 0;
 
   // Set the global status message.
+  const syncAdminCommandFooterVisibility_ = () => {
+    const footer = $(".admin-command-footer");
+    if (!footer) return;
+    const statusText = toStr($("#status") && $("#status").textContent).trim();
+    const publishState = $("#publishState");
+    const hasPublishState = !!(publishState && !publishState.classList.contains("hidden"));
+    footer.classList.toggle("hidden", !statusText && !hasPublishState);
+  };
+
   const setStatus = (msg) => {
     const el = $("#status");
     if (!el) return;
     const text = toStr(msg);
     el.textContent = text;
-    const footer = el.closest(".admin-command-footer");
-    if (footer) footer.classList.toggle("hidden", !text.trim());
+    syncAdminCommandFooterVisibility_();
+  };
+
+  const setPublishState_ = (phaseRaw, titleRaw, detailRaw) => {
+    const el = $("#publishState");
+    const titleEl = $("#publishStateTitle");
+    const detailEl = $("#publishStateDetail");
+    if (!el || !titleEl || !detailEl) return;
+    const phase = toStr(phaseRaw).trim().toLowerCase() || "idle";
+    const title = toStr(titleRaw).trim();
+    const detail = toStr(detailRaw).trim();
+    el.dataset.phase = phase;
+    titleEl.textContent = title;
+    detailEl.textContent = detail;
+    el.classList.toggle("hidden", !title && !detail);
+    syncAdminCommandFooterVisibility_();
+  };
+
+  const clearPublishState_ = () => setPublishState_("idle", "", "");
+
+  const setAdminCommandButtonLabel_ = (buttonRaw, labelRaw) => {
+    const button = buttonRaw && typeof buttonRaw === "object" ? buttonRaw : null;
+    if (!button) return;
+    const label = button.querySelector && button.querySelector(".admin-command-label");
+    if (label) label.textContent = toStr(labelRaw);
+    else button.textContent = toStr(labelRaw);
   };
 
   // Notify optional admin modules without coupling them to roster rendering.
@@ -106,22 +141,32 @@
   const syncPublishButtonAvailability_ = () => {
     const publishBtn = $("#publishBtn");
     if (!publishBtn) return false;
+    const pendingPublish = state.pendingPublish && typeof state.pendingPublish === "object"
+      ? state.pendingPublish
+      : null;
     const hasPreview = hasLoadedPreviewData_();
     const v2SourceIsSafe = state.unlockContractVersion < 2 || (
       !state.sourceVersionDrifted &&
       !!toStr(state.loadedSourceVersionId).trim() &&
       /^[A-Za-z0-9_-]+$/.test(toStr(state.loadedSourceVersionId).trim())
     );
-    const cooldownReady = Date.now() >= Math.max(0, Number(state.publishCooldownUntil) || 0);
+    const cooldownReady = !!pendingPublish || Date.now() >= Math.max(0, Number(state.publishCooldownUntil) || 0);
     const enabled = state.authenticated === true &&
       !!state.password &&
       hasPreview &&
       v2SourceIsSafe &&
       cooldownReady &&
       !state.publishBusy &&
+      !state.publishDeliveryBusy &&
       !state.activeConfigReloadBusy &&
       !state.bulkRefreshBusy;
     publishBtn.disabled = !enabled;
+    let label = "Publish";
+    if (state.publishBusy) label = "Publishing...";
+    else if (state.publishDeliveryBusy) label = "Checking delivery...";
+    else if (pendingPublish && pendingPublish.canonicalCommitted === true && pendingPublish.publicLive !== true) label = "Check delivery";
+    else if (pendingPublish) label = "Retry publish";
+    setAdminCommandButtonLabel_(publishBtn, label);
     return enabled;
   };
 
@@ -3078,7 +3123,7 @@
     if (toggle) {
       const enabled = !!(state.autoRefreshSettings && state.autoRefreshSettings.enabled);
       toggle.checked = enabled;
-      toggle.disabled = !state.password || state.autoRefreshBusy || state.runtimeRepairBusy;
+      toggle.disabled = !state.password || state.autoRefreshBusy || state.runtimeRepairBusy || state.publishBusy;
     }
 
     if (statusEl) {
@@ -3112,19 +3157,24 @@
     if (toggle) {
       const enabled = !!(state.donationRefreshSettings && state.donationRefreshSettings.enabled);
       toggle.checked = enabled;
-      toggle.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy;
+      toggle.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy || state.publishBusy;
     }
     if (runBtn) {
-      runBtn.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy;
+      runBtn.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy || state.publishBusy;
       runBtn.textContent = state.donationRefreshBusy ? "Working..." : "Run now";
     }
     if (reloadBtn) {
-      reloadBtn.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy;
+      reloadBtn.disabled = !state.password || state.donationRefreshBusy || state.runtimeRepairBusy || state.publishBusy;
     }
 
     if (statusEl) {
       if (state.donationRefreshBusy) {
         statusEl.textContent = "Updating...";
+        statusEl.style.color = "#94a3b8";
+        return;
+      }
+      if (state.publishBusy) {
+        statusEl.textContent = "Manual controls are paused while the roster snapshot is saved. A scheduled donation refresh may continue safely in the background.";
         statusEl.style.color = "#94a3b8";
         return;
       }
@@ -7369,8 +7419,14 @@
 
   const ADMIN_UNLOCK_V2_SCHEMA_VERSION = 2;
   const ADMIN_ACTIVE_VERSION_CONFLICT_CODE = "ADMIN_ACTIVE_VERSION_CONFLICT";
+  const ADMIN_PUBLISH_BUSY_CODE = "ADMIN_PUBLISH_BUSY";
   const ADMIN_PUBLIC_SELECTOR_TIMEOUT_MS = 2500;
   const ADMIN_PUBLIC_EXACT_LOAD_TIMEOUT_MS = 4000;
+  const ADMIN_PUBLISH_STATUS_POLL_MAX_MS = 5 * 60 * 1000;
+  const ADMIN_PUBLISH_STATUS_DEFAULT_RETRY_MS = 1500;
+  const ADMIN_PUBLISH_MAX_SUBMIT_ATTEMPTS = 3;
+  const ADMIN_PUBLISH_DELIVERY_MONITOR_MS = 2 * 60 * 1000;
+  const ADMIN_PUBLISH_DELIVERY_POLL_MS = 5000;
 
   const isSafeAdminActiveVersionId_ = (versionIdRaw) => {
     const versionId = toStr(versionIdRaw).trim();
@@ -8608,8 +8664,11 @@
       state.previewDirty = false;
       state.previewRevision += 1;
       state.publishBusy = false;
+      state.publishDeliveryBusy = false;
+      state.pendingPublish = null;
       state.publishAttemptId += 1;
       setAdminWorkspaceMutationBusy_(false);
+      clearPublishState_();
       state.unlockContractVersion = 0;
       state.loadedSourceVersionId = "";
       state.latestRuntimeVersionId = "";
@@ -8793,6 +8852,10 @@
         state.password = "";
         state.authenticated = false;
         state.activeConfigReloadBusy = false;
+        state.publishBusy = false;
+        state.publishDeliveryBusy = false;
+        state.pendingPublish = null;
+        clearPublishState_();
         state.unlockContractVersion = 0;
         state.loadedSourceVersionId = "";
         state.latestRuntimeVersionId = "";
@@ -8858,6 +8921,10 @@
         ) {
           return;
         }
+        state.publishAttemptId += 1;
+        state.pendingPublish = null;
+        state.publishDeliveryBusy = false;
+        clearPublishState_();
         state.activeConfigReloadBusy = true;
         syncLoadActiveButtonAvailability_();
         setAdminWorkspaceLoading_(true);
@@ -9106,17 +9173,365 @@
       };
     }
 
+    const waitForAdminPublish_ = (delayMsRaw) => new Promise((resolve) => {
+      setTimeout(resolve, Math.max(0, Number(delayMsRaw) || 0));
+    });
+
+    const createAdminPublishAttemptId_ = () => {
+      const cryptoApi = typeof window !== "undefined" && window.crypto ? window.crypto : null;
+      if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+        return cryptoApi.randomUUID();
+      }
+      if (cryptoApi && typeof cryptoApi.getRandomValues === "function") {
+        const bytes = new Uint8Array(16);
+        cryptoApi.getRandomValues(bytes);
+        return Array.from(bytes).map((value) => value.toString(16).padStart(2, "0")).join("");
+      }
+      return "publish-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 14);
+    };
+
+    const isAutomaticAdminPublishRetryError_ = (errRaw) => {
+      const code = toStr(errRaw && errRaw.code).trim();
+      if (code === ADMIN_PUBLISH_BUSY_CODE || code === "ADMIN_PUBLISH_STATUS_BUSY") return true;
+      if (errRaw && errRaw.retryable === true) return true;
+      const message = toErrorMessage(errRaw).trim().toLowerCase();
+      return message.indexOf("publish cooldown") >= 0 ||
+        message.indexOf("timed out") >= 0 ||
+        message.indexOf("timeout") >= 0 ||
+        message.indexOf("failed to fetch") >= 0 ||
+        message.indexOf("network error") >= 0 ||
+        message === "load failed" ||
+        message.indexOf("execution deadline") >= 0 ||
+        message.indexOf("briefly busy") >= 0 ||
+        message.indexOf("waiting for") >= 0;
+    };
+
+    const createAdminPublishConflictFromStatus_ = (statusRaw) => {
+      const status = statusRaw && typeof statusRaw === "object" ? statusRaw : {};
+      return createAdminApiError(
+        toStr(status.message).trim() || "Active roster data changed before this publish could commit.",
+        false,
+        ADMIN_ACTIVE_VERSION_CONFLICT_CODE
+      );
+    };
+
+    const queryAdminPublishStatusV2_ = (pendingRaw, passwordRaw) => {
+      const pending = pendingRaw && typeof pendingRaw === "object" ? pendingRaw : {};
+      return runServerMethod("getAdminPublishStatusV2", [
+        toStr(passwordRaw),
+        toStr(pending.requestId),
+        toStr(pending.expectedSourceVersionId),
+      ]);
+    };
+
+    const normalizeCommittedAdminPublishResult_ = (resultRaw, pendingRaw) => {
+      const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
+      const pending = pendingRaw && typeof pendingRaw === "object" ? pendingRaw : {};
+      const activeVersionId = toStr(result.activeVersionId || result.targetVersionId).trim();
+      const resultAttemptId = toStr(result.publishAttemptId).trim();
+      if (
+        result.status !== "committed" ||
+        activeVersionId !== toStr(pending.targetVersionId).trim() ||
+        (resultAttemptId && resultAttemptId !== toStr(pending.requestId).trim())
+      ) {
+        throw new Error("Publish confirmation did not match the submitted roster snapshot.");
+      }
+      return Object.assign({}, result, { activeVersionId });
+    };
+
+    const runCanonicalAdminPublishV2_ = async (pendingRaw, passwordRaw) => {
+      const pending = pendingRaw && typeof pendingRaw === "object" ? pendingRaw : {};
+      const deadlineMs = Date.now() + ADMIN_PUBLISH_STATUS_POLL_MAX_MS;
+      let shouldSubmit = true;
+      let submitCount = 0;
+      let statusFailureCount = 0;
+      let lastError = pending.lastError || null;
+
+      while (Date.now() <= deadlineMs) {
+        if (shouldSubmit && submitCount < ADMIN_PUBLISH_MAX_SUBMIT_ATTEMPTS) {
+          submitCount += 1;
+          const retryLabel = submitCount > 1 ? ("Safe retry " + submitCount + "/" + ADMIN_PUBLISH_MAX_SUBMIT_ATTEMPTS + ".") : "";
+          setPublishState_(
+            "saving",
+            submitCount > 1 ? "Retrying the same roster snapshot" : "Saving roster snapshot",
+            (retryLabel ? retryLabel + " " : "") + "This attempt has one fixed version id, so a slow response cannot create duplicates."
+          );
+          setStatus(submitCount > 1 ? "Retrying publish safely..." : "Publishing roster snapshot...");
+          try {
+            const result = await runServerMethod("publishRosterDataV2", [
+              pending.publishPayload,
+              toStr(passwordRaw),
+              pending.expectedSourceVersionId,
+              {
+                publishAttemptId: pending.requestId,
+                includeRosterDataInResult: false,
+              },
+            ]);
+            return normalizeCommittedAdminPublishResult_(result, pending);
+          } catch (err) {
+            lastError = err;
+          }
+        }
+
+        setPublishState_(
+          "checking",
+          "Checking the saved publish attempt",
+          "The backend is being asked whether this exact snapshot committed before any retry is allowed."
+        );
+        setStatus("Checking publish result...");
+        let status = null;
+        try {
+          status = await queryAdminPublishStatusV2_(pending, passwordRaw);
+          statusFailureCount = 0;
+        } catch (statusErr) {
+          statusFailureCount += 1;
+          if (!lastError) lastError = statusErr;
+          if (
+            isAdminActiveVersionConflict_(lastError) ||
+            !isAutomaticAdminPublishRetryError_(lastError) ||
+            statusFailureCount >= 2 ||
+            submitCount >= ADMIN_PUBLISH_MAX_SUBMIT_ATTEMPTS
+          ) {
+            throw lastError || statusErr;
+          }
+          await waitForAdminPublish_(ADMIN_PUBLISH_STATUS_DEFAULT_RETRY_MS);
+          shouldSubmit = true;
+          continue;
+        }
+
+        const statusName = toStr(status && status.status).trim().toLowerCase();
+        if (statusName === "committed") {
+          return normalizeCommittedAdminPublishResult_(status, pending);
+        }
+        if (statusName === "conflict") {
+          throw createAdminPublishConflictFromStatus_(status);
+        }
+        if (statusName === "running" || statusName === "waiting") {
+          const activity = toStr(status && status.activity).trim();
+          const donationNote = status && status.donationRefreshActive
+            ? " Donation refresh is also running independently and does not block this roster save."
+            : "";
+          setPublishState_(
+            statusName === "waiting" ? "waiting" : "saving",
+            statusName === "waiting" ? "Waiting for roster refresh" : "Roster snapshot is still saving",
+            (toStr(status && status.message).trim() || (activity ? ("Waiting for " + activity + ".") : "The save is still in progress.")) + donationNote
+          );
+          setStatus(statusName === "waiting" ? "Publish queued behind the current roster refresh..." : "Publishing roster snapshot...");
+          shouldSubmit = false;
+          await waitForAdminPublish_(Math.max(
+            750,
+            Number(status && status.retryAfterMs) || ADMIN_PUBLISH_STATUS_DEFAULT_RETRY_MS
+          ));
+          continue;
+        }
+        if (statusName === "retryable" || status && status.canRetry === true) {
+          if (lastError && !isAutomaticAdminPublishRetryError_(lastError)) {
+            lastError.adminPublishConfirmedNotCommitted = true;
+            throw lastError;
+          }
+          if (submitCount >= ADMIN_PUBLISH_MAX_SUBMIT_ATTEMPTS) break;
+          shouldSubmit = true;
+          const lastErrorMessage = toErrorMessage(lastError).trim().toLowerCase();
+          const retryDelayMs = lastErrorMessage.indexOf("publish cooldown") >= 0
+            ? 10_000
+            : Math.max(250, Number(status && status.retryAfterMs) || 250);
+          await waitForAdminPublish_(retryDelayMs);
+          continue;
+        }
+        lastError = new Error(toStr(status && status.message).trim() || "Publish status was not recognized.");
+        break;
+      }
+
+      const unresolved = lastError || new Error("The publish attempt is still unresolved.");
+      unresolved.adminPublishRetryable = true;
+      throw unresolved;
+    };
+
+    const formatAdminPublishCounts_ = (resultRaw) => {
+      const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
+      const parts = [];
+      if (result.playerCount != null && Number.isFinite(Number(result.playerCount))) {
+        parts.push(Math.max(0, Math.floor(Number(result.playerCount))) + " players");
+      }
+      if (result.noteCount != null && Number.isFinite(Number(result.noteCount))) {
+        parts.push(Math.max(0, Math.floor(Number(result.noteCount))) + " notes");
+      }
+      if (result.metricEntryCount != null && Number.isFinite(Number(result.metricEntryCount))) {
+        parts.push(Math.max(0, Math.floor(Number(result.metricEntryCount))) + " metric entries");
+      }
+      return parts.length ? (" (" + parts.join(", ") + ")") : "";
+    };
+
+    const scheduleAdminPublishCooldownUiSync_ = () => {
+      const delayMs = Math.max(0, Number(state.publishCooldownUntil) || 0) - Date.now() + 50;
+      setTimeout(() => {
+        syncPublishButtonAvailability_();
+      }, Math.max(50, delayMs));
+    };
+
+    const applyCommittedAdminPublishToWorkspace_ = (pendingRaw, resultRaw) => {
+      const pending = pendingRaw && typeof pendingRaw === "object" ? pendingRaw : {};
+      const result = normalizeCommittedAdminPublishResult_(resultRaw, pending);
+      pending.canonicalCommitted = true;
+      pending.activeVersionId = result.activeVersionId;
+      pending.publishedAt = toStr(result.publishedAt).trim();
+      pending.publishResult = result;
+      pending.lastError = null;
+      state.latestRuntimeVersionId = result.activeVersionId;
+      state.publishCooldownUntil = Date.now() + 10_000;
+      scheduleAdminPublishCooldownUiSync_();
+
+      if (state.previewRevision !== pending.submittedPreviewRevision) {
+        state.sourceVersionDrifted = true;
+        setStatus("Roster snapshot saved, but newer local edits were not included. Reload active config before another roster publish.");
+        setPublishState_(
+          "warning",
+          "Roster saved; newer local edits remain only in this browser",
+          "The submitted snapshot was preserved exactly. Reload active config and reapply the newer edits before publishing again."
+        );
+        return result;
+      }
+
+      const currentCwlLeagueSignups = state.cwlLeagueSignupsAvailable &&
+        pending.publishPayload.cwlLeagueSignups &&
+        typeof pending.publishPayload.cwlLeagueSignups === "object"
+          ? cloneJson(pending.publishPayload.cwlLeagueSignups)
+          : null;
+      const localCanonical = cloneJson(pending.publishPayload);
+      if (pending.publishedAt) localCanonical.lastUpdatedAt = pending.publishedAt;
+      const rebasedRosterData = attachAuthenticatedCwlLeagueSignupsV2_(
+        localCanonical,
+        currentCwlLeagueSignups
+      );
+      applyActiveConfigIntoPreview_(rebasedRosterData, "Roster snapshot saved. Public delivery is being checked.", {
+        contractVersion: ADMIN_UNLOCK_V2_SCHEMA_VERSION,
+        sourceVersionId: result.activeVersionId,
+        cwlLeagueSignupsAvailable: state.cwlLeagueSignupsAvailable,
+        cwlLeagueSignupsError: state.cwlLeagueSignupsError,
+      });
+      return result;
+    };
+
+    const readAdminPublicDeliveryVersion_ = async () => {
+      if (!getRosterPublicDataApi_()) throw new Error("The public delivery checker is unavailable.");
+      const selector = await runAdminPublicDataRequestWithTimeout_(
+        (requestSignal) => loadAdminCommittedSelectorV2_(requestSignal),
+        null,
+        Math.max(ADMIN_PUBLIC_SELECTOR_TIMEOUT_MS, 4000),
+        "Public roster delivery check"
+      );
+      return toStr(selector && selector.currentVersionId).trim();
+    };
+
+    const monitorAdminPublishDelivery_ = async (pendingRaw, passwordRaw, optionsRaw) => {
+      const pending = pendingRaw && typeof pendingRaw === "object" ? pendingRaw : null;
+      if (!pending || pending.canonicalCommitted !== true) return false;
+      const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+      const monitorStartedAt = Date.now();
+      const monitorForMs = Math.max(5000, Number(options.monitorForMs) || ADMIN_PUBLISH_DELIVERY_MONITOR_MS);
+      let deliveryTargetVersionId = toStr(pending.deliveryTargetVersionId || pending.activeVersionId).trim();
+      let deliveryWasSuperseded = deliveryTargetVersionId !== toStr(pending.activeVersionId).trim();
+      let lastError = null;
+      let consecutiveDeliveryFailures = 0;
+
+      state.publishDeliveryBusy = true;
+      syncPublishButtonAvailability_();
+      setPublishState_(
+        "delivering",
+        "Roster saved; updating the public page",
+        "The canonical snapshot is safe. Public delivery runs separately and may take a minute."
+      );
+      setStatus("Roster saved" + formatAdminPublishCounts_(pending.publishResult) + ". Checking public delivery...");
+      try {
+        if (options.retryDelivery === true) {
+          try {
+            const backendStatus = await queryAdminPublishStatusV2_(pending, passwordRaw);
+            if (toStr(backendStatus && backendStatus.status).trim().toLowerCase() === "committed") {
+              await runServerMethod("retryAdminPublishDeliveryV2", [toStr(passwordRaw), pending.requestId]);
+            } else if (
+              toStr(backendStatus && backendStatus.status).trim().toLowerCase() === "conflict" &&
+              isSafeAdminActiveVersionId_(backendStatus && backendStatus.activeVersionId)
+            ) {
+              deliveryTargetVersionId = toStr(backendStatus.activeVersionId).trim();
+              pending.deliveryTargetVersionId = deliveryTargetVersionId;
+              deliveryWasSuperseded = true;
+              setPublishState_(
+                "waiting",
+                "A newer roster refresh followed this publish",
+                "The original snapshot was saved. Waiting for the newer canonical version to reach the public page."
+              );
+            }
+          } catch (retryErr) {
+            lastError = retryErr;
+            if (isAdminActiveVersionConflict_(retryErr)) {
+              try {
+                const refreshedStatus = await queryAdminPublishStatusV2_(pending, passwordRaw);
+                if (isSafeAdminActiveVersionId_(refreshedStatus && refreshedStatus.activeVersionId)) {
+                  deliveryTargetVersionId = toStr(refreshedStatus.activeVersionId).trim();
+                  pending.deliveryTargetVersionId = deliveryTargetVersionId;
+                  deliveryWasSuperseded = true;
+                }
+              } catch (statusErr) {
+                lastError = statusErr;
+              }
+            }
+          }
+        }
+
+        while (Date.now() - monitorStartedAt < monitorForMs) {
+          if (state.pendingPublish !== pending || state.authenticated !== true) return false;
+          try {
+            const publicVersionId = await readAdminPublicDeliveryVersion_();
+            if (publicVersionId === deliveryTargetVersionId) {
+              pending.publicLive = true;
+              state.pendingPublish = null;
+              setPublishState_(
+                "live",
+                deliveryWasSuperseded ? "Current roster is live" : "Roster publish is live",
+                deliveryWasSuperseded
+                  ? "A newer background refresh followed the saved snapshot, and that current version is now public."
+                  : "The exact saved roster version is now selected on the public page."
+              );
+              setStatus("Published and live" + formatAdminPublishCounts_(pending.publishResult) + ".");
+              return true;
+            }
+            lastError = null;
+            consecutiveDeliveryFailures = 0;
+          } catch (deliveryErr) {
+            lastError = deliveryErr;
+            consecutiveDeliveryFailures += 1;
+            if (!getRosterPublicDataApi_()) break;
+            if (consecutiveDeliveryFailures >= 3) break;
+          }
+          await waitForAdminPublish_(ADMIN_PUBLISH_DELIVERY_POLL_MS);
+        }
+
+        pending.deliveryRetryAvailable = true;
+        state.pendingPublish = pending;
+        setPublishState_(
+          "warning",
+          "Roster saved; public delivery is still pending",
+          (lastError ? ("Last check: " + toErrorMessage(lastError) + " ") : "") +
+            "Use Check delivery to verify again and safely requeue this same version."
+        );
+        setStatus("Roster snapshot is saved. Public delivery has not been confirmed yet.");
+        return false;
+      } finally {
+        state.publishDeliveryBusy = false;
+        syncPublishButtonAvailability_();
+      }
+    };
+
     $("#publishBtn").onclick = async () => {
-      if (state.publishBusy || state.activeConfigReloadBusy || state.bulkRefreshBusy) return;
+      if (state.publishBusy || state.publishDeliveryBusy || state.activeConfigReloadBusy || state.bulkRefreshBusy) return;
       const publishAttemptId = state.publishAttemptId + 1;
       state.publishAttemptId = publishAttemptId;
       let enteredPublishBusy = false;
       let useV2Publish = false;
-      let v2PublishRequestStarted = false;
+      let committedPending = null;
+      let committedResult = null;
       try {
         if (!state.lastRosterData) throw new Error(PREVIEW_NOT_READY_MESSAGE);
-        const now = Date.now();
-        if (now < state.publishCooldownUntil) throw new Error("Publish cooldown: please wait a few seconds.");
 
         const pw = (state.password || toStr($("#pw") && $("#pw").value)).trim();
         if (!pw) throw new Error("Password is missing.");
@@ -9133,103 +9548,123 @@
           throw new Error("This workspace has no canonical source version. Reload active config before publishing.");
         }
 
-        syncRosterOrderFromCurrentArray_(state.lastRosterData);
-        normalizeRosterOrderInData_(state.lastRosterData);
-        reindexAllRosters();
-        reconcileAllActiveCwlPreparationAssignmentsLocal_();
-        normalizeAllRosterPublicLineupProjectionsLocal_();
+        const existingPending = state.pendingPublish && typeof state.pendingPublish === "object"
+          ? state.pendingPublish
+          : null;
+        if (useV2Publish && existingPending && existingPending.canonicalCommitted === true) {
+          try {
+            await monitorAdminPublishDelivery_(existingPending, pw, {
+              retryDelivery: true,
+              monitorForMs: ADMIN_PUBLISH_DELIVERY_MONITOR_MS,
+            });
+          } catch (deliveryErr) {
+            existingPending.deliveryRetryAvailable = true;
+            setPublishState_(
+              "warning",
+              "Roster saved; delivery check could not finish",
+              toErrorMessage(deliveryErr) + " Use Check delivery to try again."
+            );
+            setStatus("Roster snapshot remains saved. Public delivery was not confirmed.");
+          }
+          return;
+        }
+        if (!existingPending && Date.now() < state.publishCooldownUntil) {
+          throw new Error("Publish cooldown: please wait a few seconds.");
+        }
 
-        const submittedPreviewRevision = state.previewRevision;
-        const publishPayload = cloneJson(state.lastRosterData);
+        let pending = useV2Publish ? existingPending : null;
+        if (!pending) {
+          syncRosterOrderFromCurrentArray_(state.lastRosterData);
+          normalizeRosterOrderInData_(state.lastRosterData);
+          reindexAllRosters();
+          reconcileAllActiveCwlPreparationAssignmentsLocal_();
+          normalizeAllRosterPublicLineupProjectionsLocal_();
+
+          const requestId = createAdminPublishAttemptId_();
+          pending = {
+            requestId,
+            targetVersionId: "admin-publish-" + requestId,
+            expectedSourceVersionId,
+            submittedPreviewRevision: state.previewRevision,
+            publishPayload: cloneJson(state.lastRosterData),
+            canonicalCommitted: false,
+            publicLive: false,
+            startedAt: Date.now(),
+            lastError: null,
+          };
+          if (useV2Publish) state.pendingPublish = pending;
+        } else if (pending.expectedSourceVersionId !== expectedSourceVersionId) {
+          state.pendingPublish = null;
+          throw createAdminApiError(
+            "The saved publish attempt belongs to a different active version. Reload active config before publishing.",
+            false,
+            ADMIN_ACTIVE_VERSION_CONFLICT_CODE
+          );
+        }
+
         state.publishBusy = true;
         enteredPublishBusy = true;
         setAdminWorkspaceMutationBusy_(true);
         syncPublishButtonAvailability_();
         syncLoadActiveButtonAvailability_();
         refreshRefreshAllUi();
-        setStatus("Publishing...");
+        renderAutoRefreshUi();
+        renderDonationRefreshUi();
 
-        v2PublishRequestStarted = useV2Publish;
         const publishResult = useV2Publish
-          ? await runServerMethod("publishRosterDataV2", [
-              publishPayload,
-              pw,
-              expectedSourceVersionId,
-              { includeRosterDataInResult: true },
-            ])
-          : await runServerMethod("publishRosterData", [publishPayload, pw]);
+          ? await runCanonicalAdminPublishV2_(pending, pw)
+          : await runServerMethod("publishRosterData", [pending.publishPayload, pw]);
 
         if (state.publishAttemptId !== publishAttemptId) return;
 
-        state.publishCooldownUntil = Date.now() + 10_000;
         if (useV2Publish) {
-          const activeVersionId = toStr(publishResult && publishResult.activeVersionId).trim();
-          const canonicalRosterData = publishResult && publishResult.rosterData;
-          if (
-            !isSafeAdminActiveVersionId_(activeVersionId) ||
-            !canonicalRosterData ||
-            !Array.isArray(canonicalRosterData.rosters)
-          ) {
-            state.loadedSourceVersionId = "";
-            state.sourceVersionDrifted = true;
-            $("#publishBtn").disabled = true;
-            setStatus("Published, but the canonical result was not confirmed. Reload active config before publishing again.");
-            alert("Publish completed, but the backend did not return the exact canonical result. Reload active config before making another publish.");
-            return;
-          }
-          state.latestRuntimeVersionId = activeVersionId;
-          if (state.previewRevision !== submittedPreviewRevision) {
-            state.sourceVersionDrifted = true;
-            setStatus("Published the submitted snapshot, but newer local edits were not included. Reload active config and reapply those edits before publishing again.");
-            alert("Publish completed, but the preview changed while it was running. Your newer local edits were not overwritten; reload active config and reapply them before publishing again.");
-            return;
-          }
-          const currentCwlLeagueSignups = state.cwlLeagueSignupsAvailable &&
-            publishPayload.cwlLeagueSignups &&
-            typeof publishPayload.cwlLeagueSignups === "object"
-              ? cloneJson(publishPayload.cwlLeagueSignups)
-              : null;
-          const rebasedRosterData = attachAuthenticatedCwlLeagueSignupsV2_(
-            canonicalRosterData,
-            currentCwlLeagueSignups
+          committedPending = pending;
+          committedResult = applyCommittedAdminPublishToWorkspace_(pending, publishResult);
+          setPublishState_(
+            "delivering",
+            "Roster snapshot saved safely",
+            "The backend confirmed the exact attempt. Public delivery is now being checked separately."
           );
-          applyActiveConfigIntoPreview_(rebasedRosterData, "Published successfully.", {
-            contractVersion: ADMIN_UNLOCK_V2_SCHEMA_VERSION,
-            sourceVersionId: activeVersionId,
-            cwlLeagueSignupsAvailable: state.cwlLeagueSignupsAvailable,
-            cwlLeagueSignupsError: state.cwlLeagueSignupsError,
-          });
-        }
-        const playerCount = publishResult && Number.isFinite(Number(publishResult.playerCount)) ? Number(publishResult.playerCount) : null;
-        const noteCount = publishResult && Number.isFinite(Number(publishResult.noteCount)) ? Number(publishResult.noteCount) : null;
-        const metricEntryCount = publishResult && Number.isFinite(Number(publishResult.metricEntryCount))
-          ? Number(publishResult.metricEntryCount)
-          : null;
-        if (playerCount != null && noteCount != null && metricEntryCount != null) {
-          setStatus("Published successfully (" + playerCount + " players, " + noteCount + " notes, " + metricEntryCount + " metric entries).");
-        } else if (playerCount != null && noteCount != null) {
-          setStatus("Published successfully (" + playerCount + " players, " + noteCount + " notes).");
         } else {
-          setStatus("Published successfully.");
+          state.publishCooldownUntil = Date.now() + 10_000;
+          scheduleAdminPublishCooldownUiSync_();
+          state.pendingPublish = null;
+          clearPublishState_();
+          setStatus("Published successfully" + formatAdminPublishCounts_(publishResult) + ".");
         }
-
-        setTimeout(() => {
-          if (state.publishAttemptId !== publishAttemptId) return;
-          if (syncPublishButtonAvailability_()) setStatus("Ready.");
-        }, 10_050);
       } catch (err) {
         if (state.publishAttemptId !== publishAttemptId) return;
         if (isAdminActiveVersionConflict_(err)) {
           state.sourceVersionDrifted = true;
           $("#publishBtn").disabled = true;
+          state.pendingPublish = null;
           setStatus("Publish blocked because active data changed. Reload active config, review the new snapshot, and reapply your edits.");
+          setPublishState_(
+            "error",
+            "Publish stopped before committing",
+            "A different active roster version won the source check. Your local preview was not discarded."
+          );
           alert("Publish blocked: active data changed after this workspace loaded. Nothing was written. Reload active config before publishing.");
           return;
         }
-        if (v2PublishRequestStarted) {
-          state.sourceVersionDrifted = true;
-          setStatus("The publish result could not be confirmed. Reload active config before publishing again; your local preview remains available for review.");
-          alert("Publish result unconfirmed: " + toErrorMessage(err) + " Reload active config before publishing again.");
+        if (useV2Publish && err && err.adminPublishConfirmedNotCommitted === true) {
+          state.pendingPublish = null;
+          setStatus("Publish failed before any roster version committed. Correct the preview and publish again.");
+          setPublishState_(
+            "error",
+            "Publish did not commit",
+            toErrorMessage(err) + " The current preview is still editable and the Publish button remains available."
+          );
+          return;
+        }
+        if (useV2Publish && state.pendingPublish) {
+          state.pendingPublish.lastError = err;
+          setStatus("Publish has not committed yet. Use Retry publish; the same saved snapshot and version id will be reused.");
+          setPublishState_(
+            "error",
+            "Publish paused and is safe to retry",
+            toErrorMessage(err) + " No member list was discarded, and retrying cannot create a duplicate version."
+          );
           return;
         }
         syncPublishButtonAvailability_();
@@ -9242,7 +9677,20 @@
           syncLoadActiveButtonAvailability_();
           syncPublishButtonAvailability_();
           refreshRefreshAllUi();
+          renderAutoRefreshUi();
+          renderDonationRefreshUi();
         }
+      }
+      if (
+        committedPending &&
+        committedResult &&
+        state.publishAttemptId === publishAttemptId &&
+        state.pendingPublish === committedPending
+      ) {
+        await monitorAdminPublishDelivery_(committedPending, state.password, {
+          retryDelivery: false,
+          monitorForMs: ADMIN_PUBLISH_DELIVERY_MONITOR_MS,
+        });
       }
     };
   };

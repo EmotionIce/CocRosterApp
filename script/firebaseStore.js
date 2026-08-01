@@ -3063,7 +3063,12 @@ function updateActiveRosterDataCaches_(text) {
 // PUT an active roster payload to Firebase without touching caches.
 // This is the final active write boundary, so it re-validates the contract even
 // when callers believe they already hold validated data.
-function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
+function putValidatedActiveRosterDataToFirebase_(validatedRosterData, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const activeVersionIdOverride = String(options.activeVersionIdOverride == null ? "" : options.activeVersionIdOverride).trim();
+	if (activeVersionIdOverride && !isSafeActiveVersionId_(activeVersionIdOverride)) {
+		throw new Error("Active version override must use only letters, digits, underscore, and hyphen.");
+	}
 	const validated = validateRosterData_(validatedRosterData);
 	const encodedPayload = encodeFirebaseObjectKeysRecursive_(validated);
 	const activeFields = ["schemaVersion", "pageTitle", "rosterOrder", "rosters", "playerMetrics", "playerWarPerformance", "lastUpdatedAt", "publicConfig"];
@@ -3076,9 +3081,10 @@ function putValidatedActiveRosterDataToFirebase_(validatedRosterData) {
 		});
 	}
 	firebaseBatchPutJson_(writes);
-	const versionWrite = writeActiveRosterVersionShards_(createActiveVersionId_("active-write"), validated, {
+	const activeVersionId = activeVersionIdOverride || createActiveVersionId_("active-write");
+	const versionWrite = writeActiveRosterVersionShards_(activeVersionId, validated, {
 		publish: true,
-		source: "active-write",
+		source: String(options.activeVersionSource || "active-write").trim() || "active-write",
 	});
 	const storageCleanup = cleanupFirebaseStorageRetentionBestEffort_("active roster write storage retention", {
 		reason: "active-write",
@@ -3162,8 +3168,8 @@ function readLegacyActiveRosterSnapshotFromRawVersion_(versionIdRaw) {
 }
 
 // Handle write already-validated active roster data to Firebase.
-function writeValidatedActiveRosterDataToFirebase_(validatedRosterData) {
-	const writeResult = putValidatedActiveRosterDataToFirebase_(validatedRosterData);
+function writeValidatedActiveRosterDataToFirebase_(validatedRosterData, optionsRaw) {
+	const writeResult = putValidatedActiveRosterDataToFirebase_(validatedRosterData, optionsRaw);
 	updateActiveRosterDataCaches_(writeResult.text);
 	return writeResult;
 }
@@ -3655,7 +3661,10 @@ function replaceActiveRosterData_(validatedRosterData, options) {
 	if (canonicalized && (canonicalized.updatedCanonical || canonicalized.updatedRosterCache)) {
 		validated = validateRosterData_(canonicalized.rosterData);
 	}
-	const writeResult = writeValidatedActiveRosterDataToFirebase_(validated);
+	const writeResult = writeValidatedActiveRosterDataToFirebase_(validated, {
+		activeVersionIdOverride: opts.activeVersionIdOverride,
+		activeVersionSource: opts.activeVersionSource,
+	});
 
 	return {
 		replacedCount: sourceSnapshot ? 1 : 0,

@@ -67,7 +67,7 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
     assert.match(html, /Verifying admin access and loading the workspace\./, name);
-    const adminAssetVersion = name === "script/Admin.html" ? "20260729a" : "20260801a";
+    const adminAssetVersion = "20260801b";
     assert.match(html, new RegExp(`admin\\.js\\?v=[^"]*${adminAssetVersion}`), name);
     assert.match(html, /client\.js\?v=[^"]*20260729a/, name);
   }
@@ -91,7 +91,10 @@ test("Cloudflare admin shells share the responsive command bar", () => {
     for (const icon of ["📥", "🔄", "🚀", "🌐"]) assert.ok(html.includes(icon), `${name} is missing ${icon}`);
     assert.match(html, /class="admin-command-footer hidden"/, name);
     assert.match(html, /@media \(max-width: 680px\)[\s\S]*?\.admin-command-tabs \{[\s\S]*?overflow-x: auto;/, name);
-    assert.match(html, /admin\.js\?v=20260801a/, name);
+    assert.match(html, /admin\.js\?v=20260801b/, name);
+    assert.equal((html.match(/id="publishState"/g) || []).length, 1, name);
+    assert.equal((html.match(/id="publishStateTitle"/g) || []).length, 1, name);
+    assert.equal((html.match(/id="publishStateDetail"/g) || []).length, 1, name);
   }
 
   const adminClient = readShell("admin.js");
@@ -178,33 +181,36 @@ test("admin unlock V2 authenticates before exact roster hydration and never awai
   assert.doesNotMatch(adminClient, /resolveSharedActiveVersion|previousVersionId/);
 });
 
-test("admin V2 publish carries its exact source version and never falls back after a conflict", () => {
+test("admin V2 publish is idempotent, status-driven, and stays recoverable after uncertain responses", () => {
   const adminClient = readShell("admin.js");
   assert.match(
     adminClient,
-    /runServerMethod\("publishRosterDataV2", \[[\s\S]*?publishPayload,[\s\S]*?expectedSourceVersionId,[\s\S]*?includeRosterDataInResult: true/,
+    /runServerMethod\("publishRosterDataV2", \[[\s\S]*?pending\.publishPayload,[\s\S]*?pending\.expectedSourceVersionId,[\s\S]*?publishAttemptId: pending\.requestId,[\s\S]*?includeRosterDataInResult: false/,
   );
-  assert.match(adminClient, /const activeVersionId = toStr\(publishResult && publishResult\.activeVersionId\)/);
-  assert.match(adminClient, /const canonicalRosterData = publishResult && publishResult\.rosterData/);
+  assert.match(adminClient, /runServerMethod\("getAdminPublishStatusV2"/);
+  assert.match(adminClient, /runServerMethod\("retryAdminPublishDeliveryV2"/);
+  assert.match(adminClient, /targetVersionId: "admin-publish-" \+ requestId/);
+  assert.match(adminClient, /normalizeCommittedAdminPublishResult_/);
   assert.match(adminClient, /applyActiveConfigIntoPreview_\(rebasedRosterData/);
-  assert.doesNotMatch(adminClient, /publishResult\.activeVersionId \|\| publishResult\.sourceVersionId/);
-  assert.match(adminClient, /const submittedPreviewRevision = state\.previewRevision/);
-  assert.match(adminClient, /const publishPayload = cloneJson\(state\.lastRosterData\)/);
+  assert.doesNotMatch(adminClient, /const canonicalRosterData = publishResult && publishResult\.rosterData/);
+  assert.match(adminClient, /submittedPreviewRevision: state\.previewRevision/);
+  assert.match(adminClient, /publishPayload: cloneJson\(state\.lastRosterData\)/);
   assert.match(adminClient, /state\.publishBusy = true/);
   assert.match(adminClient, /setAdminWorkspaceMutationBusy_\(true\)/);
-  assert.match(adminClient, /state\.previewRevision !== submittedPreviewRevision/);
-  assert.match(adminClient, /if \(v2PublishRequestStarted\) \{[\s\S]*publish result could not be confirmed/);
-  assert.match(adminClient, /if \(state\.publishBusy \|\| state\.activeConfigReloadBusy \|\| state\.bulkRefreshBusy\) return/);
+  assert.match(adminClient, /state\.previewRevision !== pending\.submittedPreviewRevision/);
+  assert.match(adminClient, /if \(useV2Publish && state\.pendingPublish\) \{[\s\S]*Retry publish/);
+  assert.match(adminClient, /state\.pendingPublish\.lastError = err/);
+  assert.match(adminClient, /else if \(pendingPublish\) label = "Retry publish"/);
+  assert.match(adminClient, /canonicalCommitted === true[\s\S]*label = "Check delivery"/);
+  assert.match(adminClient, /if \(state\.publishBusy \|\| state\.publishDeliveryBusy \|\| state\.activeConfigReloadBusy \|\| state\.bulkRefreshBusy\) return/);
   assert.match(adminClient, /if \(state\.publishBusy \|\| state\.activeConfigReloadBusy\) \{[\s\S]*current publish or active-config load/);
   assert.match(adminClient, /finally \{[\s\S]*state\.publishBusy = false[\s\S]*setAdminWorkspaceMutationBusy_\(false\)/);
   assert.match(adminClient, /ADMIN_ACTIVE_VERSION_CONFLICT_CODE/);
   assert.match(adminClient, /Nothing was written\. Reload active config before publishing\./);
-  const publishStart = adminClient.indexOf('$("#publishBtn").onclick = async () =>');
-  const publishEnd = adminClient.indexOf("document.addEventListener", publishStart);
-  const publishFlow = adminClient.slice(publishStart, publishEnd);
-  assert.equal((publishFlow.match(/publishRosterDataV2/g) || []).length, 1);
-  assert.equal((publishFlow.match(/publishRosterData"/g) || []).length, 1);
-  assert.doesNotMatch(publishFlow, /catch[\s\S]*publishRosterData"/);
+  assert.match(adminClient, /Donation refresh is also running independently and does not block this roster save/);
+  assert.match(adminClient, /Public delivery runs separately and may take a minute/);
+  assert.equal((adminClient.match(/runServerMethod\("publishRosterDataV2"/g) || []).length, 1);
+  assert.equal((adminClient.match(/runServerMethod\("publishRosterData"/g) || []).length, 1);
 });
 
 test("admin V2 surfaces partial trigger-family repair failures", () => {
