@@ -2528,8 +2528,12 @@
         <div class="admin-section-head admin-section-head--row">
           <div>
             <h2>Rosters</h2>
+            <div class="small muted">CWL Prep: set retained subs or Fill to 50 on each roster, then build once. Votes and manual locks stay protected; the final prep roster catches overflow.</div>
           </div>
           <div class="admin-section-actions">
+            <button id="buildCwlPrepRostersBtn" class="btn" type="button" disabled>
+              Build CWL rosters
+            </button>
             <button id="applyCwlPreferencesBtn" class="btn secondary" type="button" disabled>
               Apply CWL prefs
             </button>
@@ -2539,6 +2543,7 @@
             </button>
           </div>
         </div>
+        <div id="cwlPrepDistributionSummary" class="cwl-preference-apply-summary hidden"></div>
         <div id="cwlPreferenceApplySummary" class="cwl-preference-apply-summary hidden"></div>
 
         <div id="loading" class="card preview-mount-card">

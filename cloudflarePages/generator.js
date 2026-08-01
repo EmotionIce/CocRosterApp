@@ -1328,6 +1328,228 @@
     return plan;
   };
 
+  // Normalize the retained CWL prep capacity for one roster.
+  const getCwlPrepDistributionCapacity = (rosterRaw) => {
+    const roster = isObj(rosterRaw) ? rosterRaw : {};
+    const prep = isObj(roster.cwlPreparation) ? roster.cwlPreparation : {};
+    const rosterSizeRaw = Number(prep.rosterSize);
+    const rosterSize = Number.isFinite(rosterSizeRaw)
+      ? Math.max(0, Math.min(50, Math.floor(rosterSizeRaw)))
+      : Math.max(0, Math.min(50, Array.isArray(roster.main) ? roster.main.length : 0));
+    const poolCount = [roster.main, roster.subs, roster.missing]
+      .reduce((sum, players) => sum + (Array.isArray(players) ? players.length : 0), 0);
+    const fallbackSubs = Math.max(0, Math.min(50 - rosterSize, poolCount - rosterSize));
+    const substituteCountRaw = Number(prep.substituteCount);
+    const substituteCount = Number.isFinite(substituteCountRaw)
+      ? Math.max(0, Math.min(50 - rosterSize, Math.floor(substituteCountRaw)))
+      : fallbackSubs;
+    const distributionMode = normalizeWhitespace(prep.distributionMode).toLowerCase() === "fill" ? "fill" : "subs";
+    return {
+      distributionMode,
+      rosterSize,
+      substituteCount,
+      capacity: distributionMode === "fill" ? 50 : Math.min(50, rosterSize + substituteCount),
+    };
+  };
+
+  // Build a lossless, deterministic CWL prep distribution plan. Preference
+  // moves are simulated first. Each over-cutoff player then moves through one
+  // adjacent active prep roster at a time, so the final roster safely catches
+  // all remaining overflow.
+  const planCwlPrepRosterDistribution = (args) => {
+    const input = isObj(args) ? args : {};
+    const rosterData = isObj(input.rosterData) ? input.rosterData : {};
+    const rosters = Array.isArray(rosterData.rosters) ? rosterData.rosters : [];
+    const strengthByTag = isObj(input.strengthByTag) ? input.strengthByTag : {};
+    const rosterOrder = Array.isArray(rosterData.rosterOrder)
+      ? rosterData.rosterOrder.map((value) => normalizeWhitespace(value)).filter(Boolean)
+      : [];
+    const nodesById = {};
+    const nodes = [];
+    const playerByTag = {};
+    const locationByTag = {};
+    let globalOrder = 0;
+
+    for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
+      const roster = isObj(rosters[rosterIndex]) ? rosters[rosterIndex] : {};
+      const rosterId = normalizeWhitespace(roster.id);
+      if (!rosterId) throw new Error("CWL prep distribution requires every roster to have an ID.");
+      if (nodesById[rosterId]) throw new Error("CWL prep distribution found duplicate roster ID: " + rosterId);
+      const node = { roster, rosterId, rosterIndex, tags: [] };
+      nodes.push(node);
+      nodesById[rosterId] = node;
+      const sections = [roster.main, roster.subs, roster.missing];
+      for (const playersRaw of sections) {
+        const players = Array.isArray(playersRaw) ? playersRaw : [];
+        for (const playerRaw of players) {
+          const player = isObj(playerRaw) ? playerRaw : {};
+          const playerTag = normalizeTag(player.tag);
+          if (!playerTag) throw new Error("CWL prep distribution found a player without a tag in " + rosterId + ".");
+          if (locationByTag[playerTag]) throw new Error("CWL prep distribution found duplicate player tag: " + playerTag);
+          node.tags.push(playerTag);
+          playerByTag[playerTag] = { player, globalOrder: globalOrder++ };
+          locationByTag[playerTag] = node;
+        }
+      }
+    }
+
+    const orderedNodes = [];
+    const orderedSeen = {};
+    for (const rosterId of rosterOrder) {
+      const node = nodesById[rosterId];
+      if (!node || orderedSeen[rosterId]) continue;
+      orderedSeen[rosterId] = true;
+      orderedNodes.push(node);
+    }
+    for (const node of nodes) {
+      if (orderedSeen[node.rosterId]) continue;
+      orderedSeen[node.rosterId] = true;
+      orderedNodes.push(node);
+    }
+
+    const preferencePlan = planCwlLeaguePreferenceMoves({ rosterData });
+    const preferredRosterIdByTag = {};
+    const preferenceResults = []
+      .concat(preferencePlan.moves || [])
+      .concat(preferencePlan.alreadyCorrect || [])
+      .concat(preferencePlan.conflicts || []);
+    for (const itemRaw of preferenceResults) {
+      const item = isObj(itemRaw) ? itemRaw : {};
+      const playerTag = normalizeTag(item.playerTag);
+      const targetRosterId = normalizeWhitespace(item.targetRosterId || item.rosterId);
+      if (playerTag && nodesById[targetRosterId]) preferredRosterIdByTag[playerTag] = targetRosterId;
+    }
+
+    const moveSimulatedTag = (playerTagRaw, targetRosterIdRaw) => {
+      const playerTag = normalizeTag(playerTagRaw);
+      const targetRosterId = normalizeWhitespace(targetRosterIdRaw);
+      const sourceNode = locationByTag[playerTag];
+      const targetNode = nodesById[targetRosterId];
+      if (!sourceNode || !targetNode) throw new Error("CWL prep distribution simulation could not locate " + playerTag + ".");
+      if (sourceNode === targetNode) return sourceNode;
+      const sourceIndex = sourceNode.tags.indexOf(playerTag);
+      if (sourceIndex < 0) throw new Error("CWL prep distribution simulation lost " + playerTag + ".");
+      sourceNode.tags.splice(sourceIndex, 1);
+      targetNode.tags.push(playerTag);
+      locationByTag[playerTag] = targetNode;
+      return sourceNode;
+    };
+
+    for (const moveRaw of preferencePlan.moves || []) {
+      const move = isObj(moveRaw) ? moveRaw : {};
+      moveSimulatedTag(move.playerTag, move.targetRosterId);
+    }
+
+    const activeNodes = orderedNodes.filter((node) => {
+      const prep = isObj(node.roster.cwlPreparation) ? node.roster.cwlPreparation : {};
+      return node.roster.trackingMode !== "regularWar" && prep.enabled === true;
+    });
+    if (activeNodes.length < 2) {
+      throw new Error("Enable CWL Preparation Mode on at least two ordered rosters before building rosters.");
+    }
+
+    const compareStrength = (leftTag, rightTag) => {
+      const leftRaw = isObj(strengthByTag[leftTag]) ? strengthByTag[leftTag] : {};
+      const rightRaw = isObj(strengthByTag[rightTag]) ? strengthByTag[rightTag] : {};
+      const leftScore = Number.isFinite(Number(leftRaw.strengthScore)) ? Number(leftRaw.strengthScore) : Number.NEGATIVE_INFINITY;
+      const rightScore = Number.isFinite(Number(rightRaw.strengthScore)) ? Number(rightRaw.strengthScore) : Number.NEGATIVE_INFINITY;
+      if (leftScore !== rightScore) return rightScore - leftScore;
+      const leftPlayer = playerByTag[leftTag] && playerByTag[leftTag].player;
+      const rightPlayer = playerByTag[rightTag] && playerByTag[rightTag].player;
+      const leftTh = Number.isFinite(Number(leftRaw.th)) ? Number(leftRaw.th) : Number(leftPlayer && leftPlayer.th) || 0;
+      const rightTh = Number.isFinite(Number(rightRaw.th)) ? Number(rightRaw.th) : Number(rightPlayer && rightPlayer.th) || 0;
+      if (leftTh !== rightTh) return rightTh - leftTh;
+      const leftOrder = playerByTag[leftTag] ? playerByTag[leftTag].globalOrder : Number.MAX_SAFE_INTEGER;
+      const rightOrder = playerByTag[rightTag] ? playerByTag[rightTag].globalOrder : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return leftTag.localeCompare(rightTag);
+    };
+
+    const cascadeMoves = [];
+    const rosterResults = [];
+    for (let activeIndex = 0; activeIndex < activeNodes.length; activeIndex++) {
+      const node = activeNodes[activeIndex];
+      const nextNode = activeNodes[activeIndex + 1] || null;
+      const distribution = getCwlPrepDistributionCapacity(node.roster);
+      const beforeCount = node.tags.length;
+      const rankedTags = node.tags.slice().sort(compareStrength);
+      let preferredOutsideCutoffCount = 0;
+      let lockedOutsideCutoffCount = 0;
+
+      if (nextNode) {
+        for (let rankIndex = distribution.capacity; rankIndex < rankedTags.length; rankIndex++) {
+          const playerTag = rankedTags[rankIndex];
+          if (preferredRosterIdByTag[playerTag] === node.rosterId) {
+            preferredOutsideCutoffCount++;
+            continue;
+          }
+          const lockState = getCwlPreferenceLockState(node.roster, playerTag);
+          if (lockState) {
+            lockedOutsideCutoffCount++;
+            continue;
+          }
+          const sourceNode = moveSimulatedTag(playerTag, nextNode.rosterId);
+          cascadeMoves.push({
+            playerTag,
+            playerName: normalizeWhitespace(playerByTag[playerTag] && playerByTag[playerTag].player && playerByTag[playerTag].player.name),
+            fromRosterId: sourceNode.rosterId,
+            targetRosterId: nextNode.rosterId,
+            rank: rankIndex + 1,
+            capacity: distribution.capacity,
+            distributionMode: distribution.distributionMode,
+          });
+        }
+      }
+
+      rosterResults.push({
+        rosterId: node.rosterId,
+        nextRosterId: nextNode ? nextNode.rosterId : "",
+        distributionMode: distribution.distributionMode,
+        rosterSize: distribution.rosterSize,
+        substituteCount: distribution.substituteCount,
+        capacity: distribution.capacity,
+        beforeCount,
+        afterCount: node.tags.length,
+        movedDownCount: cascadeMoves.filter((move) => move.fromRosterId === node.rosterId).length,
+        preferredOutsideCutoffCount,
+        lockedOutsideCutoffCount,
+        terminalOverflowCount: nextNode ? 0 : Math.max(0, node.tags.length - distribution.capacity),
+      });
+    }
+
+    const finalRosterIdByTag = {};
+    const finalTags = [];
+    for (const node of nodes) {
+      for (const playerTag of node.tags) {
+        if (finalRosterIdByTag[playerTag]) throw new Error("CWL prep distribution duplicated " + playerTag + ".");
+        finalRosterIdByTag[playerTag] = node.rosterId;
+        finalTags.push(playerTag);
+      }
+    }
+    const initialTags = Object.keys(playerByTag).sort();
+    finalTags.sort();
+    if (initialTags.length !== finalTags.length || initialTags.some((tag, index) => tag !== finalTags[index])) {
+      throw new Error("CWL prep distribution failed its player-conservation check.");
+    }
+    const shiftedTagSet = {};
+    for (const move of cascadeMoves) shiftedTagSet[move.playerTag] = true;
+
+    return {
+      preferencePlan,
+      cascadeMoves,
+      rosterResults,
+      finalRosterIdByTag,
+      summary: {
+        playerCount: initialTags.length,
+        preferenceMoveCount: preferencePlan.moves.length,
+        cascadeMoveCount: cascadeMoves.length,
+        shiftedPlayerCount: Object.keys(shiftedTagSet).length,
+        activeRosterCount: activeNodes.length,
+        conserved: true,
+      },
+    };
+  };
+
   const api = {
     normalizeTag,
     normalizeClanKey,
@@ -1340,6 +1562,7 @@
     buildImportComparison,
     applyImportComparison,
     planCwlLeaguePreferenceMoves,
+    planCwlPrepRosterDistribution,
     _internal: {
       sanitizeNameCandidate,
       sanitizeDiscordCandidate,

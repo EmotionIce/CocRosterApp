@@ -5235,6 +5235,46 @@ h2{
   letter-spacing: .02em;
 }
 
+.cwl-prep-distribution{
+  display:inline-flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:6px;
+  min-height:28px;
+}
+
+.cwl-prep-distribution__subs,
+.cwl-prep-distribution__fill{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  min-height:28px;
+  color:#cbd5e1;
+  font-size:11px;
+  font-weight:700;
+  white-space:nowrap;
+}
+
+.cwl-prep-subs-input{
+  width:58px;
+  min-height:28px;
+  padding:3px 7px;
+}
+
+.cwl-prep-capacity-pill{
+  display:inline-flex;
+  align-items:center;
+  min-height:28px;
+  padding:0 9px;
+  border-radius:999px;
+  border:1px solid rgba(56,189,248,.38);
+  background:rgba(3,105,161,.18);
+  color:#bae6fd;
+  font-size:11px;
+  font-weight:800;
+  white-space:nowrap;
+}
+
 .cwl-prep-summary-pill{
   display:inline-flex;
   align-items:center;

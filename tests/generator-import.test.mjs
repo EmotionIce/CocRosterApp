@@ -568,3 +568,147 @@ test("CWL preference planner tolerates missing roster arrays without mutating pr
   assert.equal(Array.isArray(rosterData.rosters[1].subs), false);
   assert.equal(Array.isArray(rosterData.rosters[2].main), false);
 });
+
+test("CWL prep distribution protects roster voters and cascades only below-cutoff non-voters", () => {
+  const generator = loadGenerator();
+  const makePlayer = (tag, th = 17) => ({ slot: null, name: tag, tag, th, notes: [] });
+  const prep = (rosterSize, substituteCount = 0, lockStateByTag = {}) => ({
+    enabled: true,
+    rosterSize,
+    distributionMode: "subs",
+    substituteCount,
+    lockStateByTag,
+  });
+  const rosterData = {
+    rosterOrder: ["top", "mid", "low"],
+    rosters: [
+      {
+        id: "top", trackingMode: "cwl", cwlPreparation: prep(2),
+        main: [makePlayer("#A"), makePlayer("#B")],
+        subs: [makePlayer("#C"), makePlayer("#D")], missing: [],
+      },
+      {
+        id: "mid", trackingMode: "cwl", cwlPreparation: prep(2, 0, { "#G": "lockedOut" }),
+        main: [makePlayer("#E"), makePlayer("#F")],
+        subs: [makePlayer("#G")], missing: [],
+      },
+      {
+        id: "low", trackingMode: "cwl", cwlPreparation: prep(2),
+        main: [makePlayer("#H"), makePlayer("#I")], subs: [], missing: [],
+      },
+    ],
+    cwlLeagueSignups: {
+      preferencesByTag: {
+        "#D": { playerTag: "#D", targetRosterId: "top", leagueName: "Top" },
+      },
+    },
+  };
+  const strengthByTag = {
+    "#A": { strengthScore: 100 }, "#B": { strengthScore: 90 },
+    "#C": { strengthScore: 80 }, "#D": { strengthScore: 10 },
+    "#E": { strengthScore: 70 }, "#F": { strengthScore: 60 },
+    "#G": { strengthScore: 50 }, "#H": { strengthScore: 40 }, "#I": { strengthScore: 30 },
+  };
+  const before = JSON.stringify(rosterData);
+
+  const plan = generator.planCwlPrepRosterDistribution({ rosterData, strengthByTag });
+
+  assert.equal(JSON.stringify(rosterData), before);
+  assert.equal(plan.finalRosterIdByTag["#D"], "top", "a voter for the current roster must stay even below cutoff");
+  assert.equal(plan.finalRosterIdByTag["#C"], "mid");
+  assert.equal(plan.finalRosterIdByTag["#F"], "low");
+  assert.equal(plan.finalRosterIdByTag["#G"], "mid", "manual prep locks must prevent automatic cross-roster moves");
+  assert.equal(plan.summary.playerCount, 9);
+  assert.equal(plan.summary.cascadeMoveCount, 2);
+  assert.equal(plan.summary.shiftedPlayerCount, 2);
+  assert.equal(plan.summary.conserved, true);
+  assert.equal(plan.rosterResults[0].preferredOutsideCutoffCount, 1);
+});
+
+test("CWL prep distribution applies votes first and preserves the strongest non-voter cutoff", () => {
+  const generator = loadGenerator();
+  const player = (tag, score) => ({ slot: null, name: tag, tag, th: score, notes: [] });
+  const prep = { enabled: true, rosterSize: 1, distributionMode: "subs", substituteCount: 0, lockStateByTag: {} };
+  const rosterData = {
+    rosterOrder: ["one", "two", "three"],
+    rosters: [
+      { id: "one", trackingMode: "cwl", cwlPreparation: { ...prep }, main: [player("#KEEP", 20)], subs: [player("#VOTE", 1)], missing: [] },
+      { id: "two", trackingMode: "cwl", cwlPreparation: { ...prep }, main: [player("#TWO", 19)], subs: [], missing: [] },
+      { id: "three", trackingMode: "cwl", cwlPreparation: { ...prep }, main: [player("#THREE", 18)], subs: [], missing: [] },
+    ],
+    cwlLeagueSignups: {
+      preferencesByTag: {
+        "#VOTE": { playerTag: "#VOTE", targetRosterId: "two", leagueName: "Two" },
+      },
+    },
+  };
+  const plan = generator.planCwlPrepRosterDistribution({
+    rosterData,
+    strengthByTag: {
+      "#KEEP": { strengthScore: 100 }, "#TWO": { strengthScore: 90 },
+      "#THREE": { strengthScore: 80 }, "#VOTE": { strengthScore: 1 },
+    },
+  });
+
+  assert.equal(plan.preferencePlan.summary.validMoveCount, 1);
+  assert.equal(plan.finalRosterIdByTag["#VOTE"], "two", "the selected roster protects the voter from its cutoff");
+  assert.equal(plan.finalRosterIdByTag["#TWO"], "two");
+  assert.equal(plan.rosterResults[1].preferredOutsideCutoffCount, 1);
+  assert.equal(plan.summary.playerCount, 4);
+  assert.equal(Object.keys(plan.finalRosterIdByTag).length, 4);
+});
+
+test("CWL prep fill mode uses a cutoff of 50 and preserves final-roster overflow", () => {
+  const generator = loadGenerator();
+  const topPlayers = Array.from({ length: 51 }, (_, index) => ({
+    slot: null,
+    name: "P" + index,
+    tag: "#P" + index,
+    th: 17,
+    notes: [],
+  }));
+  const rosterData = {
+    rosterOrder: ["top", "last"],
+    rosters: [
+      {
+        id: "top", trackingMode: "cwl",
+        cwlPreparation: { enabled: true, rosterSize: 15, distributionMode: "fill", substituteCount: 0, lockStateByTag: {} },
+        main: topPlayers.slice(0, 15), subs: topPlayers.slice(15), missing: [],
+      },
+      {
+        id: "last", trackingMode: "cwl",
+        cwlPreparation: { enabled: true, rosterSize: 5, distributionMode: "subs", substituteCount: 0, lockStateByTag: {} },
+        main: [{ slot: 1, name: "Last", tag: "#LAST", th: 17, notes: [] }], subs: [], missing: [],
+      },
+    ],
+    cwlLeagueSignups: { preferencesByTag: {} },
+  };
+  const strengthByTag = Object.fromEntries(topPlayers.map((entry, index) => [entry.tag, { strengthScore: 100 - index }]));
+  strengthByTag["#LAST"] = { strengthScore: 200 };
+
+  const plan = generator.planCwlPrepRosterDistribution({ rosterData, strengthByTag });
+
+  assert.equal(plan.rosterResults[0].capacity, 50);
+  assert.equal(plan.rosterResults[0].movedDownCount, 1);
+  assert.equal(plan.rosterResults[1].terminalOverflowCount, 0);
+  assert.equal(plan.summary.playerCount, 52);
+  assert.equal(Object.keys(plan.finalRosterIdByTag).length, 52);
+});
+
+test("CWL prep distribution rejects duplicate tags before planning any move", () => {
+  const generator = loadGenerator();
+  const prep = { enabled: true, rosterSize: 5, distributionMode: "subs", substituteCount: 0, lockStateByTag: {} };
+  const rosterData = {
+    rosterOrder: ["a", "b"],
+    rosters: [
+      { id: "a", trackingMode: "cwl", cwlPreparation: prep, main: [{ tag: "#DUP", th: 17 }], subs: [], missing: [] },
+      { id: "b", trackingMode: "cwl", cwlPreparation: prep, main: [{ tag: "#DUP", th: 16 }], subs: [], missing: [] },
+    ],
+    cwlLeagueSignups: { preferencesByTag: {} },
+  };
+
+  assert.throws(
+    () => generator.planCwlPrepRosterDistribution({ rosterData, strengthByTag: {} }),
+    /duplicate player tag: #DUP/i
+  );
+});

@@ -9,6 +9,8 @@ test("admin shells both expose the CWL preference apply controls", () => {
   const requiredTokens = [
     "applyCwlPreferencesBtn",
     "cwlPreferenceApplySummary",
+    "buildCwlPrepRostersBtn",
+    "cwlPrepDistributionSummary",
     "cwl-preference-apply-summary",
     "cwl-preference-apply-details",
     "cwl-preference-apply-details-group",
@@ -21,6 +23,8 @@ test("admin shells both expose the CWL preference apply controls", () => {
     }
     assert.equal((html.match(/id="applyCwlPreferencesBtn"/g) || []).length, 1);
     assert.equal((html.match(/id="cwlPreferenceApplySummary"/g) || []).length, 1);
+    assert.equal((html.match(/id="buildCwlPrepRostersBtn"/g) || []).length, 1);
+    assert.equal((html.match(/id="cwlPrepDistributionSummary"/g) || []).length, 1);
   }
 });
 

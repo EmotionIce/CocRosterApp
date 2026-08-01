@@ -29,6 +29,7 @@
     swapInMarksByRoster: {},
     suggestionNotesByRoster: {},
     lastCwlPreferenceApplyPlan: null,
+    lastCwlPrepDistributionPlan: null,
     pendingProfileReopen: null,
     autoRefreshSettings: null,
     autoRefreshBusy: false,
@@ -3179,6 +3180,80 @@
     }
   };
 
+  // Refresh the one-click CWL prep roster builder.
+  const refreshCwlPrepDistributionUi_ = () => {
+    const btn = $("#buildCwlPrepRostersBtn");
+    if (!btn) return;
+    const rosters = getRosters();
+    const activePrepCount = rosters.filter((roster) => isCwlPreparationActiveLocal_(roster)).length;
+    const plannerReady = !!(window.RosterGenerator && typeof window.RosterGenerator.planCwlPrepRosterDistribution === "function");
+    btn.disabled = state.bulkRefreshBusy || state.publishBusy || !state.cwlLeagueSignupsAvailable || activePrepCount < 2 || !plannerReady;
+    if (!state.cwlLeagueSignupsAvailable) {
+      btn.title = state.cwlLeagueSignupsError
+        ? ("CWL preferences are unavailable: " + state.cwlLeagueSignupsError)
+        : "CWL preferences must be loaded so voted roster choices can be protected.";
+    } else if (activePrepCount < 2) {
+      btn.title = "Enable CWL Preparation Mode on at least two ordered rosters.";
+    } else {
+      btn.title = "Apply CWL votes, keep each roster's configured strongest players, and cascade overflow down without losing members.";
+    }
+  };
+
+  // Clear the one-click CWL prep distribution summary.
+  const clearCwlPrepDistributionSummary_ = () => {
+    state.lastCwlPrepDistributionPlan = null;
+    const el = $("#cwlPrepDistributionSummary");
+    if (!el) return;
+    el.textContent = "";
+    el.classList.add("hidden");
+  };
+
+  // Render the result of the lossless one-click CWL prep roster build.
+  const renderCwlPrepDistributionSummary_ = (planRaw) => {
+    const el = $("#cwlPrepDistributionSummary");
+    if (!el) return;
+    const plan = planRaw && typeof planRaw === "object" ? planRaw : null;
+    const summary = plan && plan.summary && typeof plan.summary === "object" ? plan.summary : null;
+    if (!summary) {
+      clearCwlPrepDistributionSummary_();
+      return;
+    }
+    el.textContent = "";
+    const head = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = "CWL rosters built safely: ";
+    head.appendChild(strong);
+    head.appendChild(document.createTextNode(
+      summary.preferenceMoveCount + " vote move" + (summary.preferenceMoveCount === 1 ? "" : "s") + ", " +
+      summary.shiftedPlayerCount + " player" + (summary.shiftedPlayerCount === 1 ? "" : "s") + " shifted down across " +
+      summary.cascadeMoveCount + " league step" + (summary.cascadeMoveCount === 1 ? "" : "s") + ", all " +
+      summary.playerCount + " players conserved."
+    ));
+    el.appendChild(head);
+    const rosterResults = Array.isArray(plan.rosterResults) ? plan.rosterResults : [];
+    if (rosterResults.length) {
+      const details = document.createElement("details");
+      const detailsSummary = document.createElement("summary");
+      detailsSummary.textContent = "Per-roster result";
+      details.appendChild(detailsSummary);
+      const list = document.createElement("ul");
+      for (const result of rosterResults) {
+        const item = document.createElement("li");
+        const capacityLabel = result.distributionMode === "fill"
+          ? "fill to 50"
+          : (result.rosterSize + " main + " + result.substituteCount + " subs");
+        const suffix = result.nextRosterId
+          ? (", " + result.movedDownCount + " moved to " + result.nextRosterId)
+          : (result.terminalOverflowCount ? (", final-roster overflow " + result.terminalOverflowCount) : ", final roster");
+        item.textContent = result.rosterId + ": " + capacityLabel + ", " + result.afterCount + " retained" + suffix;
+        list.appendChild(item);
+      }
+      details.appendChild(list);
+      el.appendChild(details);
+    }
+    el.classList.remove("hidden");
+  };
+
   // Return whether the optimized startup contract is unavailable on an older backend.
   const isAdminWorkspaceBootstrapUnavailable_ = (errRaw) => {
     const message = toErrorMessage(errRaw).trim().toLowerCase();
@@ -3768,6 +3843,14 @@
     return normalizePreparationRosterSizeLocal_(mainCount, CWL_PREPARATION_MIN_ROSTER_SIZE);
   };
 
+  // Default the retained sub count to the roster's current pool, capped at 50.
+  const getInitialPreparationSubstituteCountLocal_ = (roster, rosterSizeRaw) => {
+    const rosterSize = normalizePreparationRosterSizeLocal_(rosterSizeRaw, getInitialPreparationRosterSizeForEnableLocal_(roster));
+    const poolCount = [roster && roster.main, roster && roster.subs, roster && roster.missing]
+      .reduce((sum, players) => sum + (Array.isArray(players) ? players.length : 0), 0);
+    return Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - rosterSize, poolCount - rosterSize));
+  };
+
   // Get roster pool entries for preparation local.
   const getRosterPoolEntriesForPreparationLocal_ = (roster) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : {};
@@ -3886,6 +3969,16 @@
       getInitialPreparationRosterSizeForEnableLocal_(rosterSafe)
     );
     const rosterSize = normalizePreparationRosterSizeLocal_(source && source.rosterSize, defaultRosterSize);
+    const maxSubstituteCount = Math.max(0, CWL_PREPARATION_MAX_ROSTER_SIZE - rosterSize);
+    const fallbackSubstituteCount = Math.max(
+      0,
+      Math.min(maxSubstituteCount, Object.keys(rosterPoolTagSet).length - rosterSize)
+    );
+    const substituteCountRaw = Number(source && source.substituteCount);
+    const substituteCount = Number.isFinite(substituteCountRaw)
+      ? Math.max(0, Math.min(maxSubstituteCount, Math.floor(substituteCountRaw)))
+      : fallbackSubstituteCount;
+    const distributionMode = toStr(source && source.distributionMode).trim().toLowerCase() === "fill" ? "fill" : "subs";
     const lockStateByTag = normalizePreparationLockStateLocal_(source && source.lockStateByTag, rosterPoolTagSet);
     const enabled = trackingMode === "cwl" ? toBoolFlag(source && source.enabled) : false;
     const hasAssignedSource = !!(source && source.assignedTagSet && typeof source.assignedTagSet === "object" && !Array.isArray(source.assignedTagSet));
@@ -3934,6 +4027,8 @@
     const out = {
       enabled,
       rosterSize,
+      distributionMode,
+      substituteCount,
       lockStateByTag,
       assignedTagSet,
       excludedTagSet,
@@ -4089,6 +4184,11 @@
     }) || {
       enabled: false,
       rosterSize: normalizePreparationRosterSizeLocal_(Array.isArray(rosterSafe.main) ? rosterSafe.main.length : 0, CWL_PREPARATION_MIN_ROSTER_SIZE),
+      distributionMode: "subs",
+      substituteCount: getInitialPreparationSubstituteCountLocal_(
+        rosterSafe,
+        normalizePreparationRosterSizeLocal_(Array.isArray(rosterSafe.main) ? rosterSafe.main.length : 0, CWL_PREPARATION_MIN_ROSTER_SIZE)
+      ),
       lockStateByTag: {},
       assignedTagSet: {},
       excludedTagSet: {},
@@ -4523,6 +4623,7 @@
       refreshAddPlayerUi();
       refreshRefreshAllUi();
       refreshCwlPreferenceApplyUi_();
+      refreshCwlPrepDistributionUi_();
       renderConnectedRostersTable();
       renderImportUi();
       applyBenchMarks_();
@@ -4535,6 +4636,7 @@
     refreshAddPlayerUi();
     refreshRefreshAllUi();
     refreshCwlPreferenceApplyUi_();
+    refreshCwlPrepDistributionUi_();
     renderConnectedRostersTable();
     renderImportUi();
     applyBenchMarks_();
@@ -4559,6 +4661,7 @@
     clearSavedBenchSuggestionsFromPreview_();
     clearSuggestionMarks_();
     clearCwlPreferenceApplySummary_();
+    clearCwlPrepDistributionSummary_();
     renderPreviewFromState();
     markReportStale();
     markPreviewDirty_();
@@ -4618,6 +4721,11 @@
     return {
       enabled: !!prep.enabled,
       rosterSize: prep.rosterSize,
+      distributionMode: prep.distributionMode === "fill" ? "fill" : "subs",
+      substituteCount: Number.isFinite(Number(prep.substituteCount)) ? Number(prep.substituteCount) : 0,
+      distributionCapacity: prep.distributionMode === "fill"
+        ? CWL_PREPARATION_MAX_ROSTER_SIZE
+        : Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE, prep.rosterSize + (Number(prep.substituteCount) || 0)),
       filledMainCount,
       underfilled,
       lockedInCount,
@@ -4640,6 +4748,8 @@
     const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true }) || {
       enabled: false,
       rosterSize: getInitialPreparationRosterSizeForEnableLocal_(roster),
+      distributionMode: "subs",
+      substituteCount: getInitialPreparationSubstituteCountLocal_(roster, getInitialPreparationRosterSizeForEnableLocal_(roster)),
       lockStateByTag: {},
       assignedTagSet: {},
       excludedTagSet: {},
@@ -4704,6 +4814,30 @@
     prep.rosterSize = nextSize;
     roster.cwlPreparation = prep;
     applyCwlPreparationRebalanceLocal_(roster, { enforceLockedInLimit: true, recordAppliedAt: false });
+    return getRosterPreparationSummaryLocal_(roster);
+  };
+
+  // Configure how many total players CWL prep keeps before cascading down.
+  const setRosterPreparationDistributionLocal_ = (rosterIdRaw, modeRaw, substituteCountRaw) => {
+    const rosterId = toStr(rosterIdRaw).trim();
+    if (!rosterId) throw new Error("Roster ID is required.");
+    const roster = getRosterById(rosterId);
+    if (!roster) throw new Error("Roster not found: " + rosterId);
+    if (getRosterTrackingMode(roster) !== "cwl") throw new Error(CWL_PREPARATION_WARNING_SWITCH_TO_CWL);
+    const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
+    if (!prep || !prep.enabled) throw new Error("Enable CWL Preparation Mode first.");
+    const mode = toStr(modeRaw).trim().toLowerCase() === "fill" ? "fill" : "subs";
+    const maxSubstituteCount = Math.max(0, CWL_PREPARATION_MAX_ROSTER_SIZE - prep.rosterSize);
+    const nextSubstituteCount = Number(substituteCountRaw);
+    if (!Number.isFinite(nextSubstituteCount) || Math.floor(nextSubstituteCount) !== nextSubstituteCount) {
+      throw new Error("Sub count must be a whole number.");
+    }
+    if (nextSubstituteCount < 0 || nextSubstituteCount > maxSubstituteCount) {
+      throw new Error("Sub count must be between 0 and " + maxSubstituteCount + ".");
+    }
+    prep.distributionMode = mode;
+    prep.substituteCount = nextSubstituteCount;
+    roster.cwlPreparation = prep;
     return getRosterPreparationSummaryLocal_(roster);
   };
 
@@ -4909,6 +5043,34 @@
     return Object.assign({}, withLocation, { status: "moved" });
   };
 
+  // Execute an already-built preference plan without rendering or publishing.
+  const executeCwlPreferencePlanLocal_ = (planRaw) => {
+    const plan = planRaw && typeof planRaw === "object" ? planRaw : {};
+    rebuildCwlPreferenceApplyPlanSummaryLocal_(plan);
+    const plannedMoves = plan.moves.slice();
+    plan.moves = [];
+    let appliedMoveCount = 0;
+    for (let i = 0; i < plannedMoves.length; i++) {
+      const result = movePlayerToRosterForCwlPreferenceApply_(plannedMoves[i]);
+      if (result.status === "moved") {
+        plan.moves.push(result);
+        appliedMoveCount++;
+      } else if (result.status === "already-correct") {
+        plan.alreadyCorrect.push(result);
+      } else if (result.status === "locked-player") {
+        plan.conflicts.push(result);
+      } else if (result.status === "missing-player") {
+        plan.missingPlayers.push(result);
+      } else if (result.status === "missing-option") {
+        plan.missingOptions.push(result);
+      } else {
+        plan.skipped.push(result);
+      }
+    }
+    rebuildCwlPreferenceApplyPlanSummaryLocal_(plan);
+    return { plan, appliedMoveCount };
+  };
+
   // Apply loaded CWL league preferences to the preview roster data only.
   const applyCwlLeaguePreferencesToPreview_ = () => {
     if (state.bulkRefreshBusy) throw new Error("Refresh all is already running.");
@@ -4932,29 +5094,10 @@
       return plan;
     }
 
-    const plannedMoves = plan.moves.slice();
-    plan.moves = [];
-    let appliedMoveCount = 0;
     const previewSnapshot = cloneJson(state.lastRosterData);
     try {
-      for (let i = 0; i < plannedMoves.length; i++) {
-        const result = movePlayerToRosterForCwlPreferenceApply_(plannedMoves[i]);
-        if (result.status === "moved") {
-          plan.moves.push(result);
-          appliedMoveCount++;
-        } else if (result.status === "already-correct") {
-          plan.alreadyCorrect.push(result);
-        } else if (result.status === "locked-player") {
-          plan.conflicts.push(result);
-        } else if (result.status === "missing-player") {
-          plan.missingPlayers.push(result);
-        } else if (result.status === "missing-option") {
-          plan.missingOptions.push(result);
-        } else {
-          plan.skipped.push(result);
-        }
-      }
-      rebuildCwlPreferenceApplyPlanSummaryLocal_(plan);
+      const execution = executeCwlPreferencePlanLocal_(plan);
+      const appliedMoveCount = execution.appliedMoveCount;
       if (appliedMoveCount > 0) {
         applyPreviewMutation("Applied CWL preferences: " + appliedMoveCount + " preview move" + (appliedMoveCount === 1 ? "" : "s") + ".");
       } else {
@@ -4963,6 +5106,7 @@
       state.lastCwlPreferenceApplyPlan = plan;
       renderCwlPreferenceApplySummary_(plan, appliedMoveCount);
       refreshCwlPreferenceApplyUi_();
+      refreshCwlPrepDistributionUi_();
       if (appliedMoveCount > 0) {
         setStatus("Applied CWL preferences to preview: " + appliedMoveCount + " move" + (appliedMoveCount === 1 ? "" : "s") + ".");
       } else {
@@ -4972,6 +5116,196 @@
     } catch (err) {
       state.lastRosterData = previewSnapshot;
       state.lastCwlPreferenceApplyPlan = null;
+      renderPreviewFromState();
+      throw err;
+    }
+  };
+
+  // Capture the exact player inventory used by the lossless roster builder.
+  const captureCwlPrepPlayerInventoryLocal_ = () => {
+    const byTag = {};
+    const tags = [];
+    let playerCount = 0;
+    const rosters = getRosters();
+    for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
+      const roster = rosters[rosterIndex];
+      ensureRosterArrays(roster);
+      const rosterId = toStr(roster.id).trim();
+      const sections = [
+        { role: "main", players: roster.main },
+        { role: "sub", players: roster.subs },
+        { role: "missing", players: roster.missing },
+      ];
+      for (const section of sections) {
+        for (let playerIndex = 0; playerIndex < section.players.length; playerIndex++) {
+          playerCount++;
+          const player = section.players[playerIndex] && typeof section.players[playerIndex] === "object"
+            ? section.players[playerIndex]
+            : {};
+          const playerTag = normalizeTag(player.tag);
+          if (!playerTag) throw new Error("CWL roster build stopped: a player in " + rosterId + " has no tag.");
+          if (byTag[playerTag]) throw new Error("CWL roster build stopped: duplicate player tag " + playerTag + ".");
+          byTag[playerTag] = { rosterId, role: section.role, playerIndex };
+          tags.push(playerTag);
+        }
+      }
+    }
+    tags.sort();
+    return { byTag, tags, playerCount };
+  };
+
+  // Assert that a roster build preserved every player exactly once.
+  const assertCwlPrepPlayerInventoryConservedLocal_ = (beforeRaw, expectedRosterIdByTagRaw) => {
+    const before = beforeRaw && typeof beforeRaw === "object" ? beforeRaw : { tags: [], playerCount: 0 };
+    const after = captureCwlPrepPlayerInventoryLocal_();
+    if (before.playerCount !== after.playerCount || before.tags.join("|") !== after.tags.join("|")) {
+      throw new Error("CWL roster build failed its player-conservation check; all changes were rolled back.");
+    }
+    const expectedRosterIdByTag = expectedRosterIdByTagRaw && typeof expectedRosterIdByTagRaw === "object"
+      ? expectedRosterIdByTagRaw
+      : {};
+    for (const playerTag of before.tags) {
+      const expectedRosterId = toStr(expectedRosterIdByTag[playerTag]).trim();
+      const actualRosterId = toStr(after.byTag[playerTag] && after.byTag[playerTag].rosterId).trim();
+      if (expectedRosterId && actualRosterId !== expectedRosterId) {
+        throw new Error("CWL roster build placement check failed for " + playerTag + "; all changes were rolled back.");
+      }
+    }
+    return after;
+  };
+
+  // Score every player against one shared prep context before cross-roster
+  // moves, keeping adjacent-league comparisons deterministic and comparable.
+  const buildCwlPrepStrengthByTagLocal_ = () => {
+    const out = {};
+    const entries = [];
+    const rosters = getRosters();
+    for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
+      const ranking = buildCwlPreparationRankingLocal_(rosters[rosterIndex]);
+      const ranked = Array.isArray(ranking.ranked) ? ranking.ranked : [];
+      for (let rankIndex = 0; rankIndex < ranked.length; rankIndex++) {
+        const entry = ranked[rankIndex] && typeof ranked[rankIndex] === "object" ? ranked[rankIndex] : {};
+        const playerTag = normalizeTag(entry.tag);
+        if (!playerTag || out[playerTag]) continue;
+        out[playerTag] = { pending: true };
+        entries.push({ entry, playerTag, rosterIndex, rankIndex });
+      }
+    }
+    if (!entries.length) return {};
+    let thMin = Number.MAX_SAFE_INTEGER;
+    let thMax = 0;
+    let sumThreeStarRate = 0;
+    let sumMissRate = 0;
+    for (const item of entries) {
+      const stats = item.entry.playerStats && typeof item.entry.playerStats === "object" ? item.entry.playerStats : {};
+      const th = toNonNegativeIntLocal_(stats.th);
+      const countedAttacks = toNonNegativeIntLocal_(stats.countedAttacks);
+      const resolvedWarDays = toNonNegativeIntLocal_(stats.resolvedWarDays);
+      thMin = Math.min(thMin, th);
+      thMax = Math.max(thMax, th);
+      sumThreeStarRate += toNonNegativeIntLocal_(stats.threeStarCount) / Math.max(1, countedAttacks);
+      sumMissRate += toNonNegativeIntLocal_(stats.missedAttacks) / Math.max(1, resolvedWarDays);
+    }
+    const planningContext = {
+      thMin: thMin === Number.MAX_SAFE_INTEGER ? 0 : thMin,
+      thMax,
+      poolThreeStarRateMean: sumThreeStarRate / entries.length,
+      poolMissRateMean: sumMissRate / entries.length,
+    };
+    for (const item of entries) {
+      const stats = item.entry.playerStats && typeof item.entry.playerStats === "object" ? item.entry.playerStats : {};
+      const strength = computeStrengthScoreLocal_(stats, planningContext, CWL_PREPARATION_BENCH_CONFIG);
+      out[item.playerTag] = {
+        strengthScore: Number.isFinite(Number(strength && strength.score)) ? Number(strength.score) : Number.NEGATIVE_INFINITY,
+        th: toNonNegativeIntLocal_(stats.th),
+        rosterIndex: item.rosterIndex,
+        rankIndex: item.rankIndex,
+      };
+    }
+    return out;
+  };
+
+  // Apply one planned adjacent-roster cascade move without rendering.
+  const movePlayerDownForCwlPrepDistributionLocal_ = (moveRaw) => {
+    const move = moveRaw && typeof moveRaw === "object" ? moveRaw : {};
+    const playerTag = normalizeTag(move.playerTag);
+    const sourceRosterId = toStr(move.fromRosterId).trim();
+    const targetRosterId = toStr(move.targetRosterId).trim();
+    const rosters = getRosters();
+    const location = findPlayerLocationByTag(playerTag);
+    if (!location) throw new Error("CWL roster build could not find " + playerTag + ".");
+    const sourceRoster = rosters[location.rosterIndex];
+    const actualSourceRosterId = toStr(sourceRoster && sourceRoster.id).trim();
+    if (actualSourceRosterId !== sourceRosterId) {
+      throw new Error("CWL roster build expected " + playerTag + " in " + sourceRosterId + " but found it in " + actualSourceRosterId + ".");
+    }
+    const targetRoster = rosters.find((roster) => toStr(roster && roster.id).trim() === targetRosterId);
+    if (!targetRoster) throw new Error("CWL roster build target does not exist: " + targetRosterId);
+    ensureRosterArrays(sourceRoster);
+    ensureRosterArrays(targetRoster);
+    const sourceList = location.role === "main" ? sourceRoster.main : (location.role === "sub" ? sourceRoster.subs : sourceRoster.missing);
+    const removed = sourceList.splice(location.index, 1);
+    if (!removed[0]) throw new Error("CWL roster build failed to move " + playerTag + ".");
+    targetRoster.subs.push(removed[0]);
+    transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
+    reconcileCwlPreparationAssignmentsLocal_(sourceRoster);
+    reconcileCwlPreparationAssignmentsLocal_(targetRoster);
+    pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
+    reindexRoster(sourceRoster);
+    reindexRoster(targetRoster);
+  };
+
+  // Apply votes and strength cutoffs as one rollback-safe preview operation.
+  const buildCwlPrepRostersToPreviewLocal_ = () => {
+    if (state.bulkRefreshBusy) throw new Error("Refresh all is already running.");
+    if (!hasLoadedPreviewData_()) throw new Error(PREVIEW_NOT_READY_MESSAGE);
+    if (!state.cwlLeagueSignupsAvailable) {
+      throw new Error(state.cwlLeagueSignupsError
+        ? ("CWL preferences are unavailable: " + state.cwlLeagueSignupsError)
+        : "CWL preferences are unavailable, so voted roster choices cannot be protected.");
+    }
+    const planner = window.RosterGenerator && typeof window.RosterGenerator.planCwlPrepRosterDistribution === "function"
+      ? window.RosterGenerator.planCwlPrepRosterDistribution
+      : null;
+    if (!planner) throw new Error("CWL prep roster builder is unavailable.");
+
+    const inventoryBefore = captureCwlPrepPlayerInventoryLocal_();
+    const distributionPlan = planner({
+      rosterData: state.lastRosterData,
+      strengthByTag: buildCwlPrepStrengthByTagLocal_(),
+    });
+    const previewSnapshot = cloneJson(state.lastRosterData);
+    try {
+      const preferenceExecution = executeCwlPreferencePlanLocal_(distributionPlan.preferencePlan);
+      if (preferenceExecution.appliedMoveCount !== distributionPlan.summary.preferenceMoveCount) {
+        throw new Error("CWL roster build preference plan changed during execution.");
+      }
+      const cascadeMoves = Array.isArray(distributionPlan.cascadeMoves) ? distributionPlan.cascadeMoves : [];
+      for (let i = 0; i < cascadeMoves.length; i++) {
+        movePlayerDownForCwlPrepDistributionLocal_(cascadeMoves[i]);
+      }
+      reconcileAllActiveCwlPreparationAssignmentsLocal_();
+      const rosters = getRosters();
+      for (let i = 0; i < rosters.length; i++) {
+        if (!isCwlPreparationActiveLocal_(rosters[i])) continue;
+        applyCwlPreparationRebalanceLocal_(rosters[i], { enforceLockedInLimit: true, recordAppliedAt: true });
+      }
+      assertCwlPrepPlayerInventoryConservedLocal_(inventoryBefore, distributionPlan.finalRosterIdByTag);
+      applyPreviewMutation(
+        "Built CWL rosters safely: " + distributionPlan.summary.shiftedPlayerCount + " player" +
+        (distributionPlan.summary.shiftedPlayerCount === 1 ? "" : "s") + " shifted down; all " +
+        distributionPlan.summary.playerCount + " players conserved."
+      );
+      state.lastCwlPreferenceApplyPlan = distributionPlan.preferencePlan;
+      state.lastCwlPrepDistributionPlan = distributionPlan;
+      renderCwlPreferenceApplySummary_(distributionPlan.preferencePlan, preferenceExecution.appliedMoveCount);
+      renderCwlPrepDistributionSummary_(distributionPlan);
+      refreshCwlPrepDistributionUi_();
+      return distributionPlan;
+    } catch (err) {
+      state.lastRosterData = previewSnapshot;
+      state.lastCwlPreferenceApplyPlan = null;
+      state.lastCwlPrepDistributionPlan = null;
       renderPreviewFromState();
       throw err;
     }
@@ -6875,6 +7209,7 @@
     renderAutoRefreshUi();
     renderDonationRefreshUi();
     refreshCwlPreferenceApplyUi_();
+    refreshCwlPrepDistributionUi_();
     return { settingsResults, cwlLeagueSignups };
   };
 
@@ -7225,6 +7560,7 @@
       const prepStrip = document.createElement("div");
       prepStrip.className = "cwl-prep-strip";
       let prepRosterSize = getInitialPreparationRosterSizeForEnableLocal_(r);
+      let prepFillCheckbox = null;
       if (trackingMode === "cwl") {
         const prepToggleBtn = document.createElement("button");
         prepToggleBtn.type = "button";
@@ -7263,6 +7599,71 @@
           prepSummaryPill.title = "locked in " + prepSummary.lockedInCount + ", locked out " + prepSummary.lockedOutCount;
         }
 
+        const prepDistribution = document.createElement("div");
+        prepDistribution.className = "cwl-prep-distribution";
+        const prepSubsLabel = document.createElement("label");
+        prepSubsLabel.className = "cwl-prep-distribution__subs";
+        const prepSubsText = document.createElement("span");
+        prepSubsText.textContent = "Subs";
+        const prepSubsInput = document.createElement("input");
+        prepSubsInput.type = "number";
+        prepSubsInput.className = "admin-input cwl-prep-subs-input";
+        prepSubsInput.min = "0";
+        prepSubsInput.step = "1";
+        prepSubsInput.max = String(Math.max(0, CWL_PREPARATION_MAX_ROSTER_SIZE - prepRosterSize));
+        prepSubsInput.value = String(prepSummary ? prepSummary.substituteCount : 0);
+        prepSubsInput.title = "Retain this many substitutes after the " + prepRosterSize + " main players";
+        prepSubsLabel.appendChild(prepSubsText);
+        prepSubsLabel.appendChild(prepSubsInput);
+
+        const prepFillLabel = document.createElement("label");
+        prepFillLabel.className = "cwl-prep-distribution__fill";
+        prepFillCheckbox = document.createElement("input");
+        prepFillCheckbox.type = "checkbox";
+        prepFillCheckbox.checked = !!(prepSummary && prepSummary.distributionMode === "fill");
+        const prepFillText = document.createElement("span");
+        prepFillText.textContent = "Fill to 50";
+        prepFillLabel.appendChild(prepFillCheckbox);
+        prepFillLabel.appendChild(prepFillText);
+
+        const prepCapacityPill = document.createElement("span");
+        prepCapacityPill.className = "cwl-prep-capacity-pill";
+        prepCapacityPill.textContent = "Keep " + (prepSummary ? prepSummary.distributionCapacity : prepRosterSize);
+        prepCapacityPill.title = "Players outside this strength cutoff move to the next active prep roster unless they voted for this roster or are manually locked.";
+        prepDistribution.appendChild(prepSubsLabel);
+        prepDistribution.appendChild(prepFillLabel);
+        prepDistribution.appendChild(prepCapacityPill);
+
+        const persistPrepDistribution = () => {
+          const substituteCount = Number(prepSubsInput.value);
+          setRosterPreparationDistributionLocal_(
+            rosterId,
+            prepFillCheckbox.checked ? "fill" : "subs",
+            substituteCount
+          );
+          applyPreviewMutation("CWL prep retention updated for " + rosterId + ".");
+        };
+        prepSubsInput.addEventListener("change", () => {
+          try {
+            clearPendingProfileReopen();
+            persistPrepDistribution();
+          } catch (err) {
+            alert("CWL prep sub count update failed: " + toErrorMessage(err));
+            renderPreviewFromState();
+          }
+        });
+        prepFillCheckbox.addEventListener("change", () => {
+          try {
+            clearPendingProfileReopen();
+            persistPrepDistribution();
+          } catch (err) {
+            alert("CWL prep fill update failed: " + toErrorMessage(err));
+            renderPreviewFromState();
+          }
+        });
+        prepSubsInput.disabled = !prepActive || prepFillCheckbox.checked;
+        prepFillCheckbox.disabled = !prepActive;
+
         prepToggleBtn.onclick = () => {
           try {
             clearPendingProfileReopen();
@@ -7297,6 +7698,7 @@
         prepPlusBtn.disabled = !prepActive || prepRosterSize >= CWL_PREPARATION_MAX_ROSTER_SIZE;
         prepStrip.appendChild(prepToggleBtn);
         prepStrip.appendChild(prepStepper);
+        prepStrip.appendChild(prepDistribution);
         prepStrip.appendChild(prepSummaryPill);
       }
 
@@ -7370,6 +7772,12 @@
             (btn.textContent === "+" && prepRosterSize >= CWL_PREPARATION_MAX_ROSTER_SIZE)
           );
           btn.disabled = disabled || sizeStepDisabled;
+        }
+        const prepInputs = Array.from(prepStrip.querySelectorAll("input"));
+        for (let i = 0; i < prepInputs.length; i++) {
+          const input = prepInputs[i];
+          const isSubsInput = input.classList.contains("cwl-prep-subs-input");
+          input.disabled = disabled || !prepActive || (isSubsInput && prepFillCheckbox && prepFillCheckbox.checked);
         }
       };
 
@@ -7506,6 +7914,7 @@
   const refreshAdminWorkflowUi = () => {
     refreshRefreshAllUi();
     refreshCwlPreferenceApplyUi_();
+    refreshCwlPrepDistributionUi_();
     renderConnectedRostersTable();
     renderImportUi();
     applyBenchMarks_();
@@ -7648,6 +8057,7 @@
     state.swapInMarksByRoster = {};
     state.suggestionNotesByRoster = {};
     clearCwlPreferenceApplySummary_();
+    clearCwlPrepDistributionSummary_();
     reindexAllRosters();
     normalizeAllRosterPublicLineupProjectionsLocal_();
     setAddPreviewRosterStatus("", false);
@@ -7998,6 +8408,7 @@
         renderAutoRefreshUi();
         renderDonationRefreshUi();
         refreshCwlPreferenceApplyUi_();
+        refreshCwlPrepDistributionUi_();
         syncPublishButtonAvailability_();
         syncLoadActiveButtonAvailability_();
         refreshRefreshAllUi();
@@ -8085,6 +8496,19 @@
         } catch (err) {
           setStatus("");
           alert("Apply CWL preferences failed: " + toErrorMessage(err));
+        }
+      };
+    }
+
+    const buildCwlPrepRostersBtn = $("#buildCwlPrepRostersBtn");
+    if (buildCwlPrepRostersBtn) {
+      buildCwlPrepRostersBtn.onclick = () => {
+        if (buildCwlPrepRostersBtn.disabled) return;
+        try {
+          buildCwlPrepRostersToPreviewLocal_();
+        } catch (err) {
+          setStatus("");
+          alert("Build CWL rosters failed: " + toErrorMessage(err));
         }
       };
     }

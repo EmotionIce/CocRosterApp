@@ -700,6 +700,30 @@ test("active contract accepts canonical roster players and playerMetrics.byTag",
   assert.equal(validated.rosters[0].main[0].discord, "player");
 });
 
+test("active contract preserves and clamps CWL prep distribution settings", () => {
+  const backend = loadBackend();
+  const data = buildValidRosterData();
+  data.rosters[0].trackingMode = "cwl";
+  data.rosters[0].cwlPreparation = {
+    enabled: true,
+    rosterSize: 15,
+    distributionMode: "fill",
+    substituteCount: 99,
+    lockStateByTag: {},
+    assignedTagSet: { "#PLAYER": true },
+    excludedTagSet: {},
+    clanAbsentTagSet: {},
+  };
+
+  const validated = backend.validateRosterData_(data);
+  const prep = validated.rosters[0].cwlPreparation;
+
+  assert.equal(prep.distributionMode, "fill");
+  assert.equal(prep.substituteCount, 35);
+  assert.equal(prep.rosterSize, 15);
+  assert.equal(prep.assignedTagSet["#PLAYER"], true);
+});
+
 test("active reader reconstructs the published active version before legacy active", () => {
   const backend = installMemoryFirebase(loadBackend());
   const versionedData = buildValidRosterData();
