@@ -1352,10 +1352,42 @@
     };
   };
 
-  // Build a lossless, deterministic CWL prep distribution plan. Preference
-  // moves are simulated first. Each over-cutoff player then moves through one
-  // adjacent active prep roster at a time, so the final roster safely catches
-  // all remaining overflow.
+  // Normalize the hard eligibility requirements for one CWL prep roster.
+  const getCwlPrepDistributionRequirements = (rosterRaw) => {
+    const roster = isObj(rosterRaw) ? rosterRaw : {};
+    const prep = isObj(roster.cwlPreparation) ? roster.cwlPreparation : {};
+    const requirements = isObj(prep.requirements) ? prep.requirements : {};
+    const minTownHallRaw = Number(requirements.minTownHall);
+    const hasMaxMissedAttacks = requirements.maxMissedAttacks !== ""
+      && requirements.maxMissedAttacks != null
+      && Number.isFinite(Number(requirements.maxMissedAttacks));
+    const hasMaxMissedAttackRate = requirements.maxMissedAttackRate !== ""
+      && requirements.maxMissedAttackRate != null
+      && Number.isFinite(Number(requirements.maxMissedAttackRate));
+    return {
+      minTownHall: Number.isFinite(minTownHallRaw) ? Math.max(0, Math.floor(minTownHallRaw)) : 0,
+      maxMissedAttacks: hasMaxMissedAttacks
+        ? Math.max(0, Math.floor(Number(requirements.maxMissedAttacks)))
+        : null,
+      maxMissedAttackRate: hasMaxMissedAttackRate
+        ? Math.max(0, Math.min(1, Number(requirements.maxMissedAttackRate)))
+        : null,
+    };
+  };
+
+  // Create a structured preflight failure without mutating the input roster data.
+  const createCwlPrepDistributionError = (messageRaw, detailsRaw) => {
+    const error = new Error(normalizeWhitespace(messageRaw) || "CWL prep distribution is not feasible.");
+    error.code = "CWL_PREP_DISTRIBUTION_INFEASIBLE";
+    error.details = isObj(detailsRaw) ? detailsRaw : {};
+    return error;
+  };
+
+  // Build a lossless, deterministic CWL prep distribution plan. Votes are
+  // simulated first, then every active roster enforces hard main/sub capacity
+  // and eligibility requirements. Rejected players may only move down through
+  // adjacent active rosters; the final roster is never an implicit overflow
+  // sink.
   const planCwlPrepRosterDistribution = (args) => {
     const input = isObj(args) ? args : {};
     const rosterData = isObj(input.rosterData) ? input.rosterData : {};
@@ -1368,6 +1400,8 @@
     const nodes = [];
     const playerByTag = {};
     const locationByTag = {};
+    const roleByTag = {};
+    const lockStateByTag = {};
     let globalOrder = 0;
 
     for (let rosterIndex = 0; rosterIndex < rosters.length; rosterIndex++) {
@@ -1378,9 +1412,13 @@
       const node = { roster, rosterId, rosterIndex, tags: [] };
       nodes.push(node);
       nodesById[rosterId] = node;
-      const sections = [roster.main, roster.subs, roster.missing];
-      for (const playersRaw of sections) {
-        const players = Array.isArray(playersRaw) ? playersRaw : [];
+      const sections = [
+        { role: "main", players: roster.main },
+        { role: "sub", players: roster.subs },
+        { role: "missing", players: roster.missing },
+      ];
+      for (const section of sections) {
+        const players = Array.isArray(section.players) ? section.players : [];
         for (const playerRaw of players) {
           const player = isObj(playerRaw) ? playerRaw : {};
           const playerTag = normalizeTag(player.tag);
@@ -1389,6 +1427,8 @@
           node.tags.push(playerTag);
           playerByTag[playerTag] = { player, globalOrder: globalOrder++ };
           locationByTag[playerTag] = node;
+          roleByTag[playerTag] = section.role;
+          lockStateByTag[playerTag] = getCwlPreferenceLockState(roster, playerTag);
         }
       }
     }
@@ -1407,12 +1447,83 @@
       orderedNodes.push(node);
     }
 
-    const preferencePlan = planCwlLeaguePreferenceMoves({ rosterData });
+    const rawPreferencePlan = planCwlLeaguePreferenceMoves({ rosterData });
+    const preferencePlan = {
+      preferenceCount: rawPreferencePlan.preferenceCount,
+      moves: (rawPreferencePlan.moves || []).map((item) => Object.assign({}, item)),
+      alreadyCorrect: (rawPreferencePlan.alreadyCorrect || []).map((item) => Object.assign({}, item)),
+      skipped: (rawPreferencePlan.skipped || []).map((item) => Object.assign({}, item)),
+      conflicts: [],
+      missingPlayers: (rawPreferencePlan.missingPlayers || []).map((item) => Object.assign({}, item)),
+      missingOptions: (rawPreferencePlan.missingOptions || []).map((item) => Object.assign({}, item)),
+      summary: null,
+    };
+
+    // Locked-Out controls role selection, not roster placement. Convert a vote
+    // that the standalone preference planner classified as a lock conflict back
+    // into a real vote move for this distribution plan. Locked-In remains an
+    // explicit placement override until hard requirements reject it.
+    for (const conflictRaw of rawPreferencePlan.conflicts || []) {
+      const conflict = isObj(conflictRaw) ? conflictRaw : {};
+      const playerTag = normalizeTag(conflict.playerTag);
+      const location = locationByTag[playerTag];
+      const targetRosterIds = Array.isArray(conflict.targetRosterIds) ? conflict.targetRosterIds : [];
+      let targetRosterId = normalizeWhitespace(conflict.targetRosterId);
+      if (!nodesById[targetRosterId]) {
+        targetRosterId = targetRosterIds.map((value) => normalizeWhitespace(value)).find((value) => !!nodesById[value]) || "";
+      }
+      if (conflict.lockState === "lockedOut" && location && targetRosterId && targetRosterId !== location.rosterId) {
+        preferencePlan.moves.push(Object.assign({}, conflict, {
+          reason: "vote-move",
+          allowLockedOutMove: true,
+          fromRosterId: location.rosterId,
+          fromRole: roleByTag[playerTag] || "sub",
+          targetRosterId,
+        }));
+      } else {
+        preferencePlan.conflicts.push(Object.assign({}, conflict));
+      }
+    }
+    preferencePlan.summary = buildCwlPreferencePlanSummary(preferencePlan);
+    const activeNodes = orderedNodes.filter((node) => {
+      const prep = isObj(node.roster.cwlPreparation) ? node.roster.cwlPreparation : {};
+      return node.roster.trackingMode !== "regularWar" && prep.enabled === true;
+    });
+    if (activeNodes.length < 2) {
+      throw new Error("Enable CWL Preparation Mode on at least two ordered rosters before building rosters.");
+    }
+    const activeNodeIdSet = {};
+    for (const node of activeNodes) activeNodeIdSet[node.rosterId] = true;
+
+    // The standalone preference planner may legitimately target any configured
+    // roster. The one-click prep builder cannot: moving a voter outside the
+    // active prep chain would bypass every configured capacity and requirement.
+    const disabledTargetViolations = [];
+    const preferenceTargetResults = preferencePlan.moves || [];
+    for (const itemRaw of preferenceTargetResults) {
+      const item = isObj(itemRaw) ? itemRaw : {};
+      const playerTag = normalizeTag(item.playerTag);
+      const targetRosterId = normalizeWhitespace(item.targetRosterId || item.rosterId);
+      if (!playerTag || !nodesById[targetRosterId] || activeNodeIdSet[targetRosterId]) continue;
+      disabledTargetViolations.push({ playerTag, targetRosterId });
+    }
+    if (disabledTargetViolations.length) {
+      throw createCwlPrepDistributionError(
+        "CWL prep distribution cannot use " + disabledTargetViolations.length + " vote" +
+          (disabledTargetViolations.length === 1 ? "" : "s") +
+          " because the selected roster is not enabled for CWL Preparation Mode. Enable every voted roster or change those votes.",
+        {
+          reason: "preference-target-prep-disabled",
+          violationCount: disabledTargetViolations.length,
+          violations: disabledTargetViolations,
+          playerTags: disabledTargetViolations.map((item) => item.playerTag).sort(),
+        }
+      );
+    }
     const preferredRosterIdByTag = {};
     const preferenceResults = []
       .concat(preferencePlan.moves || [])
-      .concat(preferencePlan.alreadyCorrect || [])
-      .concat(preferencePlan.conflicts || []);
+      .concat(preferencePlan.alreadyCorrect || []);
     for (const itemRaw of preferenceResults) {
       const item = isObj(itemRaw) ? itemRaw : {};
       const playerTag = normalizeTag(item.playerTag);
@@ -1420,7 +1531,7 @@
       if (playerTag && nodesById[targetRosterId]) preferredRosterIdByTag[playerTag] = targetRosterId;
     }
 
-    const moveSimulatedTag = (playerTagRaw, targetRosterIdRaw) => {
+    const moveSimulatedTag = (playerTagRaw, targetRosterIdRaw, targetRoleRaw) => {
       const playerTag = normalizeTag(playerTagRaw);
       const targetRosterId = normalizeWhitespace(targetRosterIdRaw);
       const sourceNode = locationByTag[playerTag];
@@ -1432,20 +1543,39 @@
       sourceNode.tags.splice(sourceIndex, 1);
       targetNode.tags.push(playerTag);
       locationByTag[playerTag] = targetNode;
+      const targetRole = normalizeWhitespace(targetRoleRaw);
+      roleByTag[playerTag] = targetRole === "main" || targetRole === "missing" ? targetRole : "sub";
       return sourceNode;
     };
 
     for (const moveRaw of preferencePlan.moves || []) {
       const move = isObj(moveRaw) ? moveRaw : {};
-      moveSimulatedTag(move.playerTag, move.targetRosterId);
+      const playerTag = normalizeTag(move.playerTag);
+      const targetRole = lockStateByTag[playerTag] === "lockedOut"
+        ? "sub"
+        : (normalizeWhitespace(move.fromRole) === "main" ? "main" : "sub");
+      moveSimulatedTag(playerTag, move.targetRosterId, targetRole);
     }
 
-    const activeNodes = orderedNodes.filter((node) => {
-      const prep = isObj(node.roster.cwlPreparation) ? node.roster.cwlPreparation : {};
-      return node.roster.trackingMode !== "regularWar" && prep.enabled === true;
-    });
-    if (activeNodes.length < 2) {
-      throw new Error("Enable CWL Preparation Mode on at least two ordered rosters before building rosters.");
+    const activePlayerCount = activeNodes.reduce((sum, node) => sum + node.tags.length, 0);
+    const totalConfiguredCapacity = activeNodes.reduce(
+      (sum, node) => sum + getCwlPrepDistributionCapacity(node.roster).capacity,
+      0
+    );
+    if (activePlayerCount > totalConfiguredCapacity) {
+      const missingSpots = activePlayerCount - totalConfiguredCapacity;
+      throw createCwlPrepDistributionError(
+        "CWL prep distribution cannot place " + activePlayerCount + " active players in " +
+          totalConfiguredCapacity + " configured spots (" + missingSpots + " more " +
+          (missingSpots === 1 ? "spot is" : "spots are") +
+          " required). Increase substitutes, use Fill, or enable another lower roster.",
+        {
+          reason: "total-capacity",
+          activePlayerCount,
+          totalConfiguredCapacity,
+          unplacedCount: missingSpots,
+        }
+      );
     }
 
     const compareStrength = (leftTag, rightTag) => {
@@ -1465,66 +1595,389 @@
       return leftTag.localeCompare(rightTag);
     };
 
-    const cascadeMoves = [];
-    const rosterResults = [];
+    const getPlayerRequirementMetrics = (playerTagRaw) => {
+      const playerTag = normalizeTag(playerTagRaw);
+      const strength = isObj(strengthByTag[playerTag]) ? strengthByTag[playerTag] : {};
+      const player = playerByTag[playerTag] && playerByTag[playerTag].player;
+      const thRaw = Number(strength.th);
+      const th = Number.isFinite(thRaw) ? Math.max(0, Math.floor(thRaw)) : Math.max(0, Math.floor(Number(player && player.th) || 0));
+      const missedAttacksRaw = Number(strength.missedAttacks);
+      const missedAttacks = Number.isFinite(missedAttacksRaw) ? Math.max(0, Math.floor(missedAttacksRaw)) : 0;
+      const resolvedWarDaysRaw = Number(strength.resolvedWarDays);
+      const resolvedWarDays = Number.isFinite(resolvedWarDaysRaw) ? Math.max(0, Math.floor(resolvedWarDaysRaw)) : 0;
+      const attackOpportunitiesRaw = Number(strength.attackOpportunities);
+      const attackOpportunities = strength.attackOpportunities !== ""
+        && strength.attackOpportunities != null
+        && Number.isFinite(attackOpportunitiesRaw)
+        ? Math.max(0, Math.floor(attackOpportunitiesRaw))
+        : resolvedWarDays;
+      const explicitRateRaw = Number(strength.missedAttackRate);
+      const missedAttackRate = strength.missedAttackRate !== "" && strength.missedAttackRate != null && Number.isFinite(explicitRateRaw)
+        ? Math.max(0, Math.min(1, explicitRateRaw))
+        : (attackOpportunities > 0
+          ? Math.max(0, Math.min(1, missedAttacks / attackOpportunities))
+          : (missedAttacks > 0 ? 1 : 0));
+      return { th, missedAttacks, attackOpportunities, resolvedWarDays, missedAttackRate };
+    };
+
+    const evaluateRequirements = (playerTagRaw, requirements) => {
+      const playerTag = normalizeTag(playerTagRaw);
+      const metrics = getPlayerRequirementMetrics(playerTag);
+      const failures = [];
+      if (metrics.th < requirements.minTownHall) {
+        failures.push({ key: "minTownHall", actual: metrics.th, required: requirements.minTownHall });
+      }
+      if (requirements.maxMissedAttacks != null && metrics.missedAttacks > requirements.maxMissedAttacks) {
+        failures.push({ key: "maxMissedAttacks", actual: metrics.missedAttacks, required: requirements.maxMissedAttacks });
+      }
+      if (requirements.maxMissedAttackRate != null && metrics.missedAttackRate > requirements.maxMissedAttackRate) {
+        failures.push({ key: "maxMissedAttackRate", actual: metrics.missedAttackRate, required: requirements.maxMissedAttackRate });
+      }
+      return { eligible: failures.length === 0, failures, metrics };
+    };
+
+    const activePlayerTags = [];
+    const startActiveIndexByTag = {};
+    const distributions = [];
+    const requirementsByActiveIndex = [];
     for (let activeIndex = 0; activeIndex < activeNodes.length; activeIndex++) {
       const node = activeNodes[activeIndex];
-      const nextNode = activeNodes[activeIndex + 1] || null;
-      const distribution = getCwlPrepDistributionCapacity(node.roster);
-      const beforeCount = node.tags.length;
-      const rankedTags = node.tags.slice().sort(compareStrength);
-      let preferredOutsideCutoffCount = 0;
-      let lockedOutsideCutoffCount = 0;
+      distributions.push(getCwlPrepDistributionCapacity(node.roster));
+      requirementsByActiveIndex.push(getCwlPrepDistributionRequirements(node.roster));
+      for (const playerTag of node.tags) {
+        activePlayerTags.push(playerTag);
+        startActiveIndexByTag[playerTag] = activeIndex;
+      }
+    }
+    activePlayerTags.sort((leftTag, rightTag) => {
+      const leftOrder = playerByTag[leftTag] ? playerByTag[leftTag].globalOrder : Number.MAX_SAFE_INTEGER;
+      const rightOrder = playerByTag[rightTag] ? playerByTag[rightTag].globalOrder : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return leftTag.localeCompare(rightTag);
+    });
 
-      if (nextNode) {
-        for (let rankIndex = distribution.capacity; rankIndex < rankedTags.length; rankIndex++) {
-          const playerTag = rankedTags[rankIndex];
-          if (preferredRosterIdByTag[playerTag] === node.rosterId) {
-            preferredOutsideCutoffCount++;
-            continue;
+    const eligibilityByTagAndActiveIndex = {};
+    for (const playerTag of activePlayerTags) {
+      const byActiveIndex = [];
+      const startIndex = startActiveIndexByTag[playerTag];
+      for (let activeIndex = 0; activeIndex < activeNodes.length; activeIndex++) {
+        byActiveIndex.push(activeIndex < startIndex
+          ? { eligible: false, failures: [], metrics: getPlayerRequirementMetrics(playerTag), upwardBlocked: true }
+          : evaluateRequirements(playerTag, requirementsByActiveIndex[activeIndex]));
+      }
+      eligibilityByTagAndActiveIndex[playerTag] = byActiveIndex;
+    }
+
+    const finalActiveIndex = activeNodes.length - 1;
+    const finalEligibleLockedInTags = activePlayerTags.filter((playerTag) =>
+      startActiveIndexByTag[playerTag] === finalActiveIndex
+      && lockStateByTag[playerTag] === "lockedIn"
+      && eligibilityByTagAndActiveIndex[playerTag][finalActiveIndex].eligible
+    );
+    if (finalEligibleLockedInTags.length > distributions[finalActiveIndex].rosterSize) {
+      throw createCwlPrepDistributionError(
+        "CWL prep distribution cannot honor " + finalEligibleLockedInTags.length + " eligible Locked-In players in " +
+          activeNodes[finalActiveIndex].rosterId + " because it has only " + distributions[finalActiveIndex].rosterSize + " main slots.",
+        {
+          reason: "locked-in-main-capacity",
+          rosterId: activeNodes[finalActiveIndex].rosterId,
+          lockedInCount: finalEligibleLockedInTags.length,
+          mainCapacity: distributions[finalActiveIndex].rosterSize,
+          playerTags: finalEligibleLockedInTags.slice().sort(),
+        }
+      );
+    }
+
+    // Lexicographic vector costs avoid unsafe giant numeric weights while
+    // preserving Locked-In, vote, strength, downward-distance, main-role
+    // preference, and stable-order priorities in one assignment solve.
+    const FLOW_COST_LENGTH = 6;
+    const zeroFlowCost = () => Array(FLOW_COST_LENGTH).fill(0);
+    const addFlowCost = (left, right) => left.map((value, index) => value + right[index]);
+    const negateFlowCost = (value) => value.map((item) => -item);
+    const compareFlowCost = (left, right) => {
+      for (let i = 0; i < FLOW_COST_LENGTH; i++) {
+        if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
+      }
+      return 0;
+    };
+
+    const strengthOrder = activePlayerTags.slice().sort(compareStrength);
+    const strengthImportanceByTag = {};
+    for (let i = 0; i < strengthOrder.length; i++) {
+      strengthImportanceByTag[strengthOrder[i]] = strengthOrder.length - i;
+    }
+
+    let solverRunCount = 0;
+    const solveAssignment = () => {
+      solverRunCount++;
+      const playerCount = activePlayerTags.length;
+      const sourceNodeIndex = 0;
+      const playerNodeBase = 1;
+      const roleNodeBase = playerNodeBase + playerCount;
+      const sinkNodeIndex = roleNodeBase + (activeNodes.length * 2);
+      const graph = Array.from({ length: sinkNodeIndex + 1 }, () => []);
+      const assignmentEdges = [];
+
+      const addFlowEdge = (from, to, capacity, cost, metadata) => {
+        const forward = { to, reverseIndex: graph[to].length, capacity, initialCapacity: capacity, cost, metadata: metadata || null };
+        const reverse = { to: from, reverseIndex: graph[from].length, capacity: 0, initialCapacity: 0, cost: negateFlowCost(cost), metadata: null };
+        graph[from].push(forward);
+        graph[to].push(reverse);
+        return forward;
+      };
+
+      for (let playerIndex = 0; playerIndex < playerCount; playerIndex++) {
+        const playerTag = activePlayerTags[playerIndex];
+        addFlowEdge(sourceNodeIndex, playerNodeBase + playerIndex, 1, zeroFlowCost(), null);
+        const startIndex = startActiveIndexByTag[playerTag];
+        const lockState = lockStateByTag[playerTag];
+        const strengthImportance = strengthImportanceByTag[playerTag] || 1;
+        const stableOrder = playerByTag[playerTag] ? playerByTag[playerTag].globalOrder + 1 : playerIndex + 1;
+        const isVoter = !!preferredRosterIdByTag[playerTag];
+        for (let targetIndex = startIndex; targetIndex < activeNodes.length; targetIndex++) {
+          if (!eligibilityByTagAndActiveIndex[playerTag][targetIndex].eligible) continue;
+          const distribution = distributions[targetIndex];
+          const roleOptions = lockState === "lockedIn"
+            ? ["main"]
+            : (lockState === "lockedOut" ? ["sub"] : ["main", "sub"]);
+          for (const role of roleOptions) {
+            const roleCapacity = role === "main"
+              ? distribution.rosterSize
+              : Math.max(0, distribution.capacity - distribution.rosterSize);
+            if (roleCapacity <= 0) continue;
+            const distance = targetIndex - startIndex;
+            const cost = [
+              lockState === "lockedIn" ? distance : 0,
+              isVoter ? distance : 0,
+              strengthImportance * targetIndex,
+              distance,
+              role === "sub" ? strengthImportance : 0,
+              stableOrder * ((targetIndex * 2) + (role === "sub" ? 2 : 1)),
+            ];
+            const edge = addFlowEdge(
+              playerNodeBase + playerIndex,
+              roleNodeBase + (targetIndex * 2) + (role === "sub" ? 1 : 0),
+              1,
+              cost,
+              { playerTag, targetIndex, role }
+            );
+            assignmentEdges.push(edge);
           }
-          const lockState = getCwlPreferenceLockState(node.roster, playerTag);
-          if (lockState) {
-            lockedOutsideCutoffCount++;
-            continue;
-          }
-          const sourceNode = moveSimulatedTag(playerTag, nextNode.rosterId);
-          cascadeMoves.push({
-            playerTag,
-            playerName: normalizeWhitespace(playerByTag[playerTag] && playerByTag[playerTag].player && playerByTag[playerTag].player.name),
-            fromRosterId: sourceNode.rosterId,
-            targetRosterId: nextNode.rosterId,
-            rank: rankIndex + 1,
-            capacity: distribution.capacity,
-            distributionMode: distribution.distributionMode,
-          });
         }
       }
 
+      for (let activeIndex = 0; activeIndex < activeNodes.length; activeIndex++) {
+        const distribution = distributions[activeIndex];
+        const mainCapacity = distribution.rosterSize;
+        const subCapacity = Math.max(0, distribution.capacity - distribution.rosterSize);
+        addFlowEdge(roleNodeBase + (activeIndex * 2), sinkNodeIndex, mainCapacity, zeroFlowCost(), null);
+        addFlowEdge(roleNodeBase + (activeIndex * 2) + 1, sinkNodeIndex, subCapacity, zeroFlowCost(), null);
+      }
+
+      let flow = 0;
+      let totalCost = zeroFlowCost();
+      while (flow < playerCount) {
+        const distances = Array(graph.length).fill(null);
+        const previousNode = Array(graph.length).fill(-1);
+        const previousEdgeIndex = Array(graph.length).fill(-1);
+        const inQueue = Array(graph.length).fill(false);
+        const queue = [sourceNodeIndex];
+        let queueIndex = 0;
+        distances[sourceNodeIndex] = zeroFlowCost();
+        inQueue[sourceNodeIndex] = true;
+        while (queueIndex < queue.length) {
+          const from = queue[queueIndex++];
+          inQueue[from] = false;
+          for (let edgeIndex = 0; edgeIndex < graph[from].length; edgeIndex++) {
+            const edge = graph[from][edgeIndex];
+            if (edge.capacity <= 0) continue;
+            const nextDistance = addFlowCost(distances[from], edge.cost);
+            if (distances[edge.to] && compareFlowCost(nextDistance, distances[edge.to]) >= 0) continue;
+            distances[edge.to] = nextDistance;
+            previousNode[edge.to] = from;
+            previousEdgeIndex[edge.to] = edgeIndex;
+            if (!inQueue[edge.to]) {
+              queue.push(edge.to);
+              inQueue[edge.to] = true;
+            }
+          }
+        }
+        if (!distances[sinkNodeIndex]) break;
+        let cursor = sinkNodeIndex;
+        while (cursor !== sourceNodeIndex) {
+          const from = previousNode[cursor];
+          const edge = graph[from][previousEdgeIndex[cursor]];
+          edge.capacity--;
+          graph[cursor][edge.reverseIndex].capacity++;
+          cursor = from;
+        }
+        flow++;
+        totalCost = addFlowCost(totalCost, distances[sinkNodeIndex]);
+      }
+
+      const assignmentByTag = {};
+      for (const edge of assignmentEdges) {
+        if (edge.initialCapacity === 1 && edge.capacity === 0 && edge.metadata) {
+          assignmentByTag[edge.metadata.playerTag] = {
+            targetIndex: edge.metadata.targetIndex,
+            role: edge.metadata.role,
+          };
+        }
+      }
+      const unmatchedTags = activePlayerTags.filter((playerTag) => !assignmentByTag[playerTag]);
+      return {
+        flow,
+        assignmentByTag,
+        unmatchedTags,
+        objective: totalCost,
+      };
+    };
+
+    const assignmentSolution = solveAssignment();
+
+    if (assignmentSolution.flow !== activePlayerTags.length) {
+      const unmatchedTags = assignmentSolution.unmatchedTags.length
+        ? assignmentSolution.unmatchedTags.slice().sort(compareStrength)
+        : activePlayerTags.slice().sort(compareStrength);
+      const noDestinationTagSet = {};
+      for (const playerTag of unmatchedTags) {
+        const startIndex = startActiveIndexByTag[playerTag];
+        const lockState = lockStateByTag[playerTag];
+        let hasDestination = false;
+        for (let targetIndex = startIndex; targetIndex < activeNodes.length && !hasDestination; targetIndex++) {
+          if (!eligibilityByTagAndActiveIndex[playerTag][targetIndex].eligible) continue;
+          const distribution = distributions[targetIndex];
+          if (lockState === "lockedIn") hasDestination = distribution.rosterSize > 0;
+          else if (lockState === "lockedOut") hasDestination = distribution.capacity > distribution.rosterSize;
+          else hasDestination = distribution.capacity > 0;
+        }
+        if (!hasDestination) noDestinationTagSet[playerTag] = true;
+      }
+      const requirementsRejectedTags = unmatchedTags.filter((playerTag) => {
+        if (!noDestinationTagSet[playerTag]) return false;
+        const startIndex = startActiveIndexByTag[playerTag];
+        for (let targetIndex = startIndex; targetIndex < activeNodes.length; targetIndex++) {
+          if (eligibilityByTagAndActiveIndex[playerTag][targetIndex].eligible) return false;
+        }
+        return true;
+      });
+      const capacityRejectedTags = unmatchedTags.filter((playerTag) => requirementsRejectedTags.indexOf(playerTag) < 0);
+      const lockedOutRoleCount = unmatchedTags.filter((playerTag) => lockStateByTag[playerTag] === "lockedOut").length;
+      const requirementFailureCounts = { minTownHall: 0, maxMissedAttacks: 0, maxMissedAttackRate: 0 };
+      for (const playerTag of requirementsRejectedTags) {
+        const failures = eligibilityByTagAndActiveIndex[playerTag][finalActiveIndex].failures || [];
+        for (const failure of failures) {
+          if (Object.prototype.hasOwnProperty.call(requirementFailureCounts, failure.key)) requirementFailureCounts[failure.key]++;
+        }
+      }
+      const reasonParts = [];
+      if (requirementsRejectedTags.length) reasonParts.push(requirementsRejectedTags.length + " fail requirements");
+      if (capacityRejectedTags.length) reasonParts.push(capacityRejectedTags.length +
+        (capacityRejectedTags.length === 1 ? " player exceeds" : " players exceed") + " usable capacity");
+      if (lockedOutRoleCount) reasonParts.push(lockedOutRoleCount + " Locked-Out " +
+        (lockedOutRoleCount === 1 ? "player has" : "players have") + " no available sub slot");
+      throw createCwlPrepDistributionError(
+        "CWL prep distribution cannot produce a lossless downward assignment through the final roster " +
+          activeNodes[finalActiveIndex].rosterId + ": " + (reasonParts.join("; ") || "no complete role assignment exists") +
+          ". Increase substitutes, use Fill, loosen requirements, or enable another lower roster.",
+        {
+          reason: "final-roster-unplaced",
+          rosterId: activeNodes[finalActiveIndex].rosterId,
+          unplacedCount: unmatchedTags.length,
+          requirementsRejectedCount: requirementsRejectedTags.length,
+          capacityRejectedCount: capacityRejectedTags.length,
+          lockedOutRoleCount,
+          requirementFailureCounts,
+          playerTags: unmatchedTags,
+        }
+      );
+    }
+
+    const assignmentByTag = assignmentSolution.assignmentByTag;
+    const cascadeMoves = [];
+    for (const playerTag of activePlayerTags) {
+      const assignment = assignmentByTag[playerTag];
+      const startIndex = startActiveIndexByTag[playerTag];
+      for (let sourceIndex = startIndex; sourceIndex < assignment.targetIndex; sourceIndex++) {
+        const sourceNode = activeNodes[sourceIndex];
+        const targetNode = activeNodes[sourceIndex + 1];
+        const eligibility = eligibilityByTagAndActiveIndex[playerTag][sourceIndex];
+        const reason = eligibility.eligible ? "capacity" : "requirements";
+        cascadeMoves.push({
+          playerTag,
+          playerName: normalizeWhitespace(playerByTag[playerTag] && playerByTag[playerTag].player && playerByTag[playerTag].player.name),
+          fromRosterId: sourceNode.rosterId,
+          targetRosterId: targetNode.rosterId,
+          reason,
+          capacityReason: reason === "capacity"
+            ? (lockStateByTag[playerTag] === "lockedIn"
+              ? "locked-in-main"
+              : (lockStateByTag[playerTag] === "lockedOut" ? "locked-out-sub" : "total"))
+            : "",
+          requirementFailures: Array.isArray(eligibility.failures) ? eligibility.failures.slice() : [],
+          requirements: requirementsByActiveIndex[sourceIndex],
+          capacity: distributions[sourceIndex].capacity,
+          distributionMode: distributions[sourceIndex].distributionMode,
+        });
+      }
+    }
+
+    const rosterResults = [];
+    for (let activeIndex = 0; activeIndex < activeNodes.length; activeIndex++) {
+      const node = activeNodes[activeIndex];
+      const distribution = distributions[activeIndex];
+      const expectedMainCount = activePlayerTags.filter((playerTag) =>
+        assignmentByTag[playerTag].targetIndex === activeIndex && assignmentByTag[playerTag].role === "main").length;
+      const expectedSubCount = activePlayerTags.filter((playerTag) =>
+        assignmentByTag[playerTag].targetIndex === activeIndex && assignmentByTag[playerTag].role === "sub").length;
+      const movesFromRoster = cascadeMoves.filter((move) => move.fromRosterId === node.rosterId);
+      const requirementMoves = movesFromRoster.filter((move) => move.reason === "requirements");
+      const requirementFailureCounts = { minTownHall: 0, maxMissedAttacks: 0, maxMissedAttackRate: 0 };
+      for (const move of requirementMoves) {
+        for (const failure of move.requirementFailures || []) {
+          if (Object.prototype.hasOwnProperty.call(requirementFailureCounts, failure.key)) requirementFailureCounts[failure.key]++;
+        }
+      }
       rosterResults.push({
         rosterId: node.rosterId,
-        nextRosterId: nextNode ? nextNode.rosterId : "",
+        nextRosterId: activeNodes[activeIndex + 1] ? activeNodes[activeIndex + 1].rosterId : "",
         distributionMode: distribution.distributionMode,
         rosterSize: distribution.rosterSize,
         substituteCount: distribution.substituteCount,
         capacity: distribution.capacity,
-        beforeCount,
-        afterCount: node.tags.length,
-        movedDownCount: cascadeMoves.filter((move) => move.fromRosterId === node.rosterId).length,
-        preferredOutsideCutoffCount,
-        lockedOutsideCutoffCount,
-        terminalOverflowCount: nextNode ? 0 : Math.max(0, node.tags.length - distribution.capacity),
+        requirements: requirementsByActiveIndex[activeIndex],
+        beforeCount: node.tags.length,
+        afterCount: expectedMainCount + expectedSubCount,
+        expectedMainCount,
+        expectedSubCount,
+        targetMainCount: distribution.rosterSize,
+        targetSubCount: Math.max(0, distribution.capacity - distribution.rosterSize),
+        movedDownCount: movesFromRoster.length,
+        requirementsMovedDownCount: requirementMoves.length,
+        capacityMovedDownCount: movesFromRoster.length - requirementMoves.length,
+        requirementFailureCounts,
+        targetMet: expectedMainCount === distribution.rosterSize &&
+          expectedSubCount === Math.max(0, distribution.capacity - distribution.rosterSize),
+        terminalOverflowCount: 0,
       });
     }
 
     const finalRosterIdByTag = {};
+    const finalRoleByTag = {};
     const finalTags = [];
-    for (const node of nodes) {
-      for (const playerTag of node.tags) {
-        if (finalRosterIdByTag[playerTag]) throw new Error("CWL prep distribution duplicated " + playerTag + ".");
+    for (const playerTag of Object.keys(playerByTag)) {
+      const assignment = assignmentByTag[playerTag];
+      if (assignment) {
+        finalRosterIdByTag[playerTag] = activeNodes[assignment.targetIndex].rosterId;
+        finalRoleByTag[playerTag] = assignment.role;
+      } else {
+        const node = locationByTag[playerTag];
+        if (!node) throw new Error("CWL prep distribution lost " + playerTag + ".");
         finalRosterIdByTag[playerTag] = node.rosterId;
-        finalTags.push(playerTag);
+        finalRoleByTag[playerTag] = roleByTag[playerTag] || "sub";
       }
+      finalTags.push(playerTag);
     }
     const initialTags = Object.keys(playerByTag).sort();
     finalTags.sort();
@@ -1533,18 +1986,29 @@
     }
     const shiftedTagSet = {};
     for (const move of cascadeMoves) shiftedTagSet[move.playerTag] = true;
+    const capacityMoveCount = cascadeMoves.filter((move) => move.reason === "capacity").length;
+    const requirementsMoveCount = cascadeMoves.filter((move) => move.reason === "requirements").length;
+    const targetMetCount = rosterResults.filter((result) => result.targetMet).length;
 
     return {
       preferencePlan,
       cascadeMoves,
       rosterResults,
       finalRosterIdByTag,
+      finalRoleByTag,
       summary: {
         playerCount: initialTags.length,
         preferenceMoveCount: preferencePlan.moves.length,
         cascadeMoveCount: cascadeMoves.length,
+        capacityMoveCount,
+        requirementsMoveCount,
         shiftedPlayerCount: Object.keys(shiftedTagSet).length,
         activeRosterCount: activeNodes.length,
+        solverRunCount,
+        targetMetCount,
+        allTargetsMet: targetMetCount === rosterResults.length,
+        totalConfiguredCapacity,
+        activePlayerCount,
         conserved: true,
       },
     };

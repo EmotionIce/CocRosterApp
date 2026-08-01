@@ -280,6 +280,7 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 			"weightHitUpAbility",
 			"weightHitEvenAbility",
 			"weightReliabilityPenalty",
+			"preparationReliabilityExponent",
 			"churnPenalty",
 			"supportedTownHallMin",
 			"supportedTownHallMax",
@@ -511,6 +512,50 @@ function normalizePreparationClanAbsentTagSet_(rawValue, rosterPoolTagSetRaw) {
 	return out;
 }
 
+// Sanitize hard CWL preparation eligibility requirements. Zero disables the
+// minimum Town Hall gate, while null disables either missed-attack gate.
+function sanitizeCwlPreparationRequirements_(rawValue) {
+	const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+	const minTownHallSource = raw.minTownHall;
+	const minTownHallRaw = minTownHallSource == null || (typeof minTownHallSource === "string" && !minTownHallSource.trim())
+		? NaN
+		: Number(minTownHallSource);
+	const minTownHall = isFinite(minTownHallRaw) ? Math.max(0, Math.min(99, Math.floor(minTownHallRaw))) : 0;
+
+	// Sanitize nullable number.
+	const sanitizeNullableNumber = function (valueRaw, maxValue, integerOnly) {
+		if (valueRaw == null || (typeof valueRaw === "string" && !valueRaw.trim())) return null;
+		const value = Number(valueRaw);
+		if (!isFinite(value)) return null;
+		const normalized = integerOnly ? Math.floor(value) : value;
+		return Math.max(0, Math.min(maxValue, normalized));
+	};
+
+	return {
+		minTownHall: minTownHall,
+		maxMissedAttacks: sanitizeNullableNumber(raw.maxMissedAttacks, 999, true),
+		maxMissedAttackRate: sanitizeNullableNumber(raw.maxMissedAttackRate, 1, false),
+	};
+}
+
+// Return whether a ranked player meets every hard roster eligibility limit.
+function meetsCwlPreparationRequirements_(playerStatsRaw, requirementsRaw) {
+	const stats = playerStatsRaw && typeof playerStatsRaw === "object" ? playerStatsRaw : {};
+	const requirements = sanitizeCwlPreparationRequirements_(requirementsRaw);
+	const th = toNonNegativeInt_(stats.th);
+	const missedAttacks = toNonNegativeInt_(stats.missedAttacks);
+	const attackOpportunities = toNonNegativeInt_(stats.attackOpportunities);
+	const missedAttackRate = isFinite(Number(stats.missedAttackRate))
+		? clampNumber_(Number(stats.missedAttackRate), 0, 1)
+		: (attackOpportunities > 0
+			? clampNumber_(missedAttacks / attackOpportunities, 0, 1)
+			: (missedAttacks > 0 ? 1 : 0));
+	if (requirements.minTownHall > 0 && th < requirements.minTownHall) return false;
+	if (requirements.maxMissedAttacks != null && missedAttacks > requirements.maxMissedAttacks) return false;
+	if (requirements.maxMissedAttackRate != null && missedAttackRate > requirements.maxMissedAttackRate) return false;
+	return true;
+}
+
 // Sanitize roster CWL preparation.
 function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingModeRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
@@ -555,6 +600,7 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 		? Math.max(0, Math.min(maxSubstituteCount, Math.floor(substituteCountRaw)))
 		: fallbackSubstituteCount;
 	const distributionMode = String((raw && raw.distributionMode) || "").trim().toLowerCase() === "fill" ? "fill" : "subs";
+	const requirements = sanitizeCwlPreparationRequirements_(raw && raw.requirements);
 	const lockedInCount = lockTags.filter((tag) => lockStateByTag[tag] === "lockedIn").length;
 	if (enabled && lockedInCount > rosterSize && options.enforceLockedInLimit !== false) {
 		throw new Error("CWL Preparation Mode invalid: lockedIn count (" + lockedInCount + ") exceeds roster size (" + rosterSize + ").");
@@ -570,6 +616,7 @@ function sanitizeRosterCwlPreparation_(rawValue, rosterPoolTagSetRaw, trackingMo
 		rosterSize: rosterSize,
 		distributionMode: distributionMode,
 		substituteCount: substituteCount,
+		requirements: requirements,
 		lockStateByTag: lockStateByTag,
 		assignedTagSet: assignedTagSet,
 		excludedTagSet: excludedTagSet,
@@ -635,6 +682,7 @@ function getRosterCwlPreparation_(rosterRaw) {
 			rosterSize: fallbackRosterSize,
 			distributionMode: "subs",
 			substituteCount: Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - fallbackRosterSize, poolEntries.length - fallbackRosterSize)),
+			requirements: sanitizeCwlPreparationRequirements_(null),
 			lockStateByTag: {},
 			assignedTagSet: {},
 			excludedTagSet: {},
@@ -645,6 +693,7 @@ function getRosterCwlPreparation_(rosterRaw) {
 	if (!sanitized.assignedTagSet || typeof sanitized.assignedTagSet !== "object") sanitized.assignedTagSet = {};
 	if (!sanitized.excludedTagSet || typeof sanitized.excludedTagSet !== "object") sanitized.excludedTagSet = {};
 	if (!sanitized.clanAbsentTagSet || typeof sanitized.clanAbsentTagSet !== "object") sanitized.clanAbsentTagSet = {};
+	sanitized.requirements = sanitizeCwlPreparationRequirements_(sanitized.requirements);
 	if (sanitized.distributionMode !== "fill") sanitized.distributionMode = "subs";
 	if (!isFinite(Number(sanitized.substituteCount))) sanitized.substituteCount = 0;
 	if (!sanitized.algorithm) sanitized.algorithm = CWL_PREPARATION_ALGORITHM;
@@ -701,6 +750,8 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const poolEntries = Array.isArray(options.poolEntries) ? options.poolEntries : collectRosterPoolPlayersWithSection_(roster);
 	const cwlStatsByTag = roster && roster.cwlStats && roster.cwlStats.byTag && typeof roster.cwlStats.byTag === "object" ? roster.cwlStats.byTag : {};
+	const warPerformance = roster && roster.warPerformance && typeof roster.warPerformance === "object" ? roster.warPerformance : {};
+	const warPerformanceByTag = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
 	const config = options.config && typeof options.config === "object" ? options.config : getBenchPlannerConfig_();
 	const ranked = [];
 	let thMin = Number.MAX_SAFE_INTEGER;
@@ -714,6 +765,11 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 		const tag = normalizeTag_(entry.tag || player.tag);
 		if (!tag) continue;
 		const metrics = deriveCwlMetrics_(cwlStatsByTag[tag]);
+		const performanceEntry = warPerformanceByTag[tag] && typeof warPerformanceByTag[tag] === "object" ? warPerformanceByTag[tag] : {};
+		const overallPerformance = performanceEntry.overall && typeof performanceEntry.overall === "object" ? performanceEntry.overall : {};
+		const historicalOpportunities = toNonNegativeInt_(overallPerformance.possibleAttacks);
+		const attackOpportunities = historicalOpportunities > 0 ? historicalOpportunities : toNonNegativeInt_(metrics.resolvedWarDays);
+		const missedAttacks = historicalOpportunities > 0 ? toNonNegativeInt_(overallPerformance.attacksMissed) : toNonNegativeInt_(metrics.missedAttacks);
 		const th = toNonNegativeInt_(player.th);
 		const playerStats = {
 			tag: tag,
@@ -725,7 +781,11 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 			threeStarCount: metrics.threeStarCount,
 			hitUpCount: metrics.hitUpCount,
 			sameThHitCount: metrics.sameThHitCount,
-			missedAttacks: metrics.missedAttacks,
+			missedAttacks: missedAttacks,
+			attackOpportunities: attackOpportunities,
+			missedAttackRate: attackOpportunities > 0
+				? clampNumber_(missedAttacks / attackOpportunities, 0, 1)
+				: (missedAttacks > 0 ? 1 : 0),
 		};
 		ranked.push({
 			tag: tag,
@@ -740,7 +800,7 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 		thMin = Math.min(thMin, th);
 		thMax = Math.max(thMax, th);
 		sumThreeStarRate += toNonNegativeInt_(metrics.threeStarCount) / Math.max(1, toNonNegativeInt_(metrics.countedAttacks));
-		sumMissRate += toNonNegativeInt_(metrics.missedAttacks) / Math.max(1, toNonNegativeInt_(metrics.resolvedWarDays));
+		sumMissRate += missedAttacks / Math.max(1, attackOpportunities);
 		meanCount++;
 	}
 	if (!ranked.length) {
@@ -812,6 +872,7 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 			rosterSize: fallbackRosterSize,
 			distributionMode: "subs",
 			substituteCount: Math.max(0, Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE - fallbackRosterSize, poolEntries.length - fallbackRosterSize)),
+			requirements: sanitizeCwlPreparationRequirements_(null),
 			lockStateByTag: {},
 			assignedTagSet: {},
 			excludedTagSet: {},
@@ -822,6 +883,7 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 	if (!prep.assignedTagSet || typeof prep.assignedTagSet !== "object") prep.assignedTagSet = {};
 	if (!prep.excludedTagSet || typeof prep.excludedTagSet !== "object") prep.excludedTagSet = {};
 	if (!prep.clanAbsentTagSet || typeof prep.clanAbsentTagSet !== "object") prep.clanAbsentTagSet = {};
+	prep.requirements = sanitizeCwlPreparationRequirements_(prep.requirements);
 	prep.algorithm = CWL_PREPARATION_ALGORITHM;
 
 	const lockStateByTag = prep.lockStateByTag;
@@ -878,6 +940,7 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 		if (lockStateByTag[tag] !== "lockedIn") continue;
 		const entry = rankedByTag[tag];
 		if (!entry || !entry.player) continue;
+		if (!meetsCwlPreparationRequirements_(entry.playerStats, prep.requirements)) continue;
 		lockedInEntries.push(entry);
 		selectedSet[tag] = true;
 	}
@@ -899,6 +962,7 @@ function applyCwlPreparationRebalance_(rosterRaw, optionsRaw) {
 		const tag = entry && entry.tag ? entry.tag : "";
 		if (!tag || selectedSet[tag]) continue;
 		if (lockStateByTag[tag] === "lockedOut") continue;
+		if (!meetsCwlPreparationRequirements_(entry && entry.playerStats, prep.requirements)) continue;
 		nextMain.push(entry.player);
 		selectedSet[tag] = true;
 		remainingSlots--;

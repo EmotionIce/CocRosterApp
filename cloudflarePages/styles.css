@@ -5275,6 +5275,54 @@ h2{
   white-space:nowrap;
 }
 
+.cwl-prep-requirements{
+  min-width:0;
+  border:1px solid rgba(96,165,250,.28);
+  border-radius:7px;
+  background:rgba(15,23,42,.72);
+  color:#dbeafe;
+  font-size:11px;
+}
+
+.cwl-prep-requirements[open]{
+  flex:1 1 100%;
+  padding-bottom:8px;
+}
+
+.cwl-prep-requirements > summary{
+  min-height:28px;
+  padding:6px 9px;
+  cursor:pointer;
+  font-weight:800;
+  line-height:16px;
+  white-space:nowrap;
+}
+
+.cwl-prep-requirements__grid{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:8px;
+  padding:2px 8px 0;
+}
+
+.cwl-prep-requirements__field{
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) 72px;
+  align-items:center;
+  gap:6px;
+  min-width:0;
+  color:#bfdbfe;
+  font-size:11px;
+  font-weight:700;
+}
+
+.cwl-prep-requirements__field .admin-input{
+  width:72px;
+  min-width:0;
+  min-height:28px;
+  padding:3px 7px;
+}
+
 .cwl-prep-summary-pill{
   display:inline-flex;
   align-items:center;
@@ -12946,6 +12994,244 @@ html:not(.landing-motion-ready) .landing-progress-route.is-dense .landing-progre
     transform:none !important;
   }
 }
+
+/* The admin preview reuses the roster renderer without the public sticky-header shell. */
+body.admin-shell-page .roster-head__compact{
+  display:none;
+}
+
+body.admin-shell-page .roster-head__top{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  min-width:0;
+}
+
+body.admin-shell-page .roster-head__identity-lead{
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  min-width:0;
+  flex:1 1 auto;
+}
+
+body.admin-shell-page .roster-head__crest{
+  display:grid;
+  place-items:center;
+  width:32px;
+  height:32px;
+  flex:0 0 32px;
+  border:1px solid rgba(246,232,185,.18);
+  border-radius:6px;
+  background:rgba(246,232,185,.055);
+  color:var(--turtle-gold);
+  font-size:15px;
+  line-height:1;
+}
+
+body.admin-shell-page .roster-head__identity{
+  flex:1 1 auto;
+  min-width:0;
+}
+
+body.admin-shell-page .roster-head__eyebrow{
+  color:var(--muted);
+  font-size:10px;
+  font-weight:800;
+  line-height:1.2;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+
+body.admin-shell-page .roster-head__actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:6px;
+  flex:0 0 auto;
+  flex-wrap:wrap;
+}
+
+body.admin-shell-page .roster-command-row{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}
+
+body.admin-shell-page .roster-head-metric{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  min-height:28px;
+  padding:4px 8px;
+  border:1px solid rgba(246,232,185,.14);
+  border-radius:5px;
+  background:rgba(15,17,22,.82);
+  color:#ddd5bf;
+  font-size:11px;
+  line-height:1;
+  white-space:nowrap;
+}
+
+body.admin-shell-page .roster-head-metric__icon{
+  width:13px;
+  color:var(--turtle-gold);
+  text-align:center;
+}
+
+body.admin-shell-page .roster-head-metric__label{
+  color:var(--muted);
+}
+
+body.admin-shell-page .roster-head-metric__value{
+  color:var(--turtle-cream);
+  font-variant-numeric:tabular-nums;
+}
+
+body.admin-shell-page .roster-admin-actions{
+  display:flex;
+  align-items:center;
+  margin-left:auto;
+}
+
+@media (max-width: 520px){
+  body.admin-shell-page .cwl-prep-requirements[open]{
+    width:100%;
+  }
+
+  body.admin-shell-page .cwl-prep-requirements__grid{
+    grid-template-columns:minmax(0, 1fr);
+  }
+
+  body.admin-shell-page .cwl-prep-requirements__field{
+    grid-template-columns:minmax(0, 1fr) minmax(74px, 36%);
+  }
+
+  body.admin-shell-page .cwl-prep-requirements__field .admin-input{
+    width:100%;
+  }
+
+  body.admin-shell-page .admin-tab-panel{
+    padding:8px;
+  }
+
+  body.admin-shell-page .roster-card{
+    padding:10px !important;
+  }
+
+  body.admin-shell-page .roster-head{
+    gap:8px;
+    margin-bottom:10px;
+    padding-bottom:10px;
+  }
+
+  body.admin-shell-page .roster-head__top{
+    flex-direction:column;
+    align-items:stretch;
+    gap:8px;
+  }
+
+  body.admin-shell-page .roster-head__actions{
+    width:100%;
+    justify-content:flex-start;
+  }
+
+  body.admin-shell-page .roster-command-row{
+    gap:6px;
+    padding:7px;
+  }
+
+  body.admin-shell-page .roster-admin-actions{
+    flex-basis:100%;
+    margin-left:0;
+  }
+
+  body.admin-shell-page .roster-player-card{
+    padding:10px;
+  }
+
+  body.admin-shell-page .roster-player-card .player-top{
+    display:grid;
+    grid-template-columns:minmax(0, 1fr);
+    align-items:start;
+    gap:7px;
+  }
+
+  body.admin-shell-page .roster-player-card .player-left,
+  body.admin-shell-page .roster-player-card .player-right{
+    width:100%;
+    min-width:0;
+  }
+
+  body.admin-shell-page .roster-player-card .player-left{
+    overflow:hidden;
+  }
+
+  body.admin-shell-page .roster-player-card .player-right{
+    justify-content:flex-start;
+    gap:6px;
+    flex-wrap:wrap;
+  }
+
+  body.admin-shell-page .roster-player-card .player-cwl{
+    margin-left:auto;
+  }
+
+  body.admin-shell-page .roster-player-card .player-meta-row{
+    gap:6px;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-quick-row{
+    grid-template-columns:minmax(0, 1fr) auto;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-summary{
+    min-width:0;
+    gap:4px;
+    overflow:hidden;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-summary-main{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-summary-meta{
+    max-width:58%;
+    flex:0 1 auto;
+    flex-wrap:nowrap;
+    overflow:hidden;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-summary-pill{
+    max-width:72px;
+    flex:0 1 auto;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-summary-caret{
+    flex:0 0 auto;
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-quick-remove{
+    min-width:68px;
+    padding-inline:8px;
+  }
+}
+
+@media (max-width: 340px){
+  body.admin-shell-page .roster-player-card .player-admin-quick-row{
+    grid-template-columns:minmax(0, 1fr);
+  }
+
+  body.admin-shell-page .roster-player-card .player-admin-quick-remove{
+    width:100%;
+  }
+}
+
 /* Cross-clan active-war projections remain visually distinct and read-only. */
 .roster-player-card.is-projected-participant {
   outline: 1px dashed color-mix(in srgb, var(--accent, #79d7ff) 62%, transparent);

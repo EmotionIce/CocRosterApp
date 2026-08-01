@@ -389,7 +389,7 @@ const PLAYER_PROFILE_CACHE_TTL_SECONDS = 300;
 const TOWN_HALL_ICON_CACHE_TTL_SECONDS = 3600;
 const LEAGUE_ICON_CACHE_TTL_SECONDS = 3600;
 const LEAGUE_ICON_CACHE_VERSION = "v4";
-const CWL_PREPARATION_ALGORITHM = "strength_top_x_v1";
+const CWL_PREPARATION_ALGORITHM = "strength_tiered_v2";
 const CWL_PREPARATION_MIN_ROSTER_SIZE = 5;
 const CWL_PREPARATION_MAX_ROSTER_SIZE = 50;
 const CWL_PREPARATION_ROSTER_SIZE_STEP = 5;
@@ -448,6 +448,7 @@ const CWL_BENCH_PLANNER_CONFIG = {
 	destructionPerfPriorMean: 0.5,
 	threeStarRatePriorWeight: 4.0,
 	reliabilityPriorWeight: 2.5,
+	preparationReliabilityExponent: 1.75,
 	weightTH: 0.38,
 	weightStarsPerf: 0.22,
 	weightDestructionPerf: 0.14,

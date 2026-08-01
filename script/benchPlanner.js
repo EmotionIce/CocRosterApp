@@ -156,6 +156,7 @@ function computeStrengthScore_(playerStats, planningContext, config) {
 	const th = toNonNegativeInt_(stats.th);
 	const countedAttacks = toNonNegativeInt_(stats.countedAttacks);
 	const resolvedWarDays = toNonNegativeInt_(stats.resolvedWarDays);
+	const attackOpportunities = toNonNegativeInt_(stats.attackOpportunities) || resolvedWarDays;
 	const thMin = toNonNegativeInt_(ctx.thMin);
 	const thMax = toNonNegativeInt_(ctx.thMax);
 	const normTH = thMax > thMin ? clampNumber_((th - thMin) / (thMax - thMin), 0, 1) : 0.5;
@@ -177,20 +178,25 @@ function computeStrengthScore_(playerStats, planningContext, config) {
 	const hitUpAbility = clampNumber_(0.65 * shrinkedStarsPerf + 0.35 * hitUpShare, 0, 1);
 	const hitEvenAbility = clampNumber_(0.65 * shrinkedStarsPerf + 0.35 * hitEvenShare, 0, 1);
 
-	const missRateRaw = clampNumber_(toNonNegativeInt_(stats.missedAttacks) / Math.max(1, resolvedWarDays), 0, 1);
+	const missRateRaw = clampNumber_(toNonNegativeInt_(stats.missedAttacks) / Math.max(1, attackOpportunities), 0, 1);
 	const poolMissRateMean = normalizeUnitMetric_(ctx.poolMissRateMean, 0.1);
-	const reliabilityPenalty = normalizeUnitMetric_(shrinkToward_(missRateRaw, poolMissRateMean, resolvedWarDays, Math.max(0, Number(weights.reliabilityPriorWeight) || 0)), poolMissRateMean);
+	const reliabilityPenalty = normalizeUnitMetric_(shrinkToward_(missRateRaw, poolMissRateMean, attackOpportunities, Math.max(0, Number(weights.reliabilityPriorWeight) || 0)), poolMissRateMean);
 
-	const score = (Number(weights.weightTH) || 0) * normTH + (Number(weights.weightStarsPerf) || 0) * shrinkedStarsPerf + (Number(weights.weightDestructionPerf) || 0) * shrinkedDestructionPerf + (Number(weights.weightThreeStarRate) || 0) * shrinkedThreeStarRate + (Number(weights.weightHitUpAbility) || 0) * hitUpAbility + (Number(weights.weightHitEvenAbility) || 0) * hitEvenAbility - (Number(weights.weightReliabilityPenalty) || 0) * reliabilityPenalty;
+	const baseScore = (Number(weights.weightTH) || 0) * normTH + (Number(weights.weightStarsPerf) || 0) * shrinkedStarsPerf + (Number(weights.weightDestructionPerf) || 0) * shrinkedDestructionPerf + (Number(weights.weightThreeStarRate) || 0) * shrinkedThreeStarRate + (Number(weights.weightHitUpAbility) || 0) * hitUpAbility + (Number(weights.weightHitEvenAbility) || 0) * hitEvenAbility;
+	const reliability = clampNumber_(1 - reliabilityPenalty, 0, 1);
+	const reliabilityExponent = Math.max(0.1, Number(weights.preparationReliabilityExponent) || 1);
+	const score = baseScore * Math.pow(reliability, reliabilityExponent);
 
 	return {
 		score: score,
+		baseScore: baseScore,
 		normTH: normTH,
 		shrinkedStarsPerf: shrinkedStarsPerf,
 		shrinkedDestructionPerf: shrinkedDestructionPerf,
 		shrinkedThreeStarRate: shrinkedThreeStarRate,
 		hitUpAbility: hitUpAbility,
 		hitEvenAbility: hitEvenAbility,
+		reliability: reliability,
 		reliabilityPenalty: reliabilityPenalty,
 	};
 }

@@ -11,7 +11,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <meta name="build-stamp" content="cloudflare-admin" />
-  <link rel="stylesheet" href="./styles.css?v=20260724a" />
+  <link rel="stylesheet" href="./styles.css?v=20260801a" />
   <link rel="stylesheet" href="./war-followup.css?v=20260727d" />
   <style>
     /* Admin-only tweaks */
@@ -2230,6 +2230,24 @@
         padding-bottom: 24px;
       }
 
+      #adminTabPreview .admin-section-head--row {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      #adminTabPreview .admin-section-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      #adminTabPreview .admin-section-actions .btn {
+        flex: 1 1 calc(50% - 4px);
+        min-width: 0;
+      }
+
+      #adminTabPreview .admin-section-actions #buildCwlPrepRostersBtn {
+        flex-basis: 100%;
+      }
+
       .admin-auth-card.is-unlocked .admin-auth-grid {
         grid-template-columns: 1fr;
       }
@@ -2528,7 +2546,6 @@
         <div class="admin-section-head admin-section-head--row">
           <div>
             <h2>Rosters</h2>
-            <div class="small muted">CWL Prep: set retained subs or Fill to 50 on each roster, then build once. Votes and manual locks stay protected; the final prep roster catches overflow.</div>
           </div>
           <div class="admin-section-actions">
             <button id="buildCwlPrepRostersBtn" class="btn" type="button" disabled>
@@ -2701,10 +2718,10 @@
 
 <!-- Runtime config, XLSX parsing, and the shared roster/admin clients. -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="./generator.js?v=20260408c"></script>
+  <script src="./generator.js?v=20260801a"></script>
   <script src="./client.js?v=20260729a"></script>
   <script src="./war-followup.js?v=20260727d"></script>
-  <script src="./admin.js?v=20260729c"></script>
+  <script src="./admin.js?v=20260801a"></script>
 </body>
 
 </html>

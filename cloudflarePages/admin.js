@@ -2444,7 +2444,7 @@
 
   // Deep-clone a JSON-safe value.
   const cloneJson = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
-  const CWL_PREPARATION_ALGORITHM = "strength_top_x_v1";
+  const CWL_PREPARATION_ALGORITHM = "strength_tiered_v2";
   const CWL_PREPARATION_MIN_ROSTER_SIZE = 5;
   const CWL_PREPARATION_MAX_ROSTER_SIZE = 50;
   const CWL_PREPARATION_ROSTER_SIZE_STEP = 5;
@@ -2457,6 +2457,7 @@
     weightHitUpAbility: 0.08,
     weightHitEvenAbility: 0.08,
     weightReliabilityPenalty: 0.2,
+    preparationReliabilityExponent: 1.75,
     perfPriorWeight: 3.0,
     starsPerfPriorMean: 0.5,
     destructionPerfPriorMean: 0.5,
@@ -3195,7 +3196,7 @@
     } else if (activePrepCount < 2) {
       btn.title = "Enable CWL Preparation Mode on at least two ordered rosters.";
     } else {
-      btn.title = "Apply CWL votes, keep each roster's configured strongest players, and cascade overflow down without losing members.";
+      btn.title = "Enforce each roster's hard main/sub limits and cascade every rejected player down without losing members.";
     }
   };
 
@@ -3219,15 +3220,19 @@
       return;
     }
     el.textContent = "";
+    const preferenceMoveCount = toNonNegativeIntLocal_(summary.preferenceMoveCount);
+    const requirementsMoveCount = toNonNegativeIntLocal_(summary.requirementsMoveCount);
+    const capacityMoveCount = toNonNegativeIntLocal_(summary.capacityMoveCount);
+    const playerCount = toNonNegativeIntLocal_(summary.playerCount);
     const head = document.createElement("div");
     const strong = document.createElement("strong");
     strong.textContent = "CWL rosters built safely: ";
     head.appendChild(strong);
     head.appendChild(document.createTextNode(
-      summary.preferenceMoveCount + " vote move" + (summary.preferenceMoveCount === 1 ? "" : "s") + ", " +
-      summary.shiftedPlayerCount + " player" + (summary.shiftedPlayerCount === 1 ? "" : "s") + " shifted down across " +
-      summary.cascadeMoveCount + " league step" + (summary.cascadeMoveCount === 1 ? "" : "s") + ", all " +
-      summary.playerCount + " players conserved."
+      preferenceMoveCount + " vote move" + (preferenceMoveCount === 1 ? "" : "s") + ", " +
+      requirementsMoveCount + " requirement move" + (requirementsMoveCount === 1 ? "" : "s") + ", " +
+      capacityMoveCount + " cutoff move" + (capacityMoveCount === 1 ? "" : "s") + "; all " +
+      playerCount + " players conserved."
     ));
     el.appendChild(head);
     const rosterResults = Array.isArray(plan.rosterResults) ? plan.rosterResults : [];
@@ -3242,10 +3247,17 @@
         const capacityLabel = result.distributionMode === "fill"
           ? "fill to 50"
           : (result.rosterSize + " main + " + result.substituteCount + " subs");
+        const moveParts = [];
+        if (result.requirementsMovedDownCount) moveParts.push(result.requirementsMovedDownCount + " by limits");
+        if (result.capacityMovedDownCount) moveParts.push(result.capacityMovedDownCount + " by cutoff");
+        const targetGap = Math.max(0,
+          toNonNegativeIntLocal_(result.targetMainCount) + toNonNegativeIntLocal_(result.targetSubCount) -
+          toNonNegativeIntLocal_(result.afterCount));
+        const targetStatus = targetGap > 0 ? (", " + targetGap + " configured slot" + (targetGap === 1 ? "" : "s") + " unfilled") : "";
         const suffix = result.nextRosterId
-          ? (", " + result.movedDownCount + " moved to " + result.nextRosterId)
-          : (result.terminalOverflowCount ? (", final-roster overflow " + result.terminalOverflowCount) : ", final roster");
-        item.textContent = result.rosterId + ": " + capacityLabel + ", " + result.afterCount + " retained" + suffix;
+          ? (moveParts.length ? (", moved to " + result.nextRosterId + ": " + moveParts.join(", ")) : ", no moves down")
+          : ", final roster verified";
+        item.textContent = result.rosterId + ": " + capacityLabel + " \u2192 " + result.expectedMainCount + " main + " + result.expectedSubCount + " subs" + targetStatus + suffix;
         list.appendChild(item);
       }
       details.appendChild(list);
@@ -3772,6 +3784,7 @@
     const th = toNonNegativeIntLocal_(stats.th);
     const countedAttacks = toNonNegativeIntLocal_(stats.countedAttacks);
     const resolvedWarDays = toNonNegativeIntLocal_(stats.resolvedWarDays);
+    const attackOpportunities = toNonNegativeIntLocal_(stats.attackOpportunities) || resolvedWarDays;
     const thMin = toNonNegativeIntLocal_(ctx.thMin);
     const thMax = toNonNegativeIntLocal_(ctx.thMax);
     const normTH = thMax > thMin ? clampNumberLocal_((th - thMin) / (thMax - thMin), 0, 1) : 0.5;
@@ -3792,28 +3805,32 @@
     const hitEvenShare = clampNumberLocal_(toNonNegativeIntLocal_(stats.sameThHitCount) / Math.max(1, countedAttacks), 0, 1);
     const hitUpAbility = clampNumberLocal_(0.65 * shrinkedStarsPerf + 0.35 * hitUpShare, 0, 1);
     const hitEvenAbility = clampNumberLocal_(0.65 * shrinkedStarsPerf + 0.35 * hitEvenShare, 0, 1);
-    const missRateRaw = clampNumberLocal_(toNonNegativeIntLocal_(stats.missedAttacks) / Math.max(1, resolvedWarDays), 0, 1);
+    const missRateRaw = clampNumberLocal_(toNonNegativeIntLocal_(stats.missedAttacks) / Math.max(1, attackOpportunities), 0, 1);
     const poolMissRateMean = normalizeUnitMetricLocal_(ctx.poolMissRateMean, 0.1);
     const reliabilityPenalty = normalizeUnitMetricLocal_(
-      shrinkTowardLocal_(missRateRaw, poolMissRateMean, resolvedWarDays, Math.max(0, Number(config.reliabilityPriorWeight) || 0)),
+      shrinkTowardLocal_(missRateRaw, poolMissRateMean, attackOpportunities, Math.max(0, Number(config.reliabilityPriorWeight) || 0)),
       poolMissRateMean
     );
-    const score =
+    const baseScore =
       (Number(config.weightTH) || 0) * normTH +
       (Number(config.weightStarsPerf) || 0) * shrinkedStarsPerf +
       (Number(config.weightDestructionPerf) || 0) * shrinkedDestructionPerf +
       (Number(config.weightThreeStarRate) || 0) * shrinkedThreeStarRate +
       (Number(config.weightHitUpAbility) || 0) * hitUpAbility +
-      (Number(config.weightHitEvenAbility) || 0) * hitEvenAbility -
-      (Number(config.weightReliabilityPenalty) || 0) * reliabilityPenalty;
+      (Number(config.weightHitEvenAbility) || 0) * hitEvenAbility;
+    const reliability = clampNumberLocal_(1 - reliabilityPenalty, 0, 1);
+    const reliabilityExponent = Math.max(0.1, Number(config.preparationReliabilityExponent) || 1);
+    const score = baseScore * Math.pow(reliability, reliabilityExponent);
     return {
       score,
+      baseScore,
       normTH,
       shrinkedStarsPerf,
       shrinkedDestructionPerf,
       shrinkedThreeStarRate,
       hitUpAbility,
       hitEvenAbility,
+      reliability,
       reliabilityPenalty,
     };
   };
@@ -3953,6 +3970,55 @@
     return out;
   };
 
+  // Sanitize hard per-roster CWL preparation eligibility limits.
+  const sanitizeCwlPreparationRequirementsLocal_ = (rawValue) => {
+    const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+    const minTownHallSource = raw.minTownHall;
+    const minTownHallRaw = minTownHallSource == null || (typeof minTownHallSource === "string" && !minTownHallSource.trim())
+      ? NaN
+      : Number(minTownHallSource);
+    const sanitizeNullableNumber = (valueRaw, maxValue, integerOnly) => {
+      if (valueRaw == null || (typeof valueRaw === "string" && !valueRaw.trim())) return null;
+      const value = Number(valueRaw);
+      if (!Number.isFinite(value)) return null;
+      const normalized = integerOnly ? Math.floor(value) : value;
+      return Math.max(0, Math.min(maxValue, normalized));
+    };
+    return {
+      minTownHall: Number.isFinite(minTownHallRaw) ? Math.max(0, Math.min(99, Math.floor(minTownHallRaw))) : 0,
+      maxMissedAttacks: sanitizeNullableNumber(raw.maxMissedAttacks, 999, true),
+      maxMissedAttackRate: sanitizeNullableNumber(raw.maxMissedAttackRate, 1, false),
+    };
+  };
+
+  // Format active CWL preparation limits for compact roster controls.
+  const formatCwlPreparationRequirementsLocal_ = (requirementsRaw) => {
+    const requirements = sanitizeCwlPreparationRequirementsLocal_(requirementsRaw);
+    const parts = [];
+    if (requirements.minTownHall > 0) parts.push("TH" + requirements.minTownHall + "+");
+    if (requirements.maxMissedAttacks != null) parts.push("\u2264" + requirements.maxMissedAttacks + " misses");
+    if (requirements.maxMissedAttackRate != null) parts.push("\u2264" + Math.round(requirements.maxMissedAttackRate * 100) + "% missed");
+    return parts.length ? parts.join(" \u00b7 ") : "Limits off";
+  };
+
+  // Return whether one scored player meets a roster's hard preparation limits.
+  const meetsCwlPreparationRequirementsLocal_ = (playerStatsRaw, requirementsRaw) => {
+    const stats = playerStatsRaw && typeof playerStatsRaw === "object" ? playerStatsRaw : {};
+    const requirements = sanitizeCwlPreparationRequirementsLocal_(requirementsRaw);
+    const th = toNonNegativeIntLocal_(stats.th);
+    const missedAttacks = toNonNegativeIntLocal_(stats.missedAttacks);
+    const attackOpportunities = toNonNegativeIntLocal_(stats.attackOpportunities);
+    const missedAttackRate = Number.isFinite(Number(stats.missedAttackRate))
+      ? clampNumberLocal_(Number(stats.missedAttackRate), 0, 1)
+      : (attackOpportunities > 0
+        ? clampNumberLocal_(missedAttacks / attackOpportunities, 0, 1)
+        : (missedAttacks > 0 ? 1 : 0));
+    if (requirements.minTownHall > 0 && th < requirements.minTownHall) return false;
+    if (requirements.maxMissedAttacks != null && missedAttacks > requirements.maxMissedAttacks) return false;
+    if (requirements.maxMissedAttackRate != null && missedAttackRate > requirements.maxMissedAttackRate) return false;
+    return true;
+  };
+
   // Sanitize roster CWL preparation local.
   const sanitizeRosterCwlPreparationLocal_ = (roster, optionsRaw) => {
     const rosterSafe = roster && typeof roster === "object" ? roster : null;
@@ -3979,6 +4045,7 @@
       ? Math.max(0, Math.min(maxSubstituteCount, Math.floor(substituteCountRaw)))
       : fallbackSubstituteCount;
     const distributionMode = toStr(source && source.distributionMode).trim().toLowerCase() === "fill" ? "fill" : "subs";
+    const requirements = sanitizeCwlPreparationRequirementsLocal_(source && source.requirements);
     const lockStateByTag = normalizePreparationLockStateLocal_(source && source.lockStateByTag, rosterPoolTagSet);
     const enabled = trackingMode === "cwl" ? toBoolFlag(source && source.enabled) : false;
     const hasAssignedSource = !!(source && source.assignedTagSet && typeof source.assignedTagSet === "object" && !Array.isArray(source.assignedTagSet));
@@ -4029,6 +4096,7 @@
       rosterSize,
       distributionMode,
       substituteCount,
+      requirements,
       lockStateByTag,
       assignedTagSet,
       excludedTagSet,
@@ -4095,6 +4163,10 @@
     const statsByTag = rosterSafe && rosterSafe.cwlStats && rosterSafe.cwlStats.byTag && typeof rosterSafe.cwlStats.byTag === "object"
       ? rosterSafe.cwlStats.byTag
       : {};
+    const performanceStore = state.lastRosterData && state.lastRosterData.playerWarPerformance && typeof state.lastRosterData.playerWarPerformance === "object"
+      ? state.lastRosterData.playerWarPerformance
+      : {};
+    const performanceByTag = performanceStore.byTag && typeof performanceStore.byTag === "object" ? performanceStore.byTag : {};
     const ranked = [];
     let thMin = Number.MAX_SAFE_INTEGER;
     let thMax = 0;
@@ -4107,6 +4179,13 @@
       const tag = normalizeTag(entry.tag || player.tag);
       if (!tag) continue;
       const metrics = deriveCwlMetricsLocal_(statsByTag[tag]);
+      const performanceEntry = performanceByTag[tag] && typeof performanceByTag[tag] === "object" ? performanceByTag[tag] : {};
+      const overallPerformance = performanceEntry.overall && typeof performanceEntry.overall === "object" ? performanceEntry.overall : {};
+      const historicalOpportunities = toNonNegativeIntLocal_(overallPerformance.possibleAttacks);
+      const attackOpportunities = historicalOpportunities > 0 ? historicalOpportunities : toNonNegativeIntLocal_(metrics.resolvedWarDays);
+      const missedAttacks = historicalOpportunities > 0
+        ? toNonNegativeIntLocal_(overallPerformance.attacksMissed)
+        : toNonNegativeIntLocal_(metrics.missedAttacks);
       const th = toNonNegativeIntLocal_(player.th);
       const playerStats = {
         tag,
@@ -4118,7 +4197,11 @@
         threeStarCount: metrics.threeStarCount,
         hitUpCount: metrics.hitUpCount,
         sameThHitCount: metrics.sameThHitCount,
-        missedAttacks: metrics.missedAttacks,
+        missedAttacks,
+        attackOpportunities,
+        missedAttackRate: attackOpportunities > 0
+          ? clampNumberLocal_(missedAttacks / attackOpportunities, 0, 1)
+          : (missedAttacks > 0 ? 1 : 0),
       };
       ranked.push({
         tag,
@@ -4133,7 +4216,7 @@
       thMin = Math.min(thMin, th);
       thMax = Math.max(thMax, th);
       sumThreeStarRate += toNonNegativeIntLocal_(metrics.threeStarCount) / Math.max(1, toNonNegativeIntLocal_(metrics.countedAttacks));
-      sumMissRate += toNonNegativeIntLocal_(metrics.missedAttacks) / Math.max(1, toNonNegativeIntLocal_(metrics.resolvedWarDays));
+      sumMissRate += missedAttacks / Math.max(1, attackOpportunities);
       meanCount++;
     }
     if (!ranked.length) return { ranked: [], byTag: {} };
@@ -4189,6 +4272,7 @@
         rosterSafe,
         normalizePreparationRosterSizeLocal_(Array.isArray(rosterSafe.main) ? rosterSafe.main.length : 0, CWL_PREPARATION_MIN_ROSTER_SIZE)
       ),
+      requirements: sanitizeCwlPreparationRequirementsLocal_(null),
       lockStateByTag: {},
       assignedTagSet: {},
       excludedTagSet: {},
@@ -4243,45 +4327,68 @@
     const ranked = Array.isArray(ranking.ranked) ? ranking.ranked : [];
     const rankedByTag = ranking.byTag && typeof ranking.byTag === "object" ? ranking.byTag : {};
 
-    const selectedSet = {};
-    const lockedInEntries = [];
-    for (let i = 0; i < lockTags.length; i++) {
-      const tag = lockTags[i];
-      if (lockStateByTag[tag] !== "lockedIn") continue;
-      const entry = rankedByTag[tag];
-      if (!entry || !entry.player) continue;
-      lockedInEntries.push(entry);
-      selectedSet[tag] = true;
-    }
-    lockedInEntries.sort((left, right) => {
-      const leftScore = Number.isFinite(Number(left && left.strengthScore)) ? Number(left.strengthScore) : Number.NEGATIVE_INFINITY;
-      const rightScore = Number.isFinite(Number(right && right.strengthScore)) ? Number(right.strengthScore) : Number.NEGATIVE_INFINITY;
-      if (leftScore !== rightScore) return rightScore - leftScore;
-      const leftTh = toNonNegativeIntLocal_(left && left.th);
-      const rightTh = toNonNegativeIntLocal_(right && right.th);
-      if (leftTh !== rightTh) return rightTh - leftTh;
-      return compareTagsAscLocal_(left && left.tag, right && right.tag);
-    });
-
     const nextMain = [];
-    for (let i = 0; i < lockedInEntries.length; i++) nextMain.push(lockedInEntries[i].player);
-    let remainingSlots = Math.max(0, prep.rosterSize - nextMain.length);
-    for (let i = 0; i < ranked.length && remainingSlots > 0; i++) {
-      const entry = ranked[i];
-      const tag = normalizeTag(entry && entry.tag);
-      if (!tag || selectedSet[tag]) continue;
-      if (lockStateByTag[tag] === "lockedOut") continue;
-      nextMain.push(entry.player);
-      selectedSet[tag] = true;
-      remainingSlots--;
-    }
-
     const nextSubs = [];
-    for (let i = 0; i < ranked.length; i++) {
-      const entry = ranked[i];
-      const tag = normalizeTag(entry && entry.tag);
-      if (!tag || selectedSet[tag]) continue;
-      nextSubs.push(entry.player);
+    const targetRoleByTag = options.targetRoleByTag && typeof options.targetRoleByTag === "object" && !Array.isArray(options.targetRoleByTag)
+      ? options.targetRoleByTag
+      : null;
+    if (targetRoleByTag) {
+      for (let i = 0; i < ranked.length; i++) {
+        const entry = ranked[i];
+        const tag = normalizeTag(entry && entry.tag);
+        const targetRole = toStr(targetRoleByTag[tag]).trim();
+        if (!tag || (targetRole !== "main" && targetRole !== "sub")) {
+          throw new Error("CWL roster build role plan is missing " + (tag || "a player tag") + ".");
+        }
+        if (!meetsCwlPreparationRequirementsLocal_(entry && entry.playerStats, prep.requirements)) {
+          throw new Error("CWL roster build role plan kept ineligible player " + tag + ".");
+        }
+        if (targetRole === "main") {
+          if (lockStateByTag[tag] === "lockedOut") throw new Error("CWL roster build role plan put Locked-Out player " + tag + " in main.");
+          nextMain.push(entry.player);
+        } else {
+          nextSubs.push(entry.player);
+        }
+      }
+    } else {
+      const selectedSet = {};
+      const lockedInEntries = [];
+      for (let i = 0; i < lockTags.length; i++) {
+        const tag = lockTags[i];
+        if (lockStateByTag[tag] !== "lockedIn") continue;
+        const entry = rankedByTag[tag];
+        if (!entry || !entry.player) continue;
+        if (!meetsCwlPreparationRequirementsLocal_(entry.playerStats, prep.requirements)) continue;
+        lockedInEntries.push(entry);
+        selectedSet[tag] = true;
+      }
+      lockedInEntries.sort((left, right) => {
+        const leftScore = Number.isFinite(Number(left && left.strengthScore)) ? Number(left.strengthScore) : Number.NEGATIVE_INFINITY;
+        const rightScore = Number.isFinite(Number(right && right.strengthScore)) ? Number(right.strengthScore) : Number.NEGATIVE_INFINITY;
+        if (leftScore !== rightScore) return rightScore - leftScore;
+        const leftTh = toNonNegativeIntLocal_(left && left.th);
+        const rightTh = toNonNegativeIntLocal_(right && right.th);
+        if (leftTh !== rightTh) return rightTh - leftTh;
+        return compareTagsAscLocal_(left && left.tag, right && right.tag);
+      });
+      for (let i = 0; i < lockedInEntries.length; i++) nextMain.push(lockedInEntries[i].player);
+      let remainingSlots = Math.max(0, prep.rosterSize - nextMain.length);
+      for (let i = 0; i < ranked.length && remainingSlots > 0; i++) {
+        const entry = ranked[i];
+        const tag = normalizeTag(entry && entry.tag);
+        if (!tag || selectedSet[tag]) continue;
+        if (lockStateByTag[tag] === "lockedOut") continue;
+        if (!meetsCwlPreparationRequirementsLocal_(entry && entry.playerStats, prep.requirements)) continue;
+        nextMain.push(entry.player);
+        selectedSet[tag] = true;
+        remainingSlots--;
+      }
+      for (let i = 0; i < ranked.length; i++) {
+        const entry = ranked[i];
+        const tag = normalizeTag(entry && entry.tag);
+        if (!tag || selectedSet[tag]) continue;
+        nextSubs.push(entry.player);
+      }
     }
 
     rosterSafe.main = nextMain;
@@ -4363,16 +4470,25 @@
   };
 
   // Handle transfer preparation state on explicit move local.
-  const transferPreparationStateOnExplicitMoveLocal_ = (sourceRoster, destinationRoster, playerTagRaw) => {
+  const transferPreparationStateOnExplicitMoveLocal_ = (sourceRoster, destinationRoster, playerTagRaw, optionsRaw) => {
     const source = sourceRoster && typeof sourceRoster === "object" ? sourceRoster : null;
     const destination = destinationRoster && typeof destinationRoster === "object" ? destinationRoster : null;
     const playerTag = normalizeTag(playerTagRaw);
     if (!source || !destination || !playerTag) return;
-    const sourcePrep = getRosterCwlPreparationLocal_(source, { keepWhenEmpty: true, enforceLockedInLimit: true });
-    const destinationPrep = getRosterCwlPreparationLocal_(destination, { keepWhenEmpty: true, enforceLockedInLimit: true });
-    const sourceLock = sourcePrep && sourcePrep.lockStateByTag && sourcePrep.lockStateByTag[playerTag]
-      ? sourcePrep.lockStateByTag[playerTag]
+    const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+    const enforceLockedInLimit = options.enforceLockedInLimit !== false;
+    // Capture the raw lock before sanitizing the source. Callers transfer the
+    // player first, so source sanitization correctly prunes the old tag but
+    // must not erase the lock that needs to follow the player.
+    const rawSourcePrep = source.cwlPreparation && typeof source.cwlPreparation === "object"
+      ? source.cwlPreparation
+      : null;
+    const rawSourceLock = rawSourcePrep && rawSourcePrep.lockStateByTag && typeof rawSourcePrep.lockStateByTag === "object"
+      ? toStr(rawSourcePrep.lockStateByTag[playerTag]).trim()
       : "";
+    const sourceLock = rawSourceLock === "lockedIn" || rawSourceLock === "lockedOut" ? rawSourceLock : "";
+    const sourcePrep = getRosterCwlPreparationLocal_(source, { keepWhenEmpty: true, enforceLockedInLimit });
+    const destinationPrep = getRosterCwlPreparationLocal_(destination, { keepWhenEmpty: true, enforceLockedInLimit });
 
     if (sourcePrep && sourcePrep.lockStateByTag && Object.prototype.hasOwnProperty.call(sourcePrep.lockStateByTag, playerTag)) {
       delete sourcePrep.lockStateByTag[playerTag];
@@ -4407,6 +4523,9 @@
       destination.cwlPreparation = destinationPrep;
     } else if (destinationPrepActive) {
       destinationPrep.assignedTagSet[playerTag] = true;
+      if (destinationPrep.lockStateByTag && Object.prototype.hasOwnProperty.call(destinationPrep.lockStateByTag, playerTag)) {
+        delete destinationPrep.lockStateByTag[playerTag];
+      }
       destination.cwlPreparation = destinationPrep;
     } else if (destinationPrep) {
       if (destinationPrep.lockStateByTag && Object.prototype.hasOwnProperty.call(destinationPrep.lockStateByTag, playerTag)) {
@@ -4723,6 +4842,8 @@
       rosterSize: prep.rosterSize,
       distributionMode: prep.distributionMode === "fill" ? "fill" : "subs",
       substituteCount: Number.isFinite(Number(prep.substituteCount)) ? Number(prep.substituteCount) : 0,
+      requirements: sanitizeCwlPreparationRequirementsLocal_(prep.requirements),
+      requirementsLabel: formatCwlPreparationRequirementsLocal_(prep.requirements),
       distributionCapacity: prep.distributionMode === "fill"
         ? CWL_PREPARATION_MAX_ROSTER_SIZE
         : Math.min(CWL_PREPARATION_MAX_ROSTER_SIZE, prep.rosterSize + (Number(prep.substituteCount) || 0)),
@@ -4750,6 +4871,7 @@
       rosterSize: getInitialPreparationRosterSizeForEnableLocal_(roster),
       distributionMode: "subs",
       substituteCount: getInitialPreparationSubstituteCountLocal_(roster, getInitialPreparationRosterSizeForEnableLocal_(roster)),
+      requirements: sanitizeCwlPreparationRequirementsLocal_(null),
       lockStateByTag: {},
       assignedTagSet: {},
       excludedTagSet: {},
@@ -4837,6 +4959,20 @@
     }
     prep.distributionMode = mode;
     prep.substituteCount = nextSubstituteCount;
+    roster.cwlPreparation = prep;
+    return getRosterPreparationSummaryLocal_(roster);
+  };
+
+  // Configure hard eligibility limits for one CWL preparation roster.
+  const setRosterPreparationRequirementsLocal_ = (rosterIdRaw, requirementsRaw) => {
+    const rosterId = toStr(rosterIdRaw).trim();
+    if (!rosterId) throw new Error("Roster ID is required.");
+    const roster = getRosterById(rosterId);
+    if (!roster) throw new Error("Roster not found: " + rosterId);
+    if (getRosterTrackingMode(roster) !== "cwl") throw new Error(CWL_PREPARATION_WARNING_SWITCH_TO_CWL);
+    const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
+    if (!prep || !prep.enabled) throw new Error("Enable CWL Preparation Mode first.");
+    prep.requirements = sanitizeCwlPreparationRequirementsLocal_(requirementsRaw);
     roster.cwlPreparation = prep;
     return getRosterPreparationSummaryLocal_(roster);
   };
@@ -5010,7 +5146,8 @@
     ensureRosterArrays(sourceRoster);
     ensureRosterArrays(targetRoster);
     const lockState = getCwlPreferenceApplyLockStateLocal_(sourceRoster, playerTag);
-    if (lockState) {
+    const allowLockedOutMove = lockState === "lockedOut" && move.allowLockedOutMove === true;
+    if (lockState && !allowLockedOutMove) {
       return Object.assign({}, withLocation, {
         status: "locked-player",
         reason: "locked-player",
@@ -5131,6 +5268,10 @@
       const roster = rosters[rosterIndex];
       ensureRosterArrays(roster);
       const rosterId = toStr(roster.id).trim();
+      const prep = roster.cwlPreparation && typeof roster.cwlPreparation === "object" ? roster.cwlPreparation : {};
+      const rosterLockStateByTag = prep.lockStateByTag && typeof prep.lockStateByTag === "object"
+        ? prep.lockStateByTag
+        : {};
       const sections = [
         { role: "main", players: roster.main },
         { role: "sub", players: roster.subs },
@@ -5145,7 +5286,9 @@
           const playerTag = normalizeTag(player.tag);
           if (!playerTag) throw new Error("CWL roster build stopped: a player in " + rosterId + " has no tag.");
           if (byTag[playerTag]) throw new Error("CWL roster build stopped: duplicate player tag " + playerTag + ".");
-          byTag[playerTag] = { rosterId, role: section.role, playerIndex };
+          const rawLockState = toStr(rosterLockStateByTag[playerTag]).trim();
+          const lockState = rawLockState === "lockedIn" || rawLockState === "lockedOut" ? rawLockState : "";
+          byTag[playerTag] = { rosterId, role: section.role, playerIndex, lockState };
           tags.push(playerTag);
         }
       }
@@ -5170,8 +5313,64 @@
       if (expectedRosterId && actualRosterId !== expectedRosterId) {
         throw new Error("CWL roster build placement check failed for " + playerTag + "; all changes were rolled back.");
       }
+      const expectedLockState = toStr(before.byTag && before.byTag[playerTag] && before.byTag[playerTag].lockState).trim();
+      const actualLockState = toStr(after.byTag[playerTag] && after.byTag[playerTag].lockState).trim();
+      if (actualLockState !== expectedLockState) {
+        throw new Error("CWL roster build lock-state check failed for " + playerTag + "; all changes were rolled back.");
+      }
     }
     return after;
+  };
+
+  // Assert that the applied preview exactly matches every planned hard roster
+  // and role count, and that no ineligible player survived in that roster.
+  const assertCwlPrepDistributionPlanAppliedLocal_ = (distributionPlanRaw, strengthByTagRaw) => {
+    const distributionPlan = distributionPlanRaw && typeof distributionPlanRaw === "object" ? distributionPlanRaw : {};
+    const strengthByTag = strengthByTagRaw && typeof strengthByTagRaw === "object" ? strengthByTagRaw : {};
+    const rosterResults = Array.isArray(distributionPlan.rosterResults) ? distributionPlan.rosterResults : [];
+    const finalRoleByTag = distributionPlan.finalRoleByTag && typeof distributionPlan.finalRoleByTag === "object"
+      ? distributionPlan.finalRoleByTag
+      : {};
+    for (const resultRaw of rosterResults) {
+      const result = resultRaw && typeof resultRaw === "object" ? resultRaw : {};
+      const rosterId = toStr(result.rosterId).trim();
+      const roster = getRosterById(rosterId);
+      if (!roster) throw new Error("CWL roster build count check could not find " + rosterId + "; all changes were rolled back.");
+      ensureRosterArrays(roster);
+      const actualMainCount = roster.main.length;
+      const actualSubCount = roster.subs.length;
+      const actualTotal = actualMainCount + actualSubCount + roster.missing.length;
+      const expectedMainCount = toNonNegativeIntLocal_(result.expectedMainCount);
+      const expectedSubCount = toNonNegativeIntLocal_(result.expectedSubCount);
+      const expectedTotal = toNonNegativeIntLocal_(result.afterCount);
+      const capacity = toNonNegativeIntLocal_(result.capacity);
+      if (
+        roster.missing.length !== 0 ||
+        actualMainCount !== expectedMainCount ||
+        actualSubCount !== expectedSubCount ||
+        actualTotal !== expectedTotal ||
+        actualTotal > capacity
+      ) {
+        throw new Error(
+          "CWL roster build count check failed for " + rosterId + ": expected " + expectedMainCount +
+          " main + " + expectedSubCount + " subs, got " + actualMainCount + " main + " + actualSubCount +
+          " subs; all changes were rolled back."
+        );
+      }
+      const prep = getRosterCwlPreparationLocal_(roster, { keepWhenEmpty: true, enforceLockedInLimit: true });
+      const players = roster.main.concat(roster.subs);
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex++) {
+        const playerTag = normalizeTag(players[playerIndex] && players[playerIndex].tag);
+        const actualRole = playerIndex < roster.main.length ? "main" : "sub";
+        const expectedRole = toStr(finalRoleByTag[playerTag]).trim();
+        if (expectedRole && expectedRole !== actualRole) {
+          throw new Error("CWL roster build role check failed for " + playerTag + "; all changes were rolled back.");
+        }
+        if (!meetsCwlPreparationRequirementsLocal_(strengthByTag[playerTag], prep && prep.requirements)) {
+          throw new Error("CWL roster build eligibility check failed for " + playerTag + " in " + rosterId + "; all changes were rolled back.");
+        }
+      }
+    }
   };
 
   // Score every player against one shared prep context before cross-roster
@@ -5200,11 +5399,11 @@
       const stats = item.entry.playerStats && typeof item.entry.playerStats === "object" ? item.entry.playerStats : {};
       const th = toNonNegativeIntLocal_(stats.th);
       const countedAttacks = toNonNegativeIntLocal_(stats.countedAttacks);
-      const resolvedWarDays = toNonNegativeIntLocal_(stats.resolvedWarDays);
+      const attackOpportunities = toNonNegativeIntLocal_(stats.attackOpportunities) || toNonNegativeIntLocal_(stats.resolvedWarDays);
       thMin = Math.min(thMin, th);
       thMax = Math.max(thMax, th);
       sumThreeStarRate += toNonNegativeIntLocal_(stats.threeStarCount) / Math.max(1, countedAttacks);
-      sumMissRate += toNonNegativeIntLocal_(stats.missedAttacks) / Math.max(1, resolvedWarDays);
+      sumMissRate += toNonNegativeIntLocal_(stats.missedAttacks) / Math.max(1, attackOpportunities);
     }
     const planningContext = {
       thMin: thMin === Number.MAX_SAFE_INTEGER ? 0 : thMin,
@@ -5218,6 +5417,9 @@
       out[item.playerTag] = {
         strengthScore: Number.isFinite(Number(strength && strength.score)) ? Number(strength.score) : Number.NEGATIVE_INFINITY,
         th: toNonNegativeIntLocal_(stats.th),
+        missedAttacks: toNonNegativeIntLocal_(stats.missedAttacks),
+        attackOpportunities: toNonNegativeIntLocal_(stats.attackOpportunities) || toNonNegativeIntLocal_(stats.resolvedWarDays),
+        missedAttackRate: Number.isFinite(Number(stats.missedAttackRate)) ? clampNumberLocal_(Number(stats.missedAttackRate), 0, 1) : 0,
         rosterIndex: item.rosterIndex,
         rankIndex: item.rankIndex,
       };
@@ -5247,9 +5449,11 @@
     const removed = sourceList.splice(location.index, 1);
     if (!removed[0]) throw new Error("CWL roster build failed to move " + playerTag + ".");
     targetRoster.subs.push(removed[0]);
-    transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag);
-    reconcileCwlPreparationAssignmentsLocal_(sourceRoster);
-    reconcileCwlPreparationAssignmentsLocal_(targetRoster);
+    // A multi-step cascade can temporarily pass more Locked-In players through
+    // an intermediate roster than it can start. The pure plan already proves
+    // the final lock/main counts, so defer strict reconciliation until all
+    // adjacent moves have completed.
+    transferPreparationStateOnExplicitMoveLocal_(sourceRoster, targetRoster, playerTag, { enforceLockedInLimit: false });
     pruneTagFromAllRosterPublicLineupProjectionsLocal_(playerTag);
     reindexRoster(sourceRoster);
     reindexRoster(targetRoster);
@@ -5270,9 +5474,10 @@
     if (!planner) throw new Error("CWL prep roster builder is unavailable.");
 
     const inventoryBefore = captureCwlPrepPlayerInventoryLocal_();
+    const strengthByTag = buildCwlPrepStrengthByTagLocal_();
     const distributionPlan = planner({
       rosterData: state.lastRosterData,
-      strengthByTag: buildCwlPrepStrengthByTagLocal_(),
+      strengthByTag,
     });
     const previewSnapshot = cloneJson(state.lastRosterData);
     try {
@@ -5288,12 +5493,17 @@
       const rosters = getRosters();
       for (let i = 0; i < rosters.length; i++) {
         if (!isCwlPreparationActiveLocal_(rosters[i])) continue;
-        applyCwlPreparationRebalanceLocal_(rosters[i], { enforceLockedInLimit: true, recordAppliedAt: true });
+        applyCwlPreparationRebalanceLocal_(rosters[i], {
+          enforceLockedInLimit: true,
+          recordAppliedAt: true,
+          targetRoleByTag: distributionPlan.finalRoleByTag,
+        });
       }
+      assertCwlPrepDistributionPlanAppliedLocal_(distributionPlan, strengthByTag);
       assertCwlPrepPlayerInventoryConservedLocal_(inventoryBefore, distributionPlan.finalRosterIdByTag);
       applyPreviewMutation(
-        "Built CWL rosters safely: " + distributionPlan.summary.shiftedPlayerCount + " player" +
-        (distributionPlan.summary.shiftedPlayerCount === 1 ? "" : "s") + " shifted down; all " +
+        "Built hard-limited CWL rosters: " + distributionPlan.summary.requirementsMoveCount + " by limits, " +
+        distributionPlan.summary.capacityMoveCount + " by cutoff; all " +
         distributionPlan.summary.playerCount + " players conserved."
       );
       state.lastCwlPreferenceApplyPlan = distributionPlan.preferencePlan;
@@ -7612,7 +7822,7 @@
         prepSubsInput.step = "1";
         prepSubsInput.max = String(Math.max(0, CWL_PREPARATION_MAX_ROSTER_SIZE - prepRosterSize));
         prepSubsInput.value = String(prepSummary ? prepSummary.substituteCount : 0);
-        prepSubsInput.title = "Retain this many substitutes after the " + prepRosterSize + " main players";
+        prepSubsInput.title = "Keep exactly this many substitutes after the " + prepRosterSize + " main players when enough eligible players are available";
         prepSubsLabel.appendChild(prepSubsText);
         prepSubsLabel.appendChild(prepSubsInput);
 
@@ -7629,10 +7839,52 @@
         const prepCapacityPill = document.createElement("span");
         prepCapacityPill.className = "cwl-prep-capacity-pill";
         prepCapacityPill.textContent = "Keep " + (prepSummary ? prepSummary.distributionCapacity : prepRosterSize);
-        prepCapacityPill.title = "Players outside this strength cutoff move to the next active prep roster unless they voted for this roster or are manually locked.";
+        prepCapacityPill.title = "This is a hard player limit. Votes and locks consume slots; everyone outside the cutoff moves down.";
         prepDistribution.appendChild(prepSubsLabel);
         prepDistribution.appendChild(prepFillLabel);
         prepDistribution.appendChild(prepCapacityPill);
+
+        const prepRequirements = prepSummary && prepSummary.requirements
+          ? sanitizeCwlPreparationRequirementsLocal_(prepSummary.requirements)
+          : sanitizeCwlPreparationRequirementsLocal_(null);
+        const prepRequirementsDetails = document.createElement("details");
+        prepRequirementsDetails.className = "cwl-prep-requirements";
+        const prepRequirementsSummary = document.createElement("summary");
+        prepRequirementsSummary.textContent = prepSummary ? prepSummary.requirementsLabel : "Limits off";
+        prepRequirementsSummary.title = "Players must meet every enabled limit to stay in this roster, even if they voted for it or are locked in.";
+        prepRequirementsDetails.appendChild(prepRequirementsSummary);
+        const prepRequirementsGrid = document.createElement("div");
+        prepRequirementsGrid.className = "cwl-prep-requirements__grid";
+        const buildRequirementInput = (labelText, className, value, min, max, step, placeholder) => {
+          const label = document.createElement("label");
+          label.className = "cwl-prep-requirements__field";
+          const text = document.createElement("span");
+          text.textContent = labelText;
+          const input = document.createElement("input");
+          input.type = "number";
+          input.className = "admin-input " + className;
+          input.min = String(min);
+          input.max = String(max);
+          input.step = String(step);
+          input.placeholder = placeholder;
+          input.value = value == null || (value === 0 && className === "cwl-prep-min-th-input") ? "" : String(value);
+          label.appendChild(text);
+          label.appendChild(input);
+          prepRequirementsGrid.appendChild(label);
+          return input;
+        };
+        const prepMinThInput = buildRequirementInput("Min TH", "cwl-prep-min-th-input", prepRequirements.minTownHall, 0, 25, 1, "Off");
+        const prepMaxMissesInput = buildRequirementInput("Max misses", "cwl-prep-max-misses-input", prepRequirements.maxMissedAttacks, 0, 999, 1, "Off");
+        const prepMaxMissRateInput = buildRequirementInput(
+          "Max missed %",
+          "cwl-prep-max-miss-rate-input",
+          prepRequirements.maxMissedAttackRate == null ? null : Math.round(prepRequirements.maxMissedAttackRate * 100),
+          0,
+          100,
+          1,
+          "Off"
+        );
+        prepRequirementsDetails.appendChild(prepRequirementsGrid);
 
         const persistPrepDistribution = () => {
           const substituteCount = Number(prepSubsInput.value);
@@ -7641,7 +7893,7 @@
             prepFillCheckbox.checked ? "fill" : "subs",
             substituteCount
           );
-          applyPreviewMutation("CWL prep retention updated for " + rosterId + ".");
+          applyPreviewMutation("CWL prep capacity updated for " + rosterId + ".");
         };
         prepSubsInput.addEventListener("change", () => {
           try {
@@ -7661,8 +7913,40 @@
             renderPreviewFromState();
           }
         });
+        const persistPrepRequirements = () => {
+          const readNullable = (input, divisor) => {
+            const text = toStr(input.value).trim();
+            if (!text) return null;
+            const value = Number(text);
+            if (!Number.isFinite(value)) throw new Error("Preparation limits must be numbers or left blank.");
+            return value / divisor;
+          };
+          const minTownHallText = toStr(prepMinThInput.value).trim();
+          const minTownHall = minTownHallText ? Number(minTownHallText) : 0;
+          if (!Number.isFinite(minTownHall)) throw new Error("Minimum Town Hall must be a number or left blank.");
+          setRosterPreparationRequirementsLocal_(rosterId, {
+            minTownHall,
+            maxMissedAttacks: readNullable(prepMaxMissesInput, 1),
+            maxMissedAttackRate: readNullable(prepMaxMissRateInput, 100),
+          });
+          applyPreviewMutation("CWL prep limits updated for " + rosterId + ".");
+        };
+        for (const input of [prepMinThInput, prepMaxMissesInput, prepMaxMissRateInput]) {
+          input.addEventListener("change", () => {
+            try {
+              clearPendingProfileReopen();
+              persistPrepRequirements();
+            } catch (err) {
+              alert("CWL prep limit update failed: " + toErrorMessage(err));
+              renderPreviewFromState();
+            }
+          });
+        }
         prepSubsInput.disabled = !prepActive || prepFillCheckbox.checked;
         prepFillCheckbox.disabled = !prepActive;
+        for (const input of [prepMinThInput, prepMaxMissesInput, prepMaxMissRateInput]) {
+          input.disabled = !prepActive;
+        }
 
         prepToggleBtn.onclick = () => {
           try {
@@ -7699,6 +7983,7 @@
         prepStrip.appendChild(prepToggleBtn);
         prepStrip.appendChild(prepStepper);
         prepStrip.appendChild(prepDistribution);
+        prepStrip.appendChild(prepRequirementsDetails);
         prepStrip.appendChild(prepSummaryPill);
       }
 

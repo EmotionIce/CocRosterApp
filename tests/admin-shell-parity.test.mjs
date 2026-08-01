@@ -28,6 +28,35 @@ test("admin shells both expose the CWL preference apply controls", () => {
   }
 });
 
+test("admin roster preview keeps its mobile layout compact and mirrored", () => {
+  const adminHtml = readShell("admin.html");
+  const consoleHtml = readShell("console.html");
+  const styles = readShell("styles.css");
+  const verboseHelp = "CWL Prep: set retained subs or Fill to 50 on each roster";
+  const extractPreviewMobileRules = (html) => {
+    const start = html.indexOf("#adminTabPreview .admin-section-head--row");
+    const end = html.indexOf(".admin-auth-card.is-unlocked", start);
+    assert.ok(start >= 0 && end > start);
+    return html.slice(start, end);
+  };
+
+  assert.equal(extractPreviewMobileRules(adminHtml), extractPreviewMobileRules(consoleHtml));
+  for (const [name, html] of [["admin.html", adminHtml], ["console.html", consoleHtml]]) {
+    assert.ok(!html.includes(verboseHelp), name + " still exposes the verbose CWL helper");
+    assert.match(html, /styles\.css\?v=20260801a/, name);
+    assert.match(html, /#adminTabPreview \.admin-section-head--row \{\s*grid-template-columns: minmax\(0, 1fr\);/, name);
+    assert.match(html, /#adminTabPreview \.admin-section-actions #buildCwlPrepRostersBtn \{\s*flex-basis: 100%;/, name);
+  }
+
+  assert.match(styles, /body\.admin-shell-page \.roster-head__compact\{\s*display:none;/);
+  assert.match(styles, /body\.admin-shell-page \.roster-head-metric\{[\s\S]*?display:inline-flex;/);
+  assert.match(
+    styles,
+    /@media \(max-width: 520px\)\{[\s\S]*?body\.admin-shell-page \.roster-player-card \.player-top\{[\s\S]*?grid-template-columns:minmax\(0, 1fr\);/,
+  );
+  assert.match(styles, /body\.admin-shell-page \.roster-player-card \.player-admin-summary-main\{[\s\S]*?white-space:nowrap;/);
+});
+
 test("admin shells expose the optimistic workspace skeleton", () => {
   const shells = [
     ["admin.html", readShell("admin.html")],
@@ -38,7 +67,7 @@ test("admin shells expose the optimistic workspace skeleton", () => {
     assert.equal((html.match(/id="adminWorkspaceSkeleton"/g) || []).length, 1, name);
     assert.match(html, /class="admin-workspace-skeleton hidden"/, name);
     assert.match(html, /Verifying admin access and loading the workspace\./, name);
-    const adminAssetVersion = name === "script/Admin.html" ? "20260729a" : "20260729c";
+    const adminAssetVersion = name === "script/Admin.html" ? "20260729a" : "20260801a";
     assert.match(html, new RegExp(`admin\\.js\\?v=[^"]*${adminAssetVersion}`), name);
     assert.match(html, /client\.js\?v=[^"]*20260729a/, name);
   }
@@ -62,7 +91,7 @@ test("Cloudflare admin shells share the responsive command bar", () => {
     for (const icon of ["📥", "🔄", "🚀", "🌐"]) assert.ok(html.includes(icon), `${name} is missing ${icon}`);
     assert.match(html, /class="admin-command-footer hidden"/, name);
     assert.match(html, /@media \(max-width: 680px\)[\s\S]*?\.admin-command-tabs \{[\s\S]*?overflow-x: auto;/, name);
-    assert.match(html, /admin\.js\?v=20260729c/, name);
+    assert.match(html, /admin\.js\?v=20260801a/, name);
   }
 
   const adminClient = readShell("admin.js");

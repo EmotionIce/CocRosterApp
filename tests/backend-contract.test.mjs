@@ -709,6 +709,11 @@ test("active contract preserves and clamps CWL prep distribution settings", () =
     rosterSize: 15,
     distributionMode: "fill",
     substituteCount: 99,
+    requirements: {
+      minTownHall: 16,
+      maxMissedAttacks: 1,
+      maxMissedAttackRate: 0.15,
+    },
     lockStateByTag: {},
     assignedTagSet: { "#PLAYER": true },
     excludedTagSet: {},
@@ -721,7 +726,93 @@ test("active contract preserves and clamps CWL prep distribution settings", () =
   assert.equal(prep.distributionMode, "fill");
   assert.equal(prep.substituteCount, 35);
   assert.equal(prep.rosterSize, 15);
+  assert.deepEqual({ ...prep.requirements }, {
+    minTownHall: 16,
+    maxMissedAttacks: 1,
+    maxMissedAttackRate: 0.15,
+  });
   assert.equal(prep.assignedTagSet["#PLAYER"], true);
+});
+
+test("active contract defaults missing or null CWL prep requirements to disabled", () => {
+  const backend = loadBackend();
+  const buildData = (requirementsValue, includeRequirements) => {
+    const data = buildValidRosterData();
+    data.rosters[0].trackingMode = "cwl";
+    data.rosters[0].cwlPreparation = {
+      enabled: true,
+      rosterSize: 15,
+      distributionMode: "subs",
+      substituteCount: 0,
+      lockStateByTag: {},
+      assignedTagSet: { "#PLAYER": true },
+      excludedTagSet: {},
+      clanAbsentTagSet: {},
+    };
+    if (includeRequirements) data.rosters[0].cwlPreparation.requirements = requirementsValue;
+    return data;
+  };
+
+  const missing = backend.validateRosterData_(buildData(undefined, false)).rosters[0].cwlPreparation.requirements;
+  const explicitNull = backend.validateRosterData_(buildData(null, true)).rosters[0].cwlPreparation.requirements;
+
+  const disabled = { minTownHall: 0, maxMissedAttacks: null, maxMissedAttackRate: null };
+  assert.deepEqual({ ...missing }, disabled);
+  assert.deepEqual({ ...explicitNull }, disabled);
+});
+
+test("active contract clamps CWL prep requirements without coercing null gates to zero", () => {
+  const backend = loadBackend();
+  const validateRequirements = (requirements) => {
+    const data = buildValidRosterData();
+    data.rosters[0].trackingMode = "cwl";
+    data.rosters[0].cwlPreparation = {
+      enabled: true,
+      rosterSize: 15,
+      requirements,
+    };
+    return backend.validateRosterData_(data).rosters[0].cwlPreparation.requirements;
+  };
+
+  assert.deepEqual({ ...validateRequirements({
+    minTownHall: 123.9,
+    maxMissedAttacks: 1200.8,
+    maxMissedAttackRate: 4,
+  }) }, {
+    minTownHall: 99,
+    maxMissedAttacks: 999,
+    maxMissedAttackRate: 1,
+  });
+  assert.deepEqual({ ...validateRequirements({
+    minTownHall: -4,
+    maxMissedAttacks: -7,
+    maxMissedAttackRate: -0.25,
+  }) }, {
+    minTownHall: 0,
+    maxMissedAttacks: 0,
+    maxMissedAttackRate: 0,
+  });
+  assert.deepEqual({ ...validateRequirements({
+    minTownHall: null,
+    maxMissedAttacks: null,
+    maxMissedAttackRate: null,
+  }) }, {
+    minTownHall: 0,
+    maxMissedAttacks: null,
+    maxMissedAttackRate: null,
+  });
+});
+
+test("CWL prep missed-attack limits fail closed when misses exist without recorded opportunities", () => {
+  const backend = loadBackend();
+
+  assert.equal(backend.meetsCwlPreparationRequirements_({
+    th: 17,
+    missedAttacks: 1,
+    attackOpportunities: 0,
+  }, {
+    maxMissedAttackRate: 0,
+  }), false);
 });
 
 test("active reader reconstructs the published active version before legacy active", () => {
