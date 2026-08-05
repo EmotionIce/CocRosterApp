@@ -1707,9 +1707,13 @@ function discoverCloudflareRepairContext_(workRaw) {
 		}
 	}
 	const currentCwl = readDecodedCloudflareQueueObject_(SEASON_EVENTS_CURRENT_CWL_PATH);
+	const currentCwlByRoster = readDecodedCloudflareQueueObject_(SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH);
 	const latestCompletedCwl = readDecodedCloudflareQueueObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+	const latestCompletedCwlByRoster = readDecodedCloudflareQueueObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH);
 	collectCloudflareSeasonEventIdsFromPointerMap_({ currentCwl: currentCwl }, eventIds);
+	collectCloudflareSeasonEventIdsFromPointerMap_(currentCwlByRoster, eventIds);
 	collectCloudflareSeasonEventIdsFromPointerMap_({ latestCompletedCwl: latestCompletedCwl }, eventIds);
+	collectCloudflareSeasonEventIdsFromPointerMap_(latestCompletedCwlByRoster, eventIds);
 	if (currentSeasonId) donationSeasonIds[currentSeasonId] = true;
 	return {
 		seasonIds: seasonIds,
@@ -1811,7 +1815,7 @@ function buildCloudflareTargetedRepairRequest_(workRaw) {
 		// their canonical public object, after the referenced objects/aggregates have
 		// completed their earlier repair phases. CWL signup data remains bot-only
 		// in its dedicated dirty category.
-		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => addPointer(path));
+		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => addPointer(path));
 		const currentDonationPath = buildFirebaseChildPath_(FIREBASE_DONATION_REFRESH_PATH, "current");
 		const donationCurrent = readDecodedCloudflareQueueObject_(currentDonationPath);
 		if (donationCurrent) {
@@ -1850,7 +1854,7 @@ function buildCloudflareDirtyRequest_(stateRaw, workRaw) {
 		const signup = readActiveCwlLeagueSignups_();
 		if (signup) objects.push(makeCloudflareQueueObject_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH, signup, "bot")); else deletes.push({ path: normalizeCloudflareDataObjectPath_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH), scope: "bot" });
 	} else if (work.category === "seasonPointers") {
-		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => {
+		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => {
 			const value = readDecodedCloudflareQueueObject_(path);
 			if (value == null) addCloudflareCanonicalPublicQueueCommitDelete_(commits, path);
 			else commits.push(makeCloudflareQueueObject_(path, value, "public"));

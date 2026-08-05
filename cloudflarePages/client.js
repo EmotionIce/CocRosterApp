@@ -18,7 +18,9 @@
     const SEASON_EVENTS_BASE_PATH = "events/seasonEvents";
     const SEASON_EVENTS_CURRENT_PATH = SEASON_EVENTS_BASE_PATH + "/current";
     const SEASON_EVENTS_CURRENT_CWL_PATH = SEASON_EVENTS_BASE_PATH + "/currentCwl";
+    const SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH = SEASON_EVENTS_BASE_PATH + "/currentCwlByRoster";
     const SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH = SEASON_EVENTS_BASE_PATH + "/latestCompletedCwl";
+    const SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH = SEASON_EVENTS_BASE_PATH + "/latestCompletedCwlByRoster";
     const SEASON_EVENTS_CWL_AGGREGATES_PATH = SEASON_EVENTS_BASE_PATH + "/cwlAggregates/byEvent";
     const SEASON_EVENTS_BY_ID_PATH = SEASON_EVENTS_BASE_PATH + "/byId";
     const SEASON_EVENTS_BY_SEASON_PATH = SEASON_EVENTS_BASE_PATH + "/bySeason";
@@ -5875,7 +5877,9 @@
             seasonState: source.seasonState && typeof source.seasonState === "object" ? source.seasonState : {},
             byId: source.byId && typeof source.byId === "object" ? source.byId : {},
             cwlAggregatesByEventId: source.cwlAggregatesByEventId && typeof source.cwlAggregatesByEventId === "object" ? source.cwlAggregatesByEventId : {},
+            currentCwlByRoster: source.currentCwlByRoster && typeof source.currentCwlByRoster === "object" ? source.currentCwlByRoster : {},
             latestCompletedCwl: source.latestCompletedCwl && typeof source.latestCompletedCwl === "object" ? source.latestCompletedCwl : null,
+            latestCompletedCwlByRoster: source.latestCompletedCwlByRoster && typeof source.latestCompletedCwlByRoster === "object" ? source.latestCompletedCwlByRoster : {},
             loadErrors: Array.isArray(source.loadErrors) ? source.loadErrors : [],
             loadedAt: toStr(source.loadedAt).trim(),
             mode: mode,
@@ -5888,7 +5892,9 @@
         seasonState: {},
         byId: {},
         cwlAggregatesByEventId: {},
+        currentCwlByRoster: {},
         latestCompletedCwl: null,
+        latestCompletedCwlByRoster: {},
         loadErrors: Array.isArray(loadErrorsRaw) ? loadErrorsRaw : [],
         loadedAt: new Date().toISOString(),
     });
@@ -6036,6 +6042,44 @@
         const cwl = event.cwl && typeof event.cwl === "object" ? event.cwl : {};
         const target = cwl.target && typeof cwl.target === "object" ? cwl.target : {};
         return target.resolved === true || String(target.status || "").trim().toLowerCase() === "resolved" ? target : null;
+    };
+
+    const getCwlSeasonEventsFromRosterPointers = (dataRaw, modeRaw, pointerMapKeyRaw, fallbackPointersRaw) => {
+        const data = dataRaw && typeof dataRaw === "object" ? dataRaw : {};
+        const bundle = getSeasonEventsBundle(data, modeRaw);
+        const pointerMapKey = toStr(pointerMapKeyRaw).trim();
+        const pointerMap = pointerMapKey && bundle[pointerMapKey] && typeof bundle[pointerMapKey] === "object" ? bundle[pointerMapKey] : {};
+        const rosterOrder = Array.isArray(data.rosterOrder) ? data.rosterOrder.map((value) => toStr(value).trim()) : [];
+        const rosterIds = Object.keys(pointerMap).sort((left, right) => {
+            const leftIndex = rosterOrder.indexOf(left);
+            const rightIndex = rosterOrder.indexOf(right);
+            if (leftIndex >= 0 || rightIndex >= 0) return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex) - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex);
+            return left.localeCompare(right);
+        });
+        const out = [];
+        const seen = Object.create(null);
+        const addPointer = (pointerRaw) => {
+            const pointer = pointerRaw && typeof pointerRaw === "object" ? pointerRaw : {};
+            const eventId = toStr(pointer.eventId).trim();
+            if (!eventId || seen[eventId]) return;
+            seen[eventId] = true;
+            const event = bundle.byId[eventId] && typeof bundle.byId[eventId] === "object" ? bundle.byId[eventId] : null;
+            out.push(event || Object.assign({ type: "cwl" }, pointer, { eventId: eventId }));
+        };
+        for (let i = 0; i < rosterIds.length; i++) addPointer(pointerMap[rosterIds[i]]);
+        const fallbackPointers = Array.isArray(fallbackPointersRaw) ? fallbackPointersRaw : [fallbackPointersRaw];
+        for (let i = 0; i < fallbackPointers.length; i++) addPointer(fallbackPointers[i]);
+        return out;
+    };
+
+    const getCurrentCwlSeasonEvents = (dataRaw, modeRaw) => {
+        const bundle = getSeasonEventsBundle(dataRaw, modeRaw);
+        return getCwlSeasonEventsFromRosterPointers(dataRaw, modeRaw, "currentCwlByRoster", bundle.current.cwl);
+    };
+
+    const getLatestCompletedCwlSeasonEvents = (dataRaw, modeRaw) => {
+        const bundle = getSeasonEventsBundle(dataRaw, modeRaw);
+        return getCwlSeasonEventsFromRosterPointers(dataRaw, modeRaw, "latestCompletedCwlByRoster", bundle.latestCompletedCwl);
     };
 
     const isLegacyCompletedTargetlessCwlEvent = (eventRaw) => {
@@ -6692,14 +6736,6 @@
         return dateRange + " \u00b7 Discord signups";
     };
 
-    const getLatestCompletedCwlSeasonEvent = (dataRaw, modeRaw) => {
-        const bundle = getSeasonEventsBundle(dataRaw, modeRaw);
-        const pointer = bundle.latestCompletedCwl && typeof bundle.latestCompletedCwl === "object" ? bundle.latestCompletedCwl : {};
-        const eventId = toStr(pointer.eventId).trim();
-        const byId = bundle.byId && typeof bundle.byId === "object" ? bundle.byId : {};
-        return eventId && byId[eventId] && typeof byId[eventId] === "object" ? byId[eventId] : null;
-    };
-
     const resolveCwlSeasonEventDisplayState = (eventRaw, leaderboardRaw) => {
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
         const leaderboard = leaderboardRaw && typeof leaderboardRaw === "object" ? leaderboardRaw : {};
@@ -6720,13 +6756,17 @@
         const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
         const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
         const leaderboard = buildSeasonEventLeaderboardModel(event, dataRaw);
+        const target = getCwlSeasonEventTarget(event);
+        const rosterTitle = toStr(target && (target.rosterTitle || target.rosterId)).trim();
         const objectAvailable = options.objectAvailable !== false && !!(event && toStr(event.eventId).trim());
         const lifecycleDisplayState = objectAvailable ? resolveCwlSeasonEventDisplayState(event, leaderboard) : "stale-unavailable";
         return {
             type: "cwl",
             event: event,
             leaderboardEvent: event,
-            title: options.historical === true ? "Previous CWL results" : "CWL",
+            title: options.historical === true
+                ? "Previous CWL results" + (rosterTitle ? " — " + rosterTitle : "")
+                : "CWL" + (rosterTitle ? " — " + rosterTitle : ""),
             status: lifecycleDisplayState,
             underlyingStatus: toStr(event && (event.cwlTrackingState || event.cwlStatus || event.status)).trim().toLowerCase(),
             signupsOpen: event && event.signupsOpen === true,
@@ -6766,18 +6806,33 @@
                 unavailable: !event || !toStr(event.eventId).trim() || !bundle.byId[toStr(event.eventId).trim()],
             };
         });
-        const currentCwlEvent = getCurrentSeasonEventForType(data, "cwl", mode);
-        const latestCompletedCwlEvent = getLatestCompletedCwlSeasonEvent(data, mode);
-        const currentCwlEventId = toStr(currentCwlEvent && currentCwlEvent.eventId).trim();
-        cards.push(buildCwlSeasonEventCard(currentCwlEvent, modelData, {
-            objectAvailable: !!(currentCwlEventId && bundle.byId[currentCwlEventId] && typeof bundle.byId[currentCwlEventId] === "object"),
-        }));
-        if (
-            mode === SEASON_EVENT_RESULT_MODE_VALUES.current &&
-            latestCompletedCwlEvent &&
-            toStr(latestCompletedCwlEvent.eventId).trim() !== toStr(currentCwlEvent && currentCwlEvent.eventId).trim()
-        ) {
-            cards.push(buildCwlSeasonEventCard(latestCompletedCwlEvent, modelData, { historical: true }));
+        const currentCwlEvents = getCurrentCwlSeasonEvents(data, mode);
+        const currentCwlEvent = currentCwlEvents[0] || getCurrentSeasonEventForType(data, "cwl", mode);
+        for (let i = 0; i < currentCwlEvents.length; i++) {
+            const cwlEvent = currentCwlEvents[i];
+            const currentCwlEventId = toStr(cwlEvent && cwlEvent.eventId).trim();
+            cards.push(buildCwlSeasonEventCard(cwlEvent, modelData, {
+                objectAvailable: !!(currentCwlEventId && bundle.byId[currentCwlEventId] && typeof bundle.byId[currentCwlEventId] === "object"),
+            }));
+        }
+        if (!currentCwlEvents.length) cards.push(buildCwlSeasonEventCard(currentCwlEvent, modelData, { objectAvailable: false }));
+        if (mode === SEASON_EVENT_RESULT_MODE_VALUES.current) {
+            const visibleCwlEventIds = {};
+            for (let i = 0; i < currentCwlEvents.length; i++) {
+                const eventId = toStr(currentCwlEvents[i] && currentCwlEvents[i].eventId).trim();
+                if (eventId) visibleCwlEventIds[eventId] = true;
+            }
+            const completedCwlEvents = getLatestCompletedCwlSeasonEvents(data, mode);
+            for (let i = 0; i < completedCwlEvents.length; i++) {
+                const completedEvent = completedCwlEvents[i];
+                const eventId = toStr(completedEvent && completedEvent.eventId).trim();
+                if (!eventId || visibleCwlEventIds[eventId]) continue;
+                visibleCwlEventIds[eventId] = true;
+                cards.push(buildCwlSeasonEventCard(completedEvent, modelData, {
+                    historical: true,
+                    objectAvailable: !!(bundle.byId[eventId] && typeof bundle.byId[eventId] === "object"),
+                }));
+            }
         }
         const sharedMetaLine = buildSeasonEventsSharedMetaLine(cards);
         return {
@@ -11226,6 +11281,12 @@
         collectEventId(pointers.donation);
         collectEventId(pointers.cwl);
         collectEventId(pointers.latestCompletedCwl);
+        const collectPointerMap = (mapRaw) => {
+            const map = mapRaw && typeof mapRaw === "object" && !Array.isArray(mapRaw) ? mapRaw : {};
+            Object.keys(map).forEach((key) => collectEventId(map[key]));
+        };
+        collectPointerMap(pointers.currentCwlByRoster);
+        collectPointerMap(pointers.latestCompletedCwlByRoster);
         return eventIds;
     };
 
@@ -11318,18 +11379,25 @@
     // Load current season event data from public data.
     const loadCurrentSeasonEventsViaCloudflarePublic = async () => {
         const loadErrors = [];
-        const [current, currentCwl, latestCompletedCwl, seasonState] = await Promise.all([
+        const [current, currentCwl, currentCwlByRoster, latestCompletedCwl, latestCompletedCwlByRoster, seasonState] = await Promise.all([
             fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_PATH, loadErrors),
             fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_CWL_PATH),
+            fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH),
             fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH),
+            fetchNullableDecodedCloudflarePublicJson(SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH),
             fetchOptionalDecodedCloudflarePublicJson(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH, loadErrors),
         ]);
         const currentObj = current && typeof current === "object" && !Array.isArray(current) ? current : {};
         if (currentCwl && typeof currentCwl === "object" && !Array.isArray(currentCwl)) currentObj.cwl = currentCwl;
         const latestCompletedCwlObj = latestCompletedCwl && typeof latestCompletedCwl === "object" && !Array.isArray(latestCompletedCwl) ? latestCompletedCwl : null;
-        const eventPointerMap = Object.assign({}, currentObj);
+        const currentCwlByRosterObj = currentCwlByRoster && typeof currentCwlByRoster === "object" && !Array.isArray(currentCwlByRoster) ? currentCwlByRoster : {};
+        const latestCompletedCwlByRosterObj = latestCompletedCwlByRoster && typeof latestCompletedCwlByRoster === "object" && !Array.isArray(latestCompletedCwlByRoster) ? latestCompletedCwlByRoster : {};
+        const eventPointerMap = Object.assign({}, currentObj, {
+            currentCwlByRoster: currentCwlByRosterObj,
+            latestCompletedCwlByRoster: latestCompletedCwlByRosterObj,
+        });
         if (latestCompletedCwlObj) eventPointerMap.latestCompletedCwl = latestCompletedCwlObj;
-        const byId = await loadSeasonEventObjectsByPointerMapViaCloudflarePublic(currentObj, loadErrors);
+        const byId = await loadSeasonEventObjectsByPointerMapViaCloudflarePublic(eventPointerMap, loadErrors);
         if (latestCompletedCwlObj && latestCompletedCwlObj.eventId && !byId[toStr(latestCompletedCwlObj.eventId).trim()]) {
             const event = await fetchOptionalDecodedCloudflarePublicJson(buildSeasonEventByIdPublicPath(latestCompletedCwlObj.eventId), loadErrors);
             if (event && typeof event === "object" && !Array.isArray(event)) byId[toStr(latestCompletedCwlObj.eventId).trim()] = event;
@@ -11341,7 +11409,9 @@
             seasonState: seasonState && typeof seasonState === "object" && !Array.isArray(seasonState) ? seasonState : {},
             byId: byId,
             cwlAggregatesByEventId: cwlAggregatesByEventId,
+            currentCwlByRoster: currentCwlByRosterObj,
             latestCompletedCwl: latestCompletedCwlObj,
+            latestCompletedCwlByRoster: latestCompletedCwlByRosterObj,
             loadErrors: loadErrors,
             loadedAt: new Date().toISOString(),
         };

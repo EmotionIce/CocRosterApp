@@ -889,7 +889,7 @@ const readDirectPublicActiveVersionId = async (store) => {
 // maintaining an identical bot-scoped copy.
 const isCanonicalPublicMutablePath = (pathRaw) => {
   const path = String(pathRaw == null ? "" : pathRaw).replace(/\.json$/i, "").replace(/^\/+|\/+$/g, "");
-  return /^(?:events\/seasonEvents\/(?:current|currentCwl|latestCompletedCwl|seasonState\/current|byId\/[^/]+|bySeason\/[^/]+|cwlAggregates\/byEvent\/[^/]+\/(?:live|final))|donationRefresh\/(?:current|bySeason\/[^/]+))$/.test(path);
+  return /^(?:events\/seasonEvents\/(?:current|currentCwl|currentCwlByRoster|latestCompletedCwl|latestCompletedCwlByRoster|seasonState\/current|byId\/[^/]+|bySeason\/[^/]+|cwlAggregates\/byEvent\/[^/]+\/(?:live|final))|donationRefresh\/(?:current|bySeason\/[^/]+))$/.test(path);
 };
 
 const parseVirtualBotActivePath = (pathRaw) => {
@@ -1041,12 +1041,14 @@ const collectDonationSeasonIdsFromBundle = (seasonEventsRaw, seenRaw) => {
 
 // Compose bootstrap from legacy public objects during rollout if the real object is absent.
 const synthesizePublicBootstrapFromLegacyObjects = async (store) => {
-  const [currentVersionIdRaw, manifestRaw, currentRaw, currentCwlRaw, latestCompletedCwlRaw, seasonStateRaw] = await Promise.all([
+  const [currentVersionIdRaw, manifestRaw, currentRaw, currentCwlRaw, currentCwlByRosterRaw, latestCompletedCwlRaw, latestCompletedCwlByRosterRaw, seasonStateRaw] = await Promise.all([
     readLegacyPublicJsonObject(store, "activePublished/currentVersionId"),
     readLegacyPublicJsonObject(store, "activePublished/currentManifest"),
     readLegacyPublicJsonObject(store, "events/seasonEvents/current"),
     readLegacyPublicJsonObject(store, "events/seasonEvents/currentCwl"),
+    readLegacyPublicJsonObject(store, "events/seasonEvents/currentCwlByRoster"),
     readLegacyPublicJsonObject(store, "events/seasonEvents/latestCompletedCwl"),
+    readLegacyPublicJsonObject(store, "events/seasonEvents/latestCompletedCwlByRoster"),
     readLegacyPublicJsonObject(store, "events/seasonEvents/seasonState/current"),
   ]);
   const activeVersionId = String(currentVersionIdRaw || "").trim();
@@ -1058,6 +1060,8 @@ const synthesizePublicBootstrapFromLegacyObjects = async (store) => {
     eventPointerMap.latestCompletedCwl = latestCompletedCwlRaw;
   }
   const eventIdsByKey = collectEventIdsFromPointerMap(eventPointerMap, {});
+  collectEventIdsFromPointerMap(currentCwlByRosterRaw, eventIdsByKey);
+  collectEventIdsFromPointerMap(latestCompletedCwlByRosterRaw, eventIdsByKey);
   const eventIds = Object.keys(eventIdsByKey);
   const byId = {};
   const cwlAggregatesByEventId = {};
@@ -1082,9 +1086,11 @@ const synthesizePublicBootstrapFromLegacyObjects = async (store) => {
     seasonState: seasonStateRaw && typeof seasonStateRaw === "object" && !Array.isArray(seasonStateRaw) ? seasonStateRaw : {},
     byId,
     cwlAggregatesByEventId,
+    currentCwlByRoster: isPlainJsonObject(currentCwlByRosterRaw) ? currentCwlByRosterRaw : {},
     latestCompletedCwl: latestCompletedCwlRaw && typeof latestCompletedCwlRaw === "object" && !Array.isArray(latestCompletedCwlRaw)
       ? latestCompletedCwlRaw
       : null,
+    latestCompletedCwlByRoster: isPlainJsonObject(latestCompletedCwlByRosterRaw) ? latestCompletedCwlByRosterRaw : {},
     loadErrors: [],
     loadedAt: new Date().toISOString(),
   };
@@ -1132,7 +1138,9 @@ const projectPublicBootstrapDataPath = (bootstrapRaw, objectPathRaw) => {
     const current = seasonEvents.current && typeof seasonEvents.current === "object" ? seasonEvents.current : {};
     return current.cwl || undefined;
   }
+  if (path === "events/seasonEvents/currentCwlByRoster") return seasonEvents.currentCwlByRoster || undefined;
   if (path === "events/seasonEvents/latestCompletedCwl") return seasonEvents.latestCompletedCwl || undefined;
+  if (path === "events/seasonEvents/latestCompletedCwlByRoster") return seasonEvents.latestCompletedCwlByRoster || undefined;
   if (path === "events/seasonEvents/seasonState/current") return seasonEvents.seasonState || undefined;
 
   const byIdPrefix = "events/seasonEvents/byId/";

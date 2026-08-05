@@ -565,7 +565,7 @@ function asCloudflarePlainObject_(valueRaw) {
 	return valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw) ? valueRaw : {};
 }
 
-function buildCloudflareEventPointerMap_(currentRaw, currentCwlRaw, latestCompletedCwlRaw) {
+function buildCloudflareEventPointerMap_(currentRaw, currentCwlRaw, latestCompletedCwlRaw, currentCwlByRosterRaw, latestCompletedCwlByRosterRaw) {
 	const current = asCloudflarePlainObject_(currentRaw);
 	const out = {};
 	const keys = Object.keys(current);
@@ -577,6 +577,8 @@ function buildCloudflareEventPointerMap_(currentRaw, currentCwlRaw, latestComple
 	if (latestCompletedCwlRaw && typeof latestCompletedCwlRaw === "object" && !Array.isArray(latestCompletedCwlRaw)) {
 		out.latestCompletedCwl = latestCompletedCwlRaw;
 	}
+	if (currentCwlByRosterRaw && typeof currentCwlByRosterRaw === "object" && !Array.isArray(currentCwlByRosterRaw)) out.currentCwlByRoster = currentCwlByRosterRaw;
+	if (latestCompletedCwlByRosterRaw && typeof latestCompletedCwlByRosterRaw === "object" && !Array.isArray(latestCompletedCwlByRosterRaw)) out.latestCompletedCwlByRoster = latestCompletedCwlByRosterRaw;
 	return out;
 }
 
@@ -613,6 +615,8 @@ function buildCloudflareSeasonEventsBundleFromPointers_(pointersRaw, seasonState
 	const cwlAggregatesByEventId = {};
 	const eventIds = {};
 	collectCloudflareSeasonEventIdsFromPointerMap_(current, eventIds);
+	collectCloudflareSeasonEventIdsFromPointerMap_(current.currentCwlByRoster, eventIds);
+	collectCloudflareSeasonEventIdsFromPointerMap_(current.latestCompletedCwlByRoster, eventIds);
 	const eventIdList = Object.keys(eventIds);
 	for (let i = 0; i < eventIdList.length; i++) {
 		const eventId = eventIdList[i];
@@ -632,11 +636,13 @@ function buildCloudflareSeasonEventsBundleFromPointers_(pointersRaw, seasonState
 	const latestCompletedCwl = current.latestCompletedCwl && typeof current.latestCompletedCwl === "object"
 		? current.latestCompletedCwl
 		: null;
+	const currentCwlByRoster = asCloudflarePlainObject_(current.currentCwlByRoster);
+	const latestCompletedCwlByRoster = asCloudflarePlainObject_(current.latestCompletedCwlByRoster);
 	const publicCurrent = {};
 	const currentKeys = Object.keys(current);
 	for (let i = 0; i < currentKeys.length; i++) {
 		const key = currentKeys[i];
-		if (key === "latestCompletedCwl") continue;
+		if (key === "latestCompletedCwl" || key === "currentCwlByRoster" || key === "latestCompletedCwlByRoster") continue;
 		publicCurrent[key] = current[key];
 	}
 	return {
@@ -644,7 +650,9 @@ function buildCloudflareSeasonEventsBundleFromPointers_(pointersRaw, seasonState
 		seasonState: seasonState,
 		byId: byId,
 		cwlAggregatesByEventId: cwlAggregatesByEventId,
+		currentCwlByRoster: currentCwlByRoster,
 		latestCompletedCwl: latestCompletedCwl,
+		latestCompletedCwlByRoster: latestCompletedCwlByRoster,
 		loadErrors: loadErrors,
 		loadedAt: String(options.loadedAt || new Date().toISOString()),
 	};
@@ -653,10 +661,12 @@ function buildCloudflareSeasonEventsBundleFromPointers_(pointersRaw, seasonState
 function buildCloudflareCurrentSeasonEventsBundle_() {
 	const current = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_PATH);
 	const currentCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_CWL_PATH);
+	const currentCwlByRoster = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH);
 	const latestCompletedCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+	const latestCompletedCwlByRoster = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH);
 	const seasonState = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_SEASON_STATE_CURRENT_PATH);
 	return buildCloudflareSeasonEventsBundleFromPointers_(
-		buildCloudflareEventPointerMap_(current, currentCwl, latestCompletedCwl),
+		buildCloudflareEventPointerMap_(current, currentCwl, latestCompletedCwl, currentCwlByRoster, latestCompletedCwlByRoster),
 		seasonState,
 	);
 }
@@ -869,12 +879,26 @@ function publishCloudflareSeasonEventsAndDonationDataBestEffort_(labelRaw) {
 		} else {
 			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_CURRENT_CWL_PATH);
 		}
+		const currentCwlByRoster = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH);
+		if (currentCwlByRoster && Object.keys(currentCwlByRoster).length) {
+			addCloudflarePublishObjectIfPresent_(seasonObjects, SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH, currentCwlByRoster);
+			collectCloudflareSeasonEventIdsFromPointerMap_(currentCwlByRoster, eventIds);
+		} else {
+			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH);
+		}
 		const latestCompletedCwl = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
 		if (latestCompletedCwl) {
 			addCloudflarePublishObjectIfPresent_(seasonObjects, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, latestCompletedCwl);
 			collectCloudflareSeasonEventIdsFromPointerMap_({ latestCompletedCwl: latestCompletedCwl }, eventIds);
 		} else {
 			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH);
+		}
+		const latestCompletedCwlByRoster = readDecodedCloudflareFirebaseObject_(SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH);
+		if (latestCompletedCwlByRoster && Object.keys(latestCompletedCwlByRoster).length) {
+			addCloudflarePublishObjectIfPresent_(seasonObjects, SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH, latestCompletedCwlByRoster);
+			collectCloudflareSeasonEventIdsFromPointerMap_(latestCompletedCwlByRoster, eventIds);
+		} else {
+			addCloudflareDeletePath_(deletePaths, SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH);
 		}
 		addCloudflarePublishObjectIfPresent_(
 			seasonObjects,

@@ -1822,8 +1822,10 @@ function runRefreshAllRostersUnlockedCore_(rosterDataRaw, optionsRaw) {
 	}
 	finalValidationDurationMs = Math.max(0, Date.now() - finalValidationStartMs);
 	const cwlSeasonEventRefresh =
-		typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function"
-			? tryRefreshCurrentCwlSeasonEventFromSnapshot_(validatedRosterData, autoRefreshSnapshot, { source: "refresh-all" })
+		typeof tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_ === "function"
+			? tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_(validatedRosterData, autoRefreshSnapshot, { source: "refresh-all" })
+			: typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function"
+				? tryRefreshCurrentCwlSeasonEventFromSnapshot_(validatedRosterData, autoRefreshSnapshot, { source: "refresh-all" })
 			: { ok: true, status: "unavailable" };
 	const totalDurationMs = Math.max(0, Date.now() - totalStartMs);
 	Logger.log(

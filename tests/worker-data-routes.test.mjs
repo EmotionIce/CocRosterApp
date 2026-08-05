@@ -479,6 +479,56 @@ test("mutable public reads touch one exact key and retain direct-object ETags", 
   assert.equal(kv.reads.length, 2);
 });
 
+test("roster-scoped CWL pointer maps are canonical mutable public routes", async () => {
+  const worker = loadWorker();
+  const currentKey = "public-data/events/seasonEvents/currentCwlByRoster.json";
+  const completedKey = "public-data/events/seasonEvents/latestCompletedCwlByRoster.json";
+  const kv = createObservedKv({
+    [currentKey]: JSON.stringify({
+      main: { eventId: "cwl-main", type: "cwl" },
+      second: { eventId: "cwl-second", type: "cwl" },
+    }),
+    [completedKey]: JSON.stringify({
+      third: { eventId: "cwl-third-final", type: "cwl" },
+    }),
+  });
+  const env = { ROSTER_BOT_SECRET: "secret", ROSTER_DATA_KV: kv };
+
+  const currentResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/events/seasonEvents/currentCwlByRoster.json"),
+    env,
+    {},
+  );
+  const completedResponse = await worker.fetch(
+    new Request("https://worker.test/api/public-data/events/seasonEvents/latestCompletedCwlByRoster.json"),
+    env,
+    {},
+  );
+  const botResponse = await worker.fetch(
+    new Request("https://worker.test/api/bot-data/events/seasonEvents/currentCwlByRoster.json", {
+      headers: { authorization: "Bearer secret" },
+    }),
+    env,
+    {},
+  );
+
+  assert.equal(currentResponse.status, 200);
+  assert.equal(completedResponse.status, 200);
+  assert.equal(botResponse.status, 200);
+  assert.deepEqual(await currentResponse.json(), {
+    main: { eventId: "cwl-main", type: "cwl" },
+    second: { eventId: "cwl-second", type: "cwl" },
+  });
+  assert.deepEqual(await completedResponse.json(), {
+    third: { eventId: "cwl-third-final", type: "cwl" },
+  });
+  assert.deepEqual(await botResponse.json(), {
+    main: { eventId: "cwl-main", type: "cwl" },
+    second: { eventId: "cwl-second", type: "cwl" },
+  });
+  assert.deepEqual(kv.reads, [currentKey, completedKey, currentKey]);
+});
+
 test("public health reports direct active version shard presence", async () => {
   const worker = loadWorker();
   const env = {

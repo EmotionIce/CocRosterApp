@@ -94,7 +94,9 @@ test("season-event publication writes detailed CWL objects once in public scope"
   backend.errorMessage_ = (err) => err && err.message ? err.message : String(err);
   backend.SEASON_EVENTS_CURRENT_PATH = "events/seasonEvents/current";
   backend.SEASON_EVENTS_CURRENT_CWL_PATH = "events/seasonEvents/currentCwl";
+  backend.SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH = "events/seasonEvents/currentCwlByRoster";
   backend.SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH = "events/seasonEvents/latestCompletedCwl";
+  backend.SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH = "events/seasonEvents/latestCompletedCwlByRoster";
   backend.SEASON_EVENTS_SEASON_STATE_CURRENT_PATH = "events/seasonEvents/seasonState/current";
   backend.SEASON_EVENTS_BY_SEASON_PATH = "events/seasonEvents/bySeason";
   backend.SEASON_EVENTS_BY_ID_PATH = "events/seasonEvents/byId";
@@ -112,7 +114,12 @@ test("season-event publication writes detailed CWL objects once in public scope"
   backend.readDecodedCloudflareFirebaseObject_ = (path) => {
     if (path === "events/seasonEvents/current") return { push: { eventId: "push-1" } };
     if (path === "events/seasonEvents/currentCwl") return { eventId: "cwl-1", type: "cwl" };
+    if (path === "events/seasonEvents/currentCwlByRoster") return {
+      main: { eventId: "cwl-1", type: "cwl" },
+      second: { eventId: "cwl-2", type: "cwl" },
+    };
     if (path === "events/seasonEvents/latestCompletedCwl") return null;
+    if (path === "events/seasonEvents/latestCompletedCwlByRoster") return null;
     if (path === "events/seasonEvents/seasonState/current") return { seasonId: "season-1" };
     if (path === "events/seasonEvents/bySeason/season-1") return { push: { eventId: "push-1" }, cwl: { eventId: "cwl-1" } };
     if (path === "donationRefresh/current") return { seasonId: "season-1", refreshedAt: "2026-07-08T10:00:00.000Z" };
@@ -126,6 +133,7 @@ test("season-event publication writes detailed CWL objects once in public scope"
   };
   backend.readSeasonEventById_ = (eventId) => {
     if (eventId === "cwl-1") return { eventId: "cwl-1", type: "cwl", participantsByDiscordId: {} };
+    if (eventId === "cwl-2") return { eventId: "cwl-2", type: "cwl", participantsByDiscordId: {} };
     if (eventId === "push-1") return { eventId: "push-1", type: "push" };
     return null;
   };
@@ -167,9 +175,12 @@ test("season-event publication writes detailed CWL objects once in public scope"
   assert.ok(!objectPaths.includes("bot:events/seasonEvents/current"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/currentCwl"));
   assert.ok(!objectPaths.includes("bot:events/seasonEvents/currentCwl"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/currentCwlByRoster"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/byId/cwl-1"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/byId/cwl-2"));
   assert.ok(!objectPaths.includes("bot:events/seasonEvents/byId/cwl-1"));
   assert.ok(objectPaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
+  assert.ok(objectPaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-2/live"));
   assert.ok(!objectPaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/live"));
   assert.ok(objectPaths.includes("public:donationRefresh/current"));
   assert.ok(!objectPaths.includes("bot:donationRefresh/current"));
@@ -178,6 +189,7 @@ test("season-event publication writes detailed CWL objects once in public scope"
     return `${entry.scope || publishCalls[0].scope}:${entry.path}`;
   }).sort();
   assert.ok(deletePaths.includes("public:events/seasonEvents/latestCompletedCwl"));
+  assert.ok(deletePaths.includes("public:events/seasonEvents/latestCompletedCwlByRoster"));
   assert.ok(!deletePaths.includes("bot:events/seasonEvents/latestCompletedCwl"));
   assert.ok(deletePaths.includes("public:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));
   assert.ok(!deletePaths.includes("bot:events/seasonEvents/cwlAggregates/byEvent/cwl-1/final"));

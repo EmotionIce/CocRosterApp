@@ -4854,6 +4854,113 @@ test("regular-war-only final phases publish canonically and defer stale CWL to i
   assert.ok(marker.scopes[scope]);
 });
 
+test("a deferred final capture schedules independent recovery for every current CWL roster event", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({
+    needsCwl: true,
+    eventId: "cwl-main",
+    events: [
+      { eventId: "cwl-main", rosterId: "main" },
+      { eventId: "cwl-second", rosterId: "second" },
+    ],
+  });
+  backend.ensureAutoRefreshCloudflarePublicDataPublished_ = (_current, label) => ({
+    ok: true,
+    status: "queued",
+    summary: { ok: true, status: "queued", versionId: "run-multi-deferred", label },
+  });
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+
+  const result = backend.runAutoRefreshRequiredFinalPhases_({
+    runId: "run-multi-deferred",
+    kind: "auto-refresh-queue",
+    status: "finalizing",
+    cwlSideWorkEnabled: false,
+    rosterIds: ["main", "second"],
+    taskIds: ["finalize"],
+    taskCount: 1,
+  }, null, "complete", Date.now());
+  const marker = backend.readRuntimeRecoveryMarker_();
+
+  assert.deepEqual(clone(result.cwlSeasonEventRefresh.eventIds), ["cwl-main", "cwl-second"]);
+  assert.deepEqual(clone(result.cwlFinalOutcome.eventOutcomes.map((outcome) => outcome.eventId)), ["cwl-main", "cwl-second"]);
+  assert.equal(result.cwlFinalOutcome.eventOutcomes.every((outcome) => outcome.status === "deferred"), true);
+  assert.ok(marker.scopes[backend.buildCwlRuntimeRecoveryScope_("cwl-main")]);
+  assert.ok(marker.scopes[backend.buildCwlRuntimeRecoveryScope_("cwl-second")]);
+});
+
+test("a failed secondary CWL refresh does not poison the successful primary event outcome", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.ensureAutoRefreshCloudflarePublicDataPublished_ = (_current, label) => ({
+    ok: true,
+    status: "queued",
+    summary: { ok: true, status: "queued", versionId: "run-multi-mixed", label },
+  });
+  backend.ensureAutoRefreshFinalCwlCoordinatorCapture_ = () => ({
+    ok: true,
+    status: "captured",
+    eventId: "cwl-main",
+    aggregateOk: true,
+    aggregateHash: "main-hash",
+  });
+  backend.refreshCwlSeasonEventForAutoRefreshQueue_ = () => ({
+    ok: false,
+    status: "partial-error",
+    eventId: "cwl-main",
+    eventIds: ["cwl-main", "cwl-second"],
+    results: [
+      { ok: true, status: "active", eventId: "cwl-main", aggregateHash: "main-hash" },
+      { ok: false, status: "stale", eventId: "cwl-second", reason: "second-roster-fetch-failed" },
+    ],
+  });
+  backend.tryReconcileCurrentSeasonEventsForAutoRefresh_ = () => null;
+
+  const result = backend.runAutoRefreshRequiredFinalPhases_({
+    runId: "run-multi-mixed",
+    kind: "auto-refresh-queue",
+    status: "finalizing",
+    cwlSideWorkEnabled: true,
+    rosterIds: ["main", "second"],
+    taskIds: ["finalize"],
+    taskCount: 1,
+  }, null, "complete", Date.now());
+  const outcomes = Object.fromEntries(result.cwlFinalOutcome.eventOutcomes.map((outcome) => [outcome.eventId, outcome]));
+  const marker = backend.readRuntimeRecoveryMarker_();
+
+  assert.equal(result.cwlFinalCoordinatorCapture.aggregateOk, true);
+  assert.equal(outcomes["cwl-main"].status, "successful");
+  assert.equal(outcomes["cwl-main"].retryPending, false);
+  assert.equal(outcomes["cwl-second"].status, "stale");
+  assert.equal(outcomes["cwl-second"].retryPending, true);
+  assert.equal(marker.scopes[backend.buildCwlRuntimeRecoveryScope_("cwl-main")], undefined);
+  assert.ok(marker.scopes[backend.buildCwlRuntimeRecoveryScope_("cwl-second")]);
+});
+
+test("multi-event finalization acknowledges every completed CWL runtime", () => {
+  const backend = loadBackend();
+  const acknowledged = [];
+  backend.ackAutoRefreshFinalizedCwlRuntimeBestEffort_ = (eventId, _rosterData, runId) => {
+    acknowledged.push({ eventId, runId });
+    return { ok: true, source: "test", eventId };
+  };
+
+  const result = backend.ackAutoRefreshCompletedCwlRuntimesBestEffort_({
+    ok: true,
+    status: "multiple-refreshed",
+    results: [
+      { ok: true, status: "completed", eventId: "cwl-main" },
+      { ok: true, status: "active", eventId: "cwl-second" },
+      { ok: true, status: "completed", eventId: "cwl-third" },
+    ],
+  }, { rosters: [] }, "run-multi-ack");
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(acknowledged, [
+    { eventId: "cwl-main", runId: "run-multi-ack" },
+    { eventId: "cwl-third", runId: "run-multi-ack" },
+  ]);
+});
+
 test("regular-war-only final phases do not create recovery when no CWL event needs work", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: false });

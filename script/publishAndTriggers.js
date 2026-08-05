@@ -3481,7 +3481,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			let cwlSeasonEventCloudflarePublish = { ok: true, skipped: true, reason: "cwl-refresh-not-attempted" };
 			try {
 				const need = typeof getCurrentCwlSeasonEventRefreshNeed_ === "function" ? getCurrentCwlSeasonEventRefreshNeed_() : { needsCwl: false };
-				if (need && need.needsCwl === true && typeof buildCwlCoordinatorResult_ === "function" && typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function") {
+				if (need && need.needsCwl === true && typeof buildCwlCoordinatorResult_ === "function" && (typeof tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_ === "function" || typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ === "function")) {
 					const sourceSnapshot = readAutoRefreshCoordinatorSourceSnapshot_();
 					const rosterData = validateRosterData_(sourceSnapshot && sourceSnapshot.rosterData);
 					if (!hasAutoRefreshCwlTrackingRoster_(rosterData.rosters)) {
@@ -3499,7 +3499,8 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 							nowIso: new Date().toISOString(),
 							source: "auto-refresh-cooldown-cwl",
 						});
-						cwlSeasonEventRefresh = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, { cwlCoordinator: coordinator }, {
+						const refreshFunction = typeof tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_ === "function" ? tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_ : tryRefreshCurrentCwlSeasonEventFromSnapshot_;
+						cwlSeasonEventRefresh = refreshFunction(rosterData, { cwlCoordinator: coordinator }, {
 							source: "auto-refresh-cooldown",
 						});
 						if (cwlSeasonEventRefresh && typeof cwlSeasonEventRefresh === "object") {
@@ -3998,7 +3999,7 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 	try {
 		if (
 			typeof getCurrentCwlSeasonEventRefreshNeed_ !== "function" ||
-			typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ !== "function"
+			(typeof tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_ !== "function" && typeof tryRefreshCurrentCwlSeasonEventFromSnapshot_ !== "function")
 		) {
 			return { ok: true, status: "unavailable" };
 		}
@@ -4018,6 +4019,12 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 		const stored = runId ? readAutoRefreshRunShard_(runId, "final/cwlSeasonEventRefresh") : null;
 		const storedEventId = String((stored && stored.eventId) || "");
 		const neededEventId = String(need.eventId || "");
+		const neededEventIds = Array.isArray(need.events) && need.events.length
+			? need.events.map(function (item) { return String(item && item.eventId || ""); }).filter(Boolean).sort()
+			: neededEventId ? [neededEventId] : [];
+		const storedEventIds = Array.isArray(stored && stored.eventIds) && stored.eventIds.length
+			? stored.eventIds.map(function (eventId) { return String(eventId || ""); }).filter(Boolean).sort()
+			: storedEventId ? [storedEventId] : [];
 		const storedAggregateHash = String((stored && stored.aggregateHash) || "");
 		const summaryAggregateHash = String(summary.aggregateHash || "");
 		if (
@@ -4026,6 +4033,7 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 			stored.completed === true &&
 			stored.ok !== false &&
 			(!neededEventId || storedEventId === neededEventId) &&
+			JSON.stringify(storedEventIds) === JSON.stringify(neededEventIds) &&
 			(!summaryAggregateHash || storedAggregateHash === summaryAggregateHash)
 		) {
 			const reused = Object.assign({}, stored, {
@@ -4057,7 +4065,10 @@ function refreshCwlSeasonEventForAutoRefreshQueue_(rosterDataRaw, sourceMetaRaw,
 				? rosterDataRaw
 				: buildAutoRefreshCwlCoordinatorRosterDataFromSourceMeta_(sourceMetaRaw, new Date().toISOString());
 		const snapshot = { cwlCoordinator: coordinator };
-		const result = tryRefreshCurrentCwlSeasonEventFromSnapshot_(rosterData, snapshot, {
+		const refreshFunction = typeof tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_ === "function"
+			? tryRefreshAllCurrentCwlSeasonEventsFromSnapshot_
+			: tryRefreshCurrentCwlSeasonEventFromSnapshot_;
+		const result = refreshFunction(rosterData, snapshot, {
 			source: "refresh-all-queue",
 			runId: runId,
 			allowSnapshotCoordinatorAfterTargetChange: true,
@@ -4462,6 +4473,91 @@ function recordAutoRefreshCwlFinalOutcomeRecovery_(runIdRaw, outcomeRaw) {
 	return outcome;
 }
 
+function listAutoRefreshCwlLifecycleResults_(refreshRaw) {
+	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : null;
+	if (!refresh) return [];
+	const results = Array.isArray(refresh.results) ? refresh.results.filter(function (result) { return result && typeof result === "object"; }) : [];
+	return results.length ? results : [refresh];
+}
+
+function recordAutoRefreshCwlFinalOutcomes_(runIdRaw, captureRaw, refreshRaw) {
+	const capture = captureRaw && typeof captureRaw === "object" ? captureRaw : null;
+	const refresh = refreshRaw && typeof refreshRaw === "object" ? refreshRaw : null;
+	const results = listAutoRefreshCwlLifecycleResults_(refresh);
+	if (!results.length) return recordAutoRefreshCwlFinalOutcomeRecovery_(runIdRaw, buildAutoRefreshCwlFinalOutcome_(capture, refresh));
+	const eventOutcomes = [];
+	for (let i = 0; i < results.length; i++) {
+		const result = results[i];
+		const resultEventId = String(result.eventId || (result.event && result.event.eventId) || "");
+		const resultCapture = capture && String(capture.eventId || "") === resultEventId
+			? capture
+			: { ok: true, status: "independent-event", aggregateOk: true, eventId: resultEventId };
+		eventOutcomes.push(recordAutoRefreshCwlFinalOutcomeRecovery_(runIdRaw, buildAutoRefreshCwlFinalOutcome_(resultCapture, result)));
+	}
+	const aggregate = buildAutoRefreshCwlFinalOutcome_(capture, refresh);
+	aggregate.eventOutcomes = eventOutcomes;
+	aggregate.retryPending = eventOutcomes.some(function (outcome) { return outcome.retryPending === true; });
+	if (eventOutcomes.some(function (outcome) { return outcome.status === "failed"; })) aggregate.status = "failed";
+	else if (eventOutcomes.some(function (outcome) { return outcome.status === "deferred"; })) aggregate.status = "deferred";
+	else if (eventOutcomes.some(function (outcome) { return outcome.status === "stale"; })) aggregate.status = "stale";
+	else aggregate.status = "successful";
+	aggregate.lifecycleOk = !eventOutcomes.some(function (outcome) { return outcome.lifecycleOk === false; });
+	return aggregate;
+}
+
+function ackAutoRefreshCompletedCwlRuntimesBestEffort_(refreshRaw, rosterDataRaw, runIdRaw) {
+	const results = listAutoRefreshCwlLifecycleResults_(refreshRaw);
+	const completed = results.filter(function (result) {
+		return result.ok !== false && String(result.status || "").trim().toLowerCase() === "completed" && String(result.eventId || "").trim();
+	});
+	if (!completed.length) return { ok: true, skipped: true, reason: "cwl-lifecycle-not-completed" };
+	const acknowledgements = completed.map(function (result) {
+		return ackAutoRefreshFinalizedCwlRuntimeBestEffort_(result.eventId, rosterDataRaw || null, runIdRaw);
+	});
+	if (acknowledgements.length === 1) return acknowledgements[0];
+	return {
+		ok: acknowledgements.every(function (result) { return !result || result.ok !== false; }),
+		eventIds: completed.map(function (result) { return String(result.eventId || ""); }),
+		results: acknowledgements,
+	};
+}
+
+function buildDeferredAutoRefreshCwlLifecycleResult_(captureRaw) {
+	const capture = captureRaw && typeof captureRaw === "object" ? captureRaw : {};
+	const status = String(capture.status || "").trim().toLowerCase() === "deferred" ? "deferred" : "failed";
+	const reason = String(capture.reason || capture.error || "final-cwl-capture-unavailable");
+	let needs = [];
+	try {
+		const need = typeof getCurrentCwlSeasonEventRefreshNeed_ === "function" ? getCurrentCwlSeasonEventRefreshNeed_() : null;
+		if (need && Array.isArray(need.events)) needs = need.events.filter(function (item) { return item && String(item.eventId || "").trim(); });
+		if (!needs.length && need && need.needsCwl === true && String(need.eventId || "").trim()) needs = [{ eventId: String(need.eventId || "") }];
+	} catch (err) {
+		needs = [];
+	}
+	const captureEventId = String(capture.eventId || "").trim();
+	if (captureEventId && !needs.some(function (item) { return String(item.eventId || "").trim() === captureEventId; })) {
+		needs.unshift({ eventId: captureEventId });
+	}
+	const results = needs.map(function (item) {
+		return {
+			ok: false,
+			status: status,
+			reason: reason,
+			eventId: String(item.eventId || "").trim(),
+			preserved: true,
+		};
+	});
+	return {
+		ok: false,
+		status: status,
+		reason: reason,
+		eventId: results.length ? results[0].eventId : captureEventId,
+		eventIds: results.map(function (result) { return result.eventId; }),
+		results: results,
+		preserved: true,
+	};
+}
+
 function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRaw, executionStartMsRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
@@ -4498,13 +4594,7 @@ function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRa
 	if (capture && capture.ok !== false) {
 		cwlSeasonEventRefresh = refreshCwlSeasonEventForAutoRefreshQueue_(options.rosterData || null, sourceMeta, runId);
 	} else {
-		cwlSeasonEventRefresh = {
-			ok: false,
-			status: capture && String(capture.status || "") === "deferred" ? "deferred" : "failed",
-			reason: String((capture && (capture.reason || capture.error)) || "final-cwl-capture-unavailable"),
-			eventId: String((capture && capture.eventId) || ""),
-			preserved: true,
-		};
+		cwlSeasonEventRefresh = buildDeferredAutoRefreshCwlLifecycleResult_(capture);
 	}
 	current.cwlSeasonEventRefresh = cwlSeasonEventRefresh || null;
 	const refreshStatus = String((cwlSeasonEventRefresh && cwlSeasonEventRefresh.status) || "");
@@ -4512,17 +4602,24 @@ function runAutoRefreshRequiredFinalPhases_(currentRaw, sourceMetaRaw, summaryRa
 		if (!current.cwlFinalCoordinatorCapture.aggregateHash && cwlSeasonEventRefresh.aggregateHash) {
 			current.cwlFinalCoordinatorCapture.aggregateHash = String(cwlSeasonEventRefresh.aggregateHash || "");
 		}
-		if (cwlSeasonEventRefresh.ok === false) {
+		const nestedRefreshResults = Array.isArray(cwlSeasonEventRefresh.results)
+			? cwlSeasonEventRefresh.results.filter(function (result) { return result && typeof result === "object"; })
+			: [];
+		const captureEventId = String(current.cwlFinalCoordinatorCapture.eventId || "");
+		const captureRefreshResult = nestedRefreshResults.length
+			? nestedRefreshResults.find(function (result) { return String(result.eventId || "") === captureEventId; })
+			: cwlSeasonEventRefresh;
+		const captureRefreshStatus = String((captureRefreshResult && captureRefreshResult.status) || "").trim().toLowerCase();
+		const captureRefreshUnhealthy = !captureRefreshResult || captureRefreshResult.ok === false || ["stale", "bootstrap-incomplete", "deferred", "unavailable", "error", "failed"].indexOf(captureRefreshStatus) >= 0;
+		if (captureRefreshUnhealthy) {
 			current.cwlFinalCoordinatorCapture.aggregateOk = false;
-			current.cwlFinalCoordinatorCapture.aggregateStatus = refreshStatus || current.cwlFinalCoordinatorCapture.aggregateStatus;
+			current.cwlFinalCoordinatorCapture.aggregateStatus = String((captureRefreshResult && captureRefreshResult.status) || refreshStatus || current.cwlFinalCoordinatorCapture.aggregateStatus);
 		}
 	}
-	current.cwlFinalOutcome = recordAutoRefreshCwlFinalOutcomeRecovery_(runId, buildAutoRefreshCwlFinalOutcome_(current.cwlFinalCoordinatorCapture, cwlSeasonEventRefresh));
+	current.cwlFinalOutcome = recordAutoRefreshCwlFinalOutcomes_(runId, current.cwlFinalCoordinatorCapture, cwlSeasonEventRefresh);
 	if (typeof tryReconcileCurrentSeasonEventsForAutoRefresh_ === "function") tryReconcileCurrentSeasonEventsForAutoRefresh_();
 	current.cloudflarePublicDataPublish = cloudflareMirror && cloudflareMirror.summary ? cloudflareMirror.summary : null;
-	const ack = cwlSeasonEventRefresh && cwlSeasonEventRefresh.ok !== false && refreshStatus === "completed"
-		? ackAutoRefreshFinalizedCwlRuntimeBestEffort_(cwlSeasonEventRefresh.eventId, options.rosterData || null, runId)
-		: { ok: true, skipped: true, reason: "cwl-lifecycle-not-completed" };
+	const ack = ackAutoRefreshCompletedCwlRuntimesBestEffort_(cwlSeasonEventRefresh, options.rosterData || null, runId);
 	Logger.log(
 		"autoRefresh final side phases runId=%s eventId=%s cwlStatus=%s cwlOutcome=%s finalCaptureAt=%s aggregateHash=%s leagueGroupRequests=%s cwlWarRequests=%s cloudflareStatus=%s ackSource=%s",
 		runId,
@@ -6257,7 +6354,7 @@ function runOneCwlSeasonEventRecovery_() {
 	let result;
 	try {
 		if (eventId) {
-			const current = readCurrentCwlSeasonEvent_();
+			const current = readCurrentCwlSeasonEvent_({ eventId: eventId });
 			if (!current || String(current.eventId || "") !== eventId) {
 				clearRuntimeRecoveryNeeded_(scope);
 				return { ok: true, status: "superseded", cleared: true, scope: scope, eventId: eventId };
@@ -6267,7 +6364,7 @@ function runOneCwlSeasonEventRecovery_() {
 				clearRuntimeRecoveryNeeded_(scope);
 				return { ok: true, status: "target-superseded", cleared: true, scope: scope, eventId: eventId };
 			}
-			result = refreshCurrentCwlSeasonEventCore_({ source: { type: "independent-cwl-recovery", recoveryScope: scope } });
+			result = refreshCurrentCwlSeasonEventCore_({ eventId: eventId, source: { type: "independent-cwl-recovery", recoveryScope: scope } });
 		} else {
 			result = reconcileMissingCurrentCwlSeasonEvent_({ source: { type: "independent-cwl-recovery", recoveryScope: scope } });
 		}

@@ -1881,6 +1881,130 @@ test("season events model includes an active CWL leaderboard card", () => {
   assert.equal(cwlCard.rows[0].cwlStats.defenseStarsConceded, 2);
 });
 
+test("season events model renders each roster-scoped CWL leaderboard with only its signed accounts", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const makeEvent = (eventId, rosterId, rosterTitle, clanTag, playerTag, discordId) => ({
+    eventId,
+    type: "cwl",
+    status: "open",
+    signupsOpen: true,
+    cwlTrackingState: "active",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        selectionMode: "explicit",
+        rosterId,
+        rosterTitle,
+        clanTag,
+        eligibleAccountTags: [playerTag],
+      },
+    },
+    participantsByDiscordId: {
+      [discordId]: {
+        discordId,
+        status: "signed_up",
+        accounts: [{ tag: playerTag }],
+      },
+    },
+  });
+  const makeAggregate = (eventId, playerTag, score) => ({
+    live: {
+      eventId,
+      kind: "live",
+      cwlTrackingState: "active",
+      rankedTags: [playerTag],
+      byTag: {
+        [playerTag]: {
+          starsTotal: score,
+          attacksMade: 1,
+          threeStarCount: score === 3 ? 1 : 0,
+          totalDestruction: score * 30,
+        },
+      },
+    },
+  });
+  const data = {
+    rosterOrder: ["second", "main"],
+    seasonEvents: {
+      current: { cwl: { eventId: "cwl-main", type: "cwl" } },
+      currentCwlByRoster: {
+        main: { eventId: "cwl-main", type: "cwl" },
+        second: { eventId: "cwl-second", type: "cwl" },
+      },
+      byId: {
+        "cwl-main": makeEvent("cwl-main", "main", "Main Roster", "#MAIN", "#AAA", "100"),
+        "cwl-second": makeEvent("cwl-second", "second", "Second Roster", "#SECOND", "#BBB", "200"),
+      },
+      cwlAggregatesByEventId: {
+        "cwl-main": makeAggregate("cwl-main", "#AAA", 3),
+        "cwl-second": makeAggregate("cwl-second", "#BBB", 2),
+      },
+    },
+    playerMetrics: {
+      byTag: {
+        "#AAA": { identity: { tag: "#AAA", name: "Main Player" } },
+        "#BBB": { identity: { tag: "#BBB", name: "Second Player" } },
+      },
+    },
+  };
+
+  const cards = buildSeasonEventsPublicModel(data).cards.filter((card) => card.type === "cwl" && !card.historical);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(cards.map((card) => card.event.eventId))), ["cwl-second", "cwl-main"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cards.map((card) => card.title))), ["CWL — Second Roster", "CWL — Main Roster"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cards.map((card) => card.rows.map((row) => row.accounts[0].tag)))), [["#BBB"], ["#AAA"]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cards.map((card) => card.rows[0].displayName))), ["Second Player", "Main Player"]);
+});
+
+test("season events model preserves every roster's latest completed CWL leaderboard", () => {
+  const { buildSeasonEventsPublicModel } = loadClientInternals();
+  const makeCompleted = (eventId, rosterId, rosterTitle) => ({
+    eventId,
+    type: "cwl",
+    status: "closed",
+    signupsOpen: false,
+    cwlTrackingState: "completed",
+    cwl: {
+      target: {
+        resolved: true,
+        status: "resolved",
+        selectionMode: "explicit",
+        rosterId,
+        rosterTitle,
+        clanTag: rosterId === "main" ? "#MAIN" : "#SECOND",
+        eligibleAccountTags: [],
+      },
+    },
+    participantsByDiscordId: {},
+  });
+  const data = {
+    rosterOrder: ["main", "second"],
+    seasonEvents: {
+      current: {},
+      currentCwlByRoster: {},
+      latestCompletedCwl: { eventId: "cwl-second-final", type: "cwl" },
+      latestCompletedCwlByRoster: {
+        main: { eventId: "cwl-main-final", type: "cwl" },
+        second: { eventId: "cwl-second-final", type: "cwl" },
+      },
+      byId: {
+        "cwl-main-final": makeCompleted("cwl-main-final", "main", "Main Roster"),
+        "cwl-second-final": makeCompleted("cwl-second-final", "second", "Second Roster"),
+      },
+      cwlAggregatesByEventId: {
+        "cwl-main-final": { final: { eventId: "cwl-main-final", kind: "final", rankedTags: [], byTag: {} } },
+        "cwl-second-final": { final: { eventId: "cwl-second-final", kind: "final", rankedTags: [], byTag: {} } },
+      },
+    },
+  };
+
+  const cards = buildSeasonEventsPublicModel(data).cards.filter((card) => card.type === "cwl" && card.historical);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(cards.map((card) => card.event.eventId))), ["cwl-main-final", "cwl-second-final"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cards.map((card) => card.title))), ["Previous CWL results — Main Roster", "Previous CWL results — Second Roster"]);
+});
+
 test("season events model recomputes CWL registration order when aggregate ranked tags are stale", () => {
   const { buildSeasonEventsPublicModel } = loadClientInternals();
   const data = {
