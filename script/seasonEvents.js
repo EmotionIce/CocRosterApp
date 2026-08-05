@@ -5197,6 +5197,21 @@ function clearCwlRuntimeForEvent_(eventIdRaw) {
 function writeCwlRuntimeAtomicPayloadsWithCas_(writesRaw, optionsRaw) {
 	const writes = Array.isArray(writesRaw) ? writesRaw : [];
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const applyRelativeMutation = function (rootRaw, pathRaw, payloadRaw) {
+		const root = rootRaw && typeof rootRaw === "object" && !Array.isArray(rootRaw) ? rootRaw : {};
+		const segments = String(pathRaw || "").split("/").filter(Boolean);
+		if (!segments.length) throw new Error("CWL lifecycle atomic mutation path is empty.");
+		let node = root;
+		for (let i = 0; i < segments.length - 1; i++) {
+			const segment = segments[i];
+			if (!node[segment] || typeof node[segment] !== "object" || Array.isArray(node[segment])) node[segment] = {};
+			node = node[segment];
+		}
+		const key = segments[segments.length - 1];
+		if (payloadRaw === null) delete node[key];
+		else node[key] = payloadRaw;
+		return root;
+	};
 	let runtimeWrite = null;
 	let expectedEventId = "";
 	for (let i = 0; i < writes.length; i++) {
@@ -5238,8 +5253,14 @@ function writeCwlRuntimeAtomicPayloadsWithCas_(writesRaw, optionsRaw) {
 			const incoming = decodeSeasonEventFirebasePayload_(runtimeWrite.payload);
 			patch[runtimeWrite.path.slice(basePrefix.length)] = encodeFirebaseObjectKeysRecursive_(mergeCwlRuntimeMonotonic_(rawRuntime, incoming));
 		}
+		let nextRoot = rootRead && rootRead.value && typeof rootRead.value === "object" && !Array.isArray(rootRead.value) ? rootRead.value : {};
+		const mutationPaths = Object.keys(patch);
+		for (let i = 0; i < mutationPaths.length; i++) nextRoot = applyRelativeMutation(nextRoot, mutationPaths[i], patch[mutationPaths[i]]);
 		try {
-			return firebaseRequestJsonWithEtag_(SEASON_EVENTS_BASE_PATH, "PATCH", patch, { ifMatch: rootRead.etag });
+			// Firebase supports ETag preconditions only for PUT/DELETE, not PATCH.
+			// Replace the already-read common root under its ETag to retain the same
+			// all-or-nothing lifecycle checkpoint without an unsupported request.
+			return firebaseRequestJsonWithEtag_(SEASON_EVENTS_BASE_PATH, "PUT", nextRoot, { ifMatch: rootRead.etag });
 		} catch (err) {
 			if (err && err.code === "FIREBASE_ETAG_CONFLICT") continue;
 			throw err;

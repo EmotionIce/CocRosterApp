@@ -6150,10 +6150,10 @@ test("CWL completion requires authoritative group end plus two spaced complete o
   assert.equal(second.publication.liveAggregateAction, "delete");
   assert.equal(second.publication.finalAggregateAction, "put");
   assert.equal(second.publication.pointerAction, "put");
-  assert.equal(db.currentCwl, null);
-  assert.equal(db.current.cwl, null);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl"), null);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl"), null);
   assert.equal(db.latestCompletedCwl.eventId, "cwl-active");
-  assert.equal(db.cwlAggregates.byEvent["cwl-active"].live, null);
+  assert.equal(backend.readCwlSeasonEventAggregate_("cwl-active", "live"), null);
   assert.equal(finalAggregate.byTag["#A"].starsTotal, 3);
 });
 
@@ -6807,6 +6807,53 @@ test("scheduled reconciliation does not duplicate an already genuinely completed
   assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl"), null);
 });
 
+test("CWL lifecycle runtime checkpoint uses a conditional root PUT and preserves unrelated state", () => {
+  const event = {
+    eventId: "cwl-etag-put",
+    type: "cwl",
+    status: "open",
+    signupsOpen: true,
+    cwlTrackingState: "active",
+    cwl: {},
+    participantsByDiscordId: {},
+    participantsByTag: {},
+  };
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        sentinel: { keep: true },
+        byId: { [event.eventId]: event },
+        currentCwl: { eventId: event.eventId, type: "cwl" },
+        current: { cwl: { eventId: event.eventId, type: "cwl" } },
+        cwlAggregates: { byEvent: { [event.eventId]: { live: { eventId: event.eventId, kind: "live" } } } },
+      },
+    },
+  });
+  const originalEtagRequest = backend.firebaseRequestJsonWithEtag_;
+  const conditionalMethods = [];
+  backend.firebaseRequestJsonWithEtag_ = (path, method = "GET", payload, options = {}) => {
+    if (options.ifMatch) {
+      conditionalMethods.push(String(method).toUpperCase());
+      if (String(method).toUpperCase() === "PATCH") throw new Error("Firebase does not support If-Match with PATCH");
+    }
+    return originalEtagRequest(path, method, payload, options);
+  };
+  const updatedEvent = { ...event, status: "closed", signupsOpen: false };
+  const runtime = backend.createEmptyCwlRuntime_(event.eventId, "2026-08-05T20:00:00.000Z");
+
+  backend.writeSeasonEventAtomicPayloads_([
+    { path: backend.buildSeasonEventByIdPath_(event.eventId), payload: updatedEvent },
+    { path: backend.buildCwlRuntimePath_(event.eventId), payload: runtime },
+    { path: backend.buildCwlSeasonEventAggregatePath_(event.eventId, "live"), payload: null },
+  ]);
+
+  assert.deepEqual(conditionalMethods, ["PUT"]);
+  assert.equal(backend.__getFirebaseDb().events.seasonEvents.sentinel.keep, true);
+  assert.equal(backend.readSeasonEventById_(event.eventId).status, "closed");
+  assert.equal(backend.readCwlRuntime_(event.eventId).eventId, event.eventId);
+  assert.equal(backend.readCwlSeasonEventAggregate_(event.eventId, "live"), null);
+});
+
 test("atomic legacy target reset failure preserves event, aggregates, runtime, and both pointers", () => {
   const backend = installMemoryFirebase(loadBackend());
   const nowIso = "2026-07-11T12:00:00.000Z";
@@ -6823,7 +6870,7 @@ test("atomic legacy target reset failure preserves event, aggregates, runtime, a
   const before = clone(backend.__getFirebaseDb());
   const originalEtagRequest = backend.firebaseRequestJsonWithEtag_;
   backend.firebaseRequestJsonWithEtag_ = (path, method = "GET", payload, options = {}) => {
-    if (String(path) === "events/seasonEvents" && String(method).toUpperCase() === "PATCH") throw new Error("injected atomic write failure");
+    if (String(path) === "events/seasonEvents" && String(method).toUpperCase() === "PUT") throw new Error("injected atomic write failure");
     return originalEtagRequest(path, method, payload, options);
   };
   assert.throws(() => backend.repairLegacyCwlSeasonEventBinding_({ eventId: event.eventId, nowIso, freshEvidence: evidence }), /atomic write failure/);
