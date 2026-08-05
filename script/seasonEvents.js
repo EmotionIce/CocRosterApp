@@ -196,6 +196,55 @@ function isCwlSeasonEventRefreshableState_(stateRaw) {
 	return state === "waiting" || state === "active" || state === "finalizing";
 }
 
+// Return the YYYY-MM cycle encoded by a CWL target season, when present.
+function getCwlSeasonEventTargetMonth_(eventRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const target = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event.cwl).target);
+	const match = String(target.season || "").match(/^(\d{4})-(0[1-9]|1[0-2])/);
+	return match ? match[1] + "-" + match[2] : "";
+}
+
+// Return why a nominally refreshable CWL event belongs to an older cycle.
+// A closed status alone is deliberately not enough: staff may close signups
+// while the selected roster's current CWL is still being tracked.
+function getCwlSeasonEventRolloverReason_(eventRaw, nowIsoRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+	if (!event || normalizeSeasonEventType_(event.type) !== "cwl") return "";
+	if (normalizeSeasonEventStatus_(event.status) === "archived") return "event-archived";
+	if (!isCwlSeasonEventRefreshableState_(event.cwlTrackingState)) return "";
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
+	const nowMs = parseIsoToMs_(nowIso);
+	const currentMonth = nowIso.slice(0, 7);
+	const targetMonth = getCwlSeasonEventTargetMonth_(event);
+	if (targetMonth && targetMonth < currentMonth) return "previous-cwl-season";
+
+	const endsAt = sanitizeSeasonEventTimestampOrEmpty_(event.endsAt);
+	const endsMs = parseIsoToMs_(endsAt);
+	if (endsMs > 0 && nowMs - endsMs > CWL_LIFECYCLE_RECENTLY_ENDED_LOOKBACK_MS && endsAt.slice(0, 7) < currentMonth) {
+		return "previous-event-window";
+	}
+
+	const target = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event.cwl).target);
+	const groupEnded = target.groupState === "ended" || target.groupState === "warended";
+	const observedAt = sanitizeSeasonEventTimestampOrEmpty_(target.observedAt);
+	const observedMs = parseIsoToMs_(observedAt);
+	if (groupEnded && observedMs > 0 && nowMs - observedMs > CWL_LIFECYCLE_RECENTLY_ENDED_LOOKBACK_MS && observedAt.slice(0, 7) < currentMonth) {
+		return "previous-ended-cwl-group";
+	}
+	return "";
+}
+
+// Discord retries the same interaction after transient backend failures. A
+// forced rollover must therefore recognize the event created by that request.
+function isSameCwlEnsureInteraction_(eventRaw, sourceRaw) {
+	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
+	const existingSource = sanitizeSeasonEventSource_(event.source);
+	const requestedSource = sanitizeSeasonEventSource_(sourceRaw);
+	if (!existingSource || typeof existingSource !== "object" || !requestedSource || typeof requestedSource !== "object") return false;
+	const interactionId = sanitizeSeasonEventText_(requestedSource.interactionId, 180);
+	return !!interactionId && sanitizeSeasonEventText_(existingSource.interactionId, 180) === interactionId;
+}
+
 // Return whether a raw league group looks like a live or upcoming CWL group.
 function isCwlLeagueGroupPotentiallyLive_(leaguegroupRaw) {
 	const leaguegroup = leaguegroupRaw && typeof leaguegroupRaw === "object" ? leaguegroupRaw : {};
@@ -1648,11 +1697,11 @@ function didCwlSeasonEventTargetTupleChange_(beforeRaw, afterRaw) {
 	return before.rosterId !== after.rosterId || before.clanTag !== after.clanTag || before.groupId !== after.groupId || before.season !== after.season;
 }
 
-function buildCwlTargetTransitionAtomicWrites_(eventRaw, nextEventRaw, resetTargetStateRaw) {
+function buildCwlTargetTransitionAtomicWrites_(eventRaw, nextEventRaw, resetTargetStateRaw, pointerOptionsRaw) {
 	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
 	const nextEvent = nextEventRaw && typeof nextEventRaw === "object" ? nextEventRaw : {};
 	const eventId = sanitizeSeasonEventText_(nextEvent.eventId || event.eventId, 180);
-	const writes = [{ path: buildSeasonEventByIdPath_(eventId), payload: nextEvent }].concat(buildCurrentCwlSeasonEventPointerWrites_(nextEvent));
+	const writes = [{ path: buildSeasonEventByIdPath_(eventId), payload: nextEvent }].concat(buildCurrentCwlSeasonEventPointerWrites_(nextEvent, pointerOptionsRaw));
 	if (resetTargetStateRaw === true) {
 		writes.push({ path: buildCwlSeasonEventAggregatePath_(eventId, "live"), payload: null });
 		writes.push({ path: buildCwlSeasonEventAggregatePath_(eventId, "final"), payload: null });
@@ -1666,8 +1715,8 @@ function buildCwlTargetTransitionAtomicWrites_(eventRaw, nextEventRaw, resetTarg
 }
 
 // Build a default waiting CWL event.
-function buildDefaultCwlSeasonEvent_(sourceRaw) {
-	const nowIso = new Date().toISOString();
+function buildDefaultCwlSeasonEvent_(sourceRaw, nowIsoRaw) {
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(nowIsoRaw) || new Date().toISOString();
 	const eventId = buildCwlSeasonEventId_(nowIso);
 	return {
 		eventId: eventId,
@@ -2178,10 +2227,17 @@ function repairCwlCurrentPointerRepresentations_() {
 	return withSeasonEventParticipantWriteLock_(function () { return repairCwlCurrentPointerRepresentationsUnlocked_(); });
 }
 
-// Ensure there is a non-completed current CWL event.
+// Ensure there is a current CWL event for the requested roster. Previous-cycle
+// events are archived and replaced without carrying their participants forward.
 function ensureCurrentCwlSeasonEvent_(sourceRaw, optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const rosterId = sanitizeSeasonEventText_(options.rosterId || options.selectedRosterId, 120);
+	const forceNewEvent = options.forceNewEvent === true;
+	const nowIso = sanitizeSeasonEventTimestampOrEmpty_(options.now || options.nowIso) || new Date().toISOString();
+	const source = sourceRaw || { type: "api-ensure-cwl-event" };
+	if (forceNewEvent && !rosterId) {
+		return { ok: false, status: "force-new-cwl-event-requires-roster", created: false, targetUpdated: false, event: null };
+	}
 	const pointerRepair = rosterId ? { ok: true, changed: false, pointerPaths: [] } : repairCwlCurrentPointerRepresentations_();
 	if (pointerRepair && pointerRepair.ok === false) return { ok: false, status: pointerRepair.status || "current-pointer-repair-failed", created: false, targetUpdated: false };
 	const result = withSeasonEventParticipantWriteLock_(function () {
@@ -2189,10 +2245,16 @@ function ensureCurrentCwlSeasonEvent_(sourceRaw, optionsRaw) {
 		const rosterData = activeSnapshot && activeSnapshot.rosterData ? activeSnapshot.rosterData : {};
 		const existing = readCurrentCwlSeasonEvent_(rosterId ? { rosterId: rosterId } : {});
 		const existingState = existing ? normalizeCwlTrackingState_(existing.cwlTrackingState) || "waiting" : "";
-		if (existing && existing.type === "cwl" && isCwlSeasonEventRefreshableState_(existingState)) {
+		const existingRefreshable = !!(existing && existing.type === "cwl" && isCwlSeasonEventRefreshableState_(existingState));
+		const forcedRetry = forceNewEvent && existingRefreshable && isSameCwlEnsureInteraction_(existing, source);
+		const rolloverReason = existingRefreshable && !forcedRetry
+			? forceNewEvent ? "administrator-forced" : getCwlSeasonEventRolloverReason_(existing, nowIso)
+			: "";
+		if (existingRefreshable && !rolloverReason) {
 			const targetResult = applyCwlSeasonEventTargetResolution_(existing, rosterData, {
 				rosterId: rosterId,
-				source: sourceRaw || { type: "api-ensure-cwl-event" },
+				nowIso: nowIso,
+				source: source,
 			});
 			const target = sanitizeCwlSeasonEventTarget_(targetResult.target);
 			if (rosterId && (!target.resolved || target.rosterId !== rosterId)) {
@@ -2204,19 +2266,27 @@ function ensureCurrentCwlSeasonEvent_(sourceRaw, optionsRaw) {
 				const resetTargetState = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(existing.cwl).target).resolved && targetResult.targetChanged;
 				writeSeasonEventAtomicPayloads_(buildCwlTargetTransitionAtomicWrites_(existing, targetResult.event, resetTargetState));
 			}
+			const retrySupersededEventId = forcedRetry ? sanitizeSeasonEventText_(existing.supersedesEventId, 180) : "";
+			const retrySupersededEvent = retrySupersededEventId ? readSeasonEventById_(retrySupersededEventId) : null;
 			return {
 				ok: true,
-				status: "current-cwl-event-reused",
+				status: forcedRetry ? "current-cwl-event-force-retry-reused" : "current-cwl-event-reused",
 				event: summarizeSeasonEvent_(targetResult.event),
 				created: false,
 				targetUpdated: targetResult.changed || rosterPointerMissing,
+				forceRetryReused: forcedRetry,
+				supersededEventId: retrySupersededEventId,
+				supersededEvent: retrySupersededEvent ? summarizeSeasonEvent_(retrySupersededEvent) : null,
+				rolloverReason: forcedRetry ? sanitizeSeasonEventText_(existing.rolloverReason, 160) : "",
+				rolloverForced: forcedRetry && !!retrySupersededEventId,
 			};
 		}
 
-		let event = buildDefaultCwlSeasonEvent_(sourceRaw || { type: "api-ensure-cwl-event" });
+		let event = buildDefaultCwlSeasonEvent_(source, nowIso);
 		const targetResult = applyCwlSeasonEventTargetResolution_(event, rosterData, {
 			rosterId: rosterId,
-			source: sourceRaw || { type: "api-ensure-cwl-event" },
+			nowIso: nowIso,
+			source: source,
 		});
 		event = targetResult.event;
 		const target = sanitizeCwlSeasonEventTarget_(targetResult.target);
@@ -2224,24 +2294,63 @@ function ensureCurrentCwlSeasonEvent_(sourceRaw, optionsRaw) {
 			return { ok: false, status: "selected-cwl-roster-not-eligible", created: false, targetUpdated: false, event: null };
 		}
 		if (target.rosterTitle) event.title = "CWL Event — " + target.rosterTitle;
-		writeSeasonEventAtomicPayloads_(buildCwlTargetTransitionAtomicWrites_({}, event, false));
+		let supersededEvent = null;
+		if (existingRefreshable && rolloverReason) {
+			const archivedMeta = sanitizeCwlSeasonEventMeta_(existing.cwl);
+			archivedMeta.stale = true;
+			archivedMeta.staleSince = archivedMeta.staleSince || nowIso;
+			archivedMeta.staleReason = "cwl-event-rolled-over-" + rolloverReason;
+			supersededEvent = Object.assign({}, existing, {
+				status: "archived",
+				signupsOpen: false,
+				cwl: archivedMeta,
+				updatedAt: nowIso,
+				supersededAt: nowIso,
+				supersededByEventId: event.eventId,
+				supersededReason: rolloverReason,
+			});
+			event = Object.assign({}, event, {
+				supersedesEventId: existing.eventId,
+				rolloverAt: nowIso,
+				rolloverReason: rolloverReason,
+			});
+			writeSeasonEventAtomicPayloads_([
+				{ path: buildSeasonEventByIdPath_(existing.eventId), payload: supersededEvent },
+			].concat(buildCwlTargetTransitionAtomicWrites_({}, event, false, { replacingEventId: existing.eventId })));
+			writeSeasonEventAuditEntry_(existing.eventId, {
+				action: "event-superseded",
+				eventId: existing.eventId,
+				createdAt: nowIso,
+				source: source,
+				details: { supersededByEventId: event.eventId, reason: rolloverReason, forced: forceNewEvent },
+			});
+		} else {
+			writeSeasonEventAtomicPayloads_(buildCwlTargetTransitionAtomicWrites_({}, event, false));
+		}
 		writeSeasonEventAuditEntry_(event.eventId, {
 			action: "event-created",
 			eventId: event.eventId,
 			createdAt: event.createdAt,
-			source: sourceRaw || { type: "api-ensure-cwl-event" },
+			source: source,
 			details: {
 				type: "cwl",
 				cwlTrackingState: "waiting",
 				rosterId: target.rosterId,
 				clanTag: target.clanTag,
+				supersedesEventId: supersededEvent ? supersededEvent.eventId : "",
+				rolloverReason: rolloverReason,
+				forced: forceNewEvent,
 			},
 		});
 		return {
 			ok: true,
-			status: "current-cwl-event-created",
+			status: supersededEvent ? "current-cwl-event-rolled-over" : "current-cwl-event-created",
 			event: summarizeSeasonEvent_(event),
 			created: true,
+			supersededEventId: supersededEvent ? supersededEvent.eventId : "",
+			supersededEvent: supersededEvent ? summarizeSeasonEvent_(supersededEvent) : null,
+			rolloverReason: rolloverReason,
+			rolloverForced: !!(supersededEvent && forceNewEvent),
 		};
 	});
 	if (result && typeof result === "object") result.pointerRepair = pointerRepair;
@@ -2255,11 +2364,22 @@ function ensureCurrentCwlSeasonEvent(payloadRaw, secretOrPassword) {
 	const payload = parsed.payload;
 	const result = ensureCurrentCwlSeasonEvent_(payload.source || { type: "api-ensure-cwl-event" }, {
 		rosterId: payload.rosterId || payload.selectedRosterId,
+		forceNewEvent: payload.forceNewEvent === true || payload.startNewEvent === true,
 	});
-	if (result && (result.created === true || result.targetUpdated === true)) {
+	if (result && (result.created === true || result.targetUpdated === true || result.forceRetryReused === true)) {
 		const descriptor = buildCwlLifecyclePublicationDescriptor_(result.event && result.event.eventId, result.event && result.event.cwlTrackingState, { reason: "api-ensure-current-cwl" });
 		result.publication = descriptor;
 		result.cloudflarePublish = publishCwlLifecycleDescriptor_(descriptor);
+		if (result.supersededEventId) {
+			const supersededDescriptor = buildCwlLifecyclePublicationDescriptor_(result.supersededEventId, result.supersededEvent && result.supersededEvent.cwlTrackingState, {
+				reason: "api-ensure-current-cwl-superseded",
+				liveAggregateAction: "none",
+				finalAggregateAction: "none",
+				pointerAction: "none",
+			});
+			result.supersededPublication = supersededDescriptor;
+			result.supersededCloudflarePublish = publishCwlLifecycleDescriptor_(supersededDescriptor);
+		}
 	} else if (result && result.pointerRepair && result.pointerRepair.changed && typeof enqueueCloudflareSeasonEventReconciliation_ === "function") {
 		result.cloudflarePublish = enqueueCloudflareSeasonEventReconciliation_({ eventIds: [], pointerPaths: result.pointerRepair.pointerPaths }, "api-ensure-current-cwl-pointer-repair");
 	}
@@ -2849,6 +2969,7 @@ function buildCurrentCwlSeasonEventPointerWrites_(eventRaw, optionsRaw) {
 	const event = eventRaw && typeof eventRaw === "object" ? eventRaw : {};
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const eventId = sanitizeSeasonEventText_(event.eventId, 180);
+	const replacingEventId = sanitizeSeasonEventText_(options.replacingEventId, 180);
 	const target = sanitizeCwlSeasonEventTarget_(sanitizeCwlSeasonEventMeta_(event.cwl).target);
 	if (!eventId || event.type !== "cwl") return [];
 	const pointer = buildSeasonEventPointerPayload_(event, event);
@@ -2856,10 +2977,28 @@ function buildCurrentCwlSeasonEventPointerWrites_(eventRaw, optionsRaw) {
 	if (target.rosterId) writes.push({ path: buildCurrentCwlSeasonEventRosterPointerPath_(target.rosterId), payload: pointer });
 	const primary = readSeasonEventPointer_(SEASON_EVENTS_CURRENT_CWL_PATH);
 	const generic = readSeasonEventPointer_(buildSeasonEventCurrentPointerPath_("cwl"));
+	const legacyEntries = [
+		{ path: SEASON_EVENTS_CURRENT_CWL_PATH, pointer: primary, eventId: sanitizeSeasonEventText_(primary && primary.eventId, 180) },
+		{ path: buildSeasonEventCurrentPointerPath_("cwl"), pointer: generic, eventId: sanitizeSeasonEventText_(generic && generic.eventId, 180) },
+	];
 	const pointerIds = [
-		sanitizeSeasonEventText_(primary && primary.eventId, 180),
-		sanitizeSeasonEventText_(generic && generic.eventId, 180),
+		legacyEntries[0].eventId,
+		legacyEntries[1].eventId,
 	].filter(function (value, index, all) { return value && all.indexOf(value) === index; });
+	if (replacingEventId && replacingEventId !== eventId && pointerIds.indexOf(replacingEventId) >= 0) {
+		const otherEntry = legacyEntries.filter(function (entry) {
+			return entry.eventId && entry.eventId !== replacingEventId && entry.eventId !== eventId;
+		})[0] || null;
+		if (otherEntry) {
+			for (let i = 0; i < legacyEntries.length; i++) {
+				if (legacyEntries[i].eventId === replacingEventId) writes.push({ path: legacyEntries[i].path, payload: otherEntry.pointer });
+			}
+			return writes;
+		}
+		writes.push({ path: SEASON_EVENTS_CURRENT_CWL_PATH, payload: pointer });
+		writes.push({ path: buildSeasonEventCurrentPointerPath_("cwl"), payload: pointer });
+		return writes;
+	}
 	let writeLegacy = options.forceLegacy === true || !pointerIds.length || pointerIds.every(function (value) { return value === eventId; });
 	if (!writeLegacy) {
 		writeLegacy = pointerIds.every(function (value) {

@@ -4943,6 +4943,138 @@ test("two roster-selected CWL events keep pointers, signups, aggregates, and run
   assert.equal(leaderboards.cwlByRoster.second.event.eventId, secondEventId);
 });
 
+test("ensure-current CWL automatically rolls a previous cycle without carrying signups forward", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = buildValidRosterData();
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData });
+
+  const july = backend.ensureCurrentCwlSeasonEvent_(
+    { type: "discord-admin", interactionId: "july-panel" },
+    { rosterId: "main", nowIso: "2026-07-04T12:00:00.000Z" },
+  );
+  const julyEvent = backend.readSeasonEventById_(july.event.eventId);
+  julyEvent.status = "closed";
+  julyEvent.signupsOpen = false;
+  julyEvent.cwlTrackingState = "active";
+  julyEvent.startsAt = "2026-07-04T03:20:17.000Z";
+  julyEvent.endsAt = "2026-07-11T08:12:16.000Z";
+  julyEvent.cwl.target = {
+    ...julyEvent.cwl.target,
+    groupId: "july-group",
+    season: "2026-07-03",
+    groupState: "ended",
+    observedAt: "2026-07-11T20:48:57.627Z",
+  };
+  julyEvent.participantsByDiscordId = {
+    "111": {
+      discordId: "111",
+      discordUsername: "alpha",
+      status: "signed_up",
+      accounts: [{ tag: "#PLAYER", name: "Player" }],
+    },
+  };
+  julyEvent.participantsByTag = { "#PLAYER": "111" };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(julyEvent.eventId), "PUT", julyEvent);
+
+  const august = backend.ensureCurrentCwlSeasonEvent_(
+    { type: "discord-admin", interactionId: "august-panel" },
+    { rosterId: "main", nowIso: "2026-08-05T20:10:00.000Z" },
+  );
+  const archivedJuly = backend.readSeasonEventById_(julyEvent.eventId);
+  const freshAugust = backend.readSeasonEventById_(august.event.eventId);
+
+  assert.equal(august.created, true);
+  assert.equal(august.status, "current-cwl-event-rolled-over");
+  assert.equal(august.rolloverReason, "previous-cwl-season");
+  assert.equal(august.rolloverForced, false);
+  assert.equal(august.supersededEventId, julyEvent.eventId);
+  assert.notEqual(august.event.eventId, julyEvent.eventId);
+  assert.equal(archivedJuly.status, "archived");
+  assert.equal(archivedJuly.signupsOpen, false);
+  assert.equal(archivedJuly.cwlTrackingState, "active");
+  assert.equal(archivedJuly.supersededByEventId, august.event.eventId);
+  assert.equal(archivedJuly.participantsByDiscordId["111"].accounts[0].tag, "#PLAYER");
+  assert.equal(freshAugust.status, "open");
+  assert.equal(freshAugust.signupsOpen, true);
+  assert.deepEqual(Object.keys(freshAugust.participantsByDiscordId), []);
+  assert.equal(backend.readSeasonEventPointer_(backend.buildCurrentCwlSeasonEventRosterPointerPath_("main")).eventId, august.event.eventId);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, august.event.eventId);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/current/cwl").eventId, august.event.eventId);
+
+  const repeated = backend.ensureCurrentCwlSeasonEvent_(
+    { type: "discord-admin", interactionId: "august-panel-retry" },
+    { rosterId: "main", nowIso: "2026-08-05T20:11:00.000Z" },
+  );
+  assert.equal(repeated.created, false);
+  assert.equal(repeated.event.eventId, august.event.eventId);
+});
+
+test("closed same-cycle CWL events remain reusable", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: buildValidRosterData() });
+  const created = backend.ensureCurrentCwlSeasonEvent_(
+    { type: "discord-admin", interactionId: "same-cycle-create" },
+    { rosterId: "main", nowIso: "2026-08-04T12:00:00.000Z" },
+  );
+  const event = backend.readSeasonEventById_(created.event.eventId);
+  event.status = "closed";
+  event.signupsOpen = false;
+  event.cwlTrackingState = "active";
+  event.endsAt = "2026-08-11T08:00:00.000Z";
+  event.cwl.target = { ...event.cwl.target, groupId: "august-group", season: "2026-08", groupState: "inwar" };
+  backend.writeSeasonEventFirebasePayload_(backend.buildSeasonEventByIdPath_(event.eventId), "PUT", event);
+
+  const reused = backend.ensureCurrentCwlSeasonEvent_(
+    { type: "discord-admin", interactionId: "same-cycle-repost" },
+    { rosterId: "main", nowIso: "2026-08-06T12:00:00.000Z" },
+  );
+  assert.equal(reused.created, false);
+  assert.equal(reused.status, "current-cwl-event-reused");
+  assert.equal(reused.event.eventId, event.eventId);
+  assert.equal(backend.readSeasonEventById_(event.eventId).status, "closed");
+});
+
+test("administrator CWL rollover is roster-scoped, publishes both records, and is retry-safe", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const rosterData = buildSameLeagueCwlSignupRosterData();
+  rosterData.rosters[1].main = [{ slot: 1, name: "Bravo", discord: "bravo", th: 16, tag: "#9PYLQG", notes: [] }];
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData, text: JSON.stringify(rosterData) });
+  const main = backend.ensureCurrentCwlSeasonEvent_({ type: "test-main" }, { rosterId: "main", nowIso: "2026-08-05T18:00:00.000Z" });
+  const second = backend.ensureCurrentCwlSeasonEvent_({ type: "test-second" }, { rosterId: "second", nowIso: "2026-08-05T18:01:00.000Z" });
+  const descriptors = [];
+  backend.publishCwlLifecycleDescriptor_ = (descriptor) => {
+    descriptors.push(clone(descriptor));
+    return { ok: true, queued: true };
+  };
+
+  const source = { type: "discord-admin", interactionId: "force-second-once" };
+  const forced = backend.ensureCurrentCwlSeasonEvent({ rosterId: "second", forceNewEvent: true, source }, "secret");
+  const forcedEventId = forced.event.eventId;
+
+  assert.equal(forced.created, true);
+  assert.equal(forced.rolloverForced, true);
+  assert.equal(forced.rolloverReason, "administrator-forced");
+  assert.equal(forced.supersededEventId, second.event.eventId);
+  assert.equal(backend.readSeasonEventById_(second.event.eventId).status, "archived");
+  assert.equal(backend.readSeasonEventPointer_(backend.buildCurrentCwlSeasonEventRosterPointerPath_("second")).eventId, forcedEventId);
+  assert.equal(backend.readSeasonEventPointer_(backend.buildCurrentCwlSeasonEventRosterPointerPath_("main")).eventId, main.event.eventId);
+  assert.equal(backend.readSeasonEventPointer_("events/seasonEvents/currentCwl").eventId, main.event.eventId);
+  assert.deepEqual(descriptors.map((descriptor) => descriptor.eventId), [forcedEventId, second.event.eventId]);
+  assert.equal(descriptors[0].pointerAction, "put");
+  assert.equal(descriptors[1].liveAggregateAction, "none");
+  assert.equal(descriptors[1].finalAggregateAction, "none");
+  assert.equal(descriptors[1].pointerAction, "none");
+
+  const retried = backend.ensureCurrentCwlSeasonEvent({ rosterId: "second", forceNewEvent: true, source }, "secret");
+  assert.equal(retried.created, false);
+  assert.equal(retried.forceRetryReused, true);
+  assert.equal(retried.event.eventId, forcedEventId);
+  assert.equal(retried.supersededEventId, second.event.eventId);
+  assert.equal(retried.rolloverForced, true);
+  assert.deepEqual(descriptors.map((descriptor) => descriptor.eventId), [forcedEventId, second.event.eventId, forcedEventId, second.event.eventId]);
+  assert.equal(backend.ensureCurrentCwlSeasonEvent({ forceNewEvent: true, source }, "secret").status, "force-new-cwl-event-requires-roster");
+});
+
 test("CWL event target stays frozen and target migration prunes non-target bindings", () => {
   const backend = loadBackend();
   const event = {
