@@ -40,6 +40,24 @@ const WAR_FOLLOWUP_REASON_SET = {
 	cwl_performance: true,
 };
 
+// War follow-up is shared by the password-protected admin workspace and the
+// authenticated Discord bot. Keep this authorization deliberately scoped to
+// this private workflow; a Discord credential must not become a general admin
+// password for unrelated API methods.
+function assertWarFollowupAccess_(credentialRaw) {
+	try {
+		assertAdminPassword_(credentialRaw);
+		return "admin";
+	} catch (adminErr) {
+		try {
+			assertDiscordBotApiSecret_(credentialRaw);
+			return "discord";
+		} catch (botErr) {
+			throw new Error("Authentication failed for war follow-up.");
+		}
+	}
+}
+
 function clampWarFollowupNumber_(valueRaw, minRaw, maxRaw, fallbackRaw, integerRaw) {
 	const min = Number(minRaw);
 	const max = Number(maxRaw);
@@ -378,7 +396,7 @@ function readWarFollowupCase_(tagRaw) {
 }
 
 function getWarFollowupCase(tagRaw, password) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const lock = LockService.getScriptLock();
 	lock.waitLock(30000);
 	try {
@@ -422,7 +440,7 @@ function applyWarFollowupIdentityPatch_(caseRaw, requestRaw) {
 }
 
 function getWarFollowupState(password) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const values = firebaseBatchGetJson_([WAR_FOLLOWUP_SETTINGS_PATH, WAR_FOLLOWUP_CASES_PATH]);
 	const encodedSettings = values[WAR_FOLLOWUP_SETTINGS_PATH];
 	const encodedCases = values[WAR_FOLLOWUP_CASES_PATH];
@@ -459,7 +477,7 @@ function getWarFollowupState(password) {
 }
 
 function saveWarFollowupSettings(settingsRaw, password, expectedRulesUpdatedAtRaw, mutationIdRaw) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const lock = LockService.getScriptLock();
 	lock.waitLock(30000);
 	try {
@@ -513,7 +531,7 @@ function saveWarFollowupSettings(settingsRaw, password, expectedRulesUpdatedAtRa
 }
 
 function getWarFollowupRulesStatus(mutationIdRaw, password) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const mutationId = sanitizeWarFollowupText_(mutationIdRaw, 120);
 	if (!mutationId) throw new Error("War follow-up rules mutation ID is required.");
 	const lock = LockService.getScriptLock();
@@ -536,7 +554,7 @@ function getWarFollowupRulesStatus(mutationIdRaw, password) {
 }
 
 function getWarFollowupTrustStatus(tagRaw, password, mutationIdRaw) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const tag = normalizeTag_(tagRaw);
 	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
 	const lock = LockService.getScriptLock();
@@ -561,7 +579,7 @@ function getWarFollowupTrustStatus(tagRaw, password, mutationIdRaw) {
 }
 
 function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password, mutationIdRaw) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const tag = normalizeTag_(tagRaw);
 	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");
 	const trusted = toBooleanFlag_(trustedRaw);
@@ -621,7 +639,7 @@ function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password, mutationIdRa
 }
 
 function mutateWarFollowupCase(requestRaw, password) {
-	assertAdminPassword_(password);
+	assertWarFollowupAccess_(password);
 	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
 	const tag = normalizeTag_(request.tag);
 	if (!tag || !isValidPlayerTag_(tag)) throw new Error("Invalid player tag.");

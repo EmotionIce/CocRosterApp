@@ -7233,6 +7233,23 @@ test("war follow-up state is authenticated, private, and independent from roster
     /Authentication failed/,
   );
 
+  const botState = backend.runAdminApiMethod_("getWarFollowupState", ["secret"]);
+  assert.deepEqual(Array.from(botState.cases), []);
+  const botCase = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag: "#P0LYGQ",
+    name: "Discord-created case",
+    expectedUpdatedAt: "",
+    mutationId: "discord-bot-create-case",
+  }, "secret"]);
+  assert.equal(botCase.status, "needs_review");
+  assert.equal(botCase.name, "Discord-created case");
+  assert.throws(
+    () => backend.runAdminApiMethod_("getAutoRefreshSettings", ["secret"]),
+    /Authentication failed/,
+    "the Discord credential must remain scoped to War Follow Up",
+  );
+
   const settings = backend.runAdminApiMethod_("saveWarFollowupSettings", [{
     regularLookbackWars: 99,
     regularMissedThreshold: 2,
@@ -7275,7 +7292,8 @@ test("war follow-up state is authenticated, private, and independent from roster
   const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
   assert.equal(state.settings.defaultRecoveryWars, 4);
   assert.deepEqual(Array.from(state.settings.trustedPlayerTags), ["#P0LYGJ"]);
-  assert.deepEqual(Array.from(state.cases), []);
+  assert.equal(state.cases.length, 1);
+  assert.equal(state.cases[0].tag, "#P0LYGQ");
 });
 
 test("war follow-up trust retries cannot overwrite a newer opposite decision", () => {
