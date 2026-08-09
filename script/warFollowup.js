@@ -4,7 +4,7 @@
 // payload. Reads and writes here must never publish roster versions, enqueue
 // Cloudflare work, or participate in the refresh job.
 
-const WAR_FOLLOWUP_SCHEMA_VERSION = 1;
+const WAR_FOLLOWUP_SCHEMA_VERSION = 2;
 const WAR_FOLLOWUP_PRIVATE_PATH = "private/warFollowup/v1";
 const WAR_FOLLOWUP_SETTINGS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/settings";
 const WAR_FOLLOWUP_CASES_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/cases";
@@ -17,6 +17,7 @@ const WAR_FOLLOWUP_MAX_TRUST_MUTATIONS = 128;
 
 const WAR_FOLLOWUP_STATUS_SET = {
 	needs_review: true,
+	waiting: true,
 	watching: true,
 	needs_dm: true,
 	hero_down: true,
@@ -353,6 +354,24 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		status: status,
 		outcome: outcome,
 		handledBy: sanitizeWarFollowupText_(value.handledBy, 80),
+		assignedModeratorId: /^\d{17,20}$/.test(String(value.assignedModeratorId || "").trim())
+			? String(value.assignedModeratorId).trim()
+			: "",
+		assignedModeratorName: sanitizeWarFollowupText_(value.assignedModeratorName || value.handledBy, 80),
+		assignedAt: sanitizeWarFollowupTimestamp_(value.assignedAt),
+		assignmentUpdatedAt: sanitizeWarFollowupTimestamp_(value.assignmentUpdatedAt),
+		lastMeaningfulActionAt: sanitizeWarFollowupTimestamp_(value.lastMeaningfulActionAt || value.updatedAt),
+		assignmentBlockedModeratorId: /^\d{17,20}$/.test(String(value.assignmentBlockedModeratorId || "").trim())
+			? String(value.assignmentBlockedModeratorId).trim()
+			: "",
+		assignmentBlockedUntil: sanitizeWarFollowupTimestamp_(value.assignmentBlockedUntil),
+		waitingUntil: sanitizeWarFollowupTimestamp_(value.waitingUntil),
+		waitingReason: sanitizeWarFollowupMultilineText_(value.waitingReason, 1000),
+		escalatedAt: sanitizeWarFollowupTimestamp_(value.escalatedAt),
+		escalatedBy: sanitizeWarFollowupText_(value.escalatedBy, 80),
+		openedAt: sanitizeWarFollowupTimestamp_(value.openedAt || value.createdAt),
+		triggerSignalIds: sanitizeWarFollowupStringList_(value.triggerSignalIds, { maxItems: 24, maxLength: 300 }),
+		contactPurpose: sanitizeWarFollowupText_(value.contactPurpose, 40).toLowerCase(),
 		reasonCodes: sanitizeWarFollowupStringList_(value.reasonCodes, {
 			maxItems: 8,
 			maxLength: 40,
@@ -429,14 +448,53 @@ function applyWarFollowupIdentityPatch_(caseRaw, requestRaw) {
 	const value = caseRaw && typeof caseRaw === "object" ? caseRaw : null;
 	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
 	if (!value) return;
-	const fields = ["name", "discord", "sourceRosterId", "sourceRosterTitle", "targetRosterId", "targetRosterTitle", "handledBy"];
-	const lengths = [120, 160, 120, 160, 120, 160, 80];
+	const fields = ["name", "discord", "targetRosterId", "targetRosterTitle", "handledBy"];
+	const lengths = [120, 160, 120, 160, 80];
 	for (let i = 0; i < fields.length; i++) {
 		if (!Object.prototype.hasOwnProperty.call(request, fields[i])) continue;
 		value[fields[i]] = sanitizeWarFollowupText_(request[fields[i]], lengths[i]);
 	}
-	if (Object.prototype.hasOwnProperty.call(request, "sourceClanTag")) value.sourceClanTag = normalizeTag_(request.sourceClanTag);
+	// The source roster is the case-creation snapshot. Never let a later player
+	// move silently rewrite the clan/evidence context that opened the case.
+	if (!value.sourceRosterId && Object.prototype.hasOwnProperty.call(request, "sourceRosterId")) {
+		value.sourceRosterId = sanitizeWarFollowupText_(request.sourceRosterId, 120);
+	}
+	if (!value.sourceRosterTitle && Object.prototype.hasOwnProperty.call(request, "sourceRosterTitle")) {
+		value.sourceRosterTitle = sanitizeWarFollowupText_(request.sourceRosterTitle, 160);
+	}
+	if (!value.sourceClanTag && Object.prototype.hasOwnProperty.call(request, "sourceClanTag")) {
+		value.sourceClanTag = normalizeTag_(request.sourceClanTag);
+	}
 	if (Object.prototype.hasOwnProperty.call(request, "targetClanTag")) value.targetClanTag = normalizeTag_(request.targetClanTag);
+}
+
+function applyWarFollowupOwner_(caseRaw, requestRaw, actorRaw, nowIsoRaw) {
+	const value = caseRaw && typeof caseRaw === "object" ? caseRaw : null;
+	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
+	if (!value) return;
+	const moderatorIdRaw = String(request.assignedModeratorId || "").trim();
+	const moderatorId = /^\d{17,20}$/.test(moderatorIdRaw) ? moderatorIdRaw : "";
+	const moderatorName = sanitizeWarFollowupText_(request.assignedModeratorName || request.handledBy, 80);
+	const nowIso = sanitizeWarFollowupTimestamp_(nowIsoRaw) || new Date().toISOString();
+	value.assignedModeratorId = moderatorId;
+	value.assignedModeratorName = moderatorId ? (moderatorName || moderatorId) : "";
+	value.handledBy = value.assignedModeratorName;
+	value.assignedAt = moderatorId ? nowIso : "";
+	value.assignmentUpdatedAt = nowIso;
+	value.lastMeaningfulActionAt = nowIso;
+	if (moderatorId) {
+		value.assignmentBlockedModeratorId = "";
+		value.assignmentBlockedUntil = "";
+	}
+	appendWarFollowupActivity_(
+		value,
+		moderatorId ? "assigned" : "unassigned",
+		moderatorId
+			? ("Assigned to " + value.assignedModeratorName + " (" + moderatorId + ").")
+			: "Assignment cleared.",
+		actorRaw,
+		nowIso,
+	);
 }
 
 function getWarFollowupState(password) {
@@ -685,6 +743,42 @@ function mutateWarFollowupCase(requestRaw, password) {
 		const currentSignalIds = sanitizeWarFollowupStringList_(request.signalIds, { maxItems: 24, maxLength: 300 });
 
 		switch (action) {
+			case "create_automatic":
+				if (current && current.status !== "closed" && current.status !== "dismissed") {
+					throw new Error("This follow-up is already open.");
+				}
+				value.status = "needs_review";
+				value.sourceRosterId = sanitizeWarFollowupText_(request.sourceRosterId, 120);
+				value.sourceRosterTitle = sanitizeWarFollowupText_(request.sourceRosterTitle, 160);
+				value.sourceClanTag = normalizeTag_(request.sourceClanTag);
+				value.outcome = "";
+				value.reasonCodes = sanitizeWarFollowupStringList_(request.reasonCodes, {
+					maxItems: 8,
+					maxLength: 40,
+					allowed: WAR_FOLLOWUP_REASON_SET,
+				});
+				value.triggerSignalIds = sanitizeWarFollowupStringList_(request.triggerSignalIds || request.signalIds, {
+					maxItems: 24,
+					maxLength: 300,
+				});
+				value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
+				value.openedAt = nowIso;
+				value.closedAt = "";
+				value.waitingUntil = "";
+				value.waitingReason = "";
+				value.escalatedAt = "";
+				value.escalatedBy = "";
+				appendWarFollowupActivity_(value, "automatic_case", "Opened from automated war evidence.", actor || "War Follow Up", nowIso);
+				if (request.assignedModeratorId) {
+					applyWarFollowupOwner_(value, request, actor || "War Follow Up", nowIso);
+				} else {
+					value.assignedModeratorId = "";
+					value.assignedModeratorName = "";
+					value.handledBy = "";
+					value.assignedAt = "";
+					value.assignmentUpdatedAt = nowIso;
+				}
+				break;
 			case "manual_review":
 				value.status = "needs_review";
 				value.outcome = "";
@@ -693,6 +787,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 					{ maxItems: 8, maxLength: 40, allowed: WAR_FOLLOWUP_REASON_SET },
 				);
 				value.closedAt = "";
+				value.openedAt = nowIso;
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				appendWarFollowupActivity_(value, "manual_review", "Added for review.", actor, nowIso);
 				break;
 			case "dismiss":
@@ -717,6 +813,45 @@ function mutateWarFollowupCase(requestRaw, password) {
 					nowIso,
 				);
 				break;
+			case "wait": {
+				const followupHours = Number(request.followupHours);
+				if ([0, 24, 48, 72].indexOf(followupHours) < 0) {
+					throw new Error("Waiting follow-up must be 0, 24, 48, or 72 hours.");
+				}
+				value.status = "waiting";
+				value.waitingUntil = followupHours > 0
+					? new Date(parseIsoToMs_(nowIso) + followupHours * 60 * 60 * 1000).toISOString()
+					: "";
+				value.waitingReason = sanitizeWarFollowupMultilineText_(request.waitingReason, 1000);
+				value.closedAt = "";
+				appendWarFollowupActivity_(
+					value,
+					"waiting",
+					"Marked waiting" + (followupHours ? (" with a " + followupHours + "h follow-up.") : " without a scheduled follow-up.") +
+						(value.waitingReason ? (" " + value.waitingReason) : ""),
+					actor,
+					nowIso,
+				);
+				break;
+			}
+			case "waiting_due":
+				if (value.status !== "waiting") throw new Error("This follow-up is no longer waiting.");
+				if (value.waitingUntil && parseIsoToMs_(value.waitingUntil) > parseIsoToMs_(nowIso)) {
+					throw new Error("This waiting follow-up is not due yet.");
+				}
+				value.status = "needs_review";
+				value.waitingUntil = "";
+				appendWarFollowupActivity_(value, "waiting_due", "Waiting follow-up is due for review.", actor || "War Follow Up", nowIso);
+				break;
+			case "contact":
+				value.status = "needs_dm";
+				value.contactPurpose = "general";
+				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
+				if (!value.dmText) throw new Error("The contact message is empty.");
+				value.dmSentAt = "";
+				value.closedAt = "";
+				appendWarFollowupActivity_(value, "contact_prepared", "Player contact message prepared.", actor, nowIso);
+				break;
 			case "hero_down":
 				if (!value.targetRosterId && !value.targetClanTag) throw new Error("Choose a hero-down roster.");
 				value.status = "needs_dm";
@@ -728,6 +863,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				});
 				value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
+				value.contactPurpose = "hero_down";
 				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, 1, 8, 3, true);
 				value.requireNoMisses = request.requireNoMisses == null ? true : toBooleanFlag_(request.requireNoMisses);
 				value.dmSentAt = "";
@@ -745,9 +881,15 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (value.status !== "needs_dm") throw new Error("This follow-up is not waiting for a DM.");
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText != null ? request.dmText : value.dmText, 6000);
 				if (!value.dmText) throw new Error("The DM message is empty.");
-				value.status = "hero_down";
 				value.dmSentAt = nowIso;
-				value.recoveryStartedAt = nowIso;
+				if (value.contactPurpose === "general") {
+					value.status = "waiting";
+					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
+					value.waitingReason = "Awaiting the player's response.";
+				} else {
+					value.status = "hero_down";
+					value.recoveryStartedAt = nowIso;
+				}
 				appendWarFollowupActivity_(value, "dm_sent", "Decision DM marked as sent.", actor, nowIso);
 				break;
 			case "approve_return":
@@ -787,6 +929,13 @@ function mutateWarFollowupCase(requestRaw, password) {
 					nowIso,
 				);
 				break;
+			case "resolve":
+				value.status = "closed";
+				value.outcome = "closed";
+				value.closedAt = nowIso;
+				value.waitingUntil = "";
+				appendWarFollowupActivity_(value, "resolved", "Moderation case resolved.", actor, nowIso);
+				break;
 			case "reopen":
 				value.status = "needs_review";
 				value.outcome = "";
@@ -800,6 +949,10 @@ function mutateWarFollowupCase(requestRaw, password) {
 				break;
 			}
 			case "set_handler":
+				value.assignedModeratorId = "";
+				value.assignedModeratorName = "";
+				value.assignedAt = "";
+				value.assignmentUpdatedAt = nowIso;
 				appendWarFollowupActivity_(
 					value,
 					"handler",
@@ -808,11 +961,33 @@ function mutateWarFollowupCase(requestRaw, password) {
 					nowIso,
 				);
 				break;
+			case "assign_owner":
+				if (!request.assignedModeratorId) throw new Error("Choose a moderator for this assignment.");
+				applyWarFollowupOwner_(value, request, actor, nowIso);
+				break;
+			case "unassign_owner":
+				applyWarFollowupOwner_(value, {}, actor, nowIso);
+				value.assignmentBlockedModeratorId = /^\d{17,20}$/.test(String(request.blockedModeratorId || "").trim())
+					? String(request.blockedModeratorId).trim()
+					: "";
+				value.assignmentBlockedUntil = sanitizeWarFollowupTimestamp_(request.blockedUntil);
+				break;
+			case "escalate":
+				value.escalatedAt = nowIso;
+				value.escalatedBy = actor;
+				value.status = "needs_review";
+				appendWarFollowupActivity_(value, "escalated", "Escalated for leadership review.", actor, nowIso);
+				break;
 			default:
 				throw new Error("Unsupported war follow-up action: " + action);
 		}
 
+		if (value.status !== "waiting") {
+			value.waitingUntil = "";
+			value.waitingReason = "";
+		}
 		if (!value.createdAt) value.createdAt = nowIso;
+		value.lastMeaningfulActionAt = nowIso;
 		value.updatedAt = nowIso;
 		if (mutationId) {
 			value.mutationLedger = sanitizeWarFollowupMutationLedger_(

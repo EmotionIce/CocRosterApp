@@ -7596,6 +7596,147 @@ test("war follow-up mutations are idempotent and enforce exact optional case ver
   );
 });
 
+test("war follow-up automated cases keep their trigger snapshot and enforce one canonical Discord owner", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const evidence = {
+    capturedAt: "2026-08-01T00:00:00.000Z",
+    regular: { possibleAttacks: 4, usedAttacks: 2, missedAttacks: 2 },
+    cwl: {},
+    regularEvents: [{
+      id: "war-trigger",
+      at: "2026-08-01T00:00:00.000Z",
+      clanTag: "#SOURCE",
+      stats: { possibleAttacks: 2, missedAttacks: 2 },
+    }],
+    cwlEvents: [],
+  };
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "create_automatic",
+    tag,
+    name: "Player",
+    sourceRosterId: "source-roster",
+    sourceRosterTitle: "Source clan",
+    sourceClanTag: "#SOURCE",
+    reasonCodes: ["regular_missed"],
+    triggerSignalIds: ["regular_missed:war-trigger"],
+    evidence,
+    assignedModeratorId: "111111111111111111",
+    assignedModeratorName: "First leader",
+    handledBy: "First leader",
+    actor: "War Follow Up",
+    expectedUpdatedAt: "",
+    mutationId: "automatic-create-1",
+  }, "change-me"]);
+
+  assert.equal(created.schemaVersion, 2);
+  assert.equal(created.status, "needs_review");
+  assert.equal(created.sourceClanTag, "#SOURCE");
+  assert.equal(created.evidence.regular.missedAttacks, 2);
+  assert.deepEqual(Array.from(created.triggerSignalIds), ["regular_missed:war-trigger"]);
+  assert.equal(created.assignedModeratorId, "111111111111111111");
+  assert.equal(created.assignedModeratorName, "First leader");
+  assert.ok(created.assignmentUpdatedAt);
+  assert.equal(created.activity.at(-1).type, "assigned");
+
+  const reassigned = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "assign_owner",
+    tag,
+    assignedModeratorId: "222222222222222222",
+    assignedModeratorName: "Second leader",
+    handledBy: "Second leader",
+    actor: "Leadership",
+    expectedUpdatedAt: created.updatedAt,
+    mutationId: "automatic-reassign-1",
+  }, "change-me"]);
+  assert.equal(reassigned.assignedModeratorId, "222222222222222222");
+  assert.throws(
+    () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "assign_owner",
+      tag,
+      assignedModeratorId: "333333333333333333",
+      assignedModeratorName: "Stale leader",
+      expectedUpdatedAt: created.updatedAt,
+      mutationId: "automatic-reassign-stale",
+    }, "change-me"]),
+    /changed since it was opened/,
+  );
+
+  const waiting = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "wait",
+    tag,
+    sourceRosterId: "moved-roster",
+    sourceRosterTitle: "Moved clan",
+    sourceClanTag: "#MOVED",
+    followupHours: 48,
+    waitingReason: "Awaiting a response.",
+    actor: "Second leader",
+    expectedUpdatedAt: reassigned.updatedAt,
+    mutationId: "automatic-wait-1",
+  }, "change-me"]);
+  assert.equal(waiting.status, "waiting");
+  assert.ok(waiting.waitingUntil);
+  assert.equal(waiting.sourceRosterId, "source-roster", "later identity refreshes cannot rewrite the source snapshot");
+  assert.equal(waiting.sourceClanTag, "#SOURCE");
+  assert.equal(waiting.activity.at(-1).type, "waiting");
+
+  const escalated = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "escalate",
+    tag,
+    actor: "Second leader",
+    expectedUpdatedAt: waiting.updatedAt,
+    mutationId: "automatic-escalate-1",
+  }, "change-me"]);
+  assert.equal(escalated.status, "needs_review");
+  assert.equal(escalated.waitingUntil, "", "leaving the waiting state clears the obsolete due time");
+  assert.equal(escalated.waitingReason, "");
+  assert.ok(escalated.escalatedAt);
+  assert.equal(escalated.activity.at(-1).type, "escalated");
+
+  const resolved = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "resolve",
+    tag,
+    actor: "Second leader",
+    expectedUpdatedAt: escalated.updatedAt,
+    mutationId: "automatic-resolve-1",
+  }, "change-me"]);
+  assert.equal(resolved.status, "closed");
+  assert.equal(resolved.activity.at(-1).type, "resolved");
+});
+
+test("war follow-up general player contact moves to a bounded waiting follow-up after the DM", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    expectedUpdatedAt: "",
+    mutationId: "contact-create",
+  }, "change-me"]);
+  const prepared = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact",
+    tag,
+    dmText: "Please contact leadership about your recent wars.",
+    actor: "Leader",
+    expectedUpdatedAt: created.updatedAt,
+    mutationId: "contact-prepare",
+  }, "change-me"]);
+  assert.equal(prepared.status, "needs_dm");
+  assert.equal(prepared.contactPurpose, "general");
+
+  const sent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent",
+    tag,
+    actor: "Leader",
+    expectedUpdatedAt: prepared.updatedAt,
+    mutationId: "contact-sent",
+  }, "change-me"]);
+  assert.equal(sent.status, "waiting");
+  assert.equal(sent.waitingReason, "Awaiting the player's response.");
+  assert.ok(sent.waitingUntil);
+  assert.ok(new Date(sent.waitingUntil).getTime() - new Date(sent.dmSentAt).getTime() === 24 * 60 * 60 * 1000);
+});
+
 test("war follow-up mutation id ledger stays bounded and deduplicates after later updates", () => {
   const backend = installMemoryFirebase(loadBackend());
   const tag = "#P0LYGQ";

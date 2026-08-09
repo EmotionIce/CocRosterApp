@@ -10,7 +10,7 @@
   "use strict";
 
   const DEFAULT_SETTINGS = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     regularLookbackWars: 8,
     regularMissedThreshold: 2,
     regularPerformanceEnabled: true,
@@ -31,9 +31,10 @@
     rulesUpdatedAt: "",
   };
 
-  const STATUS_ORDER = ["needs_review", "needs_dm", "hero_down", "ready", "watching", "closed"];
+  const STATUS_ORDER = ["needs_review", "waiting", "needs_dm", "hero_down", "ready", "watching", "closed"];
   const STATUS_META = {
     needs_review: { label: "Review", next: "Review the war evidence", tone: "review" },
+    waiting: { label: "Waiting", next: "Wait for the scheduled follow-up", tone: "watching" },
     needs_dm: { label: "Needs DM", next: "Send the decision message", tone: "contact" },
     hero_down: { label: "Hero-down", next: "Track hero-down wars", tone: "trial" },
     ready: { label: "Ready", next: "Make the return decision", tone: "ready" },
@@ -699,6 +700,8 @@
             ? "Closed without return to regular wars."
             : "Follow-up closed.",
         ];
+      case "resolve":
+        return ["resolved", "Moderation case resolved."];
       case "reopen":
         return ["reopened", "Follow-up reopened."];
       case "add_note":
@@ -802,10 +805,20 @@
       value.outcome = request.outcome === "no_return" ? "no_return" : "closed";
       value.closedAt = nowIso;
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
+    } else if (action === "resolve") {
+      value.status = "closed";
+      value.outcome = "closed";
+      value.closedAt = nowIso;
+      value.waitingUntil = "";
     } else if (action === "reopen") {
       value.status = "needs_review";
       value.outcome = "";
       value.closedAt = "";
+    }
+
+    if (value.status !== "waiting") {
+      value.waitingUntil = "";
+      value.waitingReason = "";
     }
 
     const actor = toText(request.actor || request.handledBy || value.handledBy).trim();
@@ -1343,9 +1356,9 @@
         tag: item ? item.tag : normalizeTag(player.tag),
         name: toText(player.name).trim(),
         discord: toText(player.discord).trim(),
-        sourceRosterId: toText(player.rosterId || (caseValue && caseValue.sourceRosterId)).trim(),
-        sourceRosterTitle: toText(player.rosterTitle || (caseValue && caseValue.sourceRosterTitle)).trim(),
-        sourceClanTag: normalizeTag(player.clanTag || (caseValue && caseValue.sourceClanTag)),
+        sourceRosterId: toText((caseValue && caseValue.sourceRosterId) || player.rosterId).trim(),
+        sourceRosterTitle: toText((caseValue && caseValue.sourceRosterTitle) || player.rosterTitle).trim(),
+        sourceClanTag: normalizeTag((caseValue && caseValue.sourceClanTag) || player.clanTag),
         actor: toText(caseValue && caseValue.handledBy).trim(),
         handledBy: toText(caseValue && caseValue.handledBy).trim(),
         signalIds: item && Array.isArray(item.signalIds) ? item.signalIds : [],
@@ -1883,7 +1896,7 @@
       for (const key of ["needs_review", "needs_dm", "hero_down", "ready"]) {
         appendStatusButton(tabs, key);
       }
-      const secondaryKeys = ["watching", "closed"];
+      const secondaryKeys = ["waiting", "watching", "closed"];
       const more = createElement("details", "wfu-status-more" + (secondaryKeys.includes(state.status) ? " is-active" : ""));
       more.dataset.wfuRootDetails = "status-more";
       const activeSecondary = secondaryKeys.includes(state.status) ? STATUS_META[state.status].label : "More";
@@ -2198,8 +2211,10 @@
         : null;
       const hasDecisionEvidence = !!(
         caseEvidence &&
-        item.status !== "needs_review" &&
-        item.status !== "watching" &&
+        (
+          toText(item.case && item.case.openedAt).trim() ||
+          (item.status !== "needs_review" && item.status !== "watching" && item.status !== "waiting")
+        ) &&
         (
           toText(caseEvidence.capturedAt).trim() ||
           toInt(caseEvidence.regular && caseEvidence.regular.possibleAttacks) ||
@@ -2472,6 +2487,22 @@
       section.appendChild(actions);
     };
 
+    const renderWaiting = (section, item) => {
+      section.appendChild(createElement("h3", "wfu-drawer-section__title", "Waiting for follow-up"));
+      const due = parseMs(item.case && item.case.waitingUntil);
+      const copy = due
+        ? ("Follow-up is due " + formatDate(item.case.waitingUntil) + ".")
+        : "No fixed follow-up time is set.";
+      section.appendChild(createElement("div", "wfu-closed-copy", copy));
+      if (toText(item.case && item.case.waitingReason).trim()) {
+        section.appendChild(createElement("div", "wfu-closed-copy", toText(item.case.waitingReason).trim()));
+      }
+      const actions = createElement("div", "wfu-form-actions");
+      actions.appendChild(createButton("Review now", "btn", () => mutate(item, "reopen")));
+      actions.appendChild(createButton("Resolve", "btn secondary", () => mutate(item, "resolve")));
+      section.appendChild(actions);
+    };
+
     const renderWatching = (section, item) => {
       const progress = item.watching || buildWatchProgress(item.case, item.evidence);
       section.appendChild(createElement("h3", "wfu-drawer-section__title", progress.ready ? "Review new results" : "Watching"));
@@ -2513,6 +2544,7 @@
       else if (item.status === "needs_review") renderDecisionStart(section, item);
       else if (item.status === "needs_dm") renderNeedsDm(section, item);
       else if (item.status === "hero_down" || item.status === "ready") renderTrial(section, item);
+      else if (item.status === "waiting") renderWaiting(section, item);
       else if (item.status === "watching") renderWatching(section, item);
       else renderClosed(section, item);
       const heading = section.querySelector(".wfu-drawer-section__title");
@@ -2616,6 +2648,13 @@
         "wfu-drawer__meta",
         [item.player.rosterTitle, item.player.th ? "TH" + item.player.th : "", item.tag].filter(Boolean).join(" · "),
       ));
+      if (item.case && (item.case.sourceRosterTitle || item.case.sourceClanTag)) {
+        identity.appendChild(createElement(
+          "div",
+          "wfu-drawer__meta",
+          "Case source: " + [item.case.sourceRosterTitle, item.case.sourceClanTag].filter(Boolean).join(" · "),
+        ));
+      }
       head.appendChild(identity);
       const close = createButton("\u00d7", "btn secondary wfu-drawer__close", () => {
         state.selectedTag = "";
