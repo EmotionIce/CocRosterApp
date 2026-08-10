@@ -432,7 +432,11 @@ const COC_FETCH_RETRY_BASE_DELAY_MS = 300;
 const COC_FETCH_RETRY_MIN_DELAY_MS = 150;
 const COC_FETCH_RETRY_MAX_DELAY_MS = 2500;
 const PLAYER_METRICS_SCHEMA_VERSION = 1;
-const PLAYER_METRICS_TROPHY_HISTORY_MAX_DAYS = 120;
+// The public UI exposes at most a 30-day journey while previous-season
+// leaderboards need at most two 28-day ranked cycles. Seventy days preserves
+// both use cases with rollover slack and keeps the immutable metrics shard
+// bounded as the tracked-player population grows.
+const PLAYER_METRICS_TROPHY_HISTORY_MAX_DAYS = 70;
 const PLAYER_METRICS_DONATION_CYCLES_MAX = 16;
 const PLAYER_METRICS_ENTRY_RETENTION_DAYS = 240;
 const PLAYER_METRICS_PLAYER_HOUSE_MAX_ELEMENTS = 8;

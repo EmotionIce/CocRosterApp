@@ -1089,7 +1089,14 @@ function enqueueCloudflareSeasonEventPublication_(eventIdRaw, reasonRaw, options
 				if (dirtyCwlFinal) { clearSupersededCloudflareDeadLetters_(state, "cwlAggregate", eventId, "final"); kinds.final = makeCloudflareDirtyRevision_(state, reasonRaw || "cwl-final", { eventId: eventId, kind: "final", category: "cwlAggregate" }); }
 				state.dirty.cwlAggregates[eventId] = kinds;
 			}
-			if (dirtyPointers) { clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", ""); state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "event-pointers", { category: "seasonPointers" }); }
+			if (dirtyPointers) {
+				clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", "");
+				const existingPaths = state.dirty.seasonPointers && Array.isArray(state.dirty.seasonPointers.pointerPaths) ? state.dirty.seasonPointers.pointerPaths : [];
+				state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "event-pointers", {
+					category: "seasonPointers",
+					pointerPaths: mergeCloudflareSeasonPointerObjectPaths_(existingPaths, []),
+				});
+			}
 			return { ok: true, eventId: eventId, revision: state.dirty.events[eventId].revision, pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
 		return finalizeCloudflareEnqueueResult_(result);
@@ -1108,7 +1115,7 @@ function enqueueCloudflareSeasonEventReconciliation_(mutationsRaw, reasonRaw) {
 		const eventId = sanitizeSeasonEventText_(eventIdsRaw[i], 180);
 		if (eventId && eventIds.indexOf(eventId) < 0) eventIds.push(eventId);
 	}
-	const pointerPaths = Array.isArray(mutations.pointerPaths) ? mutations.pointerPaths.filter(Boolean) : [];
+	const pointerPaths = mergeCloudflareSeasonPointerObjectPaths_([], mutations.pointerPaths);
 	if (!eventIds.length && !pointerPaths.length) return { ok: true, skipped: true, reason: "no-reconciliation-mutations" };
 	try {
 		const result = mutateCloudflarePublishQueueState_(function (state) {
@@ -1119,7 +1126,11 @@ function enqueueCloudflareSeasonEventReconciliation_(mutationsRaw, reasonRaw) {
 			}
 			if (pointerPaths.length) {
 				clearSupersededCloudflareDeadLetters_(state, "seasonPointers", "", "");
-				state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "season-event-reconciliation-pointers", { category: "seasonPointers", pointerPaths: pointerPaths.slice() });
+				const existingPaths = state.dirty.seasonPointers && Array.isArray(state.dirty.seasonPointers.pointerPaths) ? state.dirty.seasonPointers.pointerPaths : [];
+				state.dirty.seasonPointers = makeCloudflareDirtyRevision_(state, reasonRaw || "season-event-reconciliation-pointers", {
+					category: "seasonPointers",
+					pointerPaths: mergeCloudflareSeasonPointerObjectPaths_(existingPaths, pointerPaths),
+				});
 			}
 			return { ok: true, eventIds: eventIds.slice(), pointerPaths: pointerPaths.slice(), pending: true, nextAttemptAt: cloudflareQueueNextAttemptIso_(state) };
 		});
@@ -1507,6 +1518,81 @@ function readCloudflareTargetRosterMap_(versionIdRaw, manifestRaw) {
 	return rosterMap;
 }
 
+// Project the public metrics shard through the current bounded history schema.
+// This also makes an already-written Firebase target recoverable after a
+// representation-size rollout without mutating its immutable source version.
+function projectCloudflarePlayerMetricsForPublication_(metricsRaw) {
+	const metrics = metricsRaw && typeof metricsRaw === "object" && !Array.isArray(metricsRaw) ? metricsRaw : {};
+	const byTagRaw = metrics.byTag && typeof metrics.byTag === "object" && !Array.isArray(metrics.byTag) ? metrics.byTag : {};
+	const referenceMs = parseIsoToMs_(metrics.updatedAt) || Date.now();
+	const referenceDate = new Date(referenceMs);
+	const byTag = {};
+	const tags = Object.keys(byTagRaw);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = tags[i];
+		const entryRaw = byTagRaw[tag] && typeof byTagRaw[tag] === "object" && !Array.isArray(byTagRaw[tag]) ? byTagRaw[tag] : {};
+		const entry = Object.assign({}, entryRaw);
+		entry.trophyHistoryDaily = pruneTrophyHistoryDaily_(entryRaw.trophyHistoryDaily, referenceDate);
+		byTag[tag] = entry;
+	}
+	return Object.assign({}, metrics, { byTag: byTag });
+}
+
+function getCloudflareCanonicalSeasonPointerObjectPaths_() {
+	return [
+		SEASON_EVENTS_CURRENT_PATH,
+		SEASON_EVENTS_CURRENT_CWL_PATH,
+		SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH,
+		SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH,
+		SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH,
+		SEASON_EVENTS_SEASON_STATE_CURRENT_PATH,
+	];
+}
+
+// Reconciliation records leaf paths, while the Worker data plane stores and
+// serves complete JSON objects. Collapse a changed leaf to its independently
+// readable object, especially /bySeason/{seasonId}/{eventType} to the complete
+// /bySeason/{seasonId} map used by the previous-season website view.
+function normalizeCloudflareSeasonPointerObjectPath_(pathRaw) {
+	const path = normalizeCloudflareDataObjectPath_(pathRaw);
+	if (!path) return "";
+	const canonical = getCloudflareCanonicalSeasonPointerObjectPaths_();
+	for (let i = 0; i < canonical.length; i++) {
+		if (path === canonical[i] || path.indexOf(canonical[i] + "/") === 0) return canonical[i];
+	}
+	const seasonPrefix = normalizeCloudflareDataObjectPath_(SEASON_EVENTS_BY_SEASON_PATH) + "/";
+	if (path.indexOf(seasonPrefix) === 0) {
+		const seasonKey = path.slice(seasonPrefix.length).split("/")[0];
+		if (seasonKey) return seasonPrefix + seasonKey;
+	}
+	return "";
+}
+
+function mergeCloudflareSeasonPointerObjectPaths_(existingRaw, nextRaw) {
+	const combined = (Array.isArray(existingRaw) ? existingRaw : []).concat(Array.isArray(nextRaw) ? nextRaw : []);
+	const canonical = getCloudflareCanonicalSeasonPointerObjectPaths_();
+	const extraLimit = Math.max(1, Number(cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_MAX_OBJECTS_PER_REQUEST", 24)) - canonical.length);
+	const canonicalChanges = [];
+	const extraPaths = [];
+	for (let i = 0; i < combined.length; i++) {
+		const path = normalizeCloudflareSeasonPointerObjectPath_(combined[i]);
+		if (!path) continue;
+		const target = canonical.indexOf(path) >= 0 ? canonicalChanges : extraPaths;
+		const existingIndex = target.indexOf(path);
+		if (existingIndex >= 0) target.splice(existingIndex, 1);
+		target.push(path);
+	}
+	return canonicalChanges.concat(extraPaths.slice(Math.max(0, extraPaths.length - extraLimit)));
+}
+
+function collectCloudflareSeasonPointerObjectPaths_(pointerPathsRaw) {
+	const canonical = getCloudflareCanonicalSeasonPointerObjectPaths_();
+	const merged = mergeCloudflareSeasonPointerObjectPaths_([], pointerPathsRaw);
+	const out = canonical.slice();
+	for (let i = 0; i < merged.length; i++) if (out.indexOf(merged[i]) < 0) out.push(merged[i]);
+	return out;
+}
+
 function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 	const state = normalizeCloudflarePublishQueueState_(stateRaw);
 	const claim = claimRaw && typeof claimRaw === "object" ? claimRaw : {};
@@ -1521,7 +1607,8 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 	}
 	if (phase === "public-player-metrics") {
 		assertCloudflarePublishQueueDeadline_(45000, "active player metrics read");
-		const metrics = readDecodedCloudflareQueueObject_(typeof buildActiveVersionPath_ === "function" ? buildActiveVersionPath_(versionId, "playerMetrics") : buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionId), "playerMetrics")) || {};
+		const metricsRaw = readDecodedCloudflareQueueObject_(typeof buildActiveVersionPath_ === "function" ? buildActiveVersionPath_(versionId, "playerMetrics") : buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionId), "playerMetrics")) || {};
+		const metrics = projectCloudflarePlayerMetricsForPublication_(metricsRaw);
 		return { label: "active-public-player-metrics", request: {
 			batchId: "active:" + versionId + ":public-player-metrics",
 			objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/playerMetrics", metrics, "public")],
@@ -1669,7 +1756,11 @@ function firstCloudflareDirtyWork_(stateRaw) {
 	const donationIds = Object.keys(state.dirty.donationSeasons).sort();
 	for (let i = 0; i < donationIds.length && !liveWork; i++) if (isCloudflareQueueMarkerEligible_(state.dirty.donationSeasons[donationIds[i]], now)) liveWork = { category: "donationSeason", key: donationIds[i], revision: state.dirty.donationSeasons[donationIds[i]].revision };
 	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.cwlLeagueSignups, now)) liveWork = { category: "cwlLeagueSignups", revision: state.dirty.cwlLeagueSignups.revision };
-	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.seasonPointers, now)) liveWork = { category: "seasonPointers", revision: state.dirty.seasonPointers.revision };
+	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.seasonPointers, now)) liveWork = {
+		category: "seasonPointers",
+		revision: state.dirty.seasonPointers.revision,
+		pointerPaths: Array.isArray(state.dirty.seasonPointers.pointerPaths) ? state.dirty.seasonPointers.pointerPaths.slice() : [],
+	};
 	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.bootstrap, now)) liveWork = { category: "bootstrap", revision: state.dirty.bootstrap.revision };
 	if (!liveWork && isCloudflareQueueMarkerEligible_(state.dirty.retention, now)) liveWork = { category: "retention", revision: state.dirty.retention.revision, cursor: String(state.dirty.retention.cursor || "") };
 	if (repairWork && (!liveWork || state.dirty.repairBurst < CLOUDFLARE_QUEUE_REPAIR_BURST_LIMIT_)) return repairWork;
@@ -1854,7 +1945,7 @@ function buildCloudflareDirtyRequest_(stateRaw, workRaw) {
 		const signup = readActiveCwlLeagueSignups_();
 		if (signup) objects.push(makeCloudflareQueueObject_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH, signup, "bot")); else deletes.push({ path: normalizeCloudflareDataObjectPath_(CWL_LEAGUE_SIGNUPS_ACTIVE_PATH), scope: "bot" });
 	} else if (work.category === "seasonPointers") {
-		[SEASON_EVENTS_CURRENT_PATH, SEASON_EVENTS_CURRENT_CWL_PATH, SEASON_EVENTS_CURRENT_CWL_BY_ROSTER_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_PATH, SEASON_EVENTS_LATEST_COMPLETED_CWL_BY_ROSTER_PATH, SEASON_EVENTS_SEASON_STATE_CURRENT_PATH].forEach((path) => {
+		collectCloudflareSeasonPointerObjectPaths_(work.pointerPaths).forEach((path) => {
 			const value = readDecodedCloudflareQueueObject_(path);
 			if (value == null) addCloudflareCanonicalPublicQueueCommitDelete_(commits, path);
 			else commits.push(makeCloudflareQueueObject_(path, value, "public"));

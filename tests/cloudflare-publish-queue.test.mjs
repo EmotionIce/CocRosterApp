@@ -141,6 +141,7 @@ const loadQueue = (dateOverride = Date) => {
     encodeFirebaseObjectKeysRecursive_: (value) => value,
     decodeFirebaseObjectKeysRecursive_: (value) => value,
     createEmptyPlayerMetricsStore_: () => ({ schemaVersion: 1, updatedAt: "", byTag: {} }),
+    pruneTrophyHistoryDaily_: (value) => clone(Array.isArray(value) ? value : []),
     validateRosterData_: (value) => clone(value),
     buildFirebaseChildPath_: (...parts) => parts.filter(Boolean).join("/"),
     encodeFirebaseObjectKey_: (value) => String(value),
@@ -669,6 +670,43 @@ test("lifecycle descriptors dirty canonical event, exact aggregates, and pointer
   assert.ok(state.dirty.cwlAggregates["cwl-2"].live);
   assert.equal(state.dirty.cwlAggregates["cwl-2"].final, undefined);
   assert.equal(state.dirty.seasonPointers, null);
+});
+
+test("season reconciliation publishes complete current and historical season pointer maps", () => {
+  const q = loadQueue();
+  let state = q.createEmptyCloudflarePublishQueueState_();
+  q.mutateCloudflarePublishQueueState_ = (callback) => callback(state);
+  q.scheduleCloudflarePublishWorker_ = () => ({ scheduled: true });
+
+  q.enqueueCloudflareSeasonEventReconciliation_({
+    eventIds: ["push-current"],
+    pointerPaths: [
+      "events/seasonEvents/current/push",
+      "events/seasonEvents/bySeason/ranked-legend-i-2026-08-10/push",
+    ],
+  }, "current-rollover");
+  q.enqueueCloudflareSeasonEventReconciliation_({
+    eventIds: ["push-previous"],
+    pointerPaths: [
+      "events/seasonEvents/bySeason/ranked-legend-i-2026-07-13/donation",
+    ],
+  }, "previous-rollover");
+
+  for (const eventId of Object.keys(state.dirty.events)) delete state.dirty.events[eventId];
+  const pointerWork = q.firstCloudflareDirtyWork_(state);
+  assert.equal(pointerWork.category, "seasonPointers");
+  assert.deepEqual(Array.from(pointerWork.pointerPaths), [
+    "events/seasonEvents/current",
+    "events/seasonEvents/bySeason/ranked-legend-i-2026-08-10",
+    "events/seasonEvents/bySeason/ranked-legend-i-2026-07-13",
+  ]);
+
+  q.readDecodedCloudflareQueueObject_ = (path) => ({ path });
+  const built = q.buildCloudflareDirtyRequest_(state, pointerWork);
+  const publishedPaths = built.commits.map((item) => item.path);
+  assert.ok(publishedPaths.includes("events/seasonEvents/current"));
+  assert.ok(publishedPaths.includes("events/seasonEvents/bySeason/ranked-legend-i-2026-08-10"));
+  assert.ok(publishedPaths.includes("events/seasonEvents/bySeason/ranked-legend-i-2026-07-13"));
 });
 
 test("lease prevents six-minute overlap and claimed-work recovery follows promptly", () => {

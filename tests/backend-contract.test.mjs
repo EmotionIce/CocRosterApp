@@ -634,6 +634,59 @@ const assertRankedSeason = (actual, expected) => {
   assert.equal(actual.source, expected.source || "legend-cycle");
 };
 
+test("public player metrics projection compacts and bounds historical league snapshots", () => {
+  const backend = loadBackend();
+  const iconUrls = {
+    small: "https://api-assets.clashofclans.com/leagues/small.png",
+    medium: "https://api-assets.clashofclans.com/leagues/medium.png",
+  };
+  const metrics = {
+    schemaVersion: 1,
+    updatedAt: "2026-08-10T08:31:54.619Z",
+    byTag: {
+      "#PLAYER": {
+        identity: { tag: "#PLAYER", name: "Player" },
+        latestSnapshot: {
+          tag: "#PLAYER",
+          name: "Player",
+          trophies: 5200,
+          capturedAt: "2026-08-10T08:31:54.619Z",
+          league: { id: 29000022, name: "Legend League", iconUrls },
+        },
+        trophyHistoryDaily: [
+          {
+            dayKey: "2026-05-01",
+            capturedAt: "2026-05-01T08:00:00.000Z",
+            trophies: 4900,
+            league: { id: 29000022, name: "Legend League", iconUrls },
+          },
+          {
+            dayKey: "2026-07-13",
+            capturedAt: "2026-07-13T08:00:00.000Z",
+            trophies: 5100,
+            clanTag: "#CLAN",
+            league: { id: 29000022, name: "Legend League", iconUrls },
+            leagueTier: { id: 105000036, name: "Legend I", iconUrls },
+          },
+        ],
+        donationCycles: {},
+      },
+    },
+  };
+
+  const projected = clone(backend.projectCloudflarePlayerMetricsForPublication_(metrics));
+  const entry = projected.byTag["#PLAYER"];
+  assert.equal(entry.trophyHistoryDaily.length, 1);
+  assert.deepEqual(entry.trophyHistoryDaily[0].league, { id: 29000022, name: "Legend League" });
+  assert.deepEqual(entry.trophyHistoryDaily[0].leagueTier, { id: 105000036, name: "Legend I" });
+  assert.equal(entry.trophyHistoryDaily[0].clanTag, "#CLAN");
+  assert.deepEqual(entry.latestSnapshot.league.iconUrls, iconUrls);
+
+  const sanitized = clone(backend.sanitizePlayerMetricsStore_(metrics, metrics.updatedAt));
+  assert.equal(sanitized.byTag["#PLAYER"].trophyHistoryDaily.length, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(sanitized.byTag["#PLAYER"].trophyHistoryDaily[0].league, "iconUrls"), false);
+});
+
 test("firebaseRequestJson suppresses write response bodies", () => {
   const backend = loadBackend();
   const requests = [];

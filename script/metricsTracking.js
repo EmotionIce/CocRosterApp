@@ -125,6 +125,20 @@ function sanitizeMetricsLeagueSnapshot_(leagueRaw) {
 	return out;
 }
 
+// Historical trophy points are long-lived and need only stable league
+// identity for charts and leaderboard ranking. Icon URLs remain on the latest
+// snapshot, where the UI actually renders them, instead of being repeated for
+// every player and day in the immutable metrics shard.
+function sanitizeMetricsHistoricalLeagueSnapshot_(leagueRaw) {
+	const league = sanitizeMetricsLeagueSnapshot_(leagueRaw);
+	if (!league) return null;
+	const out = {};
+	if (toNonNegativeInt_(league.id) > 0) out.id = toNonNegativeInt_(league.id);
+	const name = String(league.name == null ? "" : league.name).trim();
+	if (name) out.name = name;
+	return Object.keys(out).length ? out : null;
+}
+
 // Sanitize metrics player house snapshot.
 function sanitizeMetricsPlayerHouseSnapshot_(playerHouseRaw) {
 	const playerHouse = playerHouseRaw && typeof playerHouseRaw === "object" ? playerHouseRaw : null;
@@ -286,9 +300,9 @@ function sanitizeMetricsTrophyHistoryPoint_(pointRaw) {
 	const clanTag = normalizeTag_(point.clanTag);
 	if (clanTag) out.clanTag = clanTag;
 
-	const league = sanitizeMetricsLeagueSnapshot_(point.league);
+	const league = sanitizeMetricsHistoricalLeagueSnapshot_(point.league);
 	if (league) out.league = league;
-	const leagueTier = sanitizeMetricsLeagueSnapshot_(point.leagueTier);
+	const leagueTier = sanitizeMetricsHistoricalLeagueSnapshot_(point.leagueTier);
 	if (leagueTier) out.leagueTier = leagueTier;
 
 	return out;
