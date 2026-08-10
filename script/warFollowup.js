@@ -4,7 +4,7 @@
 // payload. Reads and writes here must never publish roster versions, enqueue
 // Cloudflare work, or participate in the refresh job.
 
-const WAR_FOLLOWUP_SCHEMA_VERSION = 2;
+const WAR_FOLLOWUP_SCHEMA_VERSION = 3;
 const WAR_FOLLOWUP_PRIVATE_PATH = "private/warFollowup/v1";
 const WAR_FOLLOWUP_SETTINGS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/settings";
 const WAR_FOLLOWUP_CASES_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/cases";
@@ -21,6 +21,9 @@ const WAR_FOLLOWUP_STATUS_SET = {
 	watching: true,
 	needs_dm: true,
 	hero_down: true,
+	removal_pending: true,
+	removal_evasion: true,
+	removed: true,
 	closed: true,
 	dismissed: true,
 };
@@ -30,6 +33,10 @@ const WAR_FOLLOWUP_OUTCOME_SET = {
 	no_action: true,
 	approved_return: true,
 	no_return: true,
+	resolved: true,
+	removed: true,
+	removal_cancelled: true,
+	rejoin_approved: true,
 	closed: true,
 };
 
@@ -345,6 +352,9 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		tag: tag,
 		name: sanitizeWarFollowupText_(value.name, 120),
 		discord: sanitizeWarFollowupText_(value.discord, 160),
+		discordId: /^\d{17,20}$/.test(String(value.discordId || "").trim())
+			? String(value.discordId).trim()
+			: "",
 		sourceRosterId: sanitizeWarFollowupText_(value.sourceRosterId, 120),
 		sourceRosterTitle: sanitizeWarFollowupText_(value.sourceRosterTitle, 160),
 		sourceClanTag: normalizeTag_(value.sourceClanTag),
@@ -367,6 +377,7 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		assignmentBlockedUntil: sanitizeWarFollowupTimestamp_(value.assignmentBlockedUntil),
 		waitingUntil: sanitizeWarFollowupTimestamp_(value.waitingUntil),
 		waitingReason: sanitizeWarFollowupMultilineText_(value.waitingReason, 1000),
+		resolutionNote: sanitizeWarFollowupMultilineText_(value.resolutionNote, 2000),
 		escalatedAt: sanitizeWarFollowupTimestamp_(value.escalatedAt),
 		escalatedBy: sanitizeWarFollowupText_(value.escalatedBy, 80),
 		openedAt: sanitizeWarFollowupTimestamp_(value.openedAt || value.createdAt),
@@ -386,6 +397,15 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		recoveryStartedAt: sanitizeWarFollowupTimestamp_(value.recoveryStartedAt),
 		recoveryWarTarget: clampWarFollowupNumber_(value.recoveryWarTarget, 1, 8, 3, true),
 		requireNoMisses: value.requireNoMisses == null ? true : toBooleanFlag_(value.requireNoMisses),
+		removalReason: sanitizeWarFollowupMultilineText_(value.removalReason, 1000),
+		removalStartedAt: sanitizeWarFollowupTimestamp_(value.removalStartedAt),
+		removalActionedAt: sanitizeWarFollowupTimestamp_(value.removalActionedAt),
+		removalAbsentObservedAt: sanitizeWarFollowupTimestamp_(value.removalAbsentObservedAt),
+		removalRejoinedAt: sanitizeWarFollowupTimestamp_(value.removalRejoinedAt),
+		removalRejoinCount: Math.min(1000, toNonNegativeInt_(value.removalRejoinCount)),
+		rejoinRosterId: sanitizeWarFollowupText_(value.rejoinRosterId, 120),
+		rejoinRosterTitle: sanitizeWarFollowupText_(value.rejoinRosterTitle, 160),
+		rejoinClanTag: normalizeTag_(value.rejoinClanTag),
 		createdAt: sanitizeWarFollowupTimestamp_(value.createdAt),
 		updatedAt: sanitizeWarFollowupTimestamp_(value.updatedAt),
 		closedAt: sanitizeWarFollowupTimestamp_(value.closedAt),
@@ -453,6 +473,10 @@ function applyWarFollowupIdentityPatch_(caseRaw, requestRaw) {
 	for (let i = 0; i < fields.length; i++) {
 		if (!Object.prototype.hasOwnProperty.call(request, fields[i])) continue;
 		value[fields[i]] = sanitizeWarFollowupText_(request[fields[i]], lengths[i]);
+	}
+	if (Object.prototype.hasOwnProperty.call(request, "discordId")) {
+		const discordId = String(request.discordId || "").trim();
+		value.discordId = /^\d{17,20}$/.test(discordId) ? discordId : "";
 	}
 	// The source roster is the case-creation snapshot. Never let a later player
 	// move silently rewrite the clan/evidence context that opened the case.
@@ -741,6 +765,26 @@ function mutateWarFollowupCase(requestRaw, password) {
 		applyWarFollowupIdentityPatch_(value, request);
 		const actor = sanitizeWarFollowupText_(request.actor || request.handledBy || value.handledBy, 80);
 		const currentSignalIds = sanitizeWarFollowupStringList_(request.signalIds, { maxItems: 24, maxLength: 300 });
+		const dismissibleSignalIds = currentSignalIds.length
+			? currentSignalIds
+			: sanitizeWarFollowupStringList_(value.triggerSignalIds, { maxItems: 24, maxLength: 300 });
+		const removalLocked = ["removal_pending", "removal_evasion", "removed"].indexOf(value.status) >= 0;
+		if (removalLocked && ["contact", "watch", "hero_down", "wait", "dismiss", "resolve", "reopen", "close"].indexOf(action) >= 0) {
+			throw new Error("Complete, repeat, approve, or cancel the removal workflow first.");
+		}
+		if (action === "dismiss" && ["needs_review", "watching"].indexOf(value.status) < 0) throw new Error("This case cannot be closed as no action from its current state.");
+		if (action === "watch" && value.status !== "needs_review") throw new Error("Only a case awaiting review can start monitoring.");
+		if (action === "contact" && ["needs_review", "waiting"].indexOf(value.status) < 0) throw new Error("This case is not ready for a contact decision.");
+		if (action === "wait" && ["needs_review", "waiting", "needs_dm"].indexOf(value.status) < 0) throw new Error("This case cannot schedule a follow-up from its current state.");
+		if (action === "hero_down" && value.status !== "needs_review") throw new Error("Only a case awaiting review can start a hero-down period.");
+		if (action === "remove" && ["needs_review", "waiting", "hero_down", "removal_evasion", "removed"].indexOf(value.status) < 0) throw new Error("This case is not ready for a removal decision.");
+		if (action === "close" && value.status !== "hero_down") throw new Error("Only an active hero-down case can be closed without return.");
+		if (action === "resolve" && ["needs_review", "needs_dm", "waiting"].indexOf(value.status) < 0) throw new Error("This case cannot be recorded as resolved from its current state.");
+		if (action === "reopen" && ["needs_dm", "waiting", "watching", "closed", "dismissed"].indexOf(value.status) < 0) throw new Error("This case cannot be reopened from its current state.");
+		if (["set_handler", "assign_owner", "unassign_owner"].indexOf(action) >= 0 &&
+			["needs_review", "waiting", "needs_dm", "removal_pending", "removal_evasion", "removed", "hero_down"].indexOf(value.status) < 0) {
+			throw new Error("Only an active moderation case can have an owner.");
+		}
 
 		switch (action) {
 			case "create_automatic":
@@ -794,7 +838,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "dismiss":
 				value.status = "dismissed";
 				value.outcome = "no_action";
-				value.dismissedSignalIds = currentSignalIds;
+				value.dismissedSignalIds = dismissibleSignalIds;
 				value.closedAt = nowIso;
 				appendWarFollowupActivity_(value, "dismissed", "Reviewed with no action.", actor, nowIso);
 				break;
@@ -803,31 +847,61 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.outcome = "";
 				value.watchStartedAt = nowIso;
 				value.watchWarTarget = clampWarFollowupNumber_(request.watchWarTarget, 1, 8, 2, true);
-				value.dismissedSignalIds = currentSignalIds;
+				value.dismissedSignalIds = dismissibleSignalIds;
+				value.assignedModeratorId = "";
+				value.assignedModeratorName = "";
+				value.handledBy = "";
+				value.assignedAt = "";
+				value.assignmentUpdatedAt = nowIso;
 				value.closedAt = "";
 				appendWarFollowupActivity_(
 					value,
 					"watching",
-					"Watching for " + value.watchWarTarget + " regular war" + (value.watchWarTarget === 1 ? "." : "s."),
+					"Monitoring the next " + value.watchWarTarget + " regular war" + (value.watchWarTarget === 1 ? ". Active ownership released." : "s. Active ownership released."),
 					actor,
 					nowIso,
 				);
 				break;
+			case "watch_triggered":
+				if (value.status !== "watching") throw new Error("This account is no longer being monitored.");
+				value.status = "needs_review";
+				value.outcome = "";
+				value.reasonCodes = sanitizeWarFollowupStringList_(request.reasonCodes, {
+					maxItems: 8,
+					maxLength: 40,
+					allowed: WAR_FOLLOWUP_REASON_SET,
+				});
+				value.triggerSignalIds = sanitizeWarFollowupStringList_(request.triggerSignalIds || request.signalIds, {
+					maxItems: 24,
+					maxLength: 300,
+				});
+				value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
+				value.openedAt = nowIso;
+				value.closedAt = "";
+				appendWarFollowupActivity_(value, "watch_triggered", "Monitoring found new problematic war evidence and reopened the case.", actor || "War Follow Up", nowIso);
+				if (request.assignedModeratorId) applyWarFollowupOwner_(value, request, actor || "War Follow Up", nowIso);
+				break;
+			case "watch_complete":
+				if (value.status !== "watching") throw new Error("This account is no longer being monitored.");
+				value.status = "dismissed";
+				value.outcome = "no_action";
+				value.dismissedSignalIds = dismissibleSignalIds;
+				value.closedAt = nowIso;
+				appendWarFollowupActivity_(value, "watch_complete", "Monitoring completed without new problematic evidence.", actor || "War Follow Up", nowIso);
+				break;
 			case "wait": {
 				const followupHours = Number(request.followupHours);
-				if ([0, 24, 48, 72].indexOf(followupHours) < 0) {
-					throw new Error("Waiting follow-up must be 0, 24, 48, or 72 hours.");
+				if ([24, 48, 72].indexOf(followupHours) < 0) {
+					throw new Error("Waiting follow-up must be 24, 48, or 72 hours.");
 				}
 				value.status = "waiting";
-				value.waitingUntil = followupHours > 0
-					? new Date(parseIsoToMs_(nowIso) + followupHours * 60 * 60 * 1000).toISOString()
-					: "";
+				value.waitingUntil = new Date(parseIsoToMs_(nowIso) + followupHours * 60 * 60 * 1000).toISOString();
 				value.waitingReason = sanitizeWarFollowupMultilineText_(request.waitingReason, 1000);
 				value.closedAt = "";
 				appendWarFollowupActivity_(
 					value,
 					"waiting",
-					"Marked waiting" + (followupHours ? (" with a " + followupHours + "h follow-up.") : " without a scheduled follow-up.") +
+					"Paused with a " + followupHours + "h follow-up." +
 						(value.waitingReason ? (" " + value.waitingReason) : ""),
 					actor,
 					nowIso,
@@ -886,17 +960,94 @@ function mutateWarFollowupCase(requestRaw, password) {
 					value.status = "waiting";
 					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
 					value.waitingReason = "Awaiting the player's response.";
+				} else if (value.contactPurpose === "removal") {
+					value.status = "removal_pending";
 				} else {
 					value.status = "hero_down";
 					value.recoveryStartedAt = nowIso;
 				}
-				appendWarFollowupActivity_(value, "dm_sent", "Decision DM marked as sent.", actor, nowIso);
+				appendWarFollowupActivity_(
+					value,
+					"dm_sent",
+					value.contactPurpose === "removal" ? "Removal notice marked as sent." : "Decision DM marked as sent.",
+					actor,
+					nowIso,
+				);
+				break;
+			case "remove":
+				value.status = "needs_dm";
+				value.outcome = "";
+				value.contactPurpose = "removal";
+				value.removalReason = sanitizeWarFollowupMultilineText_(request.removalReason, 1000);
+				if (!value.removalReason) throw new Error("A removal reason is required.");
+				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
+				if (!value.dmText) throw new Error("The removal message is empty.");
+				value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence || value.evidence);
+				value.removalStartedAt = nowIso;
+				value.removalActionedAt = "";
+				value.removalAbsentObservedAt = "";
+				value.removalRejoinedAt = "";
+				value.rejoinRosterId = "";
+				value.rejoinRosterTitle = "";
+				value.rejoinClanTag = "";
+				value.dmSentAt = "";
+				value.closedAt = "";
+				appendWarFollowupActivity_(value, "removal_decision", "Removal from the community selected. Reason: " + value.removalReason, actor, nowIso);
+				break;
+			case "removal_no_dm":
+				if (value.status !== "needs_dm" || value.contactPurpose !== "removal") throw new Error("This case is not waiting on a removal notice.");
+				value.status = "removal_pending";
+				value.dmSentAt = "";
+				appendWarFollowupActivity_(value, "removal_no_dm", "Removal continued without a Discord DM.", actor, nowIso);
+				break;
+			case "removal_actioned":
+				if (value.status !== "removal_pending") throw new Error("This removal is no longer awaiting in-game action.");
+				value.removalActionedAt = nowIso;
+				appendWarFollowupActivity_(value, "removal_actioned", "Moderator recorded the in-game removal. Waiting for roster confirmation.", actor, nowIso);
+				break;
+			case "removal_confirmed":
+				if (["removal_pending", "removed"].indexOf(value.status) < 0) throw new Error("This case is not awaiting removal confirmation.");
+				value.status = "removed";
+				value.outcome = "removed";
+				value.removalAbsentObservedAt = nowIso;
+				value.closedAt = nowIso;
+				appendWarFollowupActivity_(value, "removal_confirmed", "Roster data confirmed that the player left the connected clans. Rejoin monitoring is active.", actor || "War Follow Up", nowIso);
+				break;
+			case "removal_rejoined":
+				if (value.status !== "removed" || !value.removalAbsentObservedAt) throw new Error("This removal is not eligible for rejoin detection.");
+				value.status = "removal_evasion";
+				value.outcome = "";
+				value.removalRejoinedAt = nowIso;
+				value.removalRejoinCount = Math.min(1000, toNonNegativeInt_(value.removalRejoinCount) + 1);
+				value.rejoinRosterId = sanitizeWarFollowupText_(request.rejoinRosterId, 120);
+				value.rejoinRosterTitle = sanitizeWarFollowupText_(request.rejoinRosterTitle, 160);
+				value.rejoinClanTag = normalizeTag_(request.rejoinClanTag);
+				value.openedAt = nowIso;
+				value.closedAt = "";
+				appendWarFollowupActivity_(value, "removal_rejoined", "Removed player detected in " + (value.rejoinRosterTitle || value.rejoinClanTag || "a connected clan") + ".", actor || "War Follow Up", nowIso);
+				break;
+			case "cancel_removal":
+				if (["needs_dm", "removal_pending"].indexOf(value.status) < 0 || value.contactPurpose !== "removal") throw new Error("This removal is no longer active.");
+				value.status = "closed";
+				value.outcome = "removal_cancelled";
+				value.removalAbsentObservedAt = "";
+				value.closedAt = nowIso;
+				appendWarFollowupActivity_(value, "removal_cancelled", "Removal decision cancelled. Rejoin monitoring is off.", actor, nowIso);
+				break;
+			case "approve_rejoin":
+				if (["removed", "removal_evasion"].indexOf(value.status) < 0) throw new Error("This account is not under rejoin monitoring.");
+				value.status = "closed";
+				value.outcome = "rejoin_approved";
+				value.removalAbsentObservedAt = "";
+				value.closedAt = nowIso;
+				value.dismissedSignalIds = dismissibleSignalIds;
+				appendWarFollowupActivity_(value, "rejoin_approved", "Leadership approved the player's return. Removal monitoring is off.", actor, nowIso);
 				break;
 			case "approve_return":
 				value.status = "closed";
 				value.outcome = "approved_return";
 				value.closedAt = nowIso;
-				value.dismissedSignalIds = currentSignalIds;
+				value.dismissedSignalIds = dismissibleSignalIds;
 				appendWarFollowupActivity_(value, "approved_return", "Approved to return to regular wars.", actor, nowIso);
 				break;
 			case "extend":
@@ -920,7 +1071,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.status = "closed";
 				value.outcome = request.outcome === "no_return" ? "no_return" : "closed";
 				value.closedAt = nowIso;
-				value.dismissedSignalIds = currentSignalIds;
+				value.dismissedSignalIds = dismissibleSignalIds;
 				appendWarFollowupActivity_(
 					value,
 					"closed",
@@ -930,11 +1081,14 @@ function mutateWarFollowupCase(requestRaw, password) {
 				);
 				break;
 			case "resolve":
+				if (["removal_pending", "removal_evasion", "removed"].indexOf(value.status) >= 0) throw new Error("Complete or cancel the removal workflow instead of closing it as a normal case.");
 				value.status = "closed";
-				value.outcome = "closed";
+				value.outcome = "resolved";
+				value.resolutionNote = sanitizeWarFollowupMultilineText_(request.resolutionNote, 2000) || "Resolved by a moderator.";
 				value.closedAt = nowIso;
 				value.waitingUntil = "";
-				appendWarFollowupActivity_(value, "resolved", "Moderation case resolved.", actor, nowIso);
+				value.dismissedSignalIds = dismissibleSignalIds;
+				appendWarFollowupActivity_(value, "resolved", "Case closed: " + value.resolutionNote, actor, nowIso);
 				break;
 			case "reopen":
 				value.status = "needs_review";
@@ -975,7 +1129,9 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "escalate":
 				value.escalatedAt = nowIso;
 				value.escalatedBy = actor;
-				value.status = "needs_review";
+				if (!(value.contactPurpose === "removal" && ["needs_dm", "removal_pending", "removal_evasion", "removed"].indexOf(value.status) >= 0)) {
+					value.status = "needs_review";
+				}
 				appendWarFollowupActivity_(value, "escalated", "Escalated for leadership review.", actor, nowIso);
 				break;
 			default:

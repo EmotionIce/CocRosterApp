@@ -7682,7 +7682,7 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
     mutationId: "automatic-create-1",
   }, "change-me"]);
 
-  assert.equal(created.schemaVersion, 2);
+  assert.equal(created.schemaVersion, 3);
   assert.equal(created.status, "needs_review");
   assert.equal(created.sourceClanTag, "#SOURCE");
   assert.equal(created.evidence.regular.missedAttacks, 2);
@@ -7750,10 +7750,14 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
     action: "resolve",
     tag,
     actor: "Second leader",
+    resolutionNote: "Player replied and leadership completed the follow-up.",
     expectedUpdatedAt: escalated.updatedAt,
     mutationId: "automatic-resolve-1",
   }, "change-me"]);
   assert.equal(resolved.status, "closed");
+  assert.equal(resolved.outcome, "resolved");
+  assert.equal(resolved.resolutionNote, "Player replied and leadership completed the follow-up.");
+  assert.deepEqual(Array.from(resolved.dismissedSignalIds), ["regular_missed:war-trigger"]);
   assert.equal(resolved.activity.at(-1).type, "resolved");
 });
 
@@ -7788,6 +7792,101 @@ test("war follow-up general player contact moves to a bounded waiting follow-up 
   assert.equal(sent.waitingReason, "Awaiting the player's response.");
   assert.ok(sent.waitingUntil);
   assert.ok(new Date(sent.waitingUntil).getTime() - new Date(sent.dmSentAt).getTime() === 24 * 60 * 60 * 1000);
+});
+
+test("war follow-up removal stays open until roster confirmation and preserves rejoin monitoring", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    name: "Player",
+    discordId: "123456789012345678",
+    sourceRosterId: "main",
+    sourceRosterTitle: "Main clan",
+    sourceClanTag: "#MAIN",
+    expectedUpdatedAt: "",
+    mutationId: "removal-create",
+  }, "change-me"]);
+  const prepared = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "remove",
+    tag,
+    removalReason: "Repeated refusal to follow war rules.",
+    dmText: "You are being removed from the community.",
+    actor: "Leader",
+    expectedUpdatedAt: created.updatedAt,
+    mutationId: "removal-prepare",
+  }, "change-me"]);
+  assert.equal(prepared.status, "needs_dm");
+  assert.equal(prepared.contactPurpose, "removal");
+  assert.equal(prepared.discordId, "123456789012345678");
+
+  const noticeSent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent",
+    tag,
+    actor: "Leader",
+    expectedUpdatedAt: prepared.updatedAt,
+    mutationId: "removal-notice",
+  }, "change-me"]);
+  assert.equal(noticeSent.status, "removal_pending");
+
+  const actioned = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "removal_actioned",
+    tag,
+    actor: "Leader",
+    expectedUpdatedAt: noticeSent.updatedAt,
+    mutationId: "removal-actioned",
+  }, "change-me"]);
+  assert.equal(actioned.status, "removal_pending", "a moderator click cannot replace authoritative roster confirmation");
+  assert.ok(actioned.removalActionedAt);
+
+  const confirmed = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "removal_confirmed",
+    tag,
+    actor: "War Follow Up",
+    expectedUpdatedAt: actioned.updatedAt,
+    mutationId: "removal-confirmed",
+  }, "change-me"]);
+  assert.equal(confirmed.status, "removed");
+  assert.equal(confirmed.outcome, "removed");
+  assert.ok(confirmed.removalAbsentObservedAt);
+
+  const rejoined = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "removal_rejoined",
+    tag,
+    rejoinRosterId: "rehab",
+    rejoinRosterTitle: "TURTLE Rehab",
+    rejoinClanTag: "#9PYLQG",
+    actor: "War Follow Up",
+    expectedUpdatedAt: confirmed.updatedAt,
+    mutationId: "removal-rejoined",
+  }, "change-me"]);
+  assert.equal(rejoined.status, "removal_evasion");
+  assert.equal(rejoined.removalRejoinCount, 1);
+  assert.equal(rejoined.rejoinClanTag, "#9PYLQG");
+
+  assert.throws(
+    () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+      action: "dismiss",
+      tag,
+      actor: "Leadership",
+      expectedUpdatedAt: rejoined.updatedAt,
+      mutationId: "removal-bypass-attempt",
+    }, "change-me"]),
+    /removal workflow/,
+    "a generic no-action control cannot bypass a removal-evasion review",
+  );
+
+  const approved = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "approve_rejoin",
+    tag,
+    actor: "Leadership",
+    expectedUpdatedAt: rejoined.updatedAt,
+    mutationId: "removal-approved",
+  }, "change-me"]);
+  assert.equal(approved.status, "closed");
+  assert.equal(approved.outcome, "rejoin_approved");
+  assert.equal(approved.removalAbsentObservedAt, "");
 });
 
 test("war follow-up mutation id ledger stays bounded and deduplicates after later updates", () => {

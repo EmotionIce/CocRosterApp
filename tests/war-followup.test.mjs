@@ -254,6 +254,71 @@ test("dismissed evidence stays closed until a genuinely new war revision appears
   assert.equal(changed.items.find((entry) => entry.tag === "#P0LYGQ").status, "needs_review");
 });
 
+test("monitoring closes after clean wars and reopens only for problematic post-watch evidence", () => {
+  const rosterData = buildRosterData();
+  const settings = {
+    regularMissedThreshold: 2,
+    regularPerformanceEnabled: false,
+    cwlMissedThreshold: 8,
+    cwlPerformanceEnabled: false,
+  };
+  const initial = followup.buildWorkItems(rosterData, { settings, cases: [] });
+  const initialItem = initial.items.find((entry) => entry.tag === "#P0LYGQ");
+  const monitoringCase = {
+    tag: "#P0LYGQ",
+    status: "watching",
+    watchStartedAt: "2026-07-25T00:00:00.000Z",
+    watchWarTarget: 1,
+    dismissedSignalIds: initialItem.signalIds,
+  };
+  rosterData.playerWarPerformance.byTag["#P0LYGQ"].recentRegularWarForm.unshift(
+    regularEvent("rw-clean", "2026-07-26T00:00:00.000Z", "#MAIN", {
+      possibleAttacks: 2, usedAttacks: 2, attacksMade: 2, attacksMissed: 0,
+      countedAttacks: 2, starsTotal: 5, totalDestruction: 180,
+    }),
+  );
+  const clean = followup.buildWorkItems(rosterData, { settings, cases: [monitoringCase] });
+  const cleanItem = clean.items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.equal(cleanItem.status, "closed");
+  assert.equal(cleanItem.watching.triggered, false);
+
+  rosterData.playerWarPerformance.byTag["#P0LYGQ"].recentRegularWarForm.unshift(
+    regularEvent("rw-problem", "2026-07-27T00:00:00.000Z", "#MAIN", {
+      possibleAttacks: 2, usedAttacks: 0, attacksMade: 0, attacksMissed: 2,
+    }),
+  );
+  const problematic = followup.buildWorkItems(rosterData, { settings, cases: [monitoringCase] });
+  const problemItem = problematic.items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.equal(problemItem.status, "needs_review");
+  assert.equal(problemItem.watching.triggered, true);
+  assert.deepEqual(problemItem.signals.map((signal) => signal.reasonCode), ["regular_missed"]);
+});
+
+test("confirmed removals stay closed while absent and surface immediately after a connected-clan rejoin", () => {
+  const rosterData = buildRosterData();
+  rosterData.rosters[0].main = rosterData.rosters[0].main.filter((player) => player.tag !== "#P0LYGQ");
+  const removalCase = {
+    tag: "#P0LYGQ",
+    name: "Player One",
+    discordId: "123456789012345678",
+    sourceRosterId: "main",
+    sourceRosterTitle: "Main clan",
+    sourceClanTag: "#MAIN",
+    status: "removed",
+    outcome: "removed",
+    contactPurpose: "removal",
+    removalAbsentObservedAt: "2026-07-26T00:00:00.000Z",
+  };
+  const absent = followup.buildWorkItems(rosterData, { settings: {}, cases: [removalCase] });
+  const absentItem = absent.items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.equal(absentItem.status, "closed");
+  assert.equal(absentItem.player.discordId, "123456789012345678");
+
+  rosterData.rosters[1].main.push({ tag: "#P0LYGQ", name: "Player One", th: 17 });
+  const rejoined = followup.buildWorkItems(rosterData, { settings: {}, cases: [removalCase] });
+  assert.equal(rejoined.items.find((entry) => entry.tag === "#P0LYGQ").status, "needs_review");
+});
+
 test("dismissed evidence stays closed when refresh promotes the same wars into the canonical ledger", () => {
   const fallbackData = buildRosterData();
   const canonicalEntry = structuredClone(fallbackData.playerWarPerformance.byTag["#P0LYGQ"]);
@@ -969,6 +1034,7 @@ test("a lost mutation response is accepted when reconciliation finds its mutatio
           status: "watching",
           watchWarTarget: 2,
           watchStartedAt: "2026-07-28T12:00:00.000Z",
+          dismissedSignalIds: mutationRequest.signalIds,
           updatedAt: "2026-07-28T12:00:00.000Z",
           mutationLedger: [{
             mutationId: mutationRequest.mutationId,

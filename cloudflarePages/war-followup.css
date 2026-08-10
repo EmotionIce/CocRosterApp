@@ -900,10 +900,6 @@
   font-weight: 800;
 }
 
-.wfu-decision-grid .wfu-decision-btn:last-child {
-  grid-column: 1 / -1;
-}
-
 .wfu-always-ignore {
   appearance: none;
   display: inline-flex;
@@ -1207,10 +1203,6 @@
   .wfu-decision-grid,
   .wfu-settings-grid {
     grid-template-columns: 1fr;
-  }
-
-  .wfu-decision-grid .wfu-decision-btn:last-child {
-    grid-column: auto;
   }
 
   .wfu-ignore-controls {
