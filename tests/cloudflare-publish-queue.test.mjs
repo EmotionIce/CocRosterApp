@@ -1433,6 +1433,39 @@ test("one permanently failed item is dead-lettered while unrelated work remains,
   assert.equal(Object.values(next.deadLetters).some((dead) => dead.category === "event" && dead.key === "bad"), false);
 });
 
+test("retrying an active dead letter clears the singleton active failure marker", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = activeState(q, "public-player-metrics");
+  const claim = {
+    category: "active",
+    phase: "public-player-metrics",
+    cursor: 0,
+    targetVersionId: state.active.targetVersionId,
+    generation: state.active.targetGeneration,
+  };
+  q.__setState(state);
+  const failed = q.recordCloudflareQueueFailure_(
+    "Cloudflare object exceeds hard limit",
+    { failed: { scope: "public", path: "activeVersions/version-B/playerMetrics.json" } },
+    "",
+    claim,
+  );
+  assert.equal(failed.deadLetter, true);
+  const itemKey = failed.itemKey;
+  assert.equal(q.__getState().active.failure.itemKey, itemKey);
+  assert.ok(q.__getState().deadLetters[itemKey]);
+
+  q.assertCloudflarePublicDataPublishAuth_ = () => true;
+  q.finalizeCloudflareEnqueueResult_ = (value) => value;
+  q.getCloudflarePublishQueueDiagnostics_ = () => clone(q.__getState());
+  q.retryCloudflarePublishQueue({ itemKey }, "secret");
+
+  const retried = q.__getState();
+  assert.equal(retried.active.failure, null);
+  assert.equal(retried.deadLetters[itemKey], undefined);
+  assert.equal(q.hasPendingCloudflarePublishWork_(retried), true);
+});
+
 test("duplicate repair enqueue merges reasons and scopes without resetting its cursor", () => {
   const q = installCasFirebase(loadQueue());
   const state = q.createEmptyCloudflarePublishQueueState_();

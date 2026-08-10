@@ -2606,8 +2606,17 @@ function retryCloudflarePublishQueue(payloadRaw, secretOrPasswordRaw) {
 		if (!itemKey) state.infrastructure = { attempt: 0, nextAttemptAt: "", lastError: "", lastFailureAt: "" };
 		else if (state.deadLetters[itemKey]) {
 			const dead = state.deadLetters[itemKey];
-			const claim = { category: dead.category, key: dead.key, kind: dead.kind, revision: dead.revision, generation: dead.revision };
-			const marker = getCloudflareQueueClaimMarker_(state, claim);
+			// Active dead-letter records intentionally omit the target/phase/cursor
+			// because those fields already live on the singleton active marker. A
+			// reconstructed claim therefore cannot match getCloudflareQueueClaimMarker_
+			// and would leave active.failure permanently dead while only hiding its
+			// diagnostics entry. Match the persisted failure item key directly.
+			let marker = null;
+			if (dead.category === "active") marker = state.active;
+			else {
+				const claim = { category: dead.category, key: dead.key, kind: dead.kind, revision: dead.revision, generation: dead.revision };
+				marker = getCloudflareQueueClaimMarker_(state, claim);
+			}
 			if (marker && marker.failure && marker.failure.itemKey === itemKey) marker.failure = null;
 			delete state.deadLetters[itemKey];
 		}
