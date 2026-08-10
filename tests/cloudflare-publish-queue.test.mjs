@@ -1433,7 +1433,7 @@ test("one permanently failed item is dead-lettered while unrelated work remains,
   assert.equal(Object.values(next.deadLetters).some((dead) => dead.category === "event" && dead.key === "bad"), false);
 });
 
-test("retrying an active dead letter clears the singleton active failure marker", () => {
+test("retrying an active dead letter clears its singleton marker even after an older retry hid the diagnostics entry", () => {
   const q = installCasFirebase(loadQueue());
   const state = activeState(q, "public-player-metrics");
   const claim = {
@@ -1454,6 +1454,10 @@ test("retrying an active dead letter clears the singleton active failure marker"
   const itemKey = failed.itemKey;
   assert.equal(q.__getState().active.failure.itemKey, itemKey);
   assert.ok(q.__getState().deadLetters[itemKey]);
+
+  const partiallyRetried = q.__getState();
+  delete partiallyRetried.deadLetters[itemKey];
+  q.__setState(partiallyRetried);
 
   q.assertCloudflarePublicDataPublishAuth_ = () => true;
   q.finalizeCloudflareEnqueueResult_ = (value) => value;
