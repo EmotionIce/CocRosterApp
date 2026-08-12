@@ -377,6 +377,9 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		assignmentBlockedUntil: sanitizeWarFollowupTimestamp_(value.assignmentBlockedUntil),
 		waitingUntil: sanitizeWarFollowupTimestamp_(value.waitingUntil),
 		waitingReason: sanitizeWarFollowupMultilineText_(value.waitingReason, 1000),
+		playerResponse: sanitizeWarFollowupMultilineText_(value.playerResponse, 2000),
+		playerResponseAt: sanitizeWarFollowupTimestamp_(value.playerResponseAt),
+		playerResponseMessageId: sanitizeWarFollowupText_(value.playerResponseMessageId, 120),
 		resolutionNote: sanitizeWarFollowupMultilineText_(value.resolutionNote, 2000),
 		escalatedAt: sanitizeWarFollowupTimestamp_(value.escalatedAt),
 		escalatedBy: sanitizeWarFollowupText_(value.escalatedBy, 80),
@@ -780,6 +783,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 		if (action === "remove" && ["needs_review", "waiting", "hero_down", "removal_evasion", "removed"].indexOf(value.status) < 0) throw new Error("This case is not ready for a removal decision.");
 		if (action === "close" && value.status !== "hero_down") throw new Error("Only an active hero-down case can be closed without return.");
 		if (action === "resolve" && ["needs_review", "needs_dm", "waiting"].indexOf(value.status) < 0) throw new Error("This case cannot be recorded as resolved from its current state.");
+		if (action === "player_response" && (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt)) throw new Error("This case is not currently awaiting a player response.");
 		if (action === "reopen" && ["needs_dm", "waiting", "watching", "closed", "dismissed"].indexOf(value.status) < 0) throw new Error("This case cannot be reopened from its current state.");
 		if (["set_handler", "assign_owner", "unassign_owner"].indexOf(action) >= 0 &&
 			["needs_review", "waiting", "needs_dm", "removal_pending", "removal_evasion", "removed", "hero_down"].indexOf(value.status) < 0) {
@@ -923,6 +927,9 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				if (!value.dmText) throw new Error("The contact message is empty.");
 				value.dmSentAt = "";
+				value.playerResponse = "";
+				value.playerResponseAt = "";
+				value.playerResponseMessageId = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "contact_prepared", "Player contact message prepared.", actor, nowIso);
 				break;
@@ -974,6 +981,18 @@ function mutateWarFollowupCase(requestRaw, password) {
 					nowIso,
 				);
 				break;
+			case "player_response": {
+				const responseText = sanitizeWarFollowupMultilineText_(request.responseText, 2000);
+				if (!responseText) throw new Error("The player response is empty.");
+				value.status = "needs_review";
+				value.playerResponse = responseText;
+				value.playerResponseAt = nowIso;
+				value.playerResponseMessageId = sanitizeWarFollowupText_(request.responseMessageId, 120);
+				value.waitingUntil = "";
+				value.waitingReason = "";
+				appendWarFollowupActivity_(value, "player_response", "Player response received:\n" + responseText, "Player DM", nowIso);
+				break;
+			}
 			case "remove":
 				value.status = "needs_dm";
 				value.outcome = "";

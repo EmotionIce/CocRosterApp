@@ -650,6 +650,11 @@
       outcome: "",
       handledBy: "",
       discordId: "",
+      waitingUntil: "",
+      waitingReason: "",
+      playerResponse: "",
+      playerResponseAt: "",
+      playerResponseMessageId: "",
       resolutionNote: "",
       removalReason: "",
       removalStartedAt: "",
@@ -701,6 +706,8 @@
         ];
       case "mark_dm_sent":
         return ["dm_sent", "Decision DM marked as sent."];
+      case "player_response":
+        return ["player_response", "Player response received."];
       case "approve_return":
         return ["approved_return", "Approved to return to regular wars."];
       case "extend":
@@ -803,11 +810,25 @@
       value.contactPurpose = "general";
       value.dmText = toText(request.dmText).trim();
       value.dmSentAt = "";
+      value.playerResponse = "";
+      value.playerResponseAt = "";
+      value.playerResponseMessageId = "";
       value.closedAt = "";
     } else if (action === "wait") {
       value.status = "waiting";
       value.waitingUntil = new Date(parseMs(nowIso) + Number(request.followupHours) * 60 * 60 * 1000).toISOString();
       value.waitingReason = toText(request.waitingReason).trim();
+      value.closedAt = "";
+    } else if (action === "player_response") {
+      if (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt) throw new Error("This case is not currently awaiting a player response.");
+      const responseText = toText(request.responseText).trim();
+      if (!responseText) throw new Error("The player response is empty.");
+      value.status = "needs_review";
+      value.playerResponse = responseText;
+      value.playerResponseAt = nowIso;
+      value.playerResponseMessageId = toText(request.responseMessageId).trim().slice(0, 120);
+      value.waitingUntil = "";
+      value.waitingReason = "";
       value.closedAt = "";
     } else if (action === "hero_down") {
       value.status = "needs_dm";
@@ -2407,6 +2428,9 @@
 
     const renderDecisionStart = (section, item) => {
       section.appendChild(createElement("h3", "wfu-drawer-section__title", "Decision"));
+      if (toText(item.case && item.case.playerResponse).trim()) {
+        section.appendChild(createElement("div", "wfu-closed-copy", "Player response: " + toText(item.case.playerResponse).trim()));
+      }
       const actions = createElement("div", "wfu-decision-grid");
       const noAction = createButton("No action", "btn secondary wfu-decision-btn", () => dismissInBackground(item));
       noAction.title = "Dismiss this evidence. Genuinely new war evidence can bring it back.";
@@ -2800,6 +2824,9 @@
       section.appendChild(createElement("div", "wfu-closed-copy", copy));
       if (toText(item.case && item.case.waitingReason).trim()) {
         section.appendChild(createElement("div", "wfu-closed-copy", toText(item.case.waitingReason).trim()));
+      }
+      if (toText(item.case && item.case.playerResponse).trim()) {
+        section.appendChild(createElement("div", "wfu-closed-copy", "Player response: " + toText(item.case.playerResponse).trim()));
       }
       const actions = createElement("div", "wfu-form-actions");
       actions.appendChild(createButton("Review now", "btn", () => mutate(item, "reopen")));

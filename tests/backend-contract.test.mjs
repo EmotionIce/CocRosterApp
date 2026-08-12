@@ -7794,6 +7794,55 @@ test("war follow-up general player contact moves to a bounded waiting follow-up 
   assert.ok(new Date(sent.waitingUntil).getTime() - new Date(sent.dmSentAt).getTime() === 24 * 60 * 60 * 1000);
 });
 
+test("war follow-up captures a player response exactly once and returns the case to review", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    discordId: "123456789012345678",
+    expectedUpdatedAt: "",
+    mutationId: "reply-create",
+  }, "change-me"]);
+  const prepared = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact",
+    tag,
+    dmText: "Please explain what happened.",
+    expectedUpdatedAt: created.updatedAt,
+    mutationId: "reply-contact",
+  }, "change-me"]);
+  const sent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent",
+    tag,
+    expectedUpdatedAt: prepared.updatedAt,
+    mutationId: "reply-sent",
+  }, "change-me"]);
+  const response = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "player_response",
+    tag,
+    responseText: "I had a family emergency and could not attack.",
+    responseMessageId: "777777777777777777",
+    expectedUpdatedAt: sent.updatedAt,
+    mutationId: "reply-message",
+  }, "change-me"]);
+
+  assert.equal(response.status, "needs_review");
+  assert.equal(response.playerResponse, "I had a family emergency and could not attack.");
+  assert.equal(response.playerResponseMessageId, "777777777777777777");
+  assert.equal(response.waitingUntil, "");
+  assert.equal(response.activity.at(-1).type, "player_response");
+  const retry = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "player_response",
+    tag,
+    responseText: "A duplicate delivery should not be appended.",
+    responseMessageId: "777777777777777777",
+    expectedUpdatedAt: response.updatedAt,
+    mutationId: "reply-message",
+  }, "change-me"]);
+  assert.equal(retry.playerResponse, response.playerResponse);
+  assert.equal(retry.activity.filter(entry => entry.type === "player_response").length, 1);
+});
+
 test("war follow-up removal stays open until roster confirmation and preserves rejoin monitoring", () => {
   const backend = installMemoryFirebase(loadBackend());
   const tag = "#P0LYGQ";
