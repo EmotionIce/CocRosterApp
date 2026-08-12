@@ -7852,6 +7852,10 @@ test("war follow-up captures a player response exactly once and returns the case
   assert.equal(response.playerResponseMessageId, "777777777777777777");
   assert.equal(response.waitingUntil, "");
   assert.equal(response.activity.at(-1).type, "player_response");
+  assert.equal(response.conversation.length, 2);
+  assert.deepEqual(Array.from(response.conversation.map(entry => entry.direction)), ["staff", "player"]);
+  assert.equal(response.conversation[0].text, "Please explain what happened.");
+  assert.equal(response.conversation[1].text, "I had a family emergency and could not attack.");
   const retry = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "player_response",
     tag,
@@ -7862,6 +7866,19 @@ test("war follow-up captures a player response exactly once and returns the case
   }, "change-me"]);
   assert.equal(retry.playerResponse, response.playerResponse);
   assert.equal(retry.activity.filter(entry => entry.type === "player_response").length, 1);
+  assert.equal(retry.conversation.length, 2);
+
+  const followup = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "player_response",
+    tag,
+    responseText: "I can provide more details if needed.",
+    responseMessageId: "999999999999999999",
+    expectedUpdatedAt: retry.updatedAt,
+    mutationId: "reply-message-followup",
+  }, "change-me"]);
+  assert.equal(followup.status, "needs_review");
+  assert.equal(followup.conversation.length, 3);
+  assert.equal(followup.conversation.at(-1).text, "I can provide more details if needed.");
 });
 
 test("war follow-up removal stays open until roster confirmation and preserves rejoin monitoring", () => {

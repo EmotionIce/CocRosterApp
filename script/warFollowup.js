@@ -9,6 +9,8 @@ const WAR_FOLLOWUP_PRIVATE_PATH = "private/warFollowup/v1";
 const WAR_FOLLOWUP_SETTINGS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/settings";
 const WAR_FOLLOWUP_CASES_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/cases";
 const WAR_FOLLOWUP_MAX_ACTIVITY = 80;
+const WAR_FOLLOWUP_MAX_CONVERSATION_MESSAGES = 40;
+const WAR_FOLLOWUP_MAX_CONVERSATION_CHARS = 24000;
 const WAR_FOLLOWUP_MAX_CASE_MUTATIONS = 16;
 const WAR_FOLLOWUP_MAX_RULE_MUTATIONS = 32;
 // This ledger is global to settings rather than per player. Keep enough history
@@ -319,6 +321,87 @@ function sanitizeWarFollowupActivity_(activityRaw) {
 	return out.slice(Math.max(0, out.length - WAR_FOLLOWUP_MAX_ACTIVITY));
 }
 
+function sanitizeWarFollowupConversation_(conversationRaw, legacyRaw) {
+	const conversation = Array.isArray(conversationRaw) ? conversationRaw : [];
+	const legacy = legacyRaw && typeof legacyRaw === "object" ? legacyRaw : {};
+	const out = [];
+	const seen = {};
+	for (let i = 0; i < conversation.length; i++) {
+		const item = conversation[i] && typeof conversation[i] === "object" ? conversation[i] : {};
+		const direction = sanitizeWarFollowupText_(item.direction, 20).toLowerCase();
+		const at = sanitizeWarFollowupTimestamp_(item.at);
+		const text = sanitizeWarFollowupMultilineText_(item.text, 2000);
+		if (["staff", "player"].indexOf(direction) < 0 || !at || !text) continue;
+		const messageId = /^\d{17,20}$/.test(String(item.messageId || "").trim()) ? String(item.messageId).trim() : "";
+		const id = sanitizeWarFollowupText_(item.id, 160) || (direction + ":" + (messageId || at) + ":" + i);
+		if (seen[id]) continue;
+		seen[id] = true;
+		out.push({
+			id: id,
+			direction: direction,
+			at: at,
+			actor: sanitizeWarFollowupText_(item.actor, 80) || (direction === "player" ? "Player" : "Staff"),
+			text: text,
+			messageId: messageId,
+			deliveryMode: direction === "staff" && sanitizeWarFollowupText_(item.deliveryMode, 20).toLowerCase() === "bot" ? "bot" : "manual",
+		});
+	}
+	if (!out.length) {
+		const dmText = sanitizeWarFollowupMultilineText_(legacy.dmText, 2000);
+		const dmAt = sanitizeWarFollowupTimestamp_(legacy.dmSentAt);
+		const dmMessageId = /^\d{17,20}$/.test(String(legacy.dmMessageId || "").trim()) ? String(legacy.dmMessageId).trim() : "";
+		if (dmText && dmAt) {
+			out.push({
+				id: "legacy-staff:" + (dmMessageId || dmAt),
+				direction: "staff",
+				at: dmAt,
+				actor: sanitizeWarFollowupText_(legacy.dmSentByName, 80) || "Staff",
+				text: dmText,
+				messageId: dmMessageId,
+				deliveryMode: sanitizeWarFollowupText_(legacy.dmDeliveryMode, 20).toLowerCase() === "bot" ? "bot" : "manual",
+			});
+		}
+		const responseText = sanitizeWarFollowupMultilineText_(legacy.playerResponse, 2000);
+		const responseAt = sanitizeWarFollowupTimestamp_(legacy.playerResponseAt);
+		const responseMessageId = /^\d{17,20}$/.test(String(legacy.playerResponseMessageId || "").trim()) ? String(legacy.playerResponseMessageId).trim() : "";
+		if (responseText && responseAt) {
+			out.push({
+				id: "legacy-player:" + (responseMessageId || responseAt),
+				direction: "player",
+				at: responseAt,
+				actor: "Player",
+				text: responseText,
+				messageId: responseMessageId,
+				deliveryMode: "manual",
+			});
+		}
+	}
+	out.sort(function (left, right) { return String(left.at).localeCompare(String(right.at)); });
+	let trimmedCount = toNonNegativeInt_(legacy.conversationTrimmedCount);
+	while (out.length > WAR_FOLLOWUP_MAX_CONVERSATION_MESSAGES) {
+		out.shift();
+		trimmedCount += 1;
+	}
+	let totalChars = out.reduce(function (total, item) { return total + item.text.length; }, 0);
+	while (out.length > 1 && totalChars > WAR_FOLLOWUP_MAX_CONVERSATION_CHARS) {
+		totalChars -= out[0].text.length;
+		out.shift();
+		trimmedCount += 1;
+	}
+	return { messages: out, trimmedCount: trimmedCount };
+}
+
+function appendWarFollowupConversation_(caseRaw, messageRaw) {
+	const value = caseRaw && typeof caseRaw === "object" ? caseRaw : null;
+	if (!value) return;
+	const sanitized = sanitizeWarFollowupConversation_(
+		(Array.isArray(value.conversation) ? value.conversation : []).concat([messageRaw]),
+		value,
+	);
+	value.conversation = sanitized.messages;
+	value.conversationTrimmedCount = sanitized.trimmedCount;
+}
+
 function sanitizeWarFollowupMutationLedger_(ledgerRaw) {
 	const ledger = Array.isArray(ledgerRaw) ? ledgerRaw : [];
 	const out = [];
@@ -347,6 +430,7 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 	const status = WAR_FOLLOWUP_STATUS_SET[statusRaw] ? statusRaw : "needs_review";
 	const outcomeRaw = sanitizeWarFollowupText_(value.outcome, 40).toLowerCase();
 	const outcome = WAR_FOLLOWUP_OUTCOME_SET[outcomeRaw] ? outcomeRaw : "";
+	const conversation = sanitizeWarFollowupConversation_(value.conversation, value);
 	return {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
 		tag: tag,
@@ -381,6 +465,9 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		playerResponse: sanitizeWarFollowupMultilineText_(value.playerResponse, 2000),
 		playerResponseAt: sanitizeWarFollowupTimestamp_(value.playerResponseAt),
 		playerResponseMessageId: sanitizeWarFollowupText_(value.playerResponseMessageId, 120),
+		replyCaptureUntil: sanitizeWarFollowupTimestamp_(value.replyCaptureUntil),
+		conversation: conversation.messages,
+		conversationTrimmedCount: conversation.trimmedCount,
 		resolutionNote: sanitizeWarFollowupMultilineText_(value.resolutionNote, 2000),
 		escalatedAt: sanitizeWarFollowupTimestamp_(value.escalatedAt),
 		escalatedBy: sanitizeWarFollowupText_(value.escalatedBy, 80),
@@ -790,7 +877,15 @@ function mutateWarFollowupCase(requestRaw, password) {
 		if (action === "remove" && ["needs_review", "waiting", "hero_down", "removal_evasion", "removed"].indexOf(value.status) < 0) throw new Error("This case is not ready for a removal decision.");
 		if (action === "close" && value.status !== "hero_down") throw new Error("Only an active hero-down case can be closed without return.");
 		if (action === "resolve" && ["needs_review", "needs_dm", "waiting"].indexOf(value.status) < 0) throw new Error("This case cannot be recorded as resolved from its current state.");
-		if (action === "player_response" && (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId)) throw new Error("This case is not currently awaiting a bot-captured player response.");
+		if (action === "player_response") {
+			const responseReference = String(request.responseToMessageId || "").trim();
+			const exactReply = /^\d{17,20}$/.test(responseReference) && responseReference === value.dmMessageId;
+			const captureWindowOpen = parseIsoToMs_(value.replyCaptureUntil) >= parseIsoToMs_(nowIso);
+			const responseStateAllowed = value.status === "waiting" || (value.status === "needs_review" && (captureWindowOpen || exactReply));
+			if (!responseStateAllowed || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) {
+				throw new Error("This case is not currently awaiting a bot-captured player response.");
+			}
+		}
 		if (action === "reopen" && ["needs_dm", "waiting", "watching", "closed", "dismissed"].indexOf(value.status) < 0) throw new Error("This case cannot be reopened from its current state.");
 		if (["set_handler", "assign_owner", "unassign_owner"].indexOf(action) >= 0 &&
 			["needs_review", "waiting", "needs_dm", "removal_pending", "removal_evasion", "removed", "hero_down"].indexOf(value.status) < 0) {
@@ -850,6 +945,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "dismiss":
 				value.status = "dismissed";
 				value.outcome = "no_action";
+				value.replyCaptureUntil = "";
 				value.dismissedSignalIds = dismissibleSignalIds;
 				value.closedAt = nowIso;
 				appendWarFollowupActivity_(value, "dismissed", "Reviewed with no action.", actor, nowIso);
@@ -857,6 +953,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "watch":
 				value.status = "watching";
 				value.outcome = "";
+				value.replyCaptureUntil = "";
 				value.watchStartedAt = nowIso;
 				value.watchWarTarget = clampWarFollowupNumber_(request.watchWarTarget, 1, 8, 2, true);
 				value.dismissedSignalIds = dismissibleSignalIds;
@@ -940,6 +1037,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.replyCaptureUntil = "";
 				value.playerResponse = "";
 				value.playerResponseAt = "";
 				value.playerResponseMessageId = "";
@@ -965,6 +1063,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.replyCaptureUntil = "";
 				value.recoveryStartedAt = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(
@@ -989,12 +1088,26 @@ function mutateWarFollowupCase(requestRaw, password) {
 					value.status = "waiting";
 					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
 					value.waitingReason = "Awaiting the player's response.";
+					value.replyCaptureUntil = value.dmDeliveryMode === "bot"
+						? new Date(parseIsoToMs_(nowIso) + 72 * 60 * 60 * 1000).toISOString()
+						: "";
 				} else if (value.contactPurpose === "removal") {
 					value.status = "removal_pending";
+					value.replyCaptureUntil = "";
 				} else {
 					value.status = "hero_down";
 					value.recoveryStartedAt = nowIso;
+					value.replyCaptureUntil = "";
 				}
+				appendWarFollowupConversation_(value, {
+					id: "staff:" + (value.dmMessageId || nowIso),
+					direction: "staff",
+					at: nowIso,
+					actor: value.dmSentByName || actor || "Staff",
+					text: value.dmText,
+					messageId: value.dmMessageId,
+					deliveryMode: value.dmDeliveryMode,
+				});
 				appendWarFollowupActivity_(
 					value,
 					"dm_sent",
@@ -1012,7 +1125,16 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.playerResponseMessageId = sanitizeWarFollowupText_(request.responseMessageId, 120);
 				value.waitingUntil = "";
 				value.waitingReason = "";
-				appendWarFollowupActivity_(value, "player_response", "Player response received:\n" + responseText, "Player DM", nowIso);
+				appendWarFollowupConversation_(value, {
+					id: "player:" + (value.playerResponseMessageId || nowIso),
+					direction: "player",
+					at: nowIso,
+					actor: "Player",
+					text: responseText,
+					messageId: value.playerResponseMessageId,
+					deliveryMode: "manual",
+				});
+				appendWarFollowupActivity_(value, "player_response", "Player response received and added to the private conversation.", "Player DM", nowIso);
 				break;
 			}
 			case "remove":
@@ -1036,6 +1158,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.replyCaptureUntil = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "removal_decision", "Removal from the community selected. Reason: " + value.removalReason, actor, nowIso);
 				break;
@@ -1047,6 +1170,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.replyCaptureUntil = "";
 				appendWarFollowupActivity_(value, "removal_no_dm", "Removal continued without a Discord DM.", actor, nowIso);
 				break;
 			case "removal_actioned":
@@ -1111,6 +1235,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.replyCaptureUntil = "";
 				value.recoveryStartedAt = "";
 				appendWarFollowupActivity_(
 					value,
@@ -1137,6 +1262,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (["removal_pending", "removal_evasion", "removed"].indexOf(value.status) >= 0) throw new Error("Complete or cancel the removal workflow instead of closing it as a normal case.");
 				value.status = "closed";
 				value.outcome = "resolved";
+				value.replyCaptureUntil = "";
 				value.resolutionNote = sanitizeWarFollowupMultilineText_(request.resolutionNote, 2000) || "Resolved by a moderator.";
 				value.closedAt = nowIso;
 				value.waitingUntil = "";

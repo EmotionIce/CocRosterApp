@@ -660,6 +660,9 @@
       dmMessageId: "",
       dmSentByDiscordId: "",
       dmSentByName: "",
+      replyCaptureUntil: "",
+      conversation: [],
+      conversationTrimmedCount: 0,
       resolutionNote: "",
       removalReason: "",
       removalStartedAt: "",
@@ -676,6 +679,30 @@
       evidence: { regular: emptyStats(), cwl: emptyStats(), regularEvents: [], cwlEvents: [] },
       activity: [],
     }, value, { tag });
+  };
+
+  const appendConversationMessage = (caseValue, messageRaw) => {
+    const message = messageRaw && typeof messageRaw === "object" ? messageRaw : {};
+    const direction = toText(message.direction).trim().toLowerCase();
+    const at = parseMs(message.at) > 0 ? new Date(parseMs(message.at)).toISOString() : "";
+    const text = toText(message.text).trim().slice(0, 2000);
+    if (!caseValue || !["staff", "player"].includes(direction) || !at || !text) return;
+    const messages = (Array.isArray(caseValue.conversation) ? caseValue.conversation : []).concat([{
+      id: toText(message.id || direction + ":" + at).trim().slice(0, 160),
+      direction,
+      at,
+      actor: toText(message.actor || (direction === "player" ? "Player" : "Staff")).trim().slice(0, 80),
+      text,
+      messageId: /^\d{17,20}$/.test(toText(message.messageId).trim()) ? toText(message.messageId).trim() : "",
+      deliveryMode: direction === "staff" && toText(message.deliveryMode).toLowerCase() === "bot" ? "bot" : "manual",
+    }]);
+    let trimmedCount = Math.max(0, toInt(caseValue.conversationTrimmedCount));
+    while (messages.length > 40 || (messages.length > 1 && messages.reduce((total, entry) => total + toText(entry.text).length, 0) > 24000)) {
+      messages.shift();
+      trimmedCount += 1;
+    }
+    caseValue.conversation = messages;
+    caseValue.conversationTrimmedCount = trimmedCount;
   };
 
   const cloneValue = (value) => {
@@ -796,11 +823,13 @@
     } else if (action === "dismiss") {
       value.status = "dismissed";
       value.outcome = "no_action";
+      value.replyCaptureUntil = "";
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
       value.closedAt = nowIso;
     } else if (action === "watch") {
       value.status = "watching";
       value.outcome = "";
+      value.replyCaptureUntil = "";
       value.watchStartedAt = nowIso;
       value.watchWarTarget = Math.floor(clamp(request.watchWarTarget, 1, 8, 2));
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
@@ -820,6 +849,7 @@
       value.dmMessageId = "";
       value.dmSentByDiscordId = "";
       value.dmSentByName = "";
+      value.replyCaptureUntil = "";
       value.playerResponse = "";
       value.playerResponseAt = "";
       value.playerResponseMessageId = "";
@@ -830,13 +860,24 @@
       value.waitingReason = toText(request.waitingReason).trim();
       value.closedAt = "";
     } else if (action === "player_response") {
-      if (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) throw new Error("This case is not currently awaiting a bot-captured player response.");
+      const exactReply = toText(request.responseToMessageId).trim() && toText(request.responseToMessageId).trim() === value.dmMessageId;
+      const captureWindowOpen = parseMs(value.replyCaptureUntil) >= parseMs(nowIso);
+      const responseStateAllowed = value.status === "waiting" || (value.status === "needs_review" && (captureWindowOpen || exactReply));
+      if (!responseStateAllowed || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) throw new Error("This case is not currently awaiting a bot-captured player response.");
       const responseText = toText(request.responseText).trim();
       if (!responseText) throw new Error("The player response is empty.");
       value.status = "needs_review";
       value.playerResponse = responseText;
       value.playerResponseAt = nowIso;
       value.playerResponseMessageId = toText(request.responseMessageId).trim().slice(0, 120);
+      appendConversationMessage(value, {
+        id: "player:" + (value.playerResponseMessageId || nowIso),
+        direction: "player",
+        at: nowIso,
+        actor: "Player",
+        text: value.playerResponse,
+        messageId: value.playerResponseMessageId,
+      });
       value.waitingUntil = "";
       value.waitingReason = "";
       value.closedAt = "";
@@ -854,6 +895,7 @@
       value.dmMessageId = "";
       value.dmSentByDiscordId = "";
       value.dmSentByName = "";
+      value.replyCaptureUntil = "";
       value.recoveryStartedAt = "";
       value.closedAt = "";
     } else if (action === "mark_dm_sent") {
@@ -867,12 +909,26 @@
         value.status = "waiting";
         value.waitingUntil = new Date(parseMs(nowIso) + 24 * 60 * 60 * 1000).toISOString();
         value.waitingReason = "Awaiting the player's response.";
+        value.replyCaptureUntil = value.dmDeliveryMode === "bot"
+          ? new Date(parseMs(nowIso) + 72 * 60 * 60 * 1000).toISOString()
+          : "";
       } else if (value.contactPurpose === "removal") {
         value.status = "removal_pending";
+        value.replyCaptureUntil = "";
       } else {
         value.status = "hero_down";
         value.recoveryStartedAt = nowIso;
+        value.replyCaptureUntil = "";
       }
+      appendConversationMessage(value, {
+        id: "staff:" + (value.dmMessageId || nowIso),
+        direction: "staff",
+        at: nowIso,
+        actor: value.dmSentByName || "Staff",
+        text: value.dmText,
+        messageId: value.dmMessageId,
+        deliveryMode: value.dmDeliveryMode,
+      });
     } else if (action === "approve_return") {
       value.status = "closed";
       value.outcome = "approved_return";
@@ -894,15 +950,18 @@
       value.dmMessageId = "";
       value.dmSentByDiscordId = "";
       value.dmSentByName = "";
+      value.replyCaptureUntil = "";
       value.recoveryStartedAt = "";
     } else if (action === "close") {
       value.status = "closed";
       value.outcome = request.outcome === "no_return" ? "no_return" : "closed";
+      value.replyCaptureUntil = "";
       value.closedAt = nowIso;
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
     } else if (action === "resolve") {
       value.status = "closed";
       value.outcome = "resolved";
+      value.replyCaptureUntil = "";
       value.resolutionNote = toText(request.resolutionNote).trim() || "Resolved by a moderator.";
       value.closedAt = nowIso;
       value.waitingUntil = "";
@@ -926,6 +985,7 @@
       value.dmMessageId = "";
       value.dmSentByDiscordId = "";
       value.dmSentByName = "";
+      value.replyCaptureUntil = "";
       value.closedAt = "";
     } else if (action === "removal_no_dm") {
       value.status = "removal_pending";
@@ -934,6 +994,7 @@
       value.dmMessageId = "";
       value.dmSentByDiscordId = "";
       value.dmSentByName = "";
+      value.replyCaptureUntil = "";
     } else if (action === "removal_actioned") {
       value.status = "removal_pending";
       value.removalActionedAt = nowIso;
