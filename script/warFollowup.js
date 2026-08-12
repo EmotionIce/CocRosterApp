@@ -397,6 +397,8 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		dmSentAt: sanitizeWarFollowupTimestamp_(value.dmSentAt),
 		dmDeliveryMode: sanitizeWarFollowupText_(value.dmDeliveryMode, 20).toLowerCase() === "bot" ? "bot" : (value.dmSentAt ? "manual" : ""),
 		dmMessageId: /^\d{17,20}$/.test(String(value.dmMessageId || "").trim()) ? String(value.dmMessageId).trim() : "",
+		dmSentByDiscordId: /^\d{17,20}$/.test(String(value.dmSentByDiscordId || "").trim()) ? String(value.dmSentByDiscordId).trim() : "",
+		dmSentByName: sanitizeWarFollowupText_(value.dmSentByName, 80),
 		watchStartedAt: sanitizeWarFollowupTimestamp_(value.watchStartedAt),
 		watchWarTarget: clampWarFollowupNumber_(value.watchWarTarget, 1, 8, 2, true),
 		recoveryStartedAt: sanitizeWarFollowupTimestamp_(value.recoveryStartedAt),
@@ -931,6 +933,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
 				value.dmMessageId = "";
+				value.dmSentByDiscordId = "";
+				value.dmSentByName = "";
 				value.playerResponse = "";
 				value.playerResponseAt = "";
 				value.playerResponseMessageId = "";
@@ -954,6 +958,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
 				value.dmMessageId = "";
+				value.dmSentByDiscordId = "";
+				value.dmSentByName = "";
 				value.recoveryStartedAt = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(
@@ -972,6 +978,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmDeliveryMode = sanitizeWarFollowupText_(request.dmDeliveryMode, 20).toLowerCase() === "bot" ? "bot" : "manual";
 				value.dmMessageId = value.dmDeliveryMode === "bot" && /^\d{17,20}$/.test(String(request.dmMessageId || "").trim()) ? String(request.dmMessageId).trim() : "";
 				if (value.dmDeliveryMode === "bot" && !value.dmMessageId) throw new Error("The delivered bot DM message ID is required.");
+				value.dmSentByDiscordId = /^\d{17,20}$/.test(String(request.dmSentByDiscordId || "").trim()) ? String(request.dmSentByDiscordId).trim() : "";
+				value.dmSentByName = sanitizeWarFollowupText_(request.dmSentByName || actor, 80);
 				if (value.contactPurpose === "general") {
 					value.status = "waiting";
 					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
@@ -1021,6 +1029,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
 				value.dmMessageId = "";
+				value.dmSentByDiscordId = "";
+				value.dmSentByName = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "removal_decision", "Removal from the community selected. Reason: " + value.removalReason, actor, nowIso);
 				break;
@@ -1030,6 +1040,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
 				value.dmMessageId = "";
+				value.dmSentByDiscordId = "";
+				value.dmSentByName = "";
 				appendWarFollowupActivity_(value, "removal_no_dm", "Removal continued without a Discord DM.", actor, nowIso);
 				break;
 			case "removal_actioned":
@@ -1092,6 +1104,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
 				value.dmMessageId = "";
+				value.dmSentByDiscordId = "";
+				value.dmSentByName = "";
 				value.recoveryStartedAt = "";
 				appendWarFollowupActivity_(
 					value,

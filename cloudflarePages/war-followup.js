@@ -657,6 +657,8 @@
       playerResponseMessageId: "",
       dmDeliveryMode: "",
       dmMessageId: "",
+      dmSentByDiscordId: "",
+      dmSentByName: "",
       resolutionNote: "",
       removalReason: "",
       removalStartedAt: "",
@@ -814,6 +816,8 @@
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
+      value.dmSentByDiscordId = "";
+      value.dmSentByName = "";
       value.playerResponse = "";
       value.playerResponseAt = "";
       value.playerResponseMessageId = "";
@@ -846,6 +850,8 @@
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
+      value.dmSentByDiscordId = "";
+      value.dmSentByName = "";
       value.recoveryStartedAt = "";
       value.closedAt = "";
     } else if (action === "mark_dm_sent") {
@@ -853,6 +859,8 @@
       value.dmSentAt = nowIso;
       value.dmDeliveryMode = toText(request.dmDeliveryMode).trim().toLowerCase() === "bot" ? "bot" : "manual";
       value.dmMessageId = value.dmDeliveryMode === "bot" ? toText(request.dmMessageId).trim().slice(0, 120) : "";
+      value.dmSentByDiscordId = /^\d{17,20}$/.test(toText(request.dmSentByDiscordId).trim()) ? toText(request.dmSentByDiscordId).trim() : "";
+      value.dmSentByName = toText(request.dmSentByName || request.actor).trim().slice(0, 80);
       if (value.contactPurpose === "general") {
         value.status = "waiting";
         value.waitingUntil = new Date(parseMs(nowIso) + 24 * 60 * 60 * 1000).toISOString();
@@ -882,6 +890,8 @@
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
+      value.dmSentByDiscordId = "";
+      value.dmSentByName = "";
       value.recoveryStartedAt = "";
     } else if (action === "close") {
       value.status = "closed";
@@ -912,12 +922,16 @@
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
+      value.dmSentByDiscordId = "";
+      value.dmSentByName = "";
       value.closedAt = "";
     } else if (action === "removal_no_dm") {
       value.status = "removal_pending";
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
+      value.dmSentByDiscordId = "";
+      value.dmSentByName = "";
     } else if (action === "removal_actioned") {
       value.status = "removal_pending";
       value.removalActionedAt = nowIso;

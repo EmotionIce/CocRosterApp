@@ -7791,6 +7791,8 @@ test("war follow-up general player contact moves to a bounded waiting follow-up 
   assert.equal(sent.status, "waiting");
   assert.equal(sent.dmDeliveryMode, "manual");
   assert.equal(sent.dmMessageId, "");
+  assert.equal(sent.dmSentByDiscordId, "");
+  assert.equal(sent.dmSentByName, "Leader");
   assert.equal(sent.waitingReason, "Awaiting the player's response.");
   assert.ok(sent.waitingUntil);
   assert.ok(new Date(sent.waitingUntil).getTime() - new Date(sent.dmSentAt).getTime() === 24 * 60 * 60 * 1000);
@@ -7825,6 +7827,8 @@ test("war follow-up captures a player response exactly once and returns the case
     tag,
     dmDeliveryMode: "bot",
     dmMessageId: "888888888888888888",
+    dmSentByDiscordId: "666666666666666666",
+    dmSentByName: "Contact Sender",
     expectedUpdatedAt: prepared.updatedAt,
     mutationId: "reply-sent",
   }, "change-me"]);
@@ -7838,6 +7842,8 @@ test("war follow-up captures a player response exactly once and returns the case
   }, "change-me"]);
 
   assert.equal(response.status, "needs_review");
+  assert.equal(response.dmSentByDiscordId, "666666666666666666");
+  assert.equal(response.dmSentByName, "Contact Sender");
   assert.equal(response.playerResponse, "I had a family emergency and could not attack.");
   assert.equal(response.playerResponseMessageId, "777777777777777777");
   assert.equal(response.waitingUntil, "");
