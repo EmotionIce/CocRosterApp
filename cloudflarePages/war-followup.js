@@ -655,6 +655,8 @@
       playerResponse: "",
       playerResponseAt: "",
       playerResponseMessageId: "",
+      dmDeliveryMode: "",
+      dmMessageId: "",
       resolutionNote: "",
       removalReason: "",
       removalStartedAt: "",
@@ -810,6 +812,8 @@
       value.contactPurpose = "general";
       value.dmText = toText(request.dmText).trim();
       value.dmSentAt = "";
+      value.dmDeliveryMode = "";
+      value.dmMessageId = "";
       value.playerResponse = "";
       value.playerResponseAt = "";
       value.playerResponseMessageId = "";
@@ -820,7 +824,7 @@
       value.waitingReason = toText(request.waitingReason).trim();
       value.closedAt = "";
     } else if (action === "player_response") {
-      if (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt) throw new Error("This case is not currently awaiting a player response.");
+      if (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) throw new Error("This case is not currently awaiting a bot-captured player response.");
       const responseText = toText(request.responseText).trim();
       if (!responseText) throw new Error("The player response is empty.");
       value.status = "needs_review";
@@ -840,11 +844,15 @@
       value.recoveryWarTarget = Math.floor(clamp(request.recoveryWarTarget, 1, 8, 3));
       value.requireNoMisses = request.requireNoMisses == null ? true : !!request.requireNoMisses;
       value.dmSentAt = "";
+      value.dmDeliveryMode = "";
+      value.dmMessageId = "";
       value.recoveryStartedAt = "";
       value.closedAt = "";
     } else if (action === "mark_dm_sent") {
       value.dmText = toText(request.dmText != null ? request.dmText : value.dmText).trim();
       value.dmSentAt = nowIso;
+      value.dmDeliveryMode = toText(request.dmDeliveryMode).trim().toLowerCase() === "bot" ? "bot" : "manual";
+      value.dmMessageId = value.dmDeliveryMode === "bot" ? toText(request.dmMessageId).trim().slice(0, 120) : "";
       if (value.contactPurpose === "general") {
         value.status = "waiting";
         value.waitingUntil = new Date(parseMs(nowIso) + 24 * 60 * 60 * 1000).toISOString();
@@ -872,6 +880,8 @@
       value.requireNoMisses = request.requireNoMisses == null ? value.requireNoMisses !== false : !!request.requireNoMisses;
       value.dmText = toText(request.dmText).trim();
       value.dmSentAt = "";
+      value.dmDeliveryMode = "";
+      value.dmMessageId = "";
       value.recoveryStartedAt = "";
     } else if (action === "close") {
       value.status = "closed";
@@ -900,10 +910,14 @@
       value.rejoinRosterTitle = "";
       value.rejoinClanTag = "";
       value.dmSentAt = "";
+      value.dmDeliveryMode = "";
+      value.dmMessageId = "";
       value.closedAt = "";
     } else if (action === "removal_no_dm") {
       value.status = "removal_pending";
       value.dmSentAt = "";
+      value.dmDeliveryMode = "";
+      value.dmMessageId = "";
     } else if (action === "removal_actioned") {
       value.status = "removal_pending";
       value.removalActionedAt = nowIso;
@@ -2765,6 +2779,8 @@
         message.setCustomValidity("");
         mutate(item, "mark_dm_sent", {
           dmText: message.value,
+          dmDeliveryMode: "manual",
+          dmMessageId: "",
           actor: toText(item.case && item.case.handledBy),
         });
       }));

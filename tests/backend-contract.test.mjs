@@ -7789,9 +7789,18 @@ test("war follow-up general player contact moves to a bounded waiting follow-up 
     mutationId: "contact-sent",
   }, "change-me"]);
   assert.equal(sent.status, "waiting");
+  assert.equal(sent.dmDeliveryMode, "manual");
+  assert.equal(sent.dmMessageId, "");
   assert.equal(sent.waitingReason, "Awaiting the player's response.");
   assert.ok(sent.waitingUntil);
   assert.ok(new Date(sent.waitingUntil).getTime() - new Date(sent.dmSentAt).getTime() === 24 * 60 * 60 * 1000);
+  assert.throws(() => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "player_response",
+    tag,
+    responseText: "This must not be captured from an unrelated bot DM.",
+    expectedUpdatedAt: sent.updatedAt,
+    mutationId: "manual-contact-reply",
+  }, "change-me"]), /not currently awaiting a bot-captured player response/i);
 });
 
 test("war follow-up captures a player response exactly once and returns the case to review", () => {
@@ -7814,6 +7823,8 @@ test("war follow-up captures a player response exactly once and returns the case
   const sent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "mark_dm_sent",
     tag,
+    dmDeliveryMode: "bot",
+    dmMessageId: "888888888888888888",
     expectedUpdatedAt: prepared.updatedAt,
     mutationId: "reply-sent",
   }, "change-me"]);

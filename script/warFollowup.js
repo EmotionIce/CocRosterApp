@@ -395,6 +395,8 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		evidence: sanitizeWarFollowupEvidenceSnapshot_(value.evidence),
 		dmText: sanitizeWarFollowupMultilineText_(value.dmText, 6000),
 		dmSentAt: sanitizeWarFollowupTimestamp_(value.dmSentAt),
+		dmDeliveryMode: sanitizeWarFollowupText_(value.dmDeliveryMode, 20).toLowerCase() === "bot" ? "bot" : (value.dmSentAt ? "manual" : ""),
+		dmMessageId: /^\d{17,20}$/.test(String(value.dmMessageId || "").trim()) ? String(value.dmMessageId).trim() : "",
 		watchStartedAt: sanitizeWarFollowupTimestamp_(value.watchStartedAt),
 		watchWarTarget: clampWarFollowupNumber_(value.watchWarTarget, 1, 8, 2, true),
 		recoveryStartedAt: sanitizeWarFollowupTimestamp_(value.recoveryStartedAt),
@@ -783,7 +785,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 		if (action === "remove" && ["needs_review", "waiting", "hero_down", "removal_evasion", "removed"].indexOf(value.status) < 0) throw new Error("This case is not ready for a removal decision.");
 		if (action === "close" && value.status !== "hero_down") throw new Error("Only an active hero-down case can be closed without return.");
 		if (action === "resolve" && ["needs_review", "needs_dm", "waiting"].indexOf(value.status) < 0) throw new Error("This case cannot be recorded as resolved from its current state.");
-		if (action === "player_response" && (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt)) throw new Error("This case is not currently awaiting a player response.");
+		if (action === "player_response" && (value.status !== "waiting" || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId)) throw new Error("This case is not currently awaiting a bot-captured player response.");
 		if (action === "reopen" && ["needs_dm", "waiting", "watching", "closed", "dismissed"].indexOf(value.status) < 0) throw new Error("This case cannot be reopened from its current state.");
 		if (["set_handler", "assign_owner", "unassign_owner"].indexOf(action) >= 0 &&
 			["needs_review", "waiting", "needs_dm", "removal_pending", "removal_evasion", "removed", "hero_down"].indexOf(value.status) < 0) {
@@ -927,6 +929,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				if (!value.dmText) throw new Error("The contact message is empty.");
 				value.dmSentAt = "";
+				value.dmDeliveryMode = "";
+				value.dmMessageId = "";
 				value.playerResponse = "";
 				value.playerResponseAt = "";
 				value.playerResponseMessageId = "";
@@ -948,6 +952,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, 1, 8, 3, true);
 				value.requireNoMisses = request.requireNoMisses == null ? true : toBooleanFlag_(request.requireNoMisses);
 				value.dmSentAt = "";
+				value.dmDeliveryMode = "";
+				value.dmMessageId = "";
 				value.recoveryStartedAt = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(
@@ -963,6 +969,9 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText != null ? request.dmText : value.dmText, 6000);
 				if (!value.dmText) throw new Error("The DM message is empty.");
 				value.dmSentAt = nowIso;
+				value.dmDeliveryMode = sanitizeWarFollowupText_(request.dmDeliveryMode, 20).toLowerCase() === "bot" ? "bot" : "manual";
+				value.dmMessageId = value.dmDeliveryMode === "bot" && /^\d{17,20}$/.test(String(request.dmMessageId || "").trim()) ? String(request.dmMessageId).trim() : "";
+				if (value.dmDeliveryMode === "bot" && !value.dmMessageId) throw new Error("The delivered bot DM message ID is required.");
 				if (value.contactPurpose === "general") {
 					value.status = "waiting";
 					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
@@ -1010,6 +1019,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.rejoinRosterTitle = "";
 				value.rejoinClanTag = "";
 				value.dmSentAt = "";
+				value.dmDeliveryMode = "";
+				value.dmMessageId = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "removal_decision", "Removal from the community selected. Reason: " + value.removalReason, actor, nowIso);
 				break;
@@ -1017,6 +1028,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (value.status !== "needs_dm" || value.contactPurpose !== "removal") throw new Error("This case is not waiting on a removal notice.");
 				value.status = "removal_pending";
 				value.dmSentAt = "";
+				value.dmDeliveryMode = "";
+				value.dmMessageId = "";
 				appendWarFollowupActivity_(value, "removal_no_dm", "Removal continued without a Discord DM.", actor, nowIso);
 				break;
 			case "removal_actioned":
@@ -1077,6 +1090,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.requireNoMisses = request.requireNoMisses == null ? value.requireNoMisses : toBooleanFlag_(request.requireNoMisses);
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				value.dmSentAt = "";
+				value.dmDeliveryMode = "";
+				value.dmMessageId = "";
 				value.recoveryStartedAt = "";
 				appendWarFollowupActivity_(
 					value,
