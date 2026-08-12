@@ -650,6 +650,7 @@
       outcome: "",
       handledBy: "",
       discordId: "",
+      assignmentCoverageOverride: false,
       waitingUntil: "",
       waitingReason: "",
       playerResponse: "",
@@ -805,6 +806,7 @@
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
       value.assignedModeratorId = "";
       value.assignedModeratorName = "";
+      value.assignmentCoverageOverride = false;
       value.handledBy = "";
       value.assignedAt = "";
       value.assignmentUpdatedAt = nowIso;

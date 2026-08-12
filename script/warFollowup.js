@@ -368,6 +368,7 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 			? String(value.assignedModeratorId).trim()
 			: "",
 		assignedModeratorName: sanitizeWarFollowupText_(value.assignedModeratorName || value.handledBy, 80),
+		assignmentCoverageOverride: value.assignmentCoverageOverride === true,
 		assignedAt: sanitizeWarFollowupTimestamp_(value.assignedAt),
 		assignmentUpdatedAt: sanitizeWarFollowupTimestamp_(value.assignmentUpdatedAt),
 		lastMeaningfulActionAt: sanitizeWarFollowupTimestamp_(value.lastMeaningfulActionAt || value.updatedAt),
@@ -510,6 +511,7 @@ function applyWarFollowupOwner_(caseRaw, requestRaw, actorRaw, nowIsoRaw) {
 	value.assignedModeratorId = moderatorId;
 	value.assignedModeratorName = moderatorId ? (moderatorName || moderatorId) : "";
 	value.handledBy = value.assignedModeratorName;
+	value.assignmentCoverageOverride = Boolean(moderatorId && request.assignmentCoverageOverride === true);
 	value.assignedAt = moderatorId ? nowIso : "";
 	value.assignmentUpdatedAt = nowIso;
 	value.lastMeaningfulActionAt = nowIso;
@@ -521,7 +523,8 @@ function applyWarFollowupOwner_(caseRaw, requestRaw, actorRaw, nowIsoRaw) {
 		value,
 		moderatorId ? "assigned" : "unassigned",
 		moderatorId
-			? ("Assigned to " + value.assignedModeratorName + " (" + moderatorId + ").")
+			? ("Assigned to " + value.assignedModeratorName + " (" + moderatorId + ")." +
+				(value.assignmentCoverageOverride ? " Senior leader took ownership outside automatic clan coverage." : ""))
 			: "Assignment cleared.",
 		actorRaw,
 		nowIso,
@@ -826,6 +829,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				} else {
 					value.assignedModeratorId = "";
 					value.assignedModeratorName = "";
+					value.assignmentCoverageOverride = false;
 					value.handledBy = "";
 					value.assignedAt = "";
 					value.assignmentUpdatedAt = nowIso;
@@ -858,6 +862,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dismissedSignalIds = dismissibleSignalIds;
 				value.assignedModeratorId = "";
 				value.assignedModeratorName = "";
+				value.assignmentCoverageOverride = false;
 				value.handledBy = "";
 				value.assignedAt = "";
 				value.assignmentUpdatedAt = nowIso;
@@ -1153,6 +1158,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "set_handler":
 				value.assignedModeratorId = "";
 				value.assignedModeratorName = "";
+				value.assignmentCoverageOverride = false;
 				value.assignedAt = "";
 				value.assignmentUpdatedAt = nowIso;
 				appendWarFollowupActivity_(

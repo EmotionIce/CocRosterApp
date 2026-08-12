@@ -7689,6 +7689,7 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
   assert.deepEqual(Array.from(created.triggerSignalIds), ["regular_missed:war-trigger"]);
   assert.equal(created.assignedModeratorId, "111111111111111111");
   assert.equal(created.assignedModeratorName, "First leader");
+  assert.equal(created.assignmentCoverageOverride, false);
   assert.ok(created.assignmentUpdatedAt);
   assert.equal(created.activity.at(-1).type, "assigned");
 
@@ -7698,11 +7699,14 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
     assignedModeratorId: "222222222222222222",
     assignedModeratorName: "Second leader",
     handledBy: "Second leader",
+    assignmentCoverageOverride: true,
     actor: "Leadership",
     expectedUpdatedAt: created.updatedAt,
     mutationId: "automatic-reassign-1",
   }, "change-me"]);
   assert.equal(reassigned.assignedModeratorId, "222222222222222222");
+  assert.equal(reassigned.assignmentCoverageOverride, true);
+  assert.match(reassigned.activity.at(-1).text, /outside automatic clan coverage/i);
   assert.throws(
     () => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
       action: "assign_owner",
