@@ -4626,6 +4626,148 @@ test("manual cleanup converts known legacy active schema leftovers", () => {
   assert.equal(repaired.rosterData.playerMetrics.byTag["#PLAYER"].identity.tag, "#PLAYER");
 });
 
+test("one final regular-war snapshot excludes every attack made after maximum stars", () => {
+  const backend = loadBackend();
+  const members = [
+    {
+      tag: "#A",
+      townHallLevel: 16,
+      attacks: [
+        { order: 1, defenderTag: "#X", stars: 3, destructionPercentage: 100 },
+        { order: 4, defenderTag: "#W", stars: 3, destructionPercentage: 100 },
+      ],
+    },
+    {
+      tag: "#B",
+      townHallLevel: 16,
+      attacks: [{ order: 2, defenderTag: "#Y", stars: 3, destructionPercentage: 100 }],
+    },
+    {
+      tag: "#C",
+      townHallLevel: 16,
+      attacks: [{ order: 3, defenderTag: "#Z", stars: 3, destructionPercentage: 100 }],
+    },
+    {
+      tag: "#FARMER",
+      townHallLevel: 16,
+      attacks: [
+        { order: 5, defenderTag: "#X", stars: 1, destructionPercentage: 40 },
+        { order: 6, defenderTag: "#Y", stars: 1, destructionPercentage: 40 },
+      ],
+    },
+  ];
+  const opponentMembers = ["#X", "#Y", "#Z", "#W"].map((tag) => ({
+    tag,
+    townHallLevel: 16,
+    attacks: [],
+  }));
+  const war = {
+    state: "warEnded",
+    teamSize: 4,
+    attacksPerMember: 2,
+    preparationStartTime: "2026-08-10T18:00:00.000Z",
+    startTime: "2026-08-11T18:00:00.000Z",
+    endTime: "2026-08-12T18:00:00.000Z",
+    clan: { tag: "#CLAN", members },
+    opponent: { tag: "#OPP", members: opponentMembers },
+  };
+  const tracked = { "#A": true, "#B": true, "#C": true, "#FARMER": true };
+
+  const raw = backend.computeRegularWarStatsFromWar_(war, "#CLAN", tracked);
+  const form = backend.computeRegularWarFormStatsFromWar_(war, "#CLAN", tracked);
+
+  assert.equal(raw["#FARMER"].usedAttacks, 2);
+  assert.equal(raw["#FARMER"].attacksMissed, 0);
+  assert.equal(raw["#FARMER"].countedAttacks, 2);
+  assert.equal(raw["#FARMER"].starsTotal, 2);
+  assert.equal(form["#FARMER"].usedAttacks, 2, "post-max attacks must still satisfy attack usage");
+  assert.equal(form["#FARMER"].attacksMissed, 0);
+  assert.equal(form["#FARMER"].countedAttacks, 0, "post-max attacks must not affect moderation form");
+  assert.equal(form["#FARMER"].starsTotal, 0);
+  assert.equal(form["#FARMER"].totalDestruction, 0);
+  assert.equal(form["#A"].countedAttacks, 2, "the attack that reaches maximum stars must still count");
+  assert.equal(form["#A"].starsTotal, 6);
+
+  const warPerformance = backend.createEmptyRosterWarPerformance_();
+  assert.equal(
+    backend.finalizeRegularWarIntoWarPerformance_(
+      warPerformance,
+      war,
+      "#CLAN",
+      tracked,
+      "2026-08-12T18:02:00.000Z",
+      "testFinalSnapshot",
+      "testFinalSnapshot",
+      false,
+    ),
+    true,
+  );
+  const warKeys = Object.keys(warPerformance.regularWarHistoryByKey);
+  assert.equal(warKeys.length, 1);
+  const historyEntry = warPerformance.regularWarHistoryByKey[warKeys[0]];
+  assert.equal(historyEntry.authoritative, true);
+  assert.equal(historyEntry.statsByTag["#FARMER"].countedAttacks, 2);
+  assert.equal(historyEntry.formStatsByTag["#FARMER"].countedAttacks, 0);
+
+  const candidate = backend.buildRegularPlayerWarCandidate_(warPerformance, warKeys[0], "#CLAN", "main");
+  const globalPerformance = backend.applyPlayerWarEventDelta_(
+    backend.createEmptyPlayerWarPerformanceStore_(),
+    candidate,
+    1,
+  );
+  const publishedForm = globalPerformance.byTag["#FARMER"].recentRegularWarForm[0].stats;
+  assert.equal(publishedForm.usedAttacks, 2);
+  assert.equal(publishedForm.attacksMissed, 0);
+  assert.equal(publishedForm.countedAttacks, 0);
+  assert.equal(publishedForm.starsTotal, 0);
+});
+
+test("regular-war form classification counts pre-max attacks and refuses ambiguous chronology", () => {
+  const backend = loadBackend();
+  const opponentThByTag = { "#X": 16, "#Y": 16 };
+  const members = [
+    {
+      tag: "#A",
+      townHallLevel: 16,
+      attacks: [
+        { order: 1, defenderTag: "#X", stars: 1, destructionPercentage: 40 },
+        { order: 3, defenderTag: "#X", stars: 3, destructionPercentage: 100 },
+      ],
+    },
+    {
+      tag: "#B",
+      townHallLevel: 16,
+      attacks: [
+        { order: 2, defenderTag: "#Y", stars: 3, destructionPercentage: 100 },
+        { order: 4, defenderTag: "#Y", stars: 1, destructionPercentage: 40 },
+      ],
+    },
+  ];
+
+  const form = backend.buildFormEligibleRegularWarStatsFromMembers_(members, 2, opponentThByTag, null, 2);
+  assert.equal(form["#A"].countedAttacks, 2, "a weak attack before maximum stars must still count");
+  assert.equal(form["#A"].starsTotal, 4);
+  assert.equal(form["#B"].usedAttacks, 2);
+  assert.equal(form["#B"].countedAttacks, 1, "the attack after maximum stars must be excluded");
+  assert.equal(form["#B"].starsTotal, 3);
+
+  const missingOrder = clone(members);
+  delete missingOrder[0].attacks[0].order;
+  assert.equal(
+    backend.buildFormEligibleRegularWarStatsFromMembers_(missingOrder, 2, opponentThByTag, null, 2),
+    null,
+    "missing order must not be guessed",
+  );
+
+  const duplicateOrder = clone(members);
+  duplicateOrder[1].attacks[0].order = 1;
+  assert.equal(
+    backend.buildFormEligibleRegularWarStatsFromMembers_(duplicateOrder, 2, opponentThByTag, null, 2),
+    null,
+    "duplicate order must not be guessed",
+  );
+});
+
 test("CWL aggregation tracks offense and defense independently", () => {
   const backend = loadBackend();
   const war = {
