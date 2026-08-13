@@ -7678,15 +7678,21 @@ test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, an
   assert.equal(noted.activity.at(-1).text, "Player acknowledged the decision.");
   assert.equal(noted.status, "hero_down");
 
+  const closureEvidence = structuredClone(evidence);
+  closureEvidence.capturedAt = "2026-07-25T00:00:00.000Z";
+  closureEvidence.regular.warCount = 4;
   const closed = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "approve_return",
     tag,
     actor: "Alex",
     expectedUpdatedAt: noted.updatedAt,
     signalIds: ["regular_missed:event"],
+    evidence: closureEvidence,
   }, "change-me"]);
   assert.equal(closed.status, "closed");
   assert.equal(closed.outcome, "approved_return");
+  assert.equal(closed.evidence.capturedAt, closureEvidence.capturedAt);
+  assert.equal(closed.evidence.regular.warCount, 4);
   assert.equal(closed.activity.at(-1).type, "approved_return");
 
   assert.throws(

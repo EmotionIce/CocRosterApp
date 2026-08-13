@@ -1065,6 +1065,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "dismiss":
 				value.status = "dismissed";
 				value.outcome = "no_action";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				if (!(value.contactPurpose === "general" && parseIsoToMs_(value.replyCaptureUntil) > parseIsoToMs_(nowIso))) {
 					value.replyCaptureUntil = "";
 				}
@@ -1117,6 +1118,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (value.status !== "watching") throw new Error("This account is no longer being monitored.");
 				value.status = "dismissed";
 				value.outcome = "no_action";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.dismissedSignalIds = dismissibleSignalIds;
 				value.closedAt = nowIso;
 				appendWarFollowupActivity_(value, "watch_complete", "Monitoring completed without new problematic evidence.", actor || "War Follow Up", nowIso);
@@ -1448,6 +1450,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (["needs_dm", "removal_pending"].indexOf(value.status) < 0 || value.contactPurpose !== "removal") throw new Error("This removal is no longer active.");
 				value.status = "closed";
 				value.outcome = "removal_cancelled";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.removalAbsentObservedAt = "";
 				value.closedAt = nowIso;
 				appendWarFollowupActivity_(value, "removal_cancelled", "Removal decision cancelled. Rejoin monitoring is off.", actor, nowIso);
@@ -1456,6 +1459,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (["removed", "removal_evasion"].indexOf(value.status) < 0) throw new Error("This account is not under rejoin monitoring.");
 				value.status = "closed";
 				value.outcome = "rejoin_approved";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.removalAbsentObservedAt = "";
 				value.closedAt = nowIso;
 				value.dismissedSignalIds = dismissibleSignalIds;
@@ -1464,6 +1468,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "approve_return":
 				value.status = "closed";
 				value.outcome = "approved_return";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.closedAt = nowIso;
 				value.dismissedSignalIds = dismissibleSignalIds;
 				appendWarFollowupActivity_(value, "approved_return", "Approved to return to regular wars.", actor, nowIso);
@@ -1499,6 +1504,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "close":
 				value.status = "closed";
 				value.outcome = request.outcome === "no_return" ? "no_return" : "closed";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.closedAt = nowIso;
 				value.dismissedSignalIds = dismissibleSignalIds;
 				appendWarFollowupActivity_(
@@ -1513,6 +1519,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (["removal_pending", "removal_evasion", "removed"].indexOf(value.status) >= 0) throw new Error("Complete or cancel the removal workflow instead of closing it as a normal case.");
 				value.status = "closed";
 				value.outcome = "resolved";
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				if (!(value.contactPurpose === "general" && parseIsoToMs_(value.replyCaptureUntil) > parseIsoToMs_(nowIso))) {
 					value.replyCaptureUntil = "";
 				}

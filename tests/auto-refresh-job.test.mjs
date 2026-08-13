@@ -5863,3 +5863,97 @@ test("expired lock and stale worker triggers are cleaned up", () => {
   assert.equal(resumeTriggers.length, 0);
   assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), undefined);
 });
+
+test("the regular-war end trigger commits captured player evidence before publishing its roster update", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  const sourceData = buildRosterData();
+  sourceData.playerWarPerformance = backend.createEmptyPlayerWarPerformanceStore_({ stage: "active" });
+  const candidate = backend.buildPlayerWarEventCandidate_({
+    kind: "regular",
+    warKey: "regular-war-ended-1",
+    clanTag: "#CLAN",
+    rosterId: "main",
+    observedAt: "2026-08-13T10:02:00.000Z",
+    authorityLevel: "authoritative",
+    complete: true,
+    classification: "exact",
+    contributionsByTag: {
+      "#PLAYER": {
+        stats: { possibleAttacks: 2, usedAttacks: 1, attacksMade: 1, attacksMissed: 1 },
+        form: { possibleAttacks: 2, usedAttacks: 1, attacksMade: 1, attacksMissed: 1, countedAttacks: 1, starsTotal: 2, totalDestruction: 80 },
+      },
+    },
+  });
+  let publishedRosterData = null;
+  let finalizedCandidates = [];
+
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: clone(sourceData) });
+  backend.listDueRegularWarRosterIdsValidated_ = () => ["main"];
+  backend.reconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  backend.reconcileRegularWarFinalizationTriggerState_ = () => null;
+  backend.finalizePlayerWarEventCandidatesToCurrent_ = (_sourceStore, candidates) => {
+    finalizedCandidates = clone(candidates);
+    const store = backend.createEmptyPlayerWarPerformanceStore_({ stage: "active" });
+    store.byTag["#PLAYER"] = { marker: "committed" };
+    return { store };
+  };
+  backend.writeAutoRefreshedActiveRosterData_ = (_source, refreshed) => {
+    publishedRosterData = clone(refreshed);
+    return { changed: true, rosterData: clone(refreshed) };
+  };
+  backend.runRefreshAllRostersCore_ = (_reader, options) => {
+    backend.emitPlayerWarEventCandidate_(candidate);
+    const result = { rosterData: clone(sourceData), processedRosters: 1, issueCount: 0 };
+    options.onAfterRun(result);
+    return result;
+  };
+
+  const result = backend.regularWarFinalizationTickInternal_();
+
+  assert.equal(result.ok, true);
+  assert.equal(finalizedCandidates.length, 1);
+  assert.equal(finalizedCandidates[0].eventId, candidate.eventId);
+  assert.equal(publishedRosterData.playerWarPerformance.byTag["#PLAYER"].marker, "committed");
+});
+
+test("captured regular-war evidence commits once and replays idempotently", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceStore = backend.createEmptyPlayerWarPerformanceStore_({ stage: "active" });
+  const candidate = backend.buildPlayerWarEventCandidate_({
+    kind: "regular",
+    warKey: "regular-war-idempotent-1",
+    clanTag: "#CLAN",
+    rosterId: "main",
+    observedAt: "2026-08-13T11:02:00.000Z",
+    authorityLevel: "authoritative",
+    complete: true,
+    classification: "exact",
+    contributionsByTag: {
+      "#PLAYER": {
+        stats: { possibleAttacks: 2, usedAttacks: 1, attacksMade: 1, attacksMissed: 1 },
+        form: { possibleAttacks: 2, usedAttacks: 1, attacksMade: 1, attacksMissed: 1, countedAttacks: 1, starsTotal: 2, totalDestruction: 80 },
+      },
+    },
+  });
+
+  const first = backend.finalizePlayerWarEventCandidatesToCurrent_(sourceStore, [candidate], {
+    stage: "active",
+    nowIso: "2026-08-13T11:03:00.000Z",
+  });
+  const second = backend.finalizePlayerWarEventCandidatesToCurrent_(sourceStore, [candidate], {
+    stage: "active",
+    nowIso: "2026-08-13T11:04:00.000Z",
+  });
+  const persisted = backend.decodeFirebaseObjectKeysRecursive_(
+    backend.firebaseRequestJson_("private/playerWarPerformance/current", "GET"),
+  );
+
+  assert.equal(first.acceptedCount, 1);
+  assert.equal(second.acceptedCount, 0);
+  assert.equal(second.results[0].idempotent, true);
+  assert.equal(persisted.meta.eventCount, 1);
+  assert.equal(persisted.byTag["#PLAYER"].regular.possibleAttacks, 2);
+  assert.equal(persisted.byTag["#PLAYER"].regular.attacksMissed, 1);
+  assert.equal(persisted.byTag["#PLAYER"].recentRegularWarForm.length, 1);
+});

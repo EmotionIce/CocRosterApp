@@ -595,6 +595,71 @@ function finalizePlayerWarEventCandidates_(sourceStoreRaw, candidatesRaw, option
 	};
 }
 
+// Commit a bounded set of captured war events to the canonical read model and
+// event ledger in one Firebase rollback boundary. Callers that also publish an
+// active roster generation must hold the active-roster job lock while doing so.
+function finalizePlayerWarEventCandidatesToCurrent_(sourceStoreRaw, candidatesRaw, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	const stage = normalizePlayerWarTrackingStage_(options.stage != null ? options.stage : getPlayerWarTrackingStage_());
+	const candidates = dedupePlayerWarCandidates_(candidatesRaw);
+	const canonicalEncoded = firebaseRequestJson_(PLAYER_WAR_PERFORMANCE_CURRENT_PATH, "GET");
+	const sourceStore = canonicalEncoded && typeof canonicalEncoded === "object"
+		? decodeFirebaseObjectKeysRecursive_(canonicalEncoded)
+		: (sourceStoreRaw && typeof sourceStoreRaw === "object"
+			? sourceStoreRaw
+			: createEmptyPlayerWarPerformanceStore_({ stage: stage, provenance: "captured-war-events-bootstrap" }));
+	if (!candidates.length) {
+		return {
+			store: sanitizePlayerWarPerformanceStore_(sourceStore, { stage: stage }),
+			results: [],
+			acceptedCount: 0,
+		};
+	}
+
+	const ledgerPaths = candidates.map(function (candidate) {
+		return buildPlayerWarLedgerEventPath_(candidate.eventId);
+	});
+	const existingEncodedByPath = firebaseBatchGetJson_(ledgerPaths, { disableFallback: true });
+	const existingRecordsByEventId = {};
+	for (let i = 0; i < candidates.length; i++) {
+		const decoded = decodeFirebaseObjectKeysRecursive_(existingEncodedByPath[ledgerPaths[i]]);
+		if (decoded && typeof decoded === "object") existingRecordsByEventId[candidates[i].eventId] = decoded;
+	}
+	const finalized = finalizePlayerWarEventCandidates_(sourceStore, candidates, {
+		persist: false,
+		collectLedgerWrites: true,
+		existingRecordsByEventId: existingRecordsByEventId,
+		stage: stage,
+		nowIso: String(options.nowIso || new Date().toISOString()),
+	});
+	const store = sanitizePlayerWarPerformanceStore_(finalized.store, { stage: stage });
+	const writes = Array.isArray(finalized.ledgerWrites) ? finalized.ledgerWrites.slice() : [];
+	writes.push(
+		{
+			path: PLAYER_WAR_PERFORMANCE_CURRENT_PATH,
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_(store),
+		},
+		{
+			path: buildFirebaseChildPath_(PLAYER_WAR_LEDGER_PATH, "meta"),
+			method: "PUT",
+			payload: encodeFirebaseObjectKeysRecursive_({
+				schemaVersion: PLAYER_WAR_EVENT_SCHEMA_VERSION,
+				shardCount: PLAYER_WAR_LEDGER_SHARD_COUNT,
+				updatedAt: store.updatedAt,
+				eventCount: toNonNegativeInt_(store.meta && store.meta.eventCount),
+				conflictCount: toNonNegativeInt_(store.meta && store.meta.conflictCount),
+			}),
+		},
+	);
+	firebaseBatchPutJson_(writes, { disableFallback: true });
+	return {
+		store: store,
+		results: finalized.results,
+		acceptedCount: finalized.acceptedCount,
+	};
+}
+
 function buildPlayerWarShadowComparison_(legacyRosterDataRaw, globalStoreRaw) {
 	const rosterData = legacyRosterDataRaw && typeof legacyRosterDataRaw === "object" ? legacyRosterDataRaw : {};
 	const globalStore = sanitizePlayerWarPerformanceStore_(globalStoreRaw);

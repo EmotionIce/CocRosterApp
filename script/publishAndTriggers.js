@@ -7354,28 +7354,48 @@ function regularWarFinalizationTickInternal_() {
 			return { ok: true, skipped: true, reason: "noDue", dueRosterIds: [] };
 		}
 		let writeResult = null;
-		const runResult = runRefreshAllRostersCore_(
-			function () {
-				sourceSnapshot = readActiveRosterSnapshot_();
-				return sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
-			},
-			{
-				lockOwner: "regular-war-finalization",
-				lockWaitMs: ACTIVE_ROSTER_JOB_LOCK_WAIT_MS,
-				allowRegularWarHistoryRepair: false,
-				allowRegularWarProvisionalFallback: false,
-				statsOnlyRegularWarFinalization: true,
-				rosterIds: dueRosterIds,
-				onAfterRun: function (resultRaw) {
-					const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
-					if (!result || result.skipped) return;
-					if (!sourceSnapshot || !sourceSnapshot.rosterData) {
-						throw new Error("Regular-war finalization source snapshot is missing.");
-					}
-					writeResult = writeAutoRefreshedActiveRosterData_(sourceSnapshot, result.rosterData);
+		const eventCandidateSink = [];
+		const previousEventCandidateSink = beginPlayerWarEventCandidateCapture_(eventCandidateSink);
+		let runResult = null;
+		try {
+			runResult = runRefreshAllRostersCore_(
+				function () {
+					sourceSnapshot = readActiveRosterSnapshot_();
+					return sourceSnapshot && sourceSnapshot.rosterData ? sourceSnapshot.rosterData : null;
 				},
-			},
-		);
+				{
+					lockOwner: "regular-war-finalization",
+					lockWaitMs: ACTIVE_ROSTER_JOB_LOCK_WAIT_MS,
+					allowRegularWarHistoryRepair: false,
+					allowRegularWarProvisionalFallback: false,
+					statsOnlyRegularWarFinalization: true,
+					rosterIds: dueRosterIds,
+					onAfterRun: function (resultRaw) {
+						const result = resultRaw && typeof resultRaw === "object" ? resultRaw : null;
+						if (!result || result.skipped) return;
+						if (!sourceSnapshot || !sourceSnapshot.rosterData) {
+							throw new Error("Regular-war finalization source snapshot is missing.");
+						}
+						if (eventCandidateSink.length) {
+							const playerWarFinalization = finalizePlayerWarEventCandidatesToCurrent_(
+								result.rosterData && result.rosterData.playerWarPerformance,
+								eventCandidateSink,
+								{ nowIso: new Date().toISOString() },
+							);
+							result.rosterData.playerWarPerformance = playerWarFinalization.store;
+							Logger.log(
+								"regularWarFinalizationTick committed player-war candidates=%s accepted=%s",
+								eventCandidateSink.length,
+								toNonNegativeInt_(playerWarFinalization.acceptedCount),
+							);
+						}
+						writeResult = writeAutoRefreshedActiveRosterData_(sourceSnapshot, result.rosterData);
+					},
+				},
+			);
+		} finally {
+			endPlayerWarEventCandidateCapture_(previousEventCandidateSink);
+		}
 		if (writeResult && writeResult.rosterData) {
 			reconcileRegularWarFinalizationTriggerStateValidated_(writeResult.rosterData);
 		} else {

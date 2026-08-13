@@ -867,6 +867,7 @@
     } else if (action === "dismiss") {
       value.status = "dismissed";
       value.outcome = "no_action";
+      if (request.evidence) value.evidence = cloneValue(request.evidence);
       if (!(value.contactPurpose === "general" && parseMs(value.replyCaptureUntil) > parseMs(nowIso))) value.replyCaptureUntil = "";
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
       value.closedAt = nowIso;
@@ -1007,6 +1008,7 @@
     } else if (action === "approve_return") {
       value.status = "closed";
       value.outcome = "approved_return";
+      if (request.evidence) value.evidence = cloneValue(request.evidence);
       value.closedAt = nowIso;
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
     } else if (action === "extend") {
@@ -1030,12 +1032,14 @@
     } else if (action === "close") {
       value.status = "closed";
       value.outcome = request.outcome === "no_return" ? "no_return" : "closed";
+      if (request.evidence) value.evidence = cloneValue(request.evidence);
       value.replyCaptureUntil = "";
       value.closedAt = nowIso;
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
     } else if (action === "resolve") {
       value.status = "closed";
       value.outcome = "resolved";
+      if (request.evidence) value.evidence = cloneValue(request.evidence);
       if (!(value.contactPurpose === "general" && parseMs(value.replyCaptureUntil) > parseMs(nowIso))) value.replyCaptureUntil = "";
       value.resolutionNote = toText(request.resolutionNote).trim() || "Resolved by a moderator.";
       value.closedAt = nowIso;
@@ -1076,11 +1080,13 @@
     } else if (action === "cancel_removal") {
       value.status = "closed";
       value.outcome = "removal_cancelled";
+      if (request.evidence) value.evidence = cloneValue(request.evidence);
       value.removalAbsentObservedAt = "";
       value.closedAt = nowIso;
     } else if (action === "approve_rejoin") {
       value.status = "closed";
       value.outcome = "rejoin_approved";
+      if (request.evidence) value.evidence = cloneValue(request.evidence);
       value.removalAbsentObservedAt = "";
       value.closedAt = nowIso;
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
@@ -1151,6 +1157,53 @@
         return true;
       })
       .sort((left, right) => parseMs(left.at) - parseMs(right.at));
+  };
+
+  const buildEvidenceAfter = (evidenceRaw, timestampRaw, baselineEvidenceRaw) => {
+    const evidence = evidenceRaw && typeof evidenceRaw === "object" ? evidenceRaw : {};
+    const baselineEvidence = baselineEvidenceRaw && typeof baselineEvidenceRaw === "object" ? baselineEvidenceRaw : {};
+    const regularEvents = eventsAfter(evidence.regularEvents, timestampRaw, "")
+      .sort((left, right) => parseMs(right.at) - parseMs(left.at) || toText(right.id).localeCompare(toText(left.id)));
+    const baselineCwlById = new Map((Array.isArray(baselineEvidence.cwlEvents) ? baselineEvidence.cwlEvents : [])
+      .filter((event) => event && toText(event.id).trim())
+      .map((event) => [toText(event.id).trim(), event]));
+    const cwlEvents = (Array.isArray(evidence.cwlEvents) ? evidence.cwlEvents : []).map((eventRaw) => {
+      const event = eventRaw && typeof eventRaw === "object" ? eventRaw : null;
+      if (!event) return null;
+      const id = toText(event.id).trim();
+      const baseline = baselineCwlById.get(id);
+      if (!baseline) return parseMs(event.at) > parseMs(timestampRaw) ? event : null;
+      const currentStats = normalizeStats(event.stats);
+      const baselineStats = normalizeStats(baseline.stats);
+      const delta = emptyStats();
+      for (const key of Object.keys(delta)) {
+        if (currentStats[key] < baselineStats[key]) return null;
+        delta[key] = currentStats[key] - baselineStats[key];
+      }
+      const hasDelta = delta.possibleAttacks > 0 || delta.usedAttacks > 0 || delta.missedAttacks > 0 ||
+        delta.countedAttacks > 0 || delta.warCount > 0;
+      if (!hasDelta) return null;
+      return Object.assign({}, event, {
+        id: id + ":after-close:" + stableRevision(Object.keys(delta).map((key) => delta[key]).join("|")),
+        legacyIds: [],
+        at: toText(evidence.capturedAt || event.at).trim(),
+        stats: delta,
+      });
+    }).filter(Boolean)
+      .sort((left, right) => parseMs(right.at) - parseMs(left.at) || toText(right.id).localeCompare(toText(left.id)));
+    const regularTotals = emptyStats();
+    const cwlTotals = emptyStats();
+    for (const event of regularEvents) addStats(regularTotals, event.stats);
+    for (const event of cwlEvents) addStats(cwlTotals, event.stats);
+    regularTotals.warCount = regularEvents.length;
+    cwlTotals.warCount = cwlEvents.reduce((sum, event) => sum + toInt(event && event.stats && event.stats.warCount), 0);
+    return {
+      capturedAt: toText(evidence.capturedAt).trim(),
+      regular: statsSummary(regularTotals),
+      cwl: statsSummary(cwlTotals),
+      regularEvents,
+      cwlEvents,
+    };
   };
 
   const buildRecoveryProgress = (caseRaw, currentEvidenceRaw) => {
@@ -1241,13 +1294,20 @@
       };
       const evidence = buildEvidenceForTag(rosterData, tag, settings, evidenceOwner);
       const signals = player && player.automaticEligible ? buildSignals(evidence, settings) : [];
-      const signalIds = signals.map((signal) => signal.id);
       const dismissed = new Set(Array.isArray(value && value.dismissedSignalIds) ? value.dismissedSignalIds : []);
-      const hasNewSignal = signals.some((signal) =>
+      let status = value ? toText(value.status).trim() : (signals.length ? "needs_review" : "");
+      const wasClosed = status === "closed" || status === "dismissed";
+      const postCloseEvidence = wasClosed && parseMs(value && value.closedAt) > 0
+        ? buildEvidenceAfter(evidence, value.closedAt, value.evidence)
+        : null;
+      const postCloseSignals = postCloseEvidence && player && player.automaticEligible
+        ? buildSignals(postCloseEvidence, settings)
+        : null;
+      const newSignals = postCloseSignals || signals.filter((signal) =>
         ![signal.id].concat(Array.isArray(signal.legacyIds) ? signal.legacyIds : [])
           .some((id) => dismissed.has(id))
       );
-      let status = value ? toText(value.status).trim() : (signals.length ? "needs_review" : "");
+      const hasNewSignal = newSignals.length > 0;
       if ((status === "closed" || status === "dismissed") && hasNewSignal) status = "needs_review";
       if (status === "dismissed") status = "closed";
       const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, evidence) : null;
@@ -1278,12 +1338,13 @@
         clanTag: normalizeTag(value && value.sourceClanTag),
         automaticEligible: false,
       };
-      const itemSignals = watching && watching.triggered ? watching.signals : signals;
+      const reopenedFromClosed = wasClosed && status === "needs_review" && hasNewSignal;
+      const itemSignals = watching && watching.triggered ? watching.signals : (reopenedFromClosed ? newSignals : signals);
       items.push({
         tag,
         player: identity,
         case: value,
-        evidence,
+        evidence: reopenedFromClosed && postCloseEvidence ? postCloseEvidence : evidence,
         signals: itemSignals,
         signalIds: itemSignals.map((signal) => signal.id),
         status,
@@ -1850,7 +1911,7 @@
       const tag = normalizeTag(item && item.tag);
       if (!tag || state.pendingCaseMutations.has(tag) || state.pendingDismissTags.has(tag)) return null;
       const playerName = toText(item && item.player && item.player.name).trim() || tag;
-      return mutate(item, "dismiss", {}, {
+      return mutate(item, "dismiss", { evidence: item.evidence }, {
         closeDrawer: true,
         errorPrefix: playerName + ": Could not save No action.",
       });
@@ -3015,7 +3076,7 @@
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!resolution.value.trim()) return;
-        await mutate(item, "resolve", { resolutionNote: resolution.value });
+        await mutate(item, "resolve", { resolutionNote: resolution.value, evidence: item.evidence });
       });
       section.appendChild(form);
     };
@@ -3177,7 +3238,7 @@
         section.appendChild(createElement("div", "wfu-message-preview", toText(item.case && item.case.dmText)));
         const queuedActions = createElement("div", "wfu-form-actions");
         queuedActions.appendChild(createButton("Refresh status", "btn", () => load(true)));
-        queuedActions.appendChild(createButton(removal ? "Cancel removal" : "Cancel / change decision", "btn secondary", () => mutate(item, removal ? "cancel_removal" : "reopen")));
+        queuedActions.appendChild(createButton(removal ? "Cancel removal" : "Cancel / change decision", "btn secondary", () => mutate(item, removal ? "cancel_removal" : "reopen", removal ? { evidence: item.evidence } : {})));
         queuedActions.appendChild(createButton("Escalate", "btn secondary is-danger", () => mutate(item, "escalate")));
         section.appendChild(queuedActions);
         return;
@@ -3240,7 +3301,7 @@
       section.appendChild(actions);
       if (removal) {
         const followup = createElement("div", "wfu-form-actions");
-        followup.appendChild(createButton("Cancel removal", "btn secondary", () => mutate(item, "cancel_removal")));
+        followup.appendChild(createButton("Cancel removal", "btn secondary", () => mutate(item, "cancel_removal", { evidence: item.evidence })));
         followup.appendChild(createButton("Escalate", "btn secondary is-danger", () => mutate(item, "escalate")));
         section.appendChild(followup);
       }
@@ -3266,13 +3327,13 @@
 
       const actions = createElement("div", "wfu-form-actions");
       if (progress.ready) {
-        actions.appendChild(createButton("Approved to return", "btn", () => mutate(item, "approve_return")));
+        actions.appendChild(createButton("Approved to return", "btn", () => mutate(item, "approve_return", { evidence: item.evidence })));
       }
       actions.appendChild(createButton("Extend period", "btn secondary", () => {
         state.decisionMode = "extend";
         render();
       }));
-      actions.appendChild(createButton("Close without return", "btn secondary is-danger", () => mutate(item, "close", { outcome: "no_return" })));
+      actions.appendChild(createButton("Close without return", "btn secondary is-danger", () => mutate(item, "close", { outcome: "no_return", evidence: item.evidence })));
       actions.appendChild(createButton("Remove from community", "btn secondary is-danger", () => {
         state.decisionMode = "remove";
         render();
@@ -3350,7 +3411,7 @@
       const removed = createButton(item.case && item.case.removalActionedAt ? "Removal recorded" : "I removed them in game", "btn is-danger", () => mutate(item, "removal_actioned"));
       removed.disabled = !!(item.case && item.case.removalActionedAt);
       actions.appendChild(removed);
-      actions.appendChild(createButton("Cancel removal", "btn secondary", () => mutate(item, "cancel_removal")));
+      actions.appendChild(createButton("Cancel removal", "btn secondary", () => mutate(item, "cancel_removal", { evidence: item.evidence })));
       actions.appendChild(createButton("Escalate", "btn secondary is-danger", () => mutate(item, "escalate")));
       section.appendChild(actions);
     };
@@ -3369,7 +3430,7 @@
         state.decisionMode = "remove";
         render();
       }));
-      actions.appendChild(createButton("Approve rejoin", "btn secondary", () => mutate(item, "approve_rejoin")));
+      actions.appendChild(createButton("Approve rejoin", "btn secondary", () => mutate(item, "approve_rejoin", { evidence: item.evidence })));
       actions.appendChild(createButton("Escalate", "btn secondary is-danger", () => mutate(item, "escalate")));
       section.appendChild(actions);
     };
@@ -3393,7 +3454,7 @@
                     : "No further action is scheduled."))))));
       section.appendChild(createElement("div", "wfu-closed-copy", outcome));
       if (item.case && item.case.status === "removed") {
-        section.appendChild(createButton("Stop rejoin monitoring", "btn secondary", () => mutate(item, "approve_rejoin")));
+        section.appendChild(createButton("Stop rejoin monitoring", "btn secondary", () => mutate(item, "approve_rejoin", { evidence: item.evidence })));
       } else {
         section.appendChild(createButton("Reopen", "btn secondary", () => mutate(item, "reopen")));
       }
