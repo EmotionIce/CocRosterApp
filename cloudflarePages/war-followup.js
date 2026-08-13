@@ -42,6 +42,8 @@
     watching: { label: "Monitoring", next: "Watching for new problematic evidence", tone: "watching" },
     closed: { label: "Closed", next: "No action needed", tone: "closed" },
   };
+  const CONTACT_REPLY_PROMPT = "If you would like to explain, reply to this message. Your reply will be forwarded privately to the moderation team.";
+  const MODERATOR_STORAGE_KEY = "warFollowupModeratorId";
 
   const toText = (value) => value == null ? "" : String(value);
   const toInt = (value) => {
@@ -140,6 +142,26 @@
       updatedAt: toText(value.updatedAt).trim(),
     };
   };
+
+  const sanitizeModerators = (raw) => (Array.isArray(raw) ? raw : [])
+    .map((entry) => {
+      const value = entry && typeof entry === "object" ? entry : {};
+      const discordId = /^\d{17,20}$/.test(toText(value.discordId).trim()) ? toText(value.discordId).trim() : "";
+      if (!discordId) return null;
+      return {
+        discordId,
+        guildId: /^\d{17,20}$/.test(toText(value.guildId).trim()) ? toText(value.guildId).trim() : "",
+        displayName: toText(value.displayName || discordId).trim().slice(0, 80),
+        clanTags: Array.from(new Set((Array.isArray(value.clanTags) ? value.clanTags : []).map(normalizeTag).filter(Boolean))).sort(),
+        notificationMode: ["dm", "channel", "both"].includes(toText(value.notificationMode).trim().toLowerCase())
+          ? toText(value.notificationMode).trim().toLowerCase()
+          : "channel",
+        accepting: value.accepting === true,
+        updatedAt: toText(value.updatedAt).trim(),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
   const emptyStats = () => ({
     warCount: 0,
@@ -660,6 +682,20 @@
       dmMessageId: "",
       dmSentByDiscordId: "",
       dmSentByName: "",
+      contactStage: "",
+      contactAutomaticReminderAllowed: true,
+      contactReminderText: "",
+      contactReminderSentAt: "",
+      contactReminderMessageId: "",
+      contactNoResponseAt: "",
+      contactReminderFailedAt: "",
+      contactReminderFailureReason: "",
+      dmQueueId: "",
+      dmQueuedAt: "",
+      dmQueuedByDiscordId: "",
+      dmQueuedByName: "",
+      dmDeliveryFailedAt: "",
+      dmDeliveryFailureReason: "",
       replyCaptureUntil: "",
       conversation: [],
       conversationTrimmedCount: 0,
@@ -728,6 +764,8 @@
         ];
       case "contact":
         return ["contact_prepared", "Player contact message prepared."];
+      case "queue_dm":
+        return ["dm_queued", "Queued for delivery by the Discord bot."];
       case "wait":
         return ["waiting", "Paused with a " + request.followupHours + "h follow-up." + (value.waitingReason ? (" " + value.waitingReason) : "")];
       case "hero_down":
@@ -740,6 +778,10 @@
         return ["dm_sent", "Decision DM marked as sent."];
       case "player_response":
         return ["player_response", "Player response received."];
+      case "assign_owner":
+        return ["assigned", "Assigned to " + (value.assignedModeratorName || value.assignedModeratorId) + "."];
+      case "unassign_owner":
+        return ["unassigned", "Assignment cleared."];
       case "approve_return":
         return ["approved_return", "Approved to return to regular wars."];
       case "extend":
@@ -807,6 +849,8 @@
       "targetRosterId",
       "targetRosterTitle",
       "handledBy",
+      "assignedModeratorId",
+      "assignedModeratorName",
     ]) {
       if (Object.prototype.hasOwnProperty.call(request, field)) value[field] = toText(request[field]).trim();
     }
@@ -823,7 +867,7 @@
     } else if (action === "dismiss") {
       value.status = "dismissed";
       value.outcome = "no_action";
-      value.replyCaptureUntil = "";
+      if (!(value.contactPurpose === "general" && parseMs(value.replyCaptureUntil) > parseMs(nowIso))) value.replyCaptureUntil = "";
       value.dismissedSignalIds = Array.isArray(request.signalIds) ? request.signalIds.slice() : [];
       value.closedAt = nowIso;
     } else if (action === "watch") {
@@ -843,12 +887,26 @@
     } else if (action === "contact") {
       value.status = "needs_dm";
       value.contactPurpose = "general";
+      value.contactAutomaticReminderAllowed = request.suppressAutomaticReminder !== true;
+      value.contactStage = "";
+      value.contactReminderText = "";
+      value.contactReminderSentAt = "";
+      value.contactReminderMessageId = "";
+      value.contactNoResponseAt = "";
+      value.contactReminderFailedAt = "";
+      value.contactReminderFailureReason = "";
       value.dmText = toText(request.dmText).trim();
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
       value.dmSentByDiscordId = "";
       value.dmSentByName = "";
+      value.dmQueueId = "";
+      value.dmQueuedAt = "";
+      value.dmQueuedByDiscordId = "";
+      value.dmQueuedByName = "";
+      value.dmDeliveryFailedAt = "";
+      value.dmDeliveryFailureReason = "";
       value.replyCaptureUntil = "";
       value.playerResponse = "";
       value.playerResponseAt = "";
@@ -860,13 +918,15 @@
       value.waitingReason = toText(request.waitingReason).trim();
       value.closedAt = "";
     } else if (action === "player_response") {
-      const exactReply = toText(request.responseToMessageId).trim() && toText(request.responseToMessageId).trim() === value.dmMessageId;
+      const exactReply = toText(request.responseToMessageId).trim() &&
+        [value.dmMessageId, value.contactReminderMessageId].includes(toText(request.responseToMessageId).trim());
       const captureWindowOpen = parseMs(value.replyCaptureUntil) >= parseMs(nowIso);
       const responseStateAllowed = value.status === "waiting" || (value.status === "needs_review" && (captureWindowOpen || exactReply));
       if (!responseStateAllowed || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) throw new Error("This case is not currently awaiting a bot-captured player response.");
       const responseText = toText(request.responseText).trim();
       if (!responseText) throw new Error("The player response is empty.");
       value.status = "needs_review";
+      value.contactStage = "responded";
       value.playerResponse = responseText;
       value.playerResponseAt = nowIso;
       value.playerResponseMessageId = toText(request.responseMessageId).trim().slice(0, 120);
@@ -898,6 +958,14 @@
       value.replyCaptureUntil = "";
       value.recoveryStartedAt = "";
       value.closedAt = "";
+    } else if (action === "queue_dm") {
+      value.dmText = toText(request.dmText != null ? request.dmText : value.dmText).trim();
+      value.dmQueueId = toText(request.dmQueueId || mutationIdRaw).trim();
+      value.dmQueuedAt = nowIso;
+      value.dmQueuedByDiscordId = toText(request.dmQueuedByDiscordId).trim();
+      value.dmQueuedByName = toText(request.dmQueuedByName || request.actor).trim().slice(0, 80);
+      value.dmDeliveryFailedAt = "";
+      value.dmDeliveryFailureReason = "";
     } else if (action === "mark_dm_sent") {
       value.dmText = toText(request.dmText != null ? request.dmText : value.dmText).trim();
       value.dmSentAt = nowIso;
@@ -905,8 +973,15 @@
       value.dmMessageId = value.dmDeliveryMode === "bot" ? toText(request.dmMessageId).trim().slice(0, 120) : "";
       value.dmSentByDiscordId = /^\d{17,20}$/.test(toText(request.dmSentByDiscordId).trim()) ? toText(request.dmSentByDiscordId).trim() : "";
       value.dmSentByName = toText(request.dmSentByName || request.actor).trim().slice(0, 80);
+      value.dmQueueId = "";
+      value.dmQueuedAt = "";
+      value.dmQueuedByDiscordId = "";
+      value.dmQueuedByName = "";
+      value.dmDeliveryFailedAt = "";
+      value.dmDeliveryFailureReason = "";
       if (value.contactPurpose === "general") {
         value.status = "waiting";
+        value.contactStage = value.contactAutomaticReminderAllowed ? "awaiting_first_response" : "awaiting_final_response";
         value.waitingUntil = new Date(parseMs(nowIso) + 24 * 60 * 60 * 1000).toISOString();
         value.waitingReason = "Awaiting the player's response.";
         value.replyCaptureUntil = value.dmDeliveryMode === "bot"
@@ -961,7 +1036,7 @@
     } else if (action === "resolve") {
       value.status = "closed";
       value.outcome = "resolved";
-      value.replyCaptureUntil = "";
+      if (!(value.contactPurpose === "general" && parseMs(value.replyCaptureUntil) > parseMs(nowIso))) value.replyCaptureUntil = "";
       value.resolutionNote = toText(request.resolutionNote).trim() || "Resolved by a moderator.";
       value.closedAt = nowIso;
       value.waitingUntil = "";
@@ -1012,7 +1087,27 @@
     } else if (action === "reopen") {
       value.status = "needs_review";
       value.outcome = "";
+      value.dmQueueId = "";
+      value.dmQueuedAt = "";
+      value.dmQueuedByDiscordId = "";
+      value.dmQueuedByName = "";
+      value.dmDeliveryFailedAt = "";
+      value.dmDeliveryFailureReason = "";
       value.closedAt = "";
+    } else if (action === "assign_owner") {
+      value.assignedModeratorId = toText(request.assignedModeratorId).trim();
+      value.assignedModeratorName = toText(request.assignedModeratorName || request.handledBy || value.assignedModeratorId).trim();
+      value.handledBy = value.assignedModeratorName;
+      value.assignmentCoverageOverride = request.assignmentCoverageOverride === true;
+      value.assignedAt = nowIso;
+      value.assignmentUpdatedAt = nowIso;
+    } else if (action === "unassign_owner") {
+      value.assignedModeratorId = "";
+      value.assignedModeratorName = "";
+      value.handledBy = "";
+      value.assignmentCoverageOverride = false;
+      value.assignedAt = "";
+      value.assignmentUpdatedAt = nowIso;
     }
 
     if (value.status !== "waiting") {
@@ -1450,9 +1545,11 @@
       loaded: false,
       loading: false,
       saving: false,
-      privateState: { settings: sanitizeSettings(null), cases: [] },
+      privateState: { settings: sanitizeSettings(null), cases: [], moderators: [] },
       work: { items: [], directory: { byTag: {}, players: [], rosters: [], missingTags: new Set() }, settings: sanitizeSettings(null), caseByTag: {} },
-      view: "work",
+      view: "mine",
+      mineGroup: "action",
+      selectedModeratorId: "",
       status: "needs_review",
       clan: "",
       handler: "",
@@ -1490,6 +1587,31 @@
     const callServer = (method, args) => {
       if (typeof options.callServer !== "function") return Promise.reject(new Error("Admin API is unavailable."));
       return options.callServer(method, args);
+    };
+    const readStoredModeratorId = () => {
+      try {
+        return typeof localStorage !== "undefined" ? toText(localStorage.getItem(MODERATOR_STORAGE_KEY)).trim() : "";
+      } catch {
+        return "";
+      }
+    };
+    const storeModeratorId = (discordIdRaw) => {
+      const discordId = toText(discordIdRaw).trim();
+      try {
+        if (typeof localStorage !== "undefined") {
+          if (discordId) localStorage.setItem(MODERATOR_STORAGE_KEY, discordId);
+          else localStorage.removeItem(MODERATOR_STORAGE_KEY);
+        }
+      } catch {
+        // The identity remains valid for this page even if browser storage is unavailable.
+      }
+    };
+    const selectedModerator = () => state.privateState.moderators.find((entry) => entry.discordId === state.selectedModeratorId) || null;
+    const itemBelongsToSelectedModerator = (item) => {
+      const moderator = selectedModerator();
+      if (!moderator || !item || !item.case) return false;
+      return item.case.assignedModeratorId === moderator.discordId ||
+        (!item.case.assignedModeratorId && toText(item.case.handledBy).trim() === moderator.displayName);
     };
     const pendingWrites = new Set();
     let mutationSequence = 0;
@@ -1583,7 +1705,12 @@
         state.privateState = {
           settings: sanitizeSettings(result && result.settings),
           cases: Array.isArray(result && result.cases) ? result.cases.map(normalizeCase).filter(Boolean) : [],
+          moderators: sanitizeModerators(result && result.moderators),
         };
+        const preferredModeratorId = state.selectedModeratorId || readStoredModeratorId();
+        state.selectedModeratorId = state.privateState.moderators.some((entry) => entry.discordId === preferredModeratorId)
+          ? preferredModeratorId
+          : "";
         state.trustUpdatedAtByTag = {};
         state.trustBaselineUpdatedAt = toText(state.privateState.settings.updatedAt).trim();
         state.loaded = true;
@@ -1603,6 +1730,7 @@
     const mutationBase = (item) => {
       const player = item && item.player ? item.player : {};
       const caseValue = item && item.case ? item.case : null;
+      const moderator = selectedModerator();
       return {
         tag: item ? item.tag : normalizeTag(player.tag),
         name: toText(player.name).trim(),
@@ -1611,7 +1739,7 @@
         sourceRosterId: toText((caseValue && caseValue.sourceRosterId) || player.rosterId).trim(),
         sourceRosterTitle: toText((caseValue && caseValue.sourceRosterTitle) || player.rosterTitle).trim(),
         sourceClanTag: normalizeTag((caseValue && caseValue.sourceClanTag) || player.clanTag),
-        actor: toText(caseValue && caseValue.handledBy).trim(),
+        actor: moderator ? moderator.displayName : toText(caseValue && caseValue.handledBy).trim(),
         handledBy: toText(caseValue && caseValue.handledBy).trim(),
         signalIds: item && Array.isArray(item.signalIds) ? item.signalIds : [],
         expectedUpdatedAt: toText(caseValue && caseValue.updatedAt).trim(),
@@ -2004,6 +2132,51 @@
     const getSelectedItem = () => state.work.items.find((item) => item.tag === state.selectedTag) || null;
 
     const statusForItem = (item) => item && STATUS_META[item.status] ? item.status : "needs_review";
+    const isActiveCase = (item) => ["needs_review", "waiting", "needs_dm", "removal_pending", "removal_evasion", "hero_down", "ready"].includes(toText(item && item.status));
+    const mineGroupForItem = (item) => {
+      if (!item) return "";
+      if (item.status === "hero_down" || (item.status === "removal_pending" && item.case && item.case.removalActionedAt)) return "active";
+      if ((item.status === "waiting" && item.case && item.case.contactPurpose === "general") ||
+          (item.status === "needs_dm" && item.case && item.case.contactPurpose === "general" && item.case.dmQueueId)) return "awaiting";
+      if (item.status === "waiting") return "scheduled";
+      if (item.status === "needs_review" || item.status === "needs_dm" || item.status === "ready" ||
+          item.status === "removal_evasion" || (item.status === "removal_pending" && !(item.case && item.case.removalActionedAt))) return "action";
+      return "";
+    };
+    const casePresentation = (item) => {
+      const caseValue = item && item.case ? item.case : {};
+      if (item && item.status === "needs_dm" && caseValue.dmQueueId) {
+        return { label: "Sending DM", next: "Queued for secure delivery by the Discord bot", tone: "contact" };
+      }
+      if (item && item.status === "needs_dm" && caseValue.dmDeliveryFailedAt) {
+        return { label: "DM failed", next: "Discord could not deliver the message; retry or choose another action", tone: "review" };
+      }
+      if (item && item.status === "waiting" && caseValue.contactPurpose === "general") {
+        if (caseValue.contactStage === "awaiting_final_response" || caseValue.contactAutomaticReminderAllowed === false) {
+          return { label: "Awaiting final reply", next: "Final message sent; no automatic reminder will follow", tone: "watching" };
+        }
+        if (caseValue.contactStage === "awaiting_after_reminder" || caseValue.contactReminderSentAt) {
+          return { label: "Awaiting reply", next: "One reminder was sent; no more automatic messages will be sent", tone: "watching" };
+        }
+        return { label: "Awaiting reply", next: "The bot will send one polite reminder if there is no reply by the deadline", tone: "watching" };
+      }
+      if (caseValue.contactStage === "no_response") {
+        return caseValue.contactAutomaticReminderAllowed === false
+          ? { label: "No response to final message", next: "The player did not reply; a moderator must decide", tone: "review" }
+          : { label: "No response", next: "No reply after the initial DM and one reminder; a moderator must decide", tone: "review" };
+      }
+      if (caseValue.contactStage === "reminder_failed") {
+        return { label: "Reminder failed", next: "The automatic reminder could not be delivered; a moderator must decide", tone: "review" };
+      }
+      if (caseValue.contactStage === "responded" && item && item.status === "needs_review") {
+        return { label: "Player replied", next: "Read the conversation and decide what happens next", tone: "review" };
+      }
+      if (item && item.status === "hero_down") return { label: "Hero-down recovery", next: "Recovery period is active", tone: "trial" };
+      if (item && item.status === "removal_pending" && caseValue.removalActionedAt) {
+        return { label: "Awaiting removal confirmation", next: "Waiting for roster data to confirm the player left", tone: "watching" };
+      }
+      return STATUS_META[statusForItem(item)];
+    };
 
     const pendingWriteCount = () => {
       const tags = new Set([
@@ -2054,6 +2227,16 @@
       const header = createElement("div", "wfu-header");
       const copy = createElement("div", "wfu-header__copy");
       copy.appendChild(createElement("h2", "wfu-title", "War follow-up"));
+      const moderator = selectedModerator();
+      if (moderator) {
+        const identityButton = createButton("Working as " + moderator.displayName, "wfu-moderator-chip", () => {
+          state.selectedModeratorId = "";
+          storeModeratorId("");
+          render();
+        });
+        identityButton.title = "Change website moderator identity";
+        copy.appendChild(identityButton);
+      }
       const menu = createElement("details", "wfu-menu");
       menu.dataset.wfuRootDetails = "more";
       const menuSummary = createElement("summary", "wfu-menu__summary", "More");
@@ -2088,21 +2271,88 @@
       rulesButton.disabled = state.saving;
       if (state.saving) rulesButton.title = "Rules are saving.";
       actions.appendChild(rulesButton);
+      actions.appendChild(createButton("Refresh", "wfu-menu__item", () => {
+        menu.open = false;
+        load(true);
+      }));
       menu.appendChild(actions);
       header.appendChild(copy);
       header.appendChild(menu);
       mount.appendChild(header);
     };
 
+    const renderModeratorPicker = (mount) => {
+      const panel = createElement("section", "wfu-moderator-picker");
+      panel.appendChild(createElement("h3", "wfu-moderator-picker__title", "Who are you working as?"));
+      panel.appendChild(createElement(
+        "p",
+        "wfu-moderator-picker__copy",
+        "Choose your Discord moderator profile. Your actions, notes and case ownership will be recorded under this name.",
+      ));
+      if (!state.privateState.moderators.length) {
+        panel.appendChild(createElement(
+          "div",
+          "wfu-empty__text",
+          "No Discord moderators have synced yet. Open the Moderation Hub in Discord, choose at least one clan, then refresh this page.",
+        ));
+        panel.appendChild(createButton("Refresh", "btn", () => load(true)));
+        mount.appendChild(panel);
+        return;
+      }
+      const form = createElement("form", "wfu-moderator-picker__form");
+      const select = createSelect("wfu-select");
+      addOption(select, "", "Choose your name", true);
+      for (const moderator of state.privateState.moderators) {
+        const coverage = moderator.clanTags.length + " " + plural(moderator.clanTags.length, "clan");
+        addOption(select, moderator.discordId, moderator.displayName + " · " + coverage + (moderator.accepting ? "" : " · paused"), false);
+      }
+      select.required = true;
+      form.appendChild(setField("Moderator", select));
+      const submit = createElement("button", "btn");
+      submit.type = "submit";
+      submit.textContent = "Open my workspace";
+      form.appendChild(submit);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!state.privateState.moderators.some((entry) => entry.discordId === select.value)) return;
+        state.selectedModeratorId = select.value;
+        storeModeratorId(select.value);
+        state.view = "mine";
+        state.mineGroup = "action";
+        render();
+      });
+      panel.appendChild(form);
+      panel.appendChild(createElement(
+        "div",
+        "wfu-moderator-picker__hint",
+        "Moderator signup and clan coverage stay in Discord. This selector only identifies who is using the admin panel.",
+      ));
+      mount.appendChild(panel);
+    };
+
     const renderViewSwitch = (mount) => {
       const switcher = createElement("div", "wfu-view-switch");
-      const workButton = createButton("Work", "wfu-view-switch__btn" + (state.view === "work" ? " is-active" : ""), () => {
+      const mineCount = state.work.items.filter((item) => isActiveCase(item) && itemBelongsToSelectedModerator(item)).length;
+      const mineButton = createButton("My cases" + (mineCount ? " " + mineCount : ""), "wfu-view-switch__btn" + (state.view === "mine" ? " is-active" : ""), () => {
+        state.view = "mine";
+        state.visibleLimit = 12;
+        render();
+      });
+      mineButton.setAttribute("aria-pressed", state.view === "mine" ? "true" : "false");
+      switcher.appendChild(mineButton);
+      const workButton = createButton("All cases", "wfu-view-switch__btn" + (state.view === "work" ? " is-active" : ""), () => {
         state.view = "work";
         state.visibleLimit = 12;
         render();
       });
       workButton.setAttribute("aria-pressed", state.view === "work" ? "true" : "false");
       switcher.appendChild(workButton);
+      const coverageButton = createButton("Coverage", "wfu-view-switch__btn" + (state.view === "coverage" ? " is-active" : ""), () => {
+        state.view = "coverage";
+        render();
+      });
+      coverageButton.setAttribute("aria-pressed", state.view === "coverage" ? "true" : "false");
+      switcher.appendChild(coverageButton);
       if (state.work.settings.missingDiscordEnabled) {
         const gapCount = state.work.directory.players.filter((player) => !player.hasDiscord && !player.trusted).length;
         const gapButton = createButton(
@@ -2118,6 +2368,41 @@
         switcher.appendChild(gapButton);
       }
       mount.appendChild(switcher);
+    };
+
+    const renderMineTabs = (mount) => {
+      const mine = state.work.items.filter((item) => isActiveCase(item) && itemBelongsToSelectedModerator(item));
+      const labels = {
+        action: "Needs action",
+        awaiting: "Awaiting replies",
+        active: "Active recovery/removal",
+        scheduled: "Scheduled follow-ups",
+      };
+      const tabs = createElement("div", "wfu-status-tabs wfu-mine-tabs");
+      for (const key of ["action", "awaiting", "active", "scheduled"]) {
+        const count = mine.filter((item) => mineGroupForItem(item) === key).length;
+        if (key === "scheduled" && !count) continue;
+        const button = createButton(
+          labels[key] + " " + count,
+          "wfu-status-tab" + (state.mineGroup === key ? " is-active" : ""),
+          () => {
+            state.mineGroup = key;
+            state.visibleLimit = 12;
+            render();
+          },
+        );
+        button.setAttribute("aria-pressed", state.mineGroup === key ? "true" : "false");
+        tabs.appendChild(button);
+      }
+      mount.appendChild(tabs);
+      const guidance = state.mineGroup === "action"
+        ? "Cases here need a decision or a message from you."
+        : (state.mineGroup === "awaiting"
+          ? "No action is needed now. The bot is sending or waiting for a player response."
+          : (state.mineGroup === "active"
+            ? "These remain visible while recovery or in-game removal is being confirmed."
+            : "These cases will return to Needs action when their follow-up is due."));
+      mount.appendChild(createElement("div", "wfu-group-guidance", guidance));
     };
 
     const renderStatusTabs = (mount) => {
@@ -2214,7 +2499,7 @@
       if (includeHandler) {
         const handler = createSelect("wfu-select");
         addOption(handler, "", "Anyone", !state.handler);
-        for (const name of state.work.settings.moderatorNames) addOption(handler, name, name, name === state.handler);
+        for (const moderator of state.privateState.moderators) addOption(handler, moderator.discordId, moderator.displayName, moderator.discordId === state.handler);
         handler.setAttribute("aria-label", "Filter by moderator");
         handler.dataset.wfuFocusKey = focusKey("field", "Work moderator filter");
         handler.addEventListener("change", () => {
@@ -2241,10 +2526,12 @@
 
     const matchesFilters = (item) => {
       if (state.pendingDismissTags.has(item.tag)) return false;
-      if (statusForItem(item) !== state.status) return false;
+      if (state.view === "mine") {
+        if (!itemBelongsToSelectedModerator(item) || mineGroupForItem(item) !== state.mineGroup) return false;
+      } else if (statusForItem(item) !== state.status) return false;
       const player = item.player || {};
       if (state.clan && state.clan !== player.rosterId && state.clan !== player.clanTag) return false;
-      if (state.handler && toText(item.case && item.case.handledBy) !== state.handler) return false;
+      if (state.handler && toText(item.case && item.case.assignedModeratorId) !== state.handler) return false;
       const query = state.search.trim().toLowerCase();
       if (!query) return true;
       return [player.name, item.tag, player.discord, player.discordId, player.rosterTitle, player.clanTag]
@@ -2269,7 +2556,7 @@
       const player = item.player || {};
       const meta = (item.case && item.case.status === "removal_evasion") || item.removalRejoinDetected
         ? { label: "Removal evasion", tone: "review" }
-        : STATUS_META[statusForItem(item)];
+        : casePresentation(item);
       const card = createElement("article", "wfu-card");
       card.dataset.status = item.status;
       card.dataset.tag = item.tag;
@@ -2321,7 +2608,7 @@
       } else if (item.status === "closed") {
         reasons.appendChild(createElement("div", "wfu-reason-line", item.case && item.case.outcome === "approved_return" ? "Approved to return" : "Follow-up complete"));
       }
-      if (!reasons.childNodes.length) reasons.appendChild(createElement("div", "wfu-reason-line", "Follow-up in progress"));
+      if (!reasons.childNodes.length) reasons.appendChild(createElement("div", "wfu-reason-line", meta.next));
       card.appendChild(reasons);
 
       const foot = createElement("div", "wfu-card__foot");
@@ -2365,12 +2652,42 @@
     };
 
     const renderWorkList = (mount) => {
-      renderStatusTabs(mount);
-      renderFilters(mount, true);
+      if (state.view === "mine") renderMineTabs(mount);
+      else renderStatusTabs(mount);
+      renderFilters(mount, state.view !== "mine");
       const list = createElement("div", "wfu-list");
       list.id = "warFollowupList";
       mount.appendChild(list);
       renderListOnly();
+    };
+
+    const renderCoverage = (mount) => {
+      const section = createElement("section", "wfu-coverage");
+      section.appendChild(createElement("h3", "wfu-coverage__title", "Moderation coverage"));
+      section.appendChild(createElement("p", "wfu-coverage__copy", "Clan choices and assignment availability are managed in the Discord Moderation Hub."));
+      const rosters = state.work.directory.rosters.filter((roster) => normalizeTag(roster.clanTag));
+      const grid = createElement("div", "wfu-coverage__grid");
+      for (const roster of rosters) {
+        const clanTag = normalizeTag(roster.clanTag);
+        const subscribed = state.privateState.moderators.filter((moderator) => moderator.clanTags.includes(clanTag));
+        const available = subscribed.filter((moderator) => moderator.accepting);
+        const card = createElement("article", "wfu-coverage-card" + (available.length ? "" : " is-uncovered"));
+        card.appendChild(createElement("div", "wfu-coverage-card__title", roster.title || clanTag));
+        card.appendChild(createElement("div", "wfu-coverage-card__status", available.length
+          ? available.length + " accepting " + plural(available.length, "moderator")
+          : "Needs coverage"));
+        card.appendChild(createElement("div", "wfu-coverage-card__people", subscribed.length
+          ? subscribed.map((moderator) => moderator.displayName + (moderator.accepting ? "" : " (paused)")).join(", ")
+          : "No moderators selected this clan."));
+        grid.appendChild(card);
+      }
+      if (!rosters.length) grid.appendChild(createElement("div", "wfu-empty__text", "No connected clans are available."));
+      section.appendChild(grid);
+      const active = state.work.items.filter(isActiveCase);
+      const assigned = active.filter((item) => item.case && item.case.assignedModeratorId).length;
+      const unassigned = active.length - assigned;
+      section.appendChild(createElement("div", "wfu-coverage__summary", active.length + " active · " + assigned + " assigned · " + unassigned + " unassigned"));
+      mount.appendChild(section);
     };
 
     const renderDiscordGaps = (mount) => {
@@ -2504,21 +2821,32 @@
     };
 
     const handlerControl = (selectedRaw) => {
-      const names = state.work.settings.moderatorNames;
-      if (names.length) {
-        const select = createSelect("wfu-select");
-        addOption(select, "", "Unassigned", !selectedRaw);
-        for (const name of names) addOption(select, name, name, name === selectedRaw);
-        return select;
+      const select = createSelect("wfu-select");
+      addOption(select, "", "Unassigned", !selectedRaw);
+      for (const moderator of state.privateState.moderators) {
+        addOption(select, moderator.discordId, moderator.displayName + (moderator.accepting ? "" : " · paused"), moderator.discordId === selectedRaw);
       }
-      const input = createElement("input", "wfu-input");
-      input.placeholder = "Moderator";
-      input.value = toText(selectedRaw);
-      return input;
+      return select;
     };
 
     const renderDecisionStart = (section, item) => {
-      section.appendChild(createElement("h3", "wfu-drawer-section__title", "Decision"));
+      const stage = toText(item.case && item.case.contactStage).trim();
+      const needsApprovedFinalMessage = ["no_response", "reminder_failed"].includes(stage);
+      const title = stage === "no_response"
+        ? (item.case && item.case.contactAutomaticReminderAllowed === false ? "No response to final message" : "No response after reminder")
+        : (stage === "reminder_failed"
+          ? "Reminder delivery failed"
+          : (stage === "responded" ? "Player replied" : "Decision"));
+      section.appendChild(createElement("h3", "wfu-drawer-section__title", title));
+      if (stage === "no_response") {
+        section.appendChild(createElement("div", "wfu-state-callout is-attention", item.case && item.case.contactAutomaticReminderAllowed === false
+          ? "The player did not reply to the moderator-approved final message. No further message will be sent unless you explicitly approve another one."
+          : "The player did not reply to the initial DM or the one automatic reminder. No further message will be sent unless you approve one below."));
+      } else if (stage === "reminder_failed") {
+        section.appendChild(createElement("div", "wfu-state-callout is-attention", toText(item.case.contactReminderFailureReason).trim() || "Discord could not deliver the automatic reminder. Choose how to continue."));
+      } else if (stage === "responded") {
+        section.appendChild(createElement("div", "wfu-state-callout is-response", "A response is available below. Review the conversation before deciding."));
+      }
       if (toText(item.case && item.case.playerResponse).trim()) {
         section.appendChild(createElement("div", "wfu-closed-copy", "Player response: " + toText(item.case.playerResponse).trim()));
       }
@@ -2540,11 +2868,11 @@
       }));
       section.appendChild(actions);
       const secondaryActions = createElement("div", "wfu-form-actions");
-      secondaryActions.appendChild(createButton("Contact player", "btn secondary", () => {
+      secondaryActions.appendChild(createButton(needsApprovedFinalMessage ? "Send final message" : (stage === "responded" ? "Reply to player" : "Contact player"), "btn secondary", () => {
         state.decisionMode = "contact";
         render();
       }));
-      secondaryActions.appendChild(createButton("Set follow-up", "btn secondary", () => {
+      secondaryActions.appendChild(createButton(needsApprovedFinalMessage ? "Give more time" : "Set follow-up", "btn secondary", () => {
         state.decisionMode = "wait";
         render();
       }));
@@ -2591,13 +2919,24 @@
     };
 
     const renderContactForm = (section, item) => {
-      section.appendChild(createElement("h3", "wfu-drawer-section__title", "Contact player"));
+      const stage = toText(item.case && item.case.contactStage).trim();
+      const isFinal = ["no_response", "reminder_failed"].includes(stage);
+      const hasPlayerReply = Array.isArray(item.case && item.case.conversation) && item.case.conversation.some((entry) => entry && entry.direction === "player");
+      section.appendChild(createElement("h3", "wfu-drawer-section__title", isFinal ? "Send final message" : (hasPlayerReply ? "Reply to player" : "Contact player")));
       const form = createElement("form", "wfu-form");
       const message = createElement("textarea", "wfu-textarea wfu-dm-textarea");
       message.rows = 7;
       message.required = true;
-      message.value = "Hi " + (item.player.name || item.tag) + ". A leader is reviewing your recent war activity and would like to follow up with you.";
+      message.maxLength = 1800;
+      message.value = isFinal
+        ? "Hi " + (item.player.name || item.tag) + ". We still need your response before leadership can finish reviewing this. Please reply when you can."
+        : (hasPlayerReply
+          ? "Hi " + (item.player.name || item.tag) + ". Thanks for getting back to us. We would like to follow up about your recent war activity."
+          : "Hi " + (item.player.name || item.tag) + ". A leader is reviewing your recent war activity and would like to follow up with you.");
       form.appendChild(setField("Message", message));
+      form.appendChild(createElement("div", "wfu-closed-copy", isFinal
+        ? "The Discord bot sends this privately and captures the reply in the case conversation. This is a moderator-approved final message, so no automatic reminder will follow; after 24 hours without a reply the case returns to Needs action."
+        : "The Discord bot sends this privately and captures the player’s reply in the case conversation. One automatic reminder is sent after 24 hours; after another 24 hours the case returns to Needs action."));
       const actions = createElement("div", "wfu-form-actions");
       actions.appendChild(createButton("Back", "btn secondary", () => {
         state.decisionMode = "";
@@ -2611,7 +2950,13 @@
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!message.value.trim()) return;
-        await mutate(item, "contact", { dmText: message.value });
+        const prepared = message.value.trim().includes(CONTACT_REPLY_PROMPT)
+          ? message.value.trim()
+          : message.value.trim() + "\n\n" + CONTACT_REPLY_PROMPT;
+        await mutate(item, "contact", {
+          dmText: prepared,
+          suppressAutomaticReminder: isFinal,
+        });
       });
       section.appendChild(form);
     };
@@ -2739,10 +3084,8 @@
       wars.min = "1";
       wars.max = "8";
       wars.value = String(toInt(item.case && item.case.recoveryWarTarget) || state.work.settings.defaultRecoveryWars);
-      const handler = handlerControl(toText(item.case && item.case.handledBy));
       form.appendChild(setField("Hero-down roster", target));
       form.appendChild(setField("Clean regular wars", wars));
-      form.appendChild(setField("Handled by", handler));
 
       const reasons = createElement("fieldset", "wfu-reason-picker");
       reasons.appendChild(createElement("legend", "wfu-field__label", "Include in DM"));
@@ -2813,8 +3156,6 @@
           targetRosterId: targetRoster.id,
           targetRosterTitle: targetRoster.title,
           targetClanTag: targetRoster.clanTag,
-          handledBy: handler.value,
-          actor: handler.value,
           recoveryWarTarget: toInt(wars.value) || state.work.settings.defaultRecoveryWars,
           requireNoMisses: true,
           reasonCodes: reasonCodes.length ? reasonCodes : ["manual"],
@@ -2828,13 +3169,42 @@
 
     const renderNeedsDm = (section, item) => {
       const removal = item.case && item.case.contactPurpose === "removal";
+      const moderator = selectedModerator();
+      const queued = toText(item.case && item.case.dmQueueId).trim();
       section.appendChild(createElement("h3", "wfu-drawer-section__title", removal ? "Send removal notice" : "Send the DM"));
+      if (queued) {
+        section.appendChild(createElement("div", "wfu-state-callout is-progress", "Queued for the Discord bot. Delivery is normally completed within a few minutes; the case will update automatically after the bot sends it."));
+        section.appendChild(createElement("div", "wfu-message-preview", toText(item.case && item.case.dmText)));
+        const queuedActions = createElement("div", "wfu-form-actions");
+        queuedActions.appendChild(createButton("Refresh status", "btn", () => load(true)));
+        queuedActions.appendChild(createButton(removal ? "Cancel removal" : "Cancel / change decision", "btn secondary", () => mutate(item, removal ? "cancel_removal" : "reopen")));
+        queuedActions.appendChild(createButton("Escalate", "btn secondary is-danger", () => mutate(item, "escalate")));
+        section.appendChild(queuedActions);
+        return;
+      }
+      if (item.case && item.case.dmDeliveryFailedAt) {
+        section.appendChild(createElement("div", "wfu-state-callout is-attention", toText(item.case.dmDeliveryFailureReason).trim() || "Discord could not deliver this message. You can retry or record a manual message below."));
+      }
       const message = createElement("textarea", "wfu-textarea wfu-dm-textarea");
       message.rows = 8;
       message.required = true;
+      message.maxLength = 2000;
       message.value = toText(item.case && item.case.dmText);
       message.addEventListener("input", () => message.setCustomValidity(""));
       section.appendChild(setField("Decision message", message));
+      const validateMessage = () => {
+        if (!message.value.trim()) {
+          message.setCustomValidity("Add the decision message first.");
+        } else if (message.value.length > 2000) {
+          message.setCustomValidity("Discord messages can contain at most 2,000 characters.");
+        } else {
+          message.setCustomValidity("");
+          return true;
+        }
+        message.reportValidity();
+        message.focus();
+        return false;
+      };
       const actions = createElement("div", "wfu-form-actions");
       actions.appendChild(createButton("Copy message", "btn secondary", async () => {
         try {
@@ -2846,19 +3216,22 @@
         }
       }));
       if (!removal) actions.appendChild(createButton("Change decision", "btn secondary", () => mutate(item, "reopen")));
-      actions.appendChild(createButton(removal ? "Mark notice sent" : "Mark DM sent", "btn", () => {
-        if (!message.value.trim()) {
-          message.setCustomValidity("Add the decision message first.");
-          message.reportValidity();
-          message.focus();
-          return;
-        }
-        message.setCustomValidity("");
+      if (item.player.hasDiscord) actions.appendChild(createButton(removal ? "Send notice through bot" : "Send through Discord bot", "btn", () => {
+        if (!validateMessage()) return;
+        mutate(item, "queue_dm", {
+          dmText: message.value,
+          dmQueuedByDiscordId: moderator && moderator.discordId,
+          dmQueuedByName: moderator && moderator.displayName,
+        });
+      }));
+      actions.appendChild(createButton(removal ? "I sent the notice myself" : "I sent it myself", "btn secondary", () => {
+        if (!validateMessage()) return;
         mutate(item, "mark_dm_sent", {
           dmText: message.value,
           dmDeliveryMode: "manual",
           dmMessageId: "",
-          actor: toText(item.case && item.case.handledBy),
+          dmSentByDiscordId: moderator && moderator.discordId,
+          dmSentByName: moderator && moderator.displayName,
         });
       }));
       if (removal && !item.player.hasDiscord) {
@@ -2909,11 +3282,20 @@
     };
 
     const renderWaiting = (section, item) => {
-      section.appendChild(createElement("h3", "wfu-drawer-section__title", "Waiting for follow-up"));
+      const contact = item.case && item.case.contactPurpose === "general" && item.case.dmDeliveryMode === "bot";
+      const reminded = contact && (item.case.contactStage === "awaiting_after_reminder" || item.case.contactReminderSentAt);
+      const finalMessage = contact && (item.case.contactStage === "awaiting_final_response" || item.case.contactAutomaticReminderAllowed === false);
+      section.appendChild(createElement("h3", "wfu-drawer-section__title", contact
+        ? (finalMessage ? "Awaiting response to final message" : (reminded ? "Awaiting response after reminder" : "Awaiting first response"))
+        : "Waiting for follow-up"));
       const due = parseMs(item.case && item.case.waitingUntil);
-      const copy = due
-        ? ("Follow-up is due " + formatDate(item.case.waitingUntil) + ".")
-        : "No fixed follow-up time is set.";
+      const copy = contact
+        ? (finalMessage
+          ? "The moderator-approved final message was sent. No automatic reminder will follow. If there is no reply by " + (due ? formatDate(item.case.waitingUntil) : "the deadline") + ", this case moves back to Needs action."
+          : (reminded
+          ? "The bot already sent the one automatic reminder. If there is still no reply by " + (due ? formatDate(item.case.waitingUntil) : "the deadline") + ", this case moves back to Needs action. No further automatic DMs will be sent."
+          : "No action is needed now. If the player has not replied by " + (due ? formatDate(item.case.waitingUntil) : "the deadline") + ", the bot sends one polite reminder automatically."))
+        : (due ? ("Follow-up is due " + formatDate(item.case.waitingUntil) + ".") : "No fixed follow-up time is set.");
       section.appendChild(createElement("div", "wfu-closed-copy", copy));
       if (toText(item.case && item.case.waitingReason).trim()) {
         section.appendChild(createElement("div", "wfu-closed-copy", toText(item.case.waitingReason).trim()));
@@ -2922,7 +3304,7 @@
         section.appendChild(createElement("div", "wfu-closed-copy", "Player response: " + toText(item.case.playerResponse).trim()));
       }
       const actions = createElement("div", "wfu-form-actions");
-      actions.appendChild(createButton("Review now", "btn", () => mutate(item, "reopen")));
+      actions.appendChild(createButton(contact ? "Decide now" : "Review now", contact ? "btn secondary" : "btn", () => mutate(item, "reopen")));
       actions.appendChild(createButton("Change follow-up", "btn secondary", () => {
         state.decisionMode = "wait";
         render();
@@ -3046,6 +3428,30 @@
       return section;
     };
 
+    const renderConversation = (item) => {
+      const messages = Array.isArray(item.case && item.case.conversation) ? item.case.conversation : [];
+      if (!messages.length) return null;
+      const details = createElement("details", "wfu-details wfu-conversation");
+      details.dataset.wfuDetails = "conversation";
+      if (toText(item.case && item.case.contactStage) === "responded") details.open = true;
+      const summary = createElement("summary", "wfu-details__summary", "Conversation (" + messages.length + ")");
+      summary.dataset.wfuFocusKey = focusKey("summary", "Conversation");
+      details.appendChild(summary);
+      const thread = createElement("div", "wfu-conversation__thread");
+      if (Number(item.case && item.case.conversationTrimmedCount) > 0) {
+        thread.appendChild(createElement("div", "wfu-conversation__trimmed", item.case.conversationTrimmedCount + " older messages are preserved in the audit history."));
+      }
+      for (const entry of messages) {
+        const staff = entry && entry.direction === "staff";
+        const bubble = createElement("article", "wfu-conversation__message " + (staff ? "is-staff" : "is-player"));
+        bubble.appendChild(createElement("div", "wfu-conversation__meta", (staff ? ("Leadership · " + (toText(entry.actor).trim() || "Staff")) : "Player") + (entry.at ? " · " + formatDate(entry.at) : "")));
+        bubble.appendChild(createElement("div", "wfu-conversation__text", toText(entry && entry.text).trim()));
+        thread.appendChild(bubble);
+      }
+      details.appendChild(thread);
+      return details;
+    };
+
     const renderNotesAndActivity = (item) => {
       const details = createElement("details", "wfu-details wfu-coordination");
       details.dataset.wfuDetails = "coordination";
@@ -3056,8 +3462,16 @@
       if (item.case) {
         if (["needs_review", "waiting", "needs_dm", "removal_pending", "hero_down", "ready"].includes(item.status)) {
           const assignmentForm = createElement("form", "wfu-form");
-          const assignment = handlerControl(toText(item.case.handledBy));
+          const assignment = handlerControl(toText(item.case.assignedModeratorId));
           const assignmentActions = createElement("div", "wfu-form-actions");
+          const currentModerator = selectedModerator();
+          if (currentModerator && item.case.assignedModeratorId !== currentModerator.discordId) {
+            assignmentActions.appendChild(createButton("Take ownership", "btn", () => mutate(item, "assign_owner", {
+              assignedModeratorId: currentModerator.discordId,
+              assignedModeratorName: currentModerator.displayName,
+              assignmentCoverageOverride: true,
+            })));
+          }
           const assignmentSave = createElement("button", "btn secondary");
           assignmentSave.type = "submit";
           assignmentSave.textContent = "Save assignment";
@@ -3067,9 +3481,13 @@
           assignmentForm.appendChild(assignmentActions);
           assignmentForm.addEventListener("submit", async (event) => {
             event.preventDefault();
-            await mutate(item, "set_handler", {
-              handledBy: assignment.value,
-              actor: assignment.value || toText(item.case && item.case.handledBy),
+            const moderator = state.privateState.moderators.find((entry) => entry.discordId === assignment.value);
+            await mutate(item, moderator ? "assign_owner" : "unassign_owner", moderator ? {
+              assignedModeratorId: moderator.discordId,
+              assignedModeratorName: moderator.displayName,
+              assignmentCoverageOverride: true,
+            } : {
+              blockedModeratorId: toText(item.case && item.case.assignedModeratorId),
             });
           });
           section.appendChild(assignmentForm);
@@ -3088,7 +3506,7 @@
         noteForm.addEventListener("submit", async (event) => {
           event.preventDefault();
           if (!note.value.trim()) return;
-          await mutate(item, "add_note", { note: note.value, actor: toText(item.case && item.case.handledBy) });
+          await mutate(item, "add_note", { note: note.value });
         });
         section.appendChild(noteForm);
       }
@@ -3163,6 +3581,8 @@
         body.appendChild(createElement("div", "wfu-drawer-error", state.error));
       }
       body.appendChild(evidenceSection(item));
+      const conversation = item.case && renderConversation(item);
+      if (conversation) body.appendChild(conversation);
       body.appendChild(renderCaseAction(item));
       if (item.case) body.appendChild(renderNotesAndActivity(item));
       const drawerUi = state.drawerUiByTag[item.tag] || {};
@@ -3173,6 +3593,10 @@
       const openDetails = new Set(Array.isArray(drawerUi.openDetails) ? drawerUi.openDetails : []);
       for (const details of Array.from(body.querySelectorAll("details[data-wfu-details]"))) {
         details.open = openDetails.has(details.dataset.wfuDetails);
+      }
+      if (normalizeTag(previousDrawerTagRaw) !== item.tag && toText(item.case && item.case.contactStage) === "responded") {
+        const conversation = body.querySelector('details[data-wfu-details="conversation"]');
+        if (conversation) conversation.open = true;
       }
       if (state.pendingCaseMutations.has(item.tag)) {
         for (const control of Array.from(body.querySelectorAll("button, input, select, textarea"))) {
@@ -3324,12 +3748,7 @@
       setControlKey(gaps, "rules-discord-gaps");
       gapLabel.appendChild(gaps); gapLabel.appendChild(createElement("span", "", "Show Discord gaps"));
       workflow.appendChild(gapLabel);
-      const moderators = createElement("textarea", "wfu-textarea");
-      moderators.rows = 3;
-      moderators.value = settings.moderatorNames.join("\n");
-      moderators.placeholder = "One moderator per line";
-      setControlKey(moderators, "rules-moderators");
-      workflow.appendChild(setField("Moderators", moderators));
+      workflow.appendChild(createElement("div", "wfu-closed-copy", "Moderator clan coverage, notification preferences and availability are managed in the Discord Moderation Hub."));
       form.appendChild(workflow);
 
       const actions = createElement("div", "wfu-form-actions");
@@ -3359,7 +3778,6 @@
           defaultRecoveryWars: recovery.value,
           defaultHeroDownRosterId: target.value,
           missingDiscordEnabled: gaps.checked,
-          moderatorNames: moderators.value.split(/\r?\n/).map((name) => name.trim()).filter(Boolean),
         };
         saveRulesInBackground(next, settings.rulesUpdatedAt);
       });
@@ -3806,8 +4224,13 @@
         mount.appendChild(createElement("div", "wfu-empty__text", "Open this section after the admin workspace has loaded."));
         return;
       }
+      if (!selectedModerator()) {
+        renderModeratorPicker(mount);
+        return;
+      }
       renderViewSwitch(mount);
       if (state.view === "discord" && state.work.settings.missingDiscordEnabled) renderDiscordGaps(mount);
+      else if (state.view === "coverage") renderCoverage(mount);
       else renderWorkList(mount);
       renderDrawer(mount, previousUi.drawerTag);
       if (state.modal === "settings") renderSettingsModal(mount, previousUi.modal);
@@ -3908,6 +4331,7 @@
   return {
     DEFAULT_SETTINGS,
     sanitizeSettings,
+    sanitizeModerators,
     normalizeStats,
     statsSummary,
     formatDate,

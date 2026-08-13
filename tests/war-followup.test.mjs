@@ -675,6 +675,42 @@ test("optimistic cases mirror every visible workflow transition", () => {
   const reopened = build(approved, "reopen");
   assert.equal(reopened.status, "needs_review");
   assert.equal(reopened.outcome, "");
+
+  const contact = build(reopened, "contact", { dmText: "Please explain." });
+  const queued = build(contact, "queue_dm", {
+    dmQueuedByDiscordId: "666666666666666666",
+    dmQueuedByName: "Case Leader",
+  });
+  assert.equal(queued.status, "needs_dm");
+  assert.equal(queued.dmQueueId, "test-queue_dm");
+  assert.equal(queued.dmQueuedByName, "Case Leader");
+  const owned = build(queued, "assign_owner", {
+    assignedModeratorId: "666666666666666666",
+    assignedModeratorName: "Case Leader",
+    assignmentCoverageOverride: true,
+  });
+  assert.equal(owned.assignedModeratorId, "666666666666666666");
+  assert.equal(owned.handledBy, "Case Leader");
+  const cancelledQueue = build(owned, "reopen");
+  assert.equal(cancelledQueue.dmQueueId, "");
+});
+
+test("Discord moderator directory sanitization keeps signed-up identities and clan coverage", () => {
+  const moderators = followup.sanitizeModerators([
+    {
+      discordId: "666666666666666666",
+      guildId: "111111111111111111",
+      displayName: "Case Leader",
+      clanTags: ["p0lygq", "#P0LYGQ"],
+      notificationMode: "both",
+      accepting: true,
+    },
+    { discordId: "invalid", displayName: "Ignore me" },
+  ]);
+  assert.equal(moderators.length, 1);
+  assert.equal(moderators[0].displayName, "Case Leader");
+  assert.deepEqual(moderators[0].clanTags, ["#P0LYGQ"]);
+  assert.equal(moderators[0].accepting, true);
 });
 
 test("form snapshots preserve unsaved values, checks, and text selection across background renders", () => {

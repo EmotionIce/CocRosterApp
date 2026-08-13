@@ -8,6 +8,7 @@ const WAR_FOLLOWUP_SCHEMA_VERSION = 3;
 const WAR_FOLLOWUP_PRIVATE_PATH = "private/warFollowup/v1";
 const WAR_FOLLOWUP_SETTINGS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/settings";
 const WAR_FOLLOWUP_CASES_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/cases";
+const WAR_FOLLOWUP_MODERATORS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/moderators";
 const WAR_FOLLOWUP_MAX_ACTIVITY = 80;
 const WAR_FOLLOWUP_MAX_CONVERSATION_MESSAGES = 40;
 const WAR_FOLLOWUP_MAX_CONVERSATION_CHARS = 24000;
@@ -48,6 +49,16 @@ const WAR_FOLLOWUP_REASON_SET = {
 	regular_performance: true,
 	cwl_missed: true,
 	cwl_performance: true,
+};
+
+const WAR_FOLLOWUP_CONTACT_STAGE_SET = {
+	"": true,
+	awaiting_first_response: true,
+	awaiting_after_reminder: true,
+	awaiting_final_response: true,
+	no_response: true,
+	reminder_failed: true,
+	responded: true,
 };
 
 // War follow-up is shared by the password-protected admin workspace and the
@@ -133,6 +144,50 @@ function sanitizeWarFollowupTagList_(listRaw) {
 		out.push(tag);
 	}
 	out.sort();
+	return out;
+}
+
+function sanitizeWarFollowupModerator_(moderatorRaw, fallbackDiscordIdRaw) {
+	const value = moderatorRaw && typeof moderatorRaw === "object" ? moderatorRaw : {};
+	const discordIdRaw = String(value.discordId || fallbackDiscordIdRaw || "").trim();
+	if (!/^\d{17,20}$/.test(discordIdRaw)) return null;
+	const notificationModeRaw = sanitizeWarFollowupText_(value.notificationMode, 20).toLowerCase();
+	const clanTagsRaw = Array.isArray(value.clanTags) ? value.clanTags : [];
+	const clanTags = [];
+	const seenClanTags = {};
+	for (let i = 0; i < clanTagsRaw.length && clanTags.length < 25; i++) {
+		const clanTag = normalizeTag_(clanTagsRaw[i]);
+		if (!clanTag || seenClanTags[clanTag]) continue;
+		seenClanTags[clanTag] = true;
+		clanTags.push(clanTag);
+	}
+	clanTags.sort();
+	return {
+		discordId: discordIdRaw,
+		guildId: /^\d{17,20}$/.test(String(value.guildId || "").trim()) ? String(value.guildId).trim() : "",
+		displayName: sanitizeWarFollowupText_(value.displayName, 80) || discordIdRaw,
+		clanTags: clanTags,
+		notificationMode: ["dm", "channel", "both"].indexOf(notificationModeRaw) >= 0 ? notificationModeRaw : "channel",
+		accepting: value.accepting === true,
+		updatedAt: sanitizeWarFollowupTimestamp_(value.updatedAt),
+	};
+}
+
+function sanitizeWarFollowupModerators_(moderatorsRaw) {
+	const source = moderatorsRaw && typeof moderatorsRaw === "object" ? moderatorsRaw : {};
+	const entries = Array.isArray(source)
+		? source.map(function (value) { return [value && value.discordId, value]; })
+		: Object.keys(source).map(function (key) { return [key, source[key]]; });
+	const out = [];
+	for (let i = 0; i < entries.length && out.length < 100; i++) {
+		const moderator = sanitizeWarFollowupModerator_(entries[i][1], entries[i][0]);
+		if (moderator) out.push(moderator);
+	}
+	out.sort(function (left, right) {
+		return Number(right.accepting) - Number(left.accepting) ||
+			String(left.displayName).localeCompare(String(right.displayName)) ||
+			String(left.discordId).localeCompare(String(right.discordId));
+	});
 	return out;
 }
 
@@ -462,6 +517,20 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		assignmentBlockedUntil: sanitizeWarFollowupTimestamp_(value.assignmentBlockedUntil),
 		waitingUntil: sanitizeWarFollowupTimestamp_(value.waitingUntil),
 		waitingReason: sanitizeWarFollowupMultilineText_(value.waitingReason, 1000),
+		contactStage: WAR_FOLLOWUP_CONTACT_STAGE_SET[sanitizeWarFollowupText_(value.contactStage, 40).toLowerCase()]
+			? sanitizeWarFollowupText_(value.contactStage, 40).toLowerCase()
+			: "",
+		contactAutomaticReminderAllowed: value.contactAutomaticReminderAllowed == null
+			? true
+			: value.contactAutomaticReminderAllowed === true,
+		contactReminderText: sanitizeWarFollowupMultilineText_(value.contactReminderText, 2000),
+		contactReminderSentAt: sanitizeWarFollowupTimestamp_(value.contactReminderSentAt),
+		contactReminderMessageId: /^\d{17,20}$/.test(String(value.contactReminderMessageId || "").trim())
+			? String(value.contactReminderMessageId).trim()
+			: "",
+		contactNoResponseAt: sanitizeWarFollowupTimestamp_(value.contactNoResponseAt),
+		contactReminderFailedAt: sanitizeWarFollowupTimestamp_(value.contactReminderFailedAt),
+		contactReminderFailureReason: sanitizeWarFollowupText_(value.contactReminderFailureReason, 300),
 		playerResponse: sanitizeWarFollowupMultilineText_(value.playerResponse, 2000),
 		playerResponseAt: sanitizeWarFollowupTimestamp_(value.playerResponseAt),
 		playerResponseMessageId: sanitizeWarFollowupText_(value.playerResponseMessageId, 120),
@@ -487,6 +556,12 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		dmMessageId: /^\d{17,20}$/.test(String(value.dmMessageId || "").trim()) ? String(value.dmMessageId).trim() : "",
 		dmSentByDiscordId: /^\d{17,20}$/.test(String(value.dmSentByDiscordId || "").trim()) ? String(value.dmSentByDiscordId).trim() : "",
 		dmSentByName: sanitizeWarFollowupText_(value.dmSentByName, 80),
+		dmQueueId: sanitizeWarFollowupText_(value.dmQueueId, 160),
+		dmQueuedAt: sanitizeWarFollowupTimestamp_(value.dmQueuedAt),
+		dmQueuedByDiscordId: /^\d{17,20}$/.test(String(value.dmQueuedByDiscordId || "").trim()) ? String(value.dmQueuedByDiscordId).trim() : "",
+		dmQueuedByName: sanitizeWarFollowupText_(value.dmQueuedByName, 80),
+		dmDeliveryFailedAt: sanitizeWarFollowupTimestamp_(value.dmDeliveryFailedAt),
+		dmDeliveryFailureReason: sanitizeWarFollowupText_(value.dmDeliveryFailureReason, 300),
 		watchStartedAt: sanitizeWarFollowupTimestamp_(value.watchStartedAt),
 		watchWarTarget: clampWarFollowupNumber_(value.watchWarTarget, 1, 8, 2, true),
 		recoveryStartedAt: sanitizeWarFollowupTimestamp_(value.recoveryStartedAt),
@@ -620,9 +695,10 @@ function applyWarFollowupOwner_(caseRaw, requestRaw, actorRaw, nowIsoRaw) {
 
 function getWarFollowupState(password) {
 	assertWarFollowupAccess_(password);
-	const values = firebaseBatchGetJson_([WAR_FOLLOWUP_SETTINGS_PATH, WAR_FOLLOWUP_CASES_PATH]);
+	const values = firebaseBatchGetJson_([WAR_FOLLOWUP_SETTINGS_PATH, WAR_FOLLOWUP_CASES_PATH, WAR_FOLLOWUP_MODERATORS_PATH]);
 	const encodedSettings = values[WAR_FOLLOWUP_SETTINGS_PATH];
 	const encodedCases = values[WAR_FOLLOWUP_CASES_PATH];
+	const encodedModerators = values[WAR_FOLLOWUP_MODERATORS_PATH];
 	const settings = sanitizeWarFollowupSettings_(
 		encodedSettings && typeof encodedSettings === "object"
 			? decodeFirebaseObjectKeysRecursive_(encodedSettings)
@@ -652,7 +728,37 @@ function getWarFollowupState(password) {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
 		settings: settings,
 		cases: cases,
+		moderators: sanitizeWarFollowupModerators_(
+			encodedModerators && typeof encodedModerators === "object"
+				? decodeFirebaseObjectKeysRecursive_(encodedModerators)
+				: null,
+		),
 	};
+}
+
+function syncWarFollowupModerator(moderatorRaw, password) {
+	assertDiscordBotApiSecret_(password);
+	const moderator = sanitizeWarFollowupModerator_(moderatorRaw, moderatorRaw && moderatorRaw.discordId);
+	if (!moderator) throw new Error("A valid Discord moderator is required.");
+	const lock = LockService.getScriptLock();
+	lock.waitLock(30000);
+	try {
+		const path = WAR_FOLLOWUP_MODERATORS_PATH + "/" + encodeFirebaseObjectKey_(moderator.discordId);
+		const encodedCurrent = firebaseRequestJson_(path, "GET");
+		const current = sanitizeWarFollowupModerator_(
+			encodedCurrent && typeof encodedCurrent === "object"
+				? decodeFirebaseObjectKeysRecursive_(encodedCurrent)
+				: null,
+			moderator.discordId,
+		);
+		const requestedMs = parseIsoToMs_(moderator.updatedAt);
+		const currentMs = parseIsoToMs_(current && current.updatedAt);
+		moderator.updatedAt = new Date(Math.max(Date.now(), requestedMs, currentMs + 1)).toISOString();
+		firebaseRequestJson_(path, "PUT", encodeFirebaseObjectKeysRecursive_(moderator));
+		return moderator;
+	} finally {
+		lock.releaseLock();
+	}
 }
 
 function saveWarFollowupSettings(settingsRaw, password, expectedRulesUpdatedAtRaw, mutationIdRaw) {
@@ -873,15 +979,29 @@ function mutateWarFollowupCase(requestRaw, password) {
 		if (action === "watch" && value.status !== "needs_review") throw new Error("Only a case awaiting review can start monitoring.");
 		if (action === "contact" && ["needs_review", "waiting"].indexOf(value.status) < 0) throw new Error("This case is not ready for a contact decision.");
 		if (action === "wait" && ["needs_review", "waiting", "needs_dm"].indexOf(value.status) < 0) throw new Error("This case cannot schedule a follow-up from its current state.");
+		if (action === "queue_dm" && value.status !== "needs_dm") throw new Error("This follow-up is not waiting for a Discord DM.");
+		if (["contact_reminder_sent", "contact_reminder_failed", "contact_no_response"].indexOf(action) >= 0) {
+			if (value.status !== "waiting" || value.contactPurpose !== "general" || value.dmDeliveryMode !== "bot" || !value.dmMessageId) {
+				throw new Error("This case is not in the bot-managed contact workflow.");
+			}
+			if (value.waitingUntil && parseIsoToMs_(value.waitingUntil) > parseIsoToMs_(nowIso)) {
+				throw new Error("This contact deadline is not due yet.");
+			}
+			if (["contact_reminder_sent", "contact_reminder_failed"].indexOf(action) >= 0 && value.contactAutomaticReminderAllowed === false) {
+				throw new Error("This moderator-approved final message must not trigger another automatic reminder.");
+			}
+		}
 		if (action === "hero_down" && value.status !== "needs_review") throw new Error("Only a case awaiting review can start a hero-down period.");
 		if (action === "remove" && ["needs_review", "waiting", "hero_down", "removal_evasion", "removed"].indexOf(value.status) < 0) throw new Error("This case is not ready for a removal decision.");
 		if (action === "close" && value.status !== "hero_down") throw new Error("Only an active hero-down case can be closed without return.");
 		if (action === "resolve" && ["needs_review", "needs_dm", "waiting"].indexOf(value.status) < 0) throw new Error("This case cannot be recorded as resolved from its current state.");
 		if (action === "player_response") {
 			const responseReference = String(request.responseToMessageId || "").trim();
-			const exactReply = /^\d{17,20}$/.test(responseReference) && responseReference === value.dmMessageId;
+			const exactReply = /^\d{17,20}$/.test(responseReference) &&
+				(responseReference === value.dmMessageId || responseReference === value.contactReminderMessageId);
 			const captureWindowOpen = parseIsoToMs_(value.replyCaptureUntil) >= parseIsoToMs_(nowIso);
-			const responseStateAllowed = value.status === "waiting" || (value.status === "needs_review" && (captureWindowOpen || exactReply));
+			const responseStateAllowed = value.status === "waiting" ||
+				(["needs_review", "closed", "dismissed"].indexOf(value.status) >= 0 && (captureWindowOpen || exactReply));
 			if (!responseStateAllowed || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) {
 				throw new Error("This case is not currently awaiting a bot-captured player response.");
 			}
@@ -945,7 +1065,9 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "dismiss":
 				value.status = "dismissed";
 				value.outcome = "no_action";
-				value.replyCaptureUntil = "";
+				if (!(value.contactPurpose === "general" && parseIsoToMs_(value.replyCaptureUntil) > parseIsoToMs_(nowIso))) {
+					value.replyCaptureUntil = "";
+				}
 				value.dismissedSignalIds = dismissibleSignalIds;
 				value.closedAt = nowIso;
 				appendWarFollowupActivity_(value, "dismissed", "Reviewed with no action.", actor, nowIso);
@@ -1030,6 +1152,14 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "contact":
 				value.status = "needs_dm";
 				value.contactPurpose = "general";
+				value.contactAutomaticReminderAllowed = request.suppressAutomaticReminder !== true;
+				value.contactStage = "";
+				value.contactReminderText = "";
+				value.contactReminderSentAt = "";
+				value.contactReminderMessageId = "";
+				value.contactNoResponseAt = "";
+				value.contactReminderFailedAt = "";
+				value.contactReminderFailureReason = "";
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				if (!value.dmText) throw new Error("The contact message is empty.");
 				value.dmSentAt = "";
@@ -1037,6 +1167,12 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
 				value.replyCaptureUntil = "";
 				value.playerResponse = "";
 				value.playerResponseAt = "";
@@ -1044,6 +1180,23 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "contact_prepared", "Player contact message prepared.", actor, nowIso);
 				break;
+			case "queue_dm": {
+				const queueId = sanitizeWarFollowupText_(request.dmQueueId || request.mutationId, 160);
+				if (!queueId) throw new Error("A Discord DM queue ID is required.");
+				if (!value.discordId) throw new Error("This player has no linked Discord account.");
+				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText != null ? request.dmText : value.dmText, 6000);
+				if (!value.dmText) throw new Error("The queued Discord message is empty.");
+				value.dmQueueId = queueId;
+				value.dmQueuedAt = nowIso;
+				value.dmQueuedByDiscordId = /^\d{17,20}$/.test(String(request.dmQueuedByDiscordId || "").trim())
+					? String(request.dmQueuedByDiscordId).trim()
+					: "";
+				value.dmQueuedByName = sanitizeWarFollowupText_(request.dmQueuedByName || actor, 80);
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
+				appendWarFollowupActivity_(value, "dm_queued", "Queued for delivery by the Discord bot.", actor, nowIso);
+				break;
+			}
 			case "hero_down":
 				if (!value.targetRosterId && !value.targetClanTag) throw new Error("Choose a hero-down roster.");
 				value.status = "needs_dm";
@@ -1056,6 +1209,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				value.contactPurpose = "hero_down";
+				value.contactStage = "";
 				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, 1, 8, 3, true);
 				value.requireNoMisses = request.requireNoMisses == null ? true : toBooleanFlag_(request.requireNoMisses);
 				value.dmSentAt = "";
@@ -1063,6 +1217,12 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
 				value.replyCaptureUntil = "";
 				value.recoveryStartedAt = "";
 				value.closedAt = "";
@@ -1076,6 +1236,9 @@ function mutateWarFollowupCase(requestRaw, password) {
 				break;
 			case "mark_dm_sent":
 				if (value.status !== "needs_dm") throw new Error("This follow-up is not waiting for a DM.");
+				if (value.dmQueueId && sanitizeWarFollowupText_(request.dmQueueId, 160) !== value.dmQueueId) {
+					throw new Error("This message is already queued for Discord delivery.");
+				}
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText != null ? request.dmText : value.dmText, 6000);
 				if (!value.dmText) throw new Error("The DM message is empty.");
 				value.dmSentAt = nowIso;
@@ -1084,8 +1247,15 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (value.dmDeliveryMode === "bot" && !value.dmMessageId) throw new Error("The delivered bot DM message ID is required.");
 				value.dmSentByDiscordId = /^\d{17,20}$/.test(String(request.dmSentByDiscordId || "").trim()) ? String(request.dmSentByDiscordId).trim() : "";
 				value.dmSentByName = sanitizeWarFollowupText_(request.dmSentByName || actor, 80);
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
 				if (value.contactPurpose === "general") {
 					value.status = "waiting";
+					value.contactStage = value.contactAutomaticReminderAllowed ? "awaiting_first_response" : "awaiting_final_response";
 					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
 					value.waitingReason = "Awaiting the player's response.";
 					value.replyCaptureUntil = value.dmDeliveryMode === "bot"
@@ -1116,10 +1286,78 @@ function mutateWarFollowupCase(requestRaw, password) {
 					nowIso,
 				);
 				break;
+			case "dm_delivery_failed":
+				if (value.status !== "needs_dm") throw new Error("This follow-up is no longer waiting for Discord delivery.");
+				if (value.dmQueueId && sanitizeWarFollowupText_(request.dmQueueId, 160) !== value.dmQueueId) {
+					throw new Error("This Discord delivery request changed before the failure was recorded.");
+				}
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = nowIso;
+				value.dmDeliveryFailureReason = sanitizeWarFollowupText_(request.dmDeliveryFailureReason, 300) || "Discord could not deliver the message.";
+				appendWarFollowupActivity_(value, "dm_delivery_failed", "Discord bot delivery failed. The message still needs attention.", actor || "War Follow Up", nowIso);
+				break;
+			case "contact_reminder_sent": {
+				if (value.contactReminderSentAt) throw new Error("The automatic contact reminder was already sent.");
+				const reminderMessageId = String(request.contactReminderMessageId || "").trim();
+				if (!/^\d{17,20}$/.test(reminderMessageId)) throw new Error("The delivered reminder message ID is required.");
+				const reminderText = sanitizeWarFollowupMultilineText_(request.contactReminderText, 2000);
+				if (!reminderText) throw new Error("The automatic reminder message is empty.");
+				value.contactStage = "awaiting_after_reminder";
+				value.contactReminderText = reminderText;
+				value.contactReminderSentAt = nowIso;
+				value.contactReminderMessageId = reminderMessageId;
+				value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
+				value.waitingReason = "Awaiting the player's response after one automatic reminder.";
+				value.replyCaptureUntil = new Date(parseIsoToMs_(nowIso) + 72 * 60 * 60 * 1000).toISOString();
+				appendWarFollowupConversation_(value, {
+					id: "staff:" + reminderMessageId,
+					direction: "staff",
+					at: nowIso,
+					actor: "War Follow Up",
+					text: reminderText,
+					messageId: reminderMessageId,
+					deliveryMode: "bot",
+				});
+				appendWarFollowupActivity_(value, "contact_reminder_sent", "One automatic response reminder was sent. No further automatic messages will be sent.", actor || "War Follow Up", nowIso);
+				break;
+			}
+			case "contact_reminder_failed":
+				if (value.contactReminderSentAt) throw new Error("The automatic contact reminder was already sent.");
+				value.status = "needs_review";
+				value.contactStage = "reminder_failed";
+				value.contactReminderFailedAt = nowIso;
+				value.contactReminderFailureReason = sanitizeWarFollowupText_(request.contactReminderFailureReason, 300) || "Discord could not deliver the automatic reminder.";
+				value.waitingUntil = "";
+				value.waitingReason = "";
+				appendWarFollowupActivity_(value, "contact_reminder_failed", "Automatic reminder delivery failed. A moderator must decide what to do next.", actor || "War Follow Up", nowIso);
+				break;
+			case "contact_no_response":
+				if (value.contactAutomaticReminderAllowed !== false && !value.contactReminderSentAt) throw new Error("The automatic reminder has not been sent yet.");
+				value.status = "needs_review";
+				value.contactStage = "no_response";
+				value.contactNoResponseAt = nowIso;
+				value.waitingUntil = "";
+				value.waitingReason = "";
+				appendWarFollowupActivity_(
+					value,
+					"contact_no_response",
+					value.contactAutomaticReminderAllowed === false
+						? "No player response was received after the moderator-approved final message."
+						: "No player response was received after the initial contact and one automatic reminder.",
+					actor || "War Follow Up",
+					nowIso,
+				);
+				break;
 			case "player_response": {
 				const responseText = sanitizeWarFollowupMultilineText_(request.responseText, 2000);
 				if (!responseText) throw new Error("The player response is empty.");
 				value.status = "needs_review";
+				value.outcome = "";
+				value.closedAt = "";
+				value.contactStage = "responded";
 				value.playerResponse = responseText;
 				value.playerResponseAt = nowIso;
 				value.playerResponseMessageId = sanitizeWarFollowupText_(request.responseMessageId, 120);
@@ -1141,6 +1379,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.status = "needs_dm";
 				value.outcome = "";
 				value.contactPurpose = "removal";
+				value.contactStage = "";
 				value.removalReason = sanitizeWarFollowupMultilineText_(request.removalReason, 1000);
 				if (!value.removalReason) throw new Error("A removal reason is required.");
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
@@ -1158,6 +1397,12 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
 				value.replyCaptureUntil = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "removal_decision", "Removal from the community selected. Reason: " + value.removalReason, actor, nowIso);
@@ -1235,6 +1480,12 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmMessageId = "";
 				value.dmSentByDiscordId = "";
 				value.dmSentByName = "";
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
 				value.replyCaptureUntil = "";
 				value.recoveryStartedAt = "";
 				appendWarFollowupActivity_(
@@ -1262,7 +1513,9 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (["removal_pending", "removal_evasion", "removed"].indexOf(value.status) >= 0) throw new Error("Complete or cancel the removal workflow instead of closing it as a normal case.");
 				value.status = "closed";
 				value.outcome = "resolved";
-				value.replyCaptureUntil = "";
+				if (!(value.contactPurpose === "general" && parseIsoToMs_(value.replyCaptureUntil) > parseIsoToMs_(nowIso))) {
+					value.replyCaptureUntil = "";
+				}
 				value.resolutionNote = sanitizeWarFollowupMultilineText_(request.resolutionNote, 2000) || "Resolved by a moderator.";
 				value.closedAt = nowIso;
 				value.waitingUntil = "";
@@ -1272,6 +1525,12 @@ function mutateWarFollowupCase(requestRaw, password) {
 			case "reopen":
 				value.status = "needs_review";
 				value.outcome = "";
+				value.dmQueueId = "";
+				value.dmQueuedAt = "";
+				value.dmQueuedByDiscordId = "";
+				value.dmQueuedByName = "";
+				value.dmDeliveryFailedAt = "";
+				value.dmDeliveryFailureReason = "";
 				value.closedAt = "";
 				appendWarFollowupActivity_(value, "reopened", "Follow-up reopened.", actor, nowIso);
 				break;

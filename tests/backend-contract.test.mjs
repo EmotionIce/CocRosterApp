@@ -7809,6 +7809,152 @@ test("war follow-up general player contact moves to a bounded waiting follow-up 
   }, "change-me"]), /not currently awaiting a bot-captured player response/i);
 });
 
+test("war follow-up syncs Discord moderators and enforces the single-reminder contact lifecycle", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const moderator = {
+    discordId: "666666666666666666",
+    guildId: "111111111111111111",
+    displayName: "Case Leader",
+    clanTags: ["#P0LYGQ"],
+    notificationMode: "both",
+    accepting: true,
+    updatedAt: new Date().toISOString(),
+  };
+  assert.throws(
+    () => backend.runAdminApiMethod_("syncWarFollowupModerator", [moderator, "change-me"]),
+    /Authentication failed for Discord bot API/,
+  );
+  const synced = backend.runAdminApiMethod_("syncWarFollowupModerator", [moderator, "secret"]);
+  assert.equal(synced.displayName, "Case Leader");
+  const state = backend.runAdminApiMethod_("getWarFollowupState", ["change-me"]);
+  assert.equal(state.moderators.length, 1);
+  assert.equal(state.moderators[0].discordId, moderator.discordId);
+  assert.deepEqual(Array.from(state.moderators[0].clanTags), ["#P0LYGQ"]);
+
+  const tag = "#P0LYGQ";
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "manual_review",
+    tag,
+    discordId: "123456789012345678",
+    expectedUpdatedAt: "",
+    mutationId: "reminder-create",
+  }, "change-me"]);
+  const prepared = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact",
+    tag,
+    dmText: "Please explain what happened.",
+    expectedUpdatedAt: created.updatedAt,
+    mutationId: "reminder-prepare",
+  }, "change-me"]);
+  const queued = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "queue_dm",
+    tag,
+    dmQueuedByDiscordId: moderator.discordId,
+    dmQueuedByName: moderator.displayName,
+    expectedUpdatedAt: prepared.updatedAt,
+    mutationId: "reminder-queue",
+  }, "change-me"]);
+  assert.equal(queued.dmQueueId, "reminder-queue");
+  const sent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent",
+    tag,
+    dmQueueId: queued.dmQueueId,
+    dmDeliveryMode: "bot",
+    dmMessageId: "888888888888888888",
+    dmSentByDiscordId: moderator.discordId,
+    dmSentByName: moderator.displayName,
+    expectedUpdatedAt: queued.updatedAt,
+    mutationId: "reminder-sent",
+  }, "secret"]);
+  assert.equal(sent.contactStage, "awaiting_first_response");
+  assert.equal(sent.dmQueueId, "");
+
+  const db = backend.__getFirebaseDb();
+  Object.values(db.private.warFollowup.v1.cases)[0].waitingUntil = "2020-01-01T00:00:00.000Z";
+  const reminded = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact_reminder_sent",
+    tag,
+    contactReminderText: "We are still waiting for your response.",
+    contactReminderMessageId: "999999999999999999",
+    expectedUpdatedAt: sent.updatedAt,
+    mutationId: "reminder-auto",
+  }, "secret"]);
+  assert.equal(reminded.status, "waiting");
+  assert.equal(reminded.contactStage, "awaiting_after_reminder");
+  assert.equal(reminded.conversation.length, 2);
+  assert.throws(() => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact_reminder_sent",
+    tag,
+    contactReminderText: "Duplicate reminder",
+    contactReminderMessageId: "777777777777777777",
+    expectedUpdatedAt: reminded.updatedAt,
+    mutationId: "reminder-duplicate",
+  }, "secret"]), /deadline is not due|already sent/i);
+
+  Object.values(db.private.warFollowup.v1.cases)[0].waitingUntil = "2020-01-01T00:00:00.000Z";
+  const noResponse = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact_no_response",
+    tag,
+    expectedUpdatedAt: reminded.updatedAt,
+    mutationId: "reminder-no-response",
+  }, "secret"]);
+  assert.equal(noResponse.status, "needs_review");
+  assert.equal(noResponse.contactStage, "no_response");
+
+  const dismissedWhileCaptureOpen = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "dismiss",
+    tag,
+    expectedUpdatedAt: noResponse.updatedAt,
+    mutationId: "reminder-dismissed",
+  }, "change-me"]);
+  assert.equal(dismissedWhileCaptureOpen.status, "dismissed");
+  assert.ok(dismissedWhileCaptureOpen.replyCaptureUntil);
+
+  const lateReply = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "player_response",
+    tag,
+    responseText: "Sorry, I can explain.",
+    responseMessageId: "777777777777777777",
+    responseToMessageId: reminded.contactReminderMessageId,
+    expectedUpdatedAt: dismissedWhileCaptureOpen.updatedAt,
+    mutationId: "reminder-late-reply",
+  }, "secret"]);
+  assert.equal(lateReply.contactStage, "responded");
+  assert.equal(lateReply.status, "needs_review");
+  assert.equal(lateReply.conversation.at(-1).direction, "player");
+
+  const finalPrepared = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact",
+    tag,
+    dmText: "This is our final follow-up. Please respond.",
+    suppressAutomaticReminder: true,
+    expectedUpdatedAt: lateReply.updatedAt,
+    mutationId: "final-prepare",
+  }, "change-me"]);
+  const finalSent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent",
+    tag,
+    dmDeliveryMode: "bot",
+    dmMessageId: "555555555555555555",
+    dmSentByDiscordId: moderator.discordId,
+    dmSentByName: moderator.displayName,
+    expectedUpdatedAt: finalPrepared.updatedAt,
+    mutationId: "final-sent",
+  }, "secret"]);
+  assert.equal(finalSent.contactAutomaticReminderAllowed, false);
+  assert.equal(finalSent.contactStage, "awaiting_final_response");
+  Object.values(db.private.warFollowup.v1.cases)[0].waitingUntil = "2020-01-01T00:00:00.000Z";
+  const finalNoResponse = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "contact_no_response",
+    tag,
+    expectedUpdatedAt: finalSent.updatedAt,
+    mutationId: "final-no-response",
+  }, "secret"]);
+  assert.equal(finalNoResponse.contactStage, "no_response");
+  assert.equal(finalNoResponse.contactAutomaticReminderAllowed, false);
+  assert.match(finalNoResponse.activity.at(-1).text, /final message/i);
+});
+
 test("war follow-up captures a player response exactly once and returns the case to review", () => {
   const backend = installMemoryFirebase(loadBackend());
   const tag = "#P0LYGQ";
