@@ -357,6 +357,7 @@ function sanitizePlayerWarPerformanceStore_(storeRaw, optionsRaw) {
 			entry.cwlSeasonContext.bySeason[season] = {
 				stats: sanitizePlayerWarStats_(value.stats),
 				finalizedEventIds: (Array.isArray(value.finalizedEventIds) ? value.finalizedEventIds : []).map(String).sort(),
+				lastEventAt: String(value.lastEventAt || ""),
 			};
 		});
 		entry.meta = {
@@ -407,10 +408,17 @@ function applyPlayerWarEventDelta_(storeRaw, eventRaw, signRaw) {
 		}
 		if (event.kind === "cwl" && event.season) {
 			const seasons = entry.cwlSeasonContext.bySeason;
-			if (!seasons[event.season]) seasons[event.season] = { stats: createEmptyWarPerformanceStats_(), finalizedEventIds: [] };
+			if (!seasons[event.season]) seasons[event.season] = { stats: createEmptyWarPerformanceStats_(), finalizedEventIds: [], lastEventAt: "" };
 			addSignedPlayerWarStats_(seasons[event.season].stats, contribution.stats, sign);
 			seasons[event.season].finalizedEventIds = seasons[event.season].finalizedEventIds.filter(function (id) { return id !== event.eventId; });
-			if (sign > 0) seasons[event.season].finalizedEventIds.push(event.eventId);
+			if (sign > 0) {
+				seasons[event.season].finalizedEventIds.push(event.eventId);
+				if (String(event.observedAt || "") > String(seasons[event.season].lastEventAt || "")) {
+					seasons[event.season].lastEventAt = String(event.observedAt || "");
+				}
+			} else if (!seasons[event.season].finalizedEventIds.length) {
+				seasons[event.season].lastEventAt = "";
+			}
 			seasons[event.season].finalizedEventIds.sort();
 		}
 		entry.meta.eventCount = Math.max(0, toNonNegativeInt_(entry.meta.eventCount) + sign);

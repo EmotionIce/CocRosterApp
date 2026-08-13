@@ -99,6 +99,41 @@ test("central player-war finalizer is idempotent and applies exact old/new delta
   assert.equal(upgraded.store.byTag[tag].recentRegularWarForm.length, 1);
 });
 
+test("canonical CWL season summaries retain the latest finalized event time", () => {
+  const b = loadBackend();
+  const tag = "#P2L9";
+  const first = b.buildPlayerWarEventCandidate_({
+    kind: "cwl",
+    warTag: "#WAR1",
+    season: "2026-08-03",
+    clanTag: "#CLANA",
+    observedAt: "2026-08-04T20:00:00.000Z",
+    contributionsByTag: { [tag]: { stats: stats(2, 1) } },
+  });
+  const second = b.buildPlayerWarEventCandidate_({
+    kind: "cwl",
+    warTag: "#WAR2",
+    season: "2026-08-03",
+    clanTag: "#CLANA",
+    observedAt: "2026-08-05T20:00:00.000Z",
+    contributionsByTag: { [tag]: { stats: stats(3, 1) } },
+  });
+
+  const finalized = b.finalizePlayerWarEventCandidates_(null, [second, first], {
+    persist: false,
+    existingRecordsByEventId: {},
+    nowIso: "2026-08-05T20:01:00.000Z",
+    stage: "cutover",
+  });
+  const season = finalized.store.byTag[tag].cwlSeasonContext.bySeason["2026-08-03"];
+
+  assert.equal(season.lastEventAt, "2026-08-05T20:00:00.000Z");
+  assert.equal(
+    b.sanitizePlayerWarPerformanceStore_(finalized.store).byTag[tag].cwlSeasonContext.bySeason["2026-08-03"].lastEventAt,
+    "2026-08-05T20:00:00.000Z",
+  );
+});
+
 test("canonical move preserves history and active participation until authoritative completion", () => {
   const b = loadBackend();
   const tag = "#P2L9";

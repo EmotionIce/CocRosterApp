@@ -296,6 +296,76 @@ test("candidate signals fall back to finalized per-roster war history and curren
   assert.equal(item.evidence.cwlEvents[0].id, "cwl:2026-07-03");
 });
 
+test("canonical and per-roster regular-war evidence are merged without double-counting promoted wars", () => {
+  const rosterData = buildRosterData();
+  const duplicate = rosterData.playerWarPerformance.byTag["#P0LYGQ"].recentRegularWarForm[0];
+  rosterData.rosters[0].warPerformance = {
+    lastRefreshedAt: "2026-07-27T00:00:00.000Z",
+    regularWarHistoryByKey: {
+      [duplicate.warKey]: {
+        warKey: duplicate.warKey,
+        authoritative: true,
+        finalizedAt: duplicate.finalizedAt,
+        statsByTag: { "#P0LYGQ": structuredClone(duplicate.stats) },
+        formStatsByTag: { "#P0LYGQ": structuredClone(duplicate.stats) },
+      },
+      "rw-local-only": {
+        warKey: "rw-local-only",
+        authoritative: true,
+        finalizedAt: "2026-07-27T00:00:00.000Z",
+        statsByTag: {
+          "#P0LYGQ": { possibleAttacks: 2, usedAttacks: 0, attacksMade: 0, attacksMissed: 2 },
+        },
+        formStatsByTag: {
+          "#P0LYGQ": { possibleAttacks: 2, usedAttacks: 0, attacksMade: 0, attacksMissed: 2 },
+        },
+      },
+    },
+  };
+
+  const settings = {
+    regularLookbackWars: 8,
+    regularMissedThreshold: 3,
+    regularPerformanceEnabled: false,
+    cwlMissedThreshold: 8,
+    cwlPerformanceEnabled: false,
+  };
+  const evidence = followup.buildEvidenceForTag(rosterData, "#P0LYGQ", settings);
+
+  assert.deepEqual(evidence.regularEvents.map((event) => event.id), ["rw-local-only", "rw-2", "rw-1"]);
+  assert.equal(evidence.regular.possibleAttacks, 6);
+  assert.equal(evidence.regular.missedAttacks, 4);
+  assert.deepEqual(followup.buildSignals(evidence, settings).map((signal) => signal.reasonCode), ["regular_missed"]);
+});
+
+test("same-season CWL evidence keeps the more complete resolved snapshot", () => {
+  const rosterData = buildRosterData();
+  rosterData.rosters[0].cwlStats = {
+    season: "2026-07",
+    lastRefreshedAt: "2026-07-28T00:00:00.000Z",
+    byTag: {
+      "#P0LYGQ": {
+        resolvedWarDays: 3,
+        possibleAttacks: 3,
+        usedAttacks: 1,
+        attacksMade: 1,
+        missedAttacks: 2,
+        countedAttacks: 1,
+        starsTotal: 1,
+        totalDestruction: 62,
+      },
+    },
+  };
+
+  const evidence = followup.buildEvidenceForTag(rosterData, "#P0LYGQ", { cwlLookbackSeasons: 1 });
+
+  assert.equal(evidence.cwlEvents.length, 1);
+  assert.equal(evidence.cwl.warCount, 3);
+  assert.equal(evidence.cwl.possibleAttacks, 3);
+  assert.equal(evidence.cwl.missedAttacks, 2);
+  assert.equal(evidence.cwlEvents[0].at, "2026-07-28T00:00:00.000Z");
+});
+
 test("dismissed evidence stays closed until a genuinely new war revision appears", () => {
   const rosterData = buildRosterData();
   const initial = followup.buildWorkItems(rosterData, { settings: {}, cases: [] });
@@ -395,6 +465,133 @@ test("a closed case evaluates only the new CWL delta within the same season", ()
   assert.equal(reopened.status, "needs_review");
   assert.deepEqual(reopened.signals.map((signal) => signal.reasonCode), ["cwl_missed"]);
   assert.equal(reopened.evidence.cwl.missedAttacks, 1);
+});
+
+test("closing a reopened CWL case snapshots the full current season for the next review cycle", () => {
+  const rosterData = buildRosterData();
+  const settings = {
+    regularMissedThreshold: 16,
+    regularPerformanceEnabled: false,
+    cwlMissedThreshold: 1,
+    cwlPerformanceEnabled: false,
+  };
+  const initialItem = followup.buildWorkItems(rosterData, { settings, cases: [] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+  const firstClosed = {
+    tag: "#P0LYGQ",
+    status: "closed",
+    outcome: "no_action",
+    evidence: structuredClone(initialItem.evidence),
+    closedAt: "2026-07-25T00:00:00.000Z",
+  };
+  const season = rosterData.playerWarPerformance.byTag["#P0LYGQ"].cwlSeasonContext.bySeason["2026-07"];
+  season.lastEventAt = "2026-07-26T00:00:00.000Z";
+  season.finalizedEventIds.push("cwl-war-2");
+  Object.assign(season.stats, { possibleAttacks: 3, usedAttacks: 1, attacksMissed: 2 });
+
+  const firstReopen = followup.buildWorkItems(rosterData, { settings, cases: [firstClosed] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.equal(firstReopen.evidence.cwl.missedAttacks, 1, "the case shows only evidence since its prior closure");
+  assert.equal(firstReopen.currentEvidence.cwl.missedAttacks, 2, "closure keeps the complete current baseline");
+
+  const secondClosed = {
+    ...firstClosed,
+    evidence: structuredClone(firstReopen.currentEvidence),
+    closedAt: "2026-07-27T00:00:00.000Z",
+  };
+  const unchanged = followup.buildWorkItems(rosterData, { settings, cases: [secondClosed] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.equal(unchanged.status, "closed");
+
+  season.lastEventAt = "2026-07-28T00:00:00.000Z";
+  season.finalizedEventIds.push("cwl-war-3");
+  Object.assign(season.stats, { possibleAttacks: 4, usedAttacks: 1, attacksMissed: 3 });
+  const secondReopen = followup.buildWorkItems(rosterData, { settings, cases: [secondClosed] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+  assert.equal(secondReopen.status, "needs_review");
+  assert.equal(secondReopen.evidence.cwl.missedAttacks, 1);
+});
+
+test("a closed case reopens for a violation in a newly observed date-based CWL season", () => {
+  const rosterData = buildRosterData();
+  const settings = {
+    regularMissedThreshold: 16,
+    regularPerformanceEnabled: false,
+    cwlLookbackSeasons: 2,
+    cwlMissedThreshold: 1,
+    cwlPerformanceEnabled: false,
+  };
+  const initialItem = followup.buildWorkItems(rosterData, { settings, cases: [] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+  const closedCase = {
+    tag: "#P0LYGQ",
+    status: "closed",
+    outcome: "no_action",
+    dismissedSignalIds: initialItem.signalIds,
+    evidence: structuredClone(initialItem.evidence),
+    closedAt: "2026-07-26T00:00:00.000Z",
+  };
+
+  rosterData.playerWarPerformance.updatedAt = "2026-08-10T12:00:00.000Z";
+  rosterData.playerWarPerformance.byTag["#P0LYGQ"].cwlSeasonContext.bySeason["2026-08-03"] = {
+    finalizedEventIds: ["cwl-aug-war-1"],
+    stats: { possibleAttacks: 1, usedAttacks: 0, attacksMade: 0, attacksMissed: 1 },
+  };
+  rosterData.rosters[0].cwlStats = {
+    season: "2026-08-03",
+    lastRefreshedAt: "2026-08-10T11:55:00.000Z",
+    byTag: {
+      "#P0LYGQ": {
+        resolvedWarDays: 1,
+        possibleAttacks: 1,
+        usedAttacks: 0,
+        attacksMade: 0,
+        attacksMissed: 1,
+      },
+    },
+  };
+
+  const currentEvidence = followup.buildEvidenceForTag(rosterData, "#P0LYGQ", settings);
+  const currentSeason = currentEvidence.cwlEvents.find((event) => event.id === "cwl:2026-08-03");
+  const reopened = followup.buildWorkItems(rosterData, { settings, cases: [closedCase] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+
+  assert.equal(currentSeason.at, "2026-08-10T11:55:00.000Z");
+  assert.equal(reopened.status, "needs_review");
+  assert.deepEqual(reopened.signals.map((signal) => signal.reasonCode), ["cwl_missed"]);
+  assert.equal(reopened.evidence.cwl.missedAttacks, 1);
+});
+
+test("expanding CWL lookback does not reopen a closed case for an older season", () => {
+  const rosterData = buildRosterData();
+  const initialSettings = {
+    regularMissedThreshold: 16,
+    regularPerformanceEnabled: false,
+    cwlLookbackSeasons: 1,
+    cwlMissedThreshold: 1,
+    cwlPerformanceEnabled: false,
+  };
+  const initialItem = followup.buildWorkItems(rosterData, { settings: initialSettings, cases: [] })
+    .items.find((entry) => entry.tag === "#P0LYGQ");
+  const closedCase = {
+    tag: "#P0LYGQ",
+    status: "closed",
+    outcome: "no_action",
+    dismissedSignalIds: initialItem.signalIds,
+    evidence: structuredClone(initialItem.evidence),
+    closedAt: "2026-07-26T00:00:00.000Z",
+  };
+  rosterData.playerWarPerformance.byTag["#P0LYGQ"].cwlSeasonContext.bySeason["2026-06"] = {
+    finalizedEventIds: ["cwl-june-war"],
+    stats: { possibleAttacks: 1, usedAttacks: 0, attacksMade: 0, attacksMissed: 1 },
+  };
+
+  const work = followup.buildWorkItems(rosterData, {
+    settings: { ...initialSettings, cwlLookbackSeasons: 2 },
+    cases: [closedCase],
+  });
+
+  assert.equal(work.items.find((entry) => entry.tag === "#P0LYGQ").status, "closed");
 });
 
 test("monitoring closes after clean wars and reopens only for problematic post-watch evidence", () => {
