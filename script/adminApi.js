@@ -995,9 +995,11 @@ function getAutoRefreshSettings(password) {
 	}
 }
 
-// Get read-only auto-refresh queue diagnostics.
-function getAutoRefreshDiagnostics(password) {
-	assertAdminPassword_(password);
+// Get read-only auto-refresh queue diagnostics. The bot credential already has
+// authority to run and repair this queue, so it may also inspect it when the
+// separately managed admin password has drifted.
+function getAutoRefreshDiagnostics(secretOrPasswordRaw) {
+	assertAutoRefreshSchedulerRepairAuth_(secretOrPasswordRaw);
 	return buildAutoRefreshDiagnostics_();
 }
 

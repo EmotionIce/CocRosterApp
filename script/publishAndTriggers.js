@@ -5697,6 +5697,8 @@ function readAutoRefreshFreshRetryPending_() {
 				createdAt: String(parsed.createdAt || ""),
 				notBeforeMs: notBeforeMs,
 				notBeforeAt: notBeforeMs ? new Date(notBeforeMs).toISOString() : "",
+				failureRetry: parsed.failureRetry === true,
+				attempt: Math.max(0, toNonNegativeInt_(parsed.attempt)),
 			};
 		}
 	} catch (err) {}
@@ -5707,17 +5709,22 @@ function readAutoRefreshFreshRetryPending_() {
 		createdAt: String(parts[1] || ""),
 		notBeforeMs: legacyNotBeforeMs,
 		notBeforeAt: legacyNotBeforeMs ? new Date(legacyNotBeforeMs).toISOString() : "",
+		failureRetry: false,
+		attempt: 0,
 	};
 }
 
 // Mark that the one-shot resume trigger should retry fresh job creation if no job exists yet.
-function markAutoRefreshFreshRetryPending_(reasonRaw, notBeforeMsRaw) {
+function markAutoRefreshFreshRetryPending_(reasonRaw, notBeforeMsRaw, optionsRaw) {
 	const reason = String(reasonRaw == null ? "" : reasonRaw).trim() || "freshRetry";
 	const notBeforeMs = Math.max(0, Number(notBeforeMsRaw) || 0);
+	const options = optionsRaw && typeof optionsRaw === "object" && !Array.isArray(optionsRaw) ? optionsRaw : {};
 	const state = {
 		reason: reason,
 		createdAt: new Date().toISOString(),
 		notBeforeMs: notBeforeMs,
+		failureRetry: options.failureRetry === true,
+		attempt: Math.max(0, toNonNegativeInt_(options.attempt)),
 	};
 	PropertiesService.getScriptProperties().setProperty(
 		AUTO_REFRESH_JOB_PENDING_FRESH_RETRY_PROPERTY,
@@ -5728,6 +5735,38 @@ function markAutoRefreshFreshRetryPending_(reasonRaw, notBeforeMsRaw) {
 		createdAt: state.createdAt,
 		notBeforeMs: state.notBeforeMs,
 		notBeforeAt: state.notBeforeMs ? new Date(state.notBeforeMs).toISOString() : "",
+		failureRetry: state.failureRetry,
+		attempt: state.attempt,
+	};
+}
+
+// Schedule bounded recovery after an unexpected coordinator/worker failure.
+// This closes the gap where an invocation can fail before durable queue state
+// exists and the next recovery opportunity would otherwise be hours away.
+function scheduleAutoRefreshFailureRetry_(reasonRaw, previousRetryRaw) {
+	const previous = previousRetryRaw && typeof previousRetryRaw === "object" ? previousRetryRaw : null;
+	const previousAttempt = previous && previous.failureRetry === true ? Math.max(0, toNonNegativeInt_(previous.attempt)) : 0;
+	const attempt = previousAttempt + 1;
+	if (attempt > AUTO_REFRESH_FAILURE_RETRY_MAX_ATTEMPTS) {
+		return { scheduled: false, exhausted: true, attempt: attempt, maxAttempts: AUTO_REFRESH_FAILURE_RETRY_MAX_ATTEMPTS };
+	}
+	const delayMs = Math.min(
+		AUTO_REFRESH_FAILURE_RETRY_MAX_MS,
+		AUTO_REFRESH_FAILURE_RETRY_BASE_MS * Math.pow(2, attempt - 1),
+	);
+	const retry = markAutoRefreshFreshRetryPending_(reasonRaw, Date.now() + delayMs, {
+		failureRetry: true,
+		attempt: attempt,
+	});
+	const scheduling = scheduleAutoRefreshFreshRetry_();
+	return {
+		scheduled: !!(scheduling && scheduling.scheduled),
+		exhausted: false,
+		attempt: attempt,
+		maxAttempts: AUTO_REFRESH_FAILURE_RETRY_MAX_ATTEMPTS,
+		delayMs: delayMs,
+		retryAt: retry.notBeforeAt,
+		scheduling: scheduling,
 	};
 }
 
@@ -6207,9 +6246,11 @@ function listPermanentSchedulerWatchdogTriggers_(inventoryRaw) {
 function ensurePermanentSchedulerWatchdogTrigger_(inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
 	const configuredId = String(props.getProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY) || "").trim();
+	const configuredVersion = String(props.getProperty(PERMANENT_SCHEDULER_WATCHDOG_VERSION_PROPERTY) || "").trim();
 	const triggers = listPermanentSchedulerWatchdogTriggers_(inventoryRaw).slice();
-	let keep = findAutoRefreshTriggerById_(triggers, configuredId);
-	if (!keep && triggers.length) keep = triggers[0];
+	const versionCurrent = configuredVersion === PERMANENT_SCHEDULER_WATCHDOG_VERSION;
+	let keep = versionCurrent ? findAutoRefreshTriggerById_(triggers, configuredId) : null;
+	if (!keep && versionCurrent && triggers.length) keep = triggers[0];
 	if (!keep) {
 		try {
 			keep = noteProjectTriggerCreated_(
@@ -6225,13 +6266,44 @@ function ensurePermanentSchedulerWatchdogTrigger_(inventoryRaw) {
 		}
 	}
 	const keepId = getTriggerUniqueId_(keep);
-	if (keepId) props.setProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY, keepId);
+	if (keepId) {
+		props.setProperty(PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID_PROPERTY, keepId);
+		props.setProperty(PERMANENT_SCHEDULER_WATCHDOG_VERSION_PROPERTY, PERMANENT_SCHEDULER_WATCHDOG_VERSION);
+	}
 	for (let i = 0; i < triggers.length; i++) {
 		if (triggers[i] === keep || getTriggerUniqueId_(triggers[i]) === keepId) continue;
 		try { deleteProjectTriggerFromInventory_(inventoryRaw, triggers[i]); } catch (err) {}
 	}
 	if (typeof clearRuntimeRecoveryNeeded_ === "function") clearRuntimeRecoveryNeeded_("permanentScheduler");
-	return { scheduled: !!keepId, degraded: !keepId, triggerId: keepId, reused: triggers.length > 0 };
+	return { scheduled: !!keepId, degraded: !keepId, triggerId: keepId, reused: versionCurrent && triggers.length > 0, upgraded: !versionCurrent };
+}
+
+// Detect a periodic invocation that never durably started. Merely confirming
+// that the recurring trigger still exists is insufficient: Apps Script can
+// occasionally miss or abort an invocation before it writes queue state.
+function scheduleOverdueAutoRefreshCatchUp_(currentRaw) {
+	if (currentRaw && currentRaw.kind === "auto-refresh-queue" && (currentRaw.status === "running" || currentRaw.status === "finalizing")) {
+		return { scheduled: false, skipped: true, reason: "activeRun" };
+	}
+	const pending = readAutoRefreshFreshRetryPending_();
+	if (pending) return { scheduled: false, skipped: true, reason: "retryPending", retry: pending };
+	const props = PropertiesService.getScriptProperties();
+	const lastStartedAt = String(props.getProperty(AUTO_REFRESH_LAST_RUN_STARTED_AT_PROPERTY) || "").trim();
+	const lastStartedMs = parseIsoToMs_(lastStartedAt);
+	const overdueAfterMs = AUTO_REFRESH_INTERVAL_MS + AUTO_REFRESH_PERIODIC_MAX_OVERDUE_MS;
+	if (lastStartedMs > 0 && Date.now() - lastStartedMs < overdueAfterMs) {
+		return { scheduled: false, skipped: true, reason: "heartbeatFresh", lastStartedAt: lastStartedAt };
+	}
+	const retry = markAutoRefreshFreshRetryPending_("periodicHeartbeatOverdue", Date.now() + 1000);
+	const scheduling = scheduleAutoRefreshFreshRetry_();
+	return {
+		scheduled: !!(scheduling && scheduling.scheduled),
+		degraded: !!(scheduling && scheduling.degraded),
+		reason: "periodicHeartbeatOverdue",
+		lastStartedAt: lastStartedAt,
+		retry: retry,
+		scheduling: scheduling,
+	};
 }
 
 function repairAutoRefreshSchedulingFromPermanentWatchdog_() {
@@ -6244,10 +6316,11 @@ function repairAutoRefreshSchedulingFromPermanentWatchdog_() {
 	} else if (isAutoRefreshFreshRetryPending_()) {
 		dynamic = scheduleAutoRefreshFreshRetry_();
 	} else {
-		clearAutoRefreshSchedulerRepairMarker_();
+		dynamic = scheduleOverdueAutoRefreshCatchUp_(current);
+		if (!dynamic || dynamic.scheduled === false) clearAutoRefreshSchedulerRepairMarker_();
 	}
 	return {
-		ok: !dynamic || dynamic.scheduled !== false,
+		ok: !dynamic || dynamic.degraded !== true,
 		enabled: true,
 		periodicTriggerId: getTriggerUniqueId_(periodic),
 		dynamic: dynamic,
@@ -7176,11 +7249,14 @@ function autoRefreshActiveRosterTickInternal_() {
 			return resultForLog;
 		}
 		const message = errorMessage_(err);
+		const previousRetry = readAutoRefreshFreshRetryPending_();
 		failCurrentAutoRefreshJobAfterError_(message);
-		setAutoRefreshRunResult_("error", "Auto-refresh run failed.", message, 0, "", startedAt, new Date().toISOString());
+		const retry = scheduleAutoRefreshFailureRetry_("coordinatorFailure", previousRetry);
+		const retrySummary = retry.scheduled ? " Automatic retry " + retry.attempt + "/" + retry.maxAttempts + " scheduled for " + retry.retryAt + "." : "";
+		setAutoRefreshRunResult_("error", "Auto-refresh run failed." + retrySummary, message, 0, "", startedAt, new Date().toISOString());
 		tryReconcileRegularWarFinalizationTriggerState_();
 		Logger.log("autoRefreshActiveRosterTick failed: %s", message);
-		resultForLog = { ok: false, status: "error", error: message };
+		resultForLog = { ok: false, status: "error", error: message, retry: retry };
 		return resultForLog;
 	} finally {
 		maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_("auto-refresh-active-tick-mirror", resultForLog);
@@ -7303,10 +7379,13 @@ function autoRefreshWorkerTickInternal_() {
 			return resultForLog;
 		}
 		const message = errorMessage_(err);
+		const previousRetry = readAutoRefreshFreshRetryPending_();
 		failCurrentAutoRefreshJobAfterError_(message);
-		setAutoRefreshRunResult_("error", "Auto-refresh worker failed.", message, 0, "", startedAt, new Date().toISOString());
+		const retry = scheduleAutoRefreshFailureRetry_("workerFailure", previousRetry);
+		const retrySummary = retry.scheduled ? " Automatic retry " + retry.attempt + "/" + retry.maxAttempts + " scheduled for " + retry.retryAt + "." : "";
+		setAutoRefreshRunResult_("error", "Auto-refresh worker failed." + retrySummary, message, 0, "", startedAt, new Date().toISOString());
 		Logger.log("autoRefreshWorkerTick failed: %s", message);
-		resultForLog = { ok: false, status: "error", error: message };
+		resultForLog = { ok: false, status: "error", error: message, retry: retry };
 		return resultForLog;
 	} finally {
 		if (!resultForLog || !resultForLog.quotaPaused) {

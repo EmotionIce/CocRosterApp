@@ -1440,6 +1440,21 @@ test("repairAutoRefreshScheduler rejects invalid credentials", () => {
   );
 });
 
+test("permanent watchdog upgrades an older trigger generation to the hourly freshness watchdog", () => {
+  const backend = loadBackend();
+  const oldTrigger = backend.ScriptApp.newTrigger("permanentSchedulerWatchdogTick").timeBased().everyHours(6).create();
+  backend.__properties.set("PERMANENT_SCHEDULER_WATCHDOG_TRIGGER_ID", oldTrigger.getUniqueId());
+  backend.__properties.set("PERMANENT_SCHEDULER_WATCHDOG_VERSION", "legacy-six-hour-v1");
+
+  const result = backend.ensurePermanentSchedulerWatchdogTrigger_();
+  const watchdogs = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "permanentSchedulerWatchdogTick");
+
+  assert.equal(result.upgraded, true);
+  assert.equal(result.triggerId === oldTrigger.getUniqueId(), false);
+  assert.equal(watchdogs.length, 1);
+  assert.equal(backend.__properties.get("PERMANENT_SCHEDULER_WATCHDOG_VERSION"), "hourly-freshness-v2");
+});
+
 test("authorization diagnostics are authenticated and manual bootstrap requires FULL scopes before trigger repair", () => {
   const backend = loadBackend();
   backend.__properties.set("ADMIN_PW", "secret");
@@ -1546,6 +1561,35 @@ test("permanent watchdog performs local trigger repair with zero remote calls du
   assert.equal(JSON.parse(backend.__properties.get("CLOUDFLARE_PUBLISH_SCHEDULER_REPAIR")).activeVersionId, "version-pending");
 });
 
+test("permanent watchdog schedules a fresh start when the periodic heartbeat is overdue", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_STARTED_AT", new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString());
+
+  const result = backend.repairAutoRefreshSchedulingFromPermanentWatchdog_();
+  const pending = backend.readAutoRefreshFreshRetryPending_();
+  const resumes = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.dynamic.reason, "periodicHeartbeatOverdue");
+  assert.equal(result.dynamic.scheduled, true);
+  assert.equal(pending.reason, "periodicHeartbeatOverdue");
+  assert.equal(resumes.length, 1);
+});
+
+test("permanent watchdog leaves a recent periodic heartbeat alone", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_STARTED_AT", new Date(Date.now() - 30 * 60 * 1000).toISOString());
+
+  const result = backend.repairAutoRefreshSchedulingFromPermanentWatchdog_();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.dynamic.reason, "heartbeatFresh");
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+  assert.equal(backend.__triggers.some((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick"), false);
+});
+
 test("admin diagnostics exposes current auto-refresh queue state without roster payloads", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.__properties.set("ADMIN_PW", "secret");
@@ -1589,6 +1633,17 @@ test("admin diagnostics exposes current auto-refresh queue state without roster 
   assert.equal(Object.prototype.hasOwnProperty.call(result.current, "rosters"), false);
 });
 
+test("read-only auto-refresh diagnostics accepts the bot recovery credential", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("ADMIN_PW", "different-admin-password");
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+
+  const result = backend.runAdminApiMethod_("getAutoRefreshDiagnostics", ["secret"]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.enabled, true);
+});
+
 test("autoRefreshActiveRosterTick uses sharded queue coordinator path", () => {
   const backend = loadBackend();
   backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
@@ -1605,6 +1660,32 @@ test("autoRefreshActiveRosterTick uses sharded queue coordinator path", () => {
 
   assert.equal(result.inProgress, true);
   assert.equal(coordinatorCalls, 1);
+});
+
+test("unexpected coordinator failures receive bounded exponential fresh retries", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.startAutoRefreshQueueCoordinator_ = () => { throw new Error("simulated pre-checkpoint failure"); };
+
+  const first = backend.autoRefreshActiveRosterTick();
+  const firstPending = backend.readAutoRefreshFreshRetryPending_();
+  const second = backend.autoRefreshActiveRosterTick();
+  const secondPending = backend.readAutoRefreshFreshRetryPending_();
+  const third = backend.autoRefreshActiveRosterTick();
+  const thirdPending = backend.readAutoRefreshFreshRetryPending_();
+  const fourth = backend.autoRefreshActiveRosterTick();
+
+  assert.equal(first.retry.scheduled, true);
+  assert.equal(first.retry.delayMs, 10 * 60 * 1000);
+  assert.equal(firstPending.attempt, 1);
+  assert.equal(second.retry.delayMs, 20 * 60 * 1000);
+  assert.equal(secondPending.attempt, 2);
+  assert.equal(third.retry.delayMs, 40 * 60 * 1000);
+  assert.equal(thirdPending.attempt, 3);
+  assert.equal(fourth.retry.scheduled, false);
+  assert.equal(fourth.retry.exhausted, true);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+  assert.equal(backend.__triggers.some((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick"), false);
 });
 
 test("autoRefreshActiveRosterTick schedules worker retry when overlap blocks coordinator", () => {
