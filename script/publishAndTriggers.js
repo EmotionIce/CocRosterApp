@@ -1481,13 +1481,21 @@ function buildAutoRefreshRosterOwnershipSnapshot_(sourceMetaRaw, sourceRosterRaw
 		const owner = String(sourceLiveOwnerRosterIdByTag[sourceLiveOwnerTags[i]] || "").trim();
 		if (tag && owner) liveOwnerRosterIdByTag[tag] = owner;
 	}
+	// The coordinator's live-owner index is the run-wide ownership snapshot.
+	// Roster tasks execute minutes apart, so a clan transfer can otherwise make
+	// both the old and new roster claim the same player from different snapshots.
+	// Keep the coordinator owner authoritative when it exists; a task may only
+	// establish ownership for a tag the coordinator did not observe.
 	for (let i = 0; i < members.length; i++) {
 		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
 		const tag = normalizeTag_(member.tag);
 		if (!tag) continue;
 		tagSet[tag] = true;
-		ownerRosterIdByTag[tag] = rosterId;
-		liveOwnerRosterIdByTag[tag] = rosterId;
+		const runLiveOwnerRosterId = String(liveOwnerRosterIdByTag[tag] || "").trim();
+		if (!runLiveOwnerRosterId || runLiveOwnerRosterId === rosterId) {
+			ownerRosterIdByTag[tag] = rosterId;
+			liveOwnerRosterIdByTag[tag] = rosterId;
+		}
 		liveMemberByTag[tag] = member;
 	}
 	membersByRosterId[rosterId] = members;

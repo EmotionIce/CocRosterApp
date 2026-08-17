@@ -2582,12 +2582,17 @@ test("roster ownership snapshot preserves live cross-roster owners for isolated 
   const sourceMeta = backend.readAutoRefreshRunShard_(runId, "source/meta");
   const sourceRoster = backend.readAutoRefreshRunShard_(runId, "source/rosters/main");
   const sourceOwnership = backend.readAutoRefreshRunShard_(runId, "source/ownership");
+  const lateMainSnapshot = {
+    clanTag: "#CLAN",
+    members: [{ tag: "#MOVED", name: "Moved after coordinator snapshot", th: 16 }],
+    metricsMembers: [],
+  };
 
   const ownershipSnapshot = backend.buildAutoRefreshRosterOwnershipSnapshot_(
     sourceMeta,
     sourceRoster,
     "main",
-    { clanTag: "#CLAN", members: [], metricsMembers: [] },
+    lateMainSnapshot,
     {},
     sourceOwnership,
   );
@@ -2595,7 +2600,7 @@ test("roster ownership snapshot preserves live cross-roster owners for isolated 
   const result = backend.applyRosterPoolSync_(
     workingRosterData,
     workingRosterData.rosters[0],
-    [],
+    lateMainSnapshot.members,
     "members",
     ownershipSnapshot,
     "2026-05-25T00:00:00.000Z",
@@ -2604,6 +2609,7 @@ test("roster ownership snapshot preserves live cross-roster owners for isolated 
   assert.equal(sourceOwnership.sourceOwnerRosterIdByTag["#MOVED"], "main");
   assert.equal(sourceOwnership.liveOwnerRosterIdByTag["#MOVED"], "second");
   assert.equal(ownershipSnapshot.ownerRosterIdByTag["#MOVED"], "second");
+  assert.equal(ownershipSnapshot.liveOwnerRosterIdByTag["#MOVED"], "second");
   assert.equal(result.removedCrossOwned, 1);
   assert.equal(workingRosterData.rosters[0].main.length, 0);
   assert.equal(workingRosterData.rosters[0].subs.length, 0);
