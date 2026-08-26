@@ -606,15 +606,9 @@ function readWarFollowupCase_(tagRaw) {
 
 function getWarFollowupCase(tagRaw, password) {
 	assertWarFollowupAccess_(password);
-	const lock = LockService.getScriptLock();
-	lock.waitLock(30000);
-	try {
-		// Reconciliation reads share the writer lock so an interrupted response
-		// cannot observe the state halfway through a still-finishing mutation.
-		return readWarFollowupCase_(tagRaw);
-	} finally {
-		lock.releaseLock();
-	}
+	// A case and its mutation ledger are committed in one atomic Firebase PUT.
+	// A read can see the previous or next case, never a half-written ledger.
+	return readWarFollowupCase_(tagRaw);
 }
 
 function appendWarFollowupActivity_(caseRaw, typeRaw, textRaw, actorRaw, nowIsoRaw) {
@@ -931,10 +925,14 @@ function mutateWarFollowupCase(requestRaw, password) {
 	const action = sanitizeWarFollowupText_(request.action, 40).toLowerCase();
 	if (!action) throw new Error("War follow-up action is required.");
 
-	const lock = LockService.getScriptLock();
-	lock.waitLock(30000);
-	try {
-		const current = readWarFollowupCase_(tag);
+	const path = WAR_FOLLOWUP_CASES_PATH + "/" + encodeFirebaseObjectKey_(tag);
+	// Serialize only changes to this case. A global script lock made unrelated
+	// roster jobs and other moderators block both saves and their confirmations.
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const snapshot = firebaseRequestJsonWithEtag_(path, "GET");
+		const current = snapshot.value && typeof snapshot.value === "object" && !Array.isArray(snapshot.value)
+			? sanitizeWarFollowupCase_(decodeFirebaseObjectKeysRecursive_(snapshot.value), tag)
+			: null;
 		const hasMutationId = Object.prototype.hasOwnProperty.call(request, "mutationId");
 		const mutationId = sanitizeWarFollowupText_(request.mutationId, 120);
 		if (hasMutationId && !mutationId) throw new Error("War follow-up mutation ID is required.");
@@ -1601,10 +1599,14 @@ function mutateWarFollowupCase(requestRaw, password) {
 			);
 		}
 		const sanitized = sanitizeWarFollowupCase_(value, tag);
-		const path = WAR_FOLLOWUP_CASES_PATH + "/" + encodeFirebaseObjectKey_(tag);
-		firebaseRequestJson_(path, "PUT", encodeFirebaseObjectKeysRecursive_(sanitized));
-		return sanitized;
-	} finally {
-		lock.releaseLock();
+		try {
+			firebaseRequestJsonWithEtag_(path, "PUT", encodeFirebaseObjectKeysRecursive_(sanitized), { ifMatch: snapshot.etag });
+			return sanitized;
+		} catch (err) {
+			if (!err || err.code !== "FIREBASE_ETAG_CONFLICT") throw err;
+			// Re-read before checking the mutation ID and optimistic version again:
+			// an identical concurrent retry succeeds, a different edit stays a conflict.
+		}
 	}
+	throw new Error("This follow-up changed since it was opened. Reload and try again.");
 }

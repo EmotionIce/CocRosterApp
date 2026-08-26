@@ -7417,6 +7417,58 @@ test("unsafe legacy active version ids are read by their exact encoded key and r
   }
 });
 
+test("case saves and reconciliation do not wait for unrelated script locks", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.LockService.getScriptLock = () => { throw new Error("unrelated job holds the script lock"); };
+  const request = { action: "manual_review", tag: "#P0LYGQ", expectedUpdatedAt: "", mutationId: "no-global-lock" };
+  const saved = backend.mutateWarFollowupCase(request, "secret");
+  assert.equal(saved.status, "needs_review");
+  assert.equal(backend.getWarFollowupCase(request.tag, "secret").mutationLedger[0].mutationId, request.mutationId);
+  assert.equal(backend.mutateWarFollowupCase(request, "secret").updatedAt, saved.updatedAt);
+});
+
+test("concurrent case CAS writes preserve the winner and reconcile identical retries", () => {
+  for (const sameMutation of [false, true]) {
+    const backend = installMemoryFirebase(loadBackend());
+    const request = { action: "manual_review", tag: "#P0LYGQ", expectedUpdatedAt: "", mutationId: "original", name: "Original" };
+    const transport = backend.firebaseRequestJsonWithEtag_;
+    let interleaved = false;
+    backend.firebaseRequestJsonWithEtag_ = (path, method, payload, options) => {
+      if (method === "PUT" && !interleaved) {
+        interleaved = true;
+        backend.mutateWarFollowupCase(sameMutation ? request : { ...request, mutationId: "winner", name: "Winner" }, "secret");
+      }
+      return transport(path, method, payload, options);
+    };
+    if (sameMutation) {
+      assert.equal(backend.mutateWarFollowupCase(request, "secret").name, "Original");
+    } else {
+      assert.throws(() => backend.mutateWarFollowupCase(request, "secret"), /changed since it was opened/);
+    }
+    const saved = backend.getWarFollowupCase(request.tag, "secret");
+    assert.equal(saved.name, sameMutation ? "Original" : "Winner");
+    assert.equal(saved.mutationLedger.length, 1);
+  }
+});
+
+test("case CAS retries are bounded and transport failures are never replayed inline", () => {
+  for (const code of ["FIREBASE_ETAG_CONFLICT", "NETWORK_ERROR"]) {
+    const backend = installMemoryFirebase(loadBackend());
+    const transport = backend.firebaseRequestJsonWithEtag_;
+    let writes = 0;
+    backend.firebaseRequestJsonWithEtag_ = (path, method, payload, options) => {
+      if (method === "PUT") {
+        writes++;
+        throw Object.assign(new Error("transport failure"), { code });
+      }
+      return transport(path, method, payload, options);
+    };
+    assert.throws(() => backend.mutateWarFollowupCase({ action: "manual_review", tag: "#P0LYGQ", mutationId: "bounded" }, "secret"),
+      code === "FIREBASE_ETAG_CONFLICT" ? /changed since it was opened/ : /transport failure/);
+    assert.equal(writes, code === "FIREBASE_ETAG_CONFLICT" ? 3 : 1);
+  }
+});
+
 test("war follow-up state is authenticated, private, and independent from roster publication", () => {
   const backend = installMemoryFirebase(loadBackend(), {
     activePublished: { currentVersionId: "keep-this-version" },
