@@ -134,6 +134,56 @@ test("canonical CWL season summaries retain the latest finalized event time", ()
   );
 });
 
+test("a season-aware CWL replay upgrades legacy seasonless evidence without double-counting", () => {
+  const b = loadBackend();
+  const tag = "#P2L9";
+  const legacy = b.buildCwlPlayerWarCandidate_(
+    { [tag]: stats(2, 1) },
+    "#WAR1",
+    "#CLANA",
+    "main",
+    { observedAt: "2026-09-04T20:00:00.000Z" },
+  );
+  assert.equal(legacy.quality.complete, false);
+  assert.equal(legacy.quality.classification, "partial");
+
+  const legacyResolution = b.resolvePlayerWarEventCandidate_(
+    null,
+    legacy,
+    "2026-09-04T20:01:00.000Z",
+  );
+  const first = b.finalizePlayerWarEventCandidates_(null, [legacy], {
+    persist: false,
+    existingRecordsByEventId: {},
+    nowIso: "2026-09-04T20:01:00.000Z",
+    stage: "cutover",
+  });
+  assert.equal(first.store.byTag[tag].cwl.starsTotal, 2);
+  assert.equal(Object.keys(first.store.byTag[tag].cwlSeasonContext.bySeason).length, 0);
+
+  const seasonAware = b.buildCwlPlayerWarCandidate_(
+    { [tag]: stats(2, 1) },
+    "#WAR1",
+    "#CLANA",
+    "main",
+    {
+      season: "2026-09",
+      observedAt: "2026-09-04T20:03:00.000Z",
+    },
+  );
+  const upgraded = b.finalizePlayerWarEventCandidates_(first.store, [seasonAware], {
+    persist: false,
+    existingRecordsByEventId: { [legacy.eventId]: legacyResolution.record },
+    nowIso: "2026-09-04T20:04:00.000Z",
+    stage: "cutover",
+  });
+
+  assert.equal(upgraded.acceptedCount, 1);
+  assert.equal(upgraded.store.byTag[tag].cwl.starsTotal, 2);
+  assert.equal(upgraded.store.byTag[tag].overall.starsTotal, 2);
+  assert.equal(upgraded.store.byTag[tag].cwlSeasonContext.bySeason["2026-09"].stats.starsTotal, 2);
+});
+
 test("canonical move preserves history and active participation until authoritative completion", () => {
   const b = loadBackend();
   const tag = "#P2L9";

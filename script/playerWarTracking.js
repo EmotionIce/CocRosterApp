@@ -167,6 +167,8 @@ function buildPlayerWarEventCandidate_(inputRaw) {
 	const kind = String(input.kind || "").toLowerCase() === "cwl" ? "cwl" : "regular";
 	const clanTag = normalizeTag_(input.clanTag);
 	const identifier = kind === "cwl" ? normalizeTag_(input.warTag || input.identifier) : String(input.warKey || input.identifier || "").trim();
+	const season = String(input.season || "").trim();
+	const missingRequiredCwlSeason = kind === "cwl" && !season;
 	const eventId = String(input.eventId || buildPlayerWarEventId_(kind, clanTag, identifier)).trim();
 	const contributionsByTag = sanitizePlayerWarContributionMap_(input.contributionsByTag);
 	if (!eventId || !identifier || !Object.keys(contributionsByTag).length) return null;
@@ -176,9 +178,11 @@ function buildPlayerWarEventCandidate_(inputRaw) {
 	const authorityRankDefault = authorityLevel === "authoritative" ? 300 : authorityLevel === "reconstructed" ? 200 : 100;
 	const authorityRank = Math.max(authorityRankDefault, toNonNegativeInt_(authorityInput.rank));
 	const classificationRaw = String(input.classification || qualityInput.classification || "").toLowerCase();
-	const classification = ["exact", "reconstructed", "ambiguous", "partial", "unrecoverable"].indexOf(classificationRaw) >= 0
+	let classification = ["exact", "reconstructed", "ambiguous", "partial", "unrecoverable"].indexOf(classificationRaw) >= 0
 		? classificationRaw
 		: (authorityRank >= 300 ? "exact" : "partial");
+	if (missingRequiredCwlSeason && classification === "exact") classification = "partial";
+	const complete = input.complete != null ? input.complete === true : (qualityInput.complete != null ? qualityInput.complete === true : authorityRank >= 300);
 	const candidate = {
 		schemaVersion: PLAYER_WAR_EVENT_SCHEMA_VERSION,
 		eventId: eventId,
@@ -186,7 +190,7 @@ function buildPlayerWarEventCandidate_(inputRaw) {
 		identifier: identifier,
 		warKey: kind === "regular" ? identifier : "",
 		warTag: kind === "cwl" ? identifier : "",
-		season: String(input.season || ""),
+		season: season,
 		clanTag: clanTag,
 		rosterId: String(input.rosterId || ""),
 		state: "finalized",
@@ -197,7 +201,7 @@ function buildPlayerWarEventCandidate_(inputRaw) {
 		authority: { level: authorityLevel, rank: authorityRank },
 		quality: {
 			classification: classification,
-			complete: input.complete != null ? input.complete === true : (qualityInput.complete != null ? qualityInput.complete === true : authorityRank >= 300),
+			complete: missingRequiredCwlSeason ? false : complete,
 			reason: String(input.qualityReason || qualityInput.reason || ""),
 		},
 		contributionsByTag: contributionsByTag,

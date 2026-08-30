@@ -2225,7 +2225,16 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			cwlCurrentWar = buildCwlCurrentWarFromWar_(war, warTag, ctx.clanTag, i);
 		}
 		if (warState === "warended") {
-			const ingested = ingestCwlWarIntoWarPerformance_(warPerformance, war, warTag, ctx.clanTag, trackedHistoryTagSet, nowIso, "cwlRefreshWarEnded");
+			const ingested = ingestCwlWarIntoWarPerformance_(
+				warPerformance,
+				war,
+				warTag,
+				ctx.clanTag,
+				trackedHistoryTagSet,
+				nowIso,
+				"cwlRefreshWarEnded",
+				{ season: leaguegroup.season, rosterId: ctx.rosterId },
+			);
 			if (ingested) finalizedCwlWars++;
 		}
 

@@ -2175,14 +2175,16 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 }
 
 // Ingest CWL war into war performance.
-function ingestCwlWarIntoWarPerformance_(warPerformance, war, warTagRaw, clanTag, trackedTagSet, nowIso, source) {
+function ingestCwlWarIntoWarPerformance_(warPerformance, war, warTagRaw, clanTag, trackedTagSet, nowIso, source, optionsRaw) {
+	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const warTag = normalizeTag_(warTagRaw) || normalizeTag_(war && war.warTag);
 	if (!warTag) return false;
 	const statsByTag = computeCwlWarStatsFromWar_(war, clanTag, trackedTagSet);
 	const result = applyWarSnapshotToLongTermAggregate_(warPerformance, "cwl", warTag, statsByTag, nowIso, source || "cwlWarFinalized", "cwlWarFinalized", false);
 	if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
 		emitPlayerWarEventCandidate_(
-			buildCwlPlayerWarCandidate_(statsByTag, warTag, clanTag, "", {
+			buildCwlPlayerWarCandidate_(statsByTag, warTag, clanTag, options.rosterId, {
+				season: options.season,
 				startTime: war && war.startTime,
 				endTime: war && war.endTime,
 				observedAt: nowIso,

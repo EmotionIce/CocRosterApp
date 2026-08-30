@@ -659,6 +659,143 @@ test("direct CWL refresh retains a preparation-day matchup from prefetched data"
   );
 });
 
+test("direct CWL fallback finalization carries its season into canonical follow-up history exactly once", () => {
+  const backend = loadBackend();
+  const rawData = buildRosterData();
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  const data = backend.validateRosterData_(rawData);
+  const leaguegroup = buildOneRoundCwlLeagueGroup({
+    state: "ended",
+    season: "2026-09",
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+  });
+  const war = buildOneRoundCwlWar({
+    state: "warEnded",
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+    playerTag: "#PLAYER",
+    stars: 2,
+    destruction: 81,
+    startTime: "2026-09-03T20:00:00.000Z",
+    endTime: "2026-09-04T20:00:00.000Z",
+  });
+  const refreshOptions = {
+    autoRefreshSnapshotMode: true,
+    prefetchedLeaguegroupRawByClanTag: { "#2LUCULP": leaguegroup },
+    prefetchedCwlWarRawByTag: { "#WAR1": war },
+  };
+
+  const eventCandidates = [];
+  const previousSink = backend.beginPlayerWarEventCandidateCapture_(eventCandidates);
+  let refreshed;
+  try {
+    refreshed = backend.refreshCwlStatsCore_(data, "main", refreshOptions);
+  } finally {
+    backend.endPlayerWarEventCandidateCapture_(previousSink);
+  }
+
+  assert.equal(refreshed.result.finalizedCwlWars, 1);
+  assert.equal(eventCandidates.length, 1);
+  assert.equal(eventCandidates[0].season, "2026-09");
+  assert.equal(eventCandidates[0].rosterId, "main");
+
+  const finalized = backend.finalizePlayerWarEventCandidates_(
+    backend.createEmptyPlayerWarPerformanceStore_(),
+    eventCandidates,
+    {
+      persist: false,
+      existingRecordsByEventId: {},
+      nowIso: "2026-09-04T20:03:00.000Z",
+      stage: "cutover",
+    },
+  );
+  const season = finalized.store.byTag["#PLAYER"].cwlSeasonContext.bySeason["2026-09"];
+  assert.equal(finalized.acceptedCount, 1);
+  assert.equal(JSON.stringify(season.finalizedEventIds), JSON.stringify([eventCandidates[0].eventId]));
+  assert.equal(season.stats.countedAttacks, 1);
+  assert.equal(season.stats.starsTotal, 2);
+
+  const replayCandidates = [];
+  const replayPreviousSink = backend.beginPlayerWarEventCandidateCapture_(replayCandidates);
+  let replayed;
+  try {
+    replayed = backend.refreshCwlStatsCore_(refreshed.rosterData, "main", refreshOptions);
+  } finally {
+    backend.endPlayerWarEventCandidateCapture_(replayPreviousSink);
+  }
+  assert.equal(replayed.result.finalizedCwlWars, 0);
+  assert.equal(replayCandidates.length, 0);
+});
+
+test("settled CWL coordinator data reaches canonical season history used by follow-up", () => {
+  const backend = installMemoryFirebase(loadBackend(), buildCurrentCwlEventDb());
+  const rawData = buildRosterData();
+  rawData.rosterOrder = ["main"];
+  rawData.rosters = [rawData.rosters[0]];
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  const data = backend.validateRosterData_(rawData);
+  const leaguegroup = buildOneRoundCwlLeagueGroup({
+    state: "inWar",
+    season: "2026-09",
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+  });
+  const war = buildOneRoundCwlWar({
+    state: "warEnded",
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+    playerTag: "#PLAYER",
+    stars: 2,
+    destruction: 81,
+    startTime: "2026-09-03T20:00:00.000Z",
+    endTime: "2026-09-04T20:00:00.000Z",
+  });
+  const coordinatorOptions = (nowIso) => ({
+    nowIso,
+    includeTargetEvidence: false,
+    prefetchedLeaguegroupRawByClanTag: { "#2LUCULP": leaguegroup },
+    prefetchedCwlWarRawByTag: { "#WAR1": war },
+  });
+
+  const confirming = backend.buildCwlCoordinatorResult_(
+    data,
+    coordinatorOptions("2026-09-04T20:00:00.000Z"),
+  );
+  assert.equal(confirming.viewsByClanTag["#2LUCULP"].contributions[0].status, "confirming");
+  const settled = backend.buildCwlCoordinatorResult_(
+    data,
+    coordinatorOptions("2026-09-04T20:03:00.000Z"),
+  );
+  assert.equal(settled.viewsByClanTag["#2LUCULP"].contributions[0].status, "settled");
+
+  const eventCandidates = [];
+  const previousSink = backend.beginPlayerWarEventCandidateCapture_(eventCandidates);
+  try {
+    backend.refreshCwlStatsCore_(data, "main", { cwlCoordinatorResult: settled });
+  } finally {
+    backend.endPlayerWarEventCandidateCapture_(previousSink);
+  }
+  assert.equal(eventCandidates.length, 1);
+  assert.equal(eventCandidates[0].season, "2026-09");
+
+  const finalized = backend.finalizePlayerWarEventCandidates_(
+    backend.createEmptyPlayerWarPerformanceStore_(),
+    eventCandidates,
+    {
+      persist: false,
+      existingRecordsByEventId: {},
+      nowIso: "2026-09-04T20:04:00.000Z",
+      stage: "cutover",
+    },
+  );
+  const followupSeason = finalized.store.byTag["#PLAYER"].cwlSeasonContext.bySeason["2026-09"];
+  assert.equal(followupSeason.stats.possibleAttacks, 1);
+  assert.equal(followupSeason.stats.usedAttacks, 1);
+  assert.equal(followupSeason.stats.starsTotal, 2);
+  assert.equal(followupSeason.lastEventAt.length > 0, true);
+});
+
 const installPublishedActiveVersion = (backend, dataRaw) => {
   const data = backend.validateRosterData_(dataRaw || buildRosterData());
   return backend.writeActiveRosterVersionShards_("source-1", data, {
