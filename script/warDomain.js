@@ -1,5 +1,8 @@
 // War domain models, aggregation, finalization, and repair helpers.
 
+const REGULAR_WAR_ATTACK_CONTEXT_SCHEMA_VERSION = 1;
+const REGULAR_WAR_ATTACK_CONTEXT_MAX_ATTACKS = 4;
+
 // Create an empty CWL stat entry.
 function createEmptyCwlStatEntry_() {
 	return {
@@ -195,6 +198,72 @@ function sanitizeWarPerformanceStatsEntry_(entryRaw) {
 	out.hitUpCount = toNonNegativeInt_(entry.hitUpCount);
 	out.sameThHitCount = toNonNegativeInt_(entry.sameThHitCount);
 	out.hitDownCount = toNonNegativeInt_(entry.hitDownCount);
+	return out;
+}
+
+// Sanitize one compact regular-war attack context item. Context is deliberately
+// numeric and tag-free because it is projected into the bounded public read
+// model; raw opponent rosters remain only in the transient Clash response.
+function sanitizeRegularWarAttackContextAttack_(entryRaw) {
+	const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+	const signed = function (valueRaw) {
+		const value = Number(valueRaw);
+		return isFinite(value) ? Math.max(-100, Math.min(100, Math.trunc(value))) : 0;
+	};
+	return {
+		attackNumber: Math.min(REGULAR_WAR_ATTACK_CONTEXT_MAX_ATTACKS, toNonNegativeInt_(entry.attackNumber)),
+		order: Math.min(10000, toNonNegativeInt_(entry.order)),
+		ownAttackOrdinal: Math.min(1000, toNonNegativeInt_(entry.ownAttackOrdinal)),
+		targetMapPosition: Math.min(100, toNonNegativeInt_(entry.targetMapPosition)),
+		targetTownHallLevel: Math.min(100, toNonNegativeInt_(entry.targetTownHallLevel)),
+		mapUp: signed(entry.mapUp),
+		townHallDelta: signed(entry.townHallDelta),
+		mirrorStarsBefore: Math.min(3, toNonNegativeInt_(entry.mirrorStarsBefore)),
+		targetStarsBefore: Math.min(3, toNonNegativeInt_(entry.targetStarsBefore)),
+		reasonableTargetsAvailable: Math.min(100, toNonNegativeInt_(entry.reasonableTargetsAvailable)),
+		stars: Math.min(3, toNonNegativeInt_(entry.stars)),
+		destruction: Math.min(100, toNonNegativeInt_(entry.destruction)),
+		newStars: Math.min(3, toNonNegativeInt_(entry.newStars)),
+		formEligible: toBooleanFlag_(entry.formEligible),
+		mirrorResolved: toBooleanFlag_(entry.mirrorResolved),
+		targetResolved: toBooleanFlag_(entry.targetResolved),
+		hitMirror: toBooleanFlag_(entry.hitMirror),
+		forcedHardTarget: toBooleanFlag_(entry.forcedHardTarget),
+	};
+}
+
+// Sanitize one player's bounded regular-war context.
+function sanitizeRegularWarAttackContext_(contextRaw) {
+	const context = contextRaw && typeof contextRaw === "object" ? contextRaw : {};
+	const medianRaw = Number(context.lineupMedianTownHall);
+	return {
+		schemaVersion: REGULAR_WAR_ATTACK_CONTEXT_SCHEMA_VERSION,
+		teamSize: Math.min(100, toNonNegativeInt_(context.teamSize)),
+		attacksPerMember: Math.min(REGULAR_WAR_ATTACK_CONTEXT_MAX_ATTACKS, toNonNegativeInt_(context.attacksPerMember)),
+		playerMapPosition: Math.min(100, toNonNegativeInt_(context.playerMapPosition)),
+		playerTownHallLevel: Math.min(100, toNonNegativeInt_(context.playerTownHallLevel)),
+		mirrorTownHallLevel: Math.min(100, toNonNegativeInt_(context.mirrorTownHallLevel)),
+		lineupMedianTownHall: isFinite(medianRaw) && medianRaw > 0 ? Math.min(100, Math.round(medianRaw * 2) / 2) : 0,
+		totalOwnAttacksMade: Math.min(1000, toNonNegativeInt_(context.totalOwnAttacksMade)),
+		maxOwnAttacks: Math.min(1000, toNonNegativeInt_(context.maxOwnAttacks)),
+		attacks: (Array.isArray(context.attacks) ? context.attacks : [])
+			.slice(0, REGULAR_WAR_ATTACK_CONTEXT_MAX_ATTACKS)
+			.map(sanitizeRegularWarAttackContextAttack_),
+	};
+}
+
+// Sanitize player-tag keyed context without retaining any unbounded payload.
+function sanitizeRegularWarAttackContextByTag_(contextByTagRaw) {
+	const contextByTag = contextByTagRaw && typeof contextByTagRaw === "object" ? contextByTagRaw : {};
+	const out = {};
+	const tags = Object.keys(contextByTag);
+	for (let i = 0; i < tags.length; i++) {
+		const tag = normalizeTag_(tags[i]);
+		if (!tag) continue;
+		const context = sanitizeRegularWarAttackContext_(contextByTag[tags[i]]);
+		if (!context.playerMapPosition && !context.playerTownHallLevel && !context.attacks.length) continue;
+		out[tag] = context;
+	}
 	return out;
 }
 
@@ -582,6 +651,7 @@ function sanitizeRegularWarSnapshot_(rawSnapshot) {
 		if (!tag) continue;
 		formStatsByTag[tag] = sanitizeWarPerformanceStatsEntry_(formStatsByTagRaw[formStatTags[i]]);
 	}
+	const formContextByTag = sanitizeRegularWarAttackContextByTag_(snapshot.formContextByTag);
 
 	const currentByTagRaw = snapshot.currentByTag && typeof snapshot.currentByTag === "object" ? snapshot.currentByTag : {};
 	const currentByTag = {};
@@ -600,6 +670,7 @@ function sanitizeRegularWarSnapshot_(rawSnapshot) {
 		source: typeof snapshot.source === "string" ? snapshot.source : "",
 		statsByTag: statsByTag,
 		formStatsByTag: formStatsByTag,
+		formContextByTag: formContextByTag,
 		currentByTag: currentByTag,
 	};
 }
@@ -1412,14 +1483,53 @@ function convertCwlAggregateToWarPerformanceStatsByTag_(aggregateRaw) {
 // Build form-eligible regular-war stats when attack chronology proves which attacks happened before max stars.
 // The additive bucket keeps the full opportunity model explicit: possibleAttacks, usedAttacks/attacksMade,
 // countedAttacks/formEligibleAttacks, and attacksMissed for the existing frontend reliability penalty.
-function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThByTagRaw, trackedTagSet, teamSizeRaw) {
+function buildRegularWarFormAnalysisFromMembers_(membersRaw, attacksPerMemberRaw, opponentMembersRaw, trackedTagSet, teamSizeRaw, opponentThByTagRaw) {
 	const members = Array.isArray(membersRaw) ? membersRaw : [];
-	const opponentThByTag = opponentThByTagRaw && typeof opponentThByTagRaw === "object" ? opponentThByTagRaw : {};
+	const opponentMembers = Array.isArray(opponentMembersRaw) ? opponentMembersRaw : [];
+	const opponentThByTag = opponentThByTagRaw && typeof opponentThByTagRaw === "object" ? Object.assign({}, opponentThByTagRaw) : {};
 	const attacksPerMember = toNonNegativeInt_(attacksPerMemberRaw);
 	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
 	const teamSize = toNonNegativeInt_(teamSizeRaw) || members.length;
 	const maxStars = teamSize * 3;
 	if (!(maxStars > 0)) return null;
+
+	const memberByTag = {};
+	const lineupTownHalls = [];
+	for (let i = 0; i < members.length; i++) {
+		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
+		const tag = normalizeTag_(member.tag);
+		if (!tag) continue;
+		memberByTag[tag] = member;
+		const townHall = readTownHallLevel_(member);
+		if (typeof townHall === "number" && isFinite(townHall) && townHall > 0) lineupTownHalls.push(townHall);
+	}
+	lineupTownHalls.sort((left, right) => left - right);
+	let lineupMedianTownHall = 0;
+	if (lineupTownHalls.length) {
+		const middle = Math.floor(lineupTownHalls.length / 2);
+		lineupMedianTownHall = lineupTownHalls.length % 2
+			? lineupTownHalls[middle]
+			: (lineupTownHalls[middle - 1] + lineupTownHalls[middle]) / 2;
+	}
+
+	const opponentByTag = {};
+	const opponentByPosition = {};
+	const duplicateOpponentPositions = {};
+	for (let i = 0; i < opponentMembers.length; i++) {
+		const opponent = opponentMembers[i] && typeof opponentMembers[i] === "object" ? opponentMembers[i] : {};
+		const tag = normalizeTag_(opponent.tag);
+		if (!tag) continue;
+		const townHall = readTownHallLevel_(opponent);
+		const mapPosition = toNonNegativeInt_(opponent.mapPosition);
+		const value = { tag: tag, townHallLevel: toNonNegativeInt_(townHall), mapPosition: mapPosition };
+		opponentByTag[tag] = value;
+		if (value.townHallLevel > 0) opponentThByTag[tag] = value.townHallLevel;
+		if (mapPosition > 0) {
+			if (opponentByPosition[mapPosition]) duplicateOpponentPositions[mapPosition] = true;
+			else opponentByPosition[mapPosition] = value;
+		}
+	}
+	Object.keys(duplicateOpponentPositions).forEach(function (position) { delete opponentByPosition[position]; });
 
 	const orderedAttacks = [];
 	for (let i = 0; i < members.length; i++) {
@@ -1438,6 +1548,7 @@ function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemb
 				order: Math.floor(attackOrder),
 				defenderTag: defenderTag,
 				stars: Math.min(3, toNonNegativeInt_(attack.stars)),
+				destruction: Math.min(100, toNonNegativeInt_(readAttackDestruction_(attack))),
 			});
 		}
 	}
@@ -1448,6 +1559,28 @@ function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemb
 	}
 
 	const eligibleAttackIndexByTag = {};
+	const contextByTag = {};
+	const attackCountByTag = {};
+	const maxOwnAttacks = teamSize * attacksPerMember;
+	Object.keys(memberByTag).forEach(function (tag) {
+		if (useTrackedFilter && !trackedTagSet[tag]) return;
+		const member = memberByTag[tag];
+		const playerMapPosition = toNonNegativeInt_(member.mapPosition);
+		const mirror = playerMapPosition > 0 ? opponentByPosition[playerMapPosition] : null;
+		contextByTag[tag] = {
+			schemaVersion: REGULAR_WAR_ATTACK_CONTEXT_SCHEMA_VERSION,
+			teamSize: teamSize,
+			attacksPerMember: attacksPerMember,
+			playerMapPosition: playerMapPosition,
+			playerTownHallLevel: toNonNegativeInt_(readTownHallLevel_(member)),
+			mirrorTownHallLevel: mirror ? mirror.townHallLevel : 0,
+			lineupMedianTownHall: lineupMedianTownHall,
+			totalOwnAttacksMade: orderedAttacks.length,
+			maxOwnAttacks: maxOwnAttacks,
+			attacks: [],
+		};
+	});
+
 	const bestStarsByDefenderTag = {};
 	let securedStars = 0;
 	for (let i = 0; i < orderedAttacks.length; i++) {
@@ -1455,15 +1588,67 @@ function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemb
 		const isFormEligible = securedStars < maxStars;
 		if (!eligibleAttackIndexByTag[orderedAttack.attackerTag]) eligibleAttackIndexByTag[orderedAttack.attackerTag] = {};
 		eligibleAttackIndexByTag[orderedAttack.attackerTag][orderedAttack.attackIndex] = isFormEligible;
+		attackCountByTag[orderedAttack.attackerTag] = toNonNegativeInt_(attackCountByTag[orderedAttack.attackerTag]) + 1;
 
-		const previousBestStars = toNonNegativeInt_(bestStarsByDefenderTag[orderedAttack.defenderTag]);
-		if (orderedAttack.stars > previousBestStars) {
+		const attacker = memberByTag[orderedAttack.attackerTag] || {};
+		const attackerTh = toNonNegativeInt_(readTownHallLevel_(attacker));
+		const attackerPosition = toNonNegativeInt_(attacker.mapPosition);
+		const target = opponentByTag[orderedAttack.defenderTag] || null;
+		const mirror = attackerPosition > 0 ? opponentByPosition[attackerPosition] : null;
+		const mirrorStarsBefore = mirror ? Math.min(3, toNonNegativeInt_(bestStarsByDefenderTag[mirror.tag])) : 0;
+		const targetStarsBefore = Math.min(3, toNonNegativeInt_(bestStarsByDefenderTag[orderedAttack.defenderTag]));
+		let reasonableTargetsAvailable = 0;
+		if (attackerTh > 0 && opponentMembers.length) {
+			const targetTags = Object.keys(opponentByTag);
+			for (let j = 0; j < targetTags.length; j++) {
+				const available = opponentByTag[targetTags[j]];
+				if (available.townHallLevel > 0 && available.townHallLevel <= attackerTh && toNonNegativeInt_(bestStarsByDefenderTag[available.tag]) < 3) {
+					reasonableTargetsAvailable++;
+				}
+			}
+		}
+		const targetResolved = !!(target && target.mapPosition > 0 && target.townHallLevel > 0);
+		const mirrorResolved = !!(mirror && mirror.mapPosition > 0 && mirror.townHallLevel > 0);
+		const hitMirror = mirrorResolved && targetResolved && target.mapPosition === attackerPosition;
+		const forcedHardTarget = !!(
+			isFormEligible &&
+			mirrorResolved &&
+			targetResolved &&
+			mirrorStarsBefore >= 3 &&
+			targetStarsBefore < 3 &&
+			target.townHallLevel > attackerTh &&
+			reasonableTargetsAvailable === 0
+		);
+		if (contextByTag[orderedAttack.attackerTag]) {
+			contextByTag[orderedAttack.attackerTag].attacks.push({
+				attackNumber: attackCountByTag[orderedAttack.attackerTag],
+				order: orderedAttack.order,
+				ownAttackOrdinal: i + 1,
+				targetMapPosition: target ? target.mapPosition : 0,
+				targetTownHallLevel: target ? target.townHallLevel : toNonNegativeInt_(opponentThByTag[orderedAttack.defenderTag]),
+				mapUp: targetResolved && attackerPosition > 0 ? attackerPosition - target.mapPosition : 0,
+				townHallDelta: target && attackerTh > 0 ? target.townHallLevel - attackerTh : 0,
+				mirrorStarsBefore: mirrorStarsBefore,
+				targetStarsBefore: targetStarsBefore,
+				reasonableTargetsAvailable: reasonableTargetsAvailable,
+				stars: orderedAttack.stars,
+				destruction: orderedAttack.destruction,
+				newStars: Math.max(0, orderedAttack.stars - targetStarsBefore),
+				formEligible: isFormEligible,
+				mirrorResolved: mirrorResolved,
+				targetResolved: targetResolved,
+				hitMirror: hitMirror,
+				forcedHardTarget: forcedHardTarget,
+			});
+		}
+
+		if (orderedAttack.stars > targetStarsBefore) {
 			bestStarsByDefenderTag[orderedAttack.defenderTag] = orderedAttack.stars;
-			securedStars += orderedAttack.stars - previousBestStars;
+			securedStars += orderedAttack.stars - targetStarsBefore;
 		}
 	}
 
-	const out = {};
+	const statsByTag = {};
 	for (let i = 0; i < members.length; i++) {
 		const member = members[i] && typeof members[i] === "object" ? members[i] : {};
 		const tag = normalizeTag_(member.tag);
@@ -1496,9 +1681,25 @@ function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemb
 				else stats.sameThHitCount++;
 			}
 		}
-		out[tag] = stats;
+		statsByTag[tag] = stats;
 	}
-	return out;
+	return {
+		statsByTag: statsByTag,
+		contextByTag: sanitizeRegularWarAttackContextByTag_(contextByTag),
+	};
+}
+
+// Backward-compatible stats-only wrapper used by legacy callers and repairs.
+function buildFormEligibleRegularWarStatsFromMembers_(membersRaw, attacksPerMemberRaw, opponentThByTagRaw, trackedTagSet, teamSizeRaw) {
+	const analysis = buildRegularWarFormAnalysisFromMembers_(
+		membersRaw,
+		attacksPerMemberRaw,
+		[],
+		trackedTagSet,
+		teamSizeRaw,
+		opponentThByTagRaw,
+	);
+	return analysis ? analysis.statsByTag : null;
 }
 
 // Compute regular war stats from war.
@@ -1509,15 +1710,23 @@ function computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet) {
 	return buildWarStatsFromMembers_(sides.side && sides.side.members, sides.attacksPerMember, opponentThByTag, trackedTagSet, "regular");
 }
 
-// Compute form-eligible regular-war stats from war when attack chronology is reliable enough to filter post-max-star attacks.
-function computeRegularWarFormStatsFromWar_(war, clanTag, trackedTagSet) {
+// Compute form-eligible regular-war stats plus bounded mirror/timing context when
+// attack chronology is reliable enough to reconstruct the state before each hit.
+function computeRegularWarFormAnalysisFromWar_(war, clanTag, trackedTagSet) {
 	const sides = getWarSidesForClan_(war, clanTag);
 	if (!sides) return null;
 	const members = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
-	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
+	const opponentMembers = Array.isArray(sides.opponentSide && sides.opponentSide.members) ? sides.opponentSide.members : [];
+	const opponentThByTag = buildMemberThByTag_(opponentMembers);
 	const currentWarMeta = war && war.currentWarMeta && typeof war.currentWarMeta === "object" ? war.currentWarMeta : {};
 	const teamSize = toNonNegativeInt_(war && war.teamSize != null ? war.teamSize : currentWarMeta.teamSize) || members.length;
-	return buildFormEligibleRegularWarStatsFromMembers_(members, sides.attacksPerMember, opponentThByTag, trackedTagSet, teamSize);
+	return buildRegularWarFormAnalysisFromMembers_(members, sides.attacksPerMember, opponentMembers, trackedTagSet, teamSize, opponentThByTag);
+}
+
+// Backward-compatible stats-only projection.
+function computeRegularWarFormStatsFromWar_(war, clanTag, trackedTagSet) {
+	const analysis = computeRegularWarFormAnalysisFromWar_(war, clanTag, trackedTagSet);
+	return analysis ? analysis.statsByTag : null;
 }
 
 // Compute CWL war stats from war.
@@ -1888,7 +2097,9 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 	const warKey = getStableRegularWarKey_(war, clanTag);
 	if (!warKey) return false;
 	const warStatsByTag = computeRegularWarStatsFromWar_(war, clanTag, trackedTagSet);
-	const formStatsByTag = computeRegularWarFormStatsFromWar_(war, clanTag, trackedTagSet);
+	const formAnalysis = computeRegularWarFormAnalysisFromWar_(war, clanTag, trackedTagSet);
+	const formStatsByTag = formAnalysis ? formAnalysis.statsByTag : null;
+	const formContextByTag = formAnalysis ? formAnalysis.contextByTag : {};
 	const result = applyWarSnapshotToLongTermAggregate_(
 		warPerformance,
 		"regular",
@@ -1901,7 +2112,7 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 		formStatsByTag,
 	);
 	if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
-		emitPlayerWarEventCandidate_(buildRegularPlayerWarCandidate_(warPerformance, warKey, clanTag, ""));
+		emitPlayerWarEventCandidate_(buildRegularPlayerWarCandidate_(warPerformance, warKey, clanTag, "", formContextByTag));
 	}
 	return !!result.applied;
 }
@@ -1912,8 +2123,10 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 	if (!snapshot || !snapshot.warMeta || !snapshot.warMeta.warKey) return false;
 	const statsByTagRaw = snapshot.statsByTag && typeof snapshot.statsByTag === "object" ? snapshot.statsByTag : {};
 	const formStatsByTagRaw = snapshot.formStatsByTag && typeof snapshot.formStatsByTag === "object" ? snapshot.formStatsByTag : {};
+	const formContextByTagRaw = snapshot.formContextByTag && typeof snapshot.formContextByTag === "object" ? snapshot.formContextByTag : {};
 	const filteredStats = {};
 	const filteredFormStats = {};
+	const filteredFormContext = {};
 	const useTrackedFilter = trackedTagSet && typeof trackedTagSet === "object" && Object.keys(trackedTagSet).length > 0;
 	const tags = Object.keys(statsByTagRaw);
 	for (let i = 0; i < tags.length; i++) {
@@ -1928,6 +2141,13 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 		if (!tag) continue;
 		if (useTrackedFilter && !trackedTagSet[tag]) continue;
 		filteredFormStats[tag] = sanitizeWarPerformanceStatsEntry_(formStatsByTagRaw[formTags[i]]);
+	}
+	const formContextTags = Object.keys(formContextByTagRaw);
+	for (let i = 0; i < formContextTags.length; i++) {
+		const tag = normalizeTag_(formContextTags[i]);
+		if (!tag) continue;
+		if (useTrackedFilter && !trackedTagSet[tag]) continue;
+		filteredFormContext[tag] = sanitizeRegularWarAttackContext_(formContextByTagRaw[formContextTags[i]]);
 	}
 	const result = applyWarSnapshotToLongTermAggregate_(
 		warPerformance,
@@ -1947,6 +2167,7 @@ function finalizeRegularWarFromSnapshot_(warPerformance, snapshotRaw, trackedTag
 				snapshot.warMeta.warKey,
 				snapshot.warMeta.clanTag || "",
 				"",
+				filteredFormContext,
 			),
 		);
 	}
@@ -1992,13 +2213,16 @@ function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, now
 	const opponentThByTag = buildMemberThByTag_(sides.opponentSide && sides.opponentSide.members);
 	const members = Array.isArray(sides.side && sides.side.members) ? sides.side.members : [];
 	const statsByTag = buildWarStatsFromMembers_(members, attacksPerMember, opponentThByTag, trackedTagSet, "regular");
-	const formStatsByTag = buildFormEligibleRegularWarStatsFromMembers_(
+	const formAnalysis = buildRegularWarFormAnalysisFromMembers_(
 		members,
 		attacksPerMember,
-		opponentThByTag,
+		Array.isArray(sides.opponentSide && sides.opponentSide.members) ? sides.opponentSide.members : [],
 		trackedTagSet,
 		toNonNegativeInt_(warMeta.teamSize) || members.length,
+		opponentThByTag,
 	);
+	const formStatsByTag = formAnalysis ? formAnalysis.statsByTag : null;
+	const formContextByTag = formAnalysis ? formAnalysis.contextByTag : {};
 	if (state !== "warended") {
 		const statTags = Object.keys(statsByTag);
 		for (let i = 0; i < statTags.length; i++) {
@@ -2059,6 +2283,7 @@ function buildRegularWarLiveSnapshot_(currentWarRaw, clanTag, trackedTagSet, now
 		source: "currentWar",
 		statsByTag: statsByTag,
 		formStatsByTag: formStatsByTag || {},
+		formContextByTag: formContextByTag,
 		currentByTag: currentByTag,
 	};
 }

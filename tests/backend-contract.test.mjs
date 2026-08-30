@@ -4768,6 +4768,171 @@ test("regular-war form classification counts pre-max attacks and refuses ambiguo
   );
 });
 
+test("regular-war form analysis captures mirror state, forced hit-ups, sequence position, and farming", () => {
+  const backend = loadBackend();
+  const war = {
+    state: "warEnded",
+    teamSize: 3,
+    attacksPerMember: 2,
+    clan: {
+      tag: "#CLAN",
+      members: [
+        {
+          tag: "#TOP",
+          mapPosition: 1,
+          townHallLevel: 16,
+          attacks: [
+            { order: 1, defenderTag: "#O3", stars: 3, destructionPercentage: 100 },
+            { order: 2, defenderTag: "#O2", stars: 3, destructionPercentage: 100 },
+          ],
+        },
+        {
+          tag: "#LOW",
+          mapPosition: 3,
+          townHallLevel: 14,
+          attacks: [
+            { order: 3, defenderTag: "#O1", stars: 1, destructionPercentage: 54 },
+          ],
+        },
+        {
+          tag: "#MID",
+          mapPosition: 2,
+          townHallLevel: 15,
+          attacks: [
+            { order: 4, defenderTag: "#O1", stars: 3, destructionPercentage: 100 },
+            { order: 5, defenderTag: "#O1", stars: 1, destructionPercentage: 40 },
+          ],
+        },
+      ],
+    },
+    opponent: {
+      tag: "#OPP",
+      members: [
+        { tag: "#O1", mapPosition: 1, townHallLevel: 16 },
+        { tag: "#O2", mapPosition: 2, townHallLevel: 15 },
+        { tag: "#O3", mapPosition: 3, townHallLevel: 14 },
+      ],
+    },
+  };
+
+  const analysis = backend.computeRegularWarFormAnalysisFromWar_(war, "#CLAN", null);
+  assert.ok(analysis);
+  assert.equal(analysis.statsByTag["#MID"].usedAttacks, 2);
+  assert.equal(analysis.statsByTag["#MID"].countedAttacks, 1, "post-max farming remains excluded");
+
+  const top = analysis.contextByTag["#TOP"];
+  assert.equal(top.playerMapPosition, 1);
+  assert.equal(top.mirrorTownHallLevel, 16);
+  assert.equal(top.attacks[0].mirrorStarsBefore, 0);
+  assert.equal(top.attacks[0].hitMirror, false);
+  assert.equal(top.attacks[0].forcedHardTarget, false);
+
+  const low = analysis.contextByTag["#LOW"];
+  assert.equal(low.playerTownHallLevel, 14);
+  assert.equal(low.lineupMedianTownHall, 15);
+  assert.equal(low.totalOwnAttacksMade, 5);
+  assert.equal(low.maxOwnAttacks, 6);
+  assert.equal(low.attacks[0].ownAttackOrdinal, 3);
+  assert.equal(low.attacks[0].targetMapPosition, 1);
+  assert.equal(low.attacks[0].mapUp, 2);
+  assert.equal(low.attacks[0].townHallDelta, 2);
+  assert.equal(low.attacks[0].mirrorStarsBefore, 3);
+  assert.equal(low.attacks[0].reasonableTargetsAvailable, 0);
+  assert.equal(low.attacks[0].forcedHardTarget, true);
+  assert.equal(low.attacks[0].formEligible, true);
+
+  const mid = analysis.contextByTag["#MID"];
+  assert.equal(mid.attacks[0].formEligible, true, "the attack securing maximum stars still counts");
+  assert.equal(mid.attacks[1].formEligible, false, "later farming remains allowed but excluded");
+});
+
+test("regular-war attack context is bounded and projected with the recent player event", () => {
+  const backend = loadBackend();
+  const contextByTag = {
+    "#PLAYER": {
+      schemaVersion: 1,
+      teamSize: 15,
+      attacksPerMember: 2,
+      playerMapPosition: 14,
+      playerTownHallLevel: 14,
+      mirrorTownHallLevel: 15,
+      lineupMedianTownHall: 16,
+      totalOwnAttacksMade: 27,
+      maxOwnAttacks: 30,
+      attacks: Array.from({ length: 8 }, (_, index) => ({
+        attackNumber: index + 1,
+        order: index + 1,
+        ownAttackOrdinal: index + 1,
+        targetMapPosition: 10,
+        targetTownHallLevel: 16,
+        mapUp: 4,
+        townHallDelta: 2,
+        mirrorStarsBefore: 3,
+        targetStarsBefore: 0,
+        reasonableTargetsAvailable: 0,
+        stars: 1,
+        destruction: 55,
+        formEligible: true,
+        hitMirror: false,
+        forcedHardTarget: true,
+      })),
+    },
+  };
+  const performance = backend.createEmptyRosterWarPerformance_();
+  backend.applyWarSnapshotToLongTermAggregate_(
+    performance,
+    "regular",
+    "war-context",
+    {
+      "#PLAYER": {
+        warsInLineup: 1,
+        possibleAttacks: 2,
+        usedAttacks: 2,
+        attacksMade: 2,
+        countedAttacks: 2,
+        formEligibleAttacks: 2,
+        starsTotal: 2,
+        totalDestruction: 110,
+      },
+    },
+    "2026-08-20T00:00:00.000Z",
+    "test",
+    "test",
+    false,
+    {
+      "#PLAYER": {
+        warsInLineup: 1,
+        possibleAttacks: 2,
+        usedAttacks: 2,
+        attacksMade: 2,
+        countedAttacks: 2,
+        formEligibleAttacks: 2,
+        starsTotal: 2,
+        totalDestruction: 110,
+      },
+    },
+  );
+
+  const candidate = backend.buildRegularPlayerWarCandidate_(performance, "war-context", "#CLAN", "main", contextByTag);
+  const event = backend.sanitizePlayerWarEventCandidate_(candidate);
+  assert.equal(event.formEvidence.byTag["#PLAYER"].attacks.length, 4, "context must stay strictly bounded");
+
+  const plain = backend.buildRegularPlayerWarCandidate_(performance, "war-context", "#CLAN", "main");
+  const plainRecord = backend.resolvePlayerWarEventCandidate_(null, plain, "2026-08-30T00:01:00.000Z").record;
+  const enriched = backend.resolvePlayerWarEventCandidate_(plainRecord, candidate, "2026-08-30T00:02:00.000Z");
+  assert.equal(enriched.accepted, true, "an otherwise identical event must accept newly available bounded context");
+  assert.equal(enriched.newEvent.formEvidence.byTag["#PLAYER"].attacks.length, 4);
+  const noDowngrade = backend.resolvePlayerWarEventCandidate_(enriched.record, plain, "2026-08-30T00:03:00.000Z");
+  assert.equal(noDowngrade.accepted, false);
+  assert.equal(noDowngrade.idempotent, true, "a context-free repair replay must not erase selected evidence");
+
+  const store = backend.applyPlayerWarEventDelta_(backend.createEmptyPlayerWarPerformanceStore_(), event, 1);
+  const recent = store.byTag["#PLAYER"].recentRegularWarForm[0];
+  assert.equal(recent.context.playerMapPosition, 14);
+  assert.equal(recent.context.attacks.length, 4);
+  assert.equal(recent.context.attacks[0].forcedHardTarget, true);
+});
+
 test("CWL aggregation tracks offense and defense independently", () => {
   const backend = loadBackend();
   const war = {
@@ -7543,6 +7708,56 @@ test("war follow-up state is authenticated, private, and independent from roster
   assert.equal(state.cases[0].tag, "#P0LYGQ");
 });
 
+test("war follow-up settings and saved evidence preserve bounded regular-war context", () => {
+  const backend = loadBackend();
+  const defaults = backend.sanitizeWarFollowupSettings_({});
+  assert.equal(defaults.schemaVersion, 4);
+  assert.equal(defaults.regularContextMode, "explain");
+  assert.equal(backend.sanitizeWarFollowupSettings_({ regularContextMode: "AUTOMATIC" }).regularContextMode, "automatic");
+  assert.equal(backend.sanitizeWarFollowupSettings_({ regularContextMode: "unsafe" }).regularContextMode, "explain");
+
+  const snapshot = backend.sanitizeWarFollowupEvidenceSnapshot_({
+    regularEvents: [{
+      id: "context-war",
+      at: "2026-08-29T00:00:00.000Z",
+      stats: { countedAttacks: 1, starsTotal: 1, totalDestruction: 63 },
+      context: {
+        playerMapPosition: 14,
+        playerTownHallLevel: 14,
+        lineupMedianTownHall: 15,
+        maxOwnAttacks: 30,
+        attacks: Array.from({ length: 8 }, (_, index) => ({
+          attackNumber: index + 1,
+          order: index + 20,
+          ownAttackOrdinal: index + 20,
+          targetMapPosition: 10,
+          targetTownHallLevel: 16,
+          townHallDelta: 2,
+          mirrorStarsBefore: 3,
+          reasonableTargetsAvailable: 0,
+          stars: 1,
+          destruction: 63,
+          formEligible: index === 0,
+          mirrorResolved: true,
+          targetResolved: true,
+          forcedHardTarget: index === 0,
+        })),
+      },
+    }],
+  });
+  assert.equal(snapshot.regularEvents[0].context.playerMapPosition, 14);
+  assert.equal(snapshot.regularEvents[0].context.attacks.length, 4);
+  assert.equal(snapshot.regularEvents[0].context.attacks[0].forcedHardTarget, true);
+
+  const savedCase = backend.sanitizeWarFollowupCase_({
+    tag: "#P0LYGQ",
+    reasonCodes: ["regular_mirror_pattern", "regular_timing_pattern"],
+    evidence: snapshot,
+  });
+  assert.deepEqual(Array.from(savedCase.reasonCodes), ["regular_mirror_pattern", "regular_timing_pattern"]);
+  assert.equal(savedCase.evidence.regularEvents[0].context.attacks.length, 4);
+});
+
 test("war follow-up trust retries cannot overwrite a newer opposite decision", () => {
   const backend = installMemoryFirebase(loadBackend());
   const tag = "#P0LYGQ";
@@ -7882,7 +8097,7 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
     mutationId: "automatic-create-1",
   }, "change-me"]);
 
-  assert.equal(created.schemaVersion, 3);
+  assert.equal(created.schemaVersion, 4);
   assert.equal(created.status, "needs_review");
   assert.equal(created.sourceClanTag, "#SOURCE");
   assert.equal(created.evidence.regular.missedAttacks, 2);

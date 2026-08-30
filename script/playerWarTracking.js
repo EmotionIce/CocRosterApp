@@ -146,6 +146,14 @@ function sanitizePlayerWarContributionMap_(mapRaw) {
 	return out;
 }
 
+function sanitizePlayerWarFormEvidence_(evidenceRaw) {
+	const evidence = evidenceRaw && typeof evidenceRaw === "object" ? evidenceRaw : {};
+	const byTag = sanitizeRegularWarAttackContextByTag_(evidence.byTag && typeof evidence.byTag === "object" ? evidence.byTag : evidence);
+	return Object.keys(byTag).length
+		? { schemaVersion: REGULAR_WAR_ATTACK_CONTEXT_SCHEMA_VERSION, byTag: byTag }
+		: {};
+}
+
 function buildPlayerWarEventId_(kindRaw, clanTagRaw, identifierRaw) {
 	const kind = String(kindRaw || "").toLowerCase() === "cwl" ? "cwl" : "regular";
 	const identifier = kind === "cwl" ? normalizeTag_(identifierRaw) : String(identifierRaw == null ? "" : identifierRaw).trim();
@@ -193,7 +201,7 @@ function buildPlayerWarEventCandidate_(inputRaw) {
 			reason: String(input.qualityReason || qualityInput.reason || ""),
 		},
 		contributionsByTag: contributionsByTag,
-		formEvidence: input.formEvidence && typeof input.formEvidence === "object" ? input.formEvidence : {},
+		formEvidence: sanitizePlayerWarFormEvidence_(input.formEvidence),
 		provenance: input.provenance && typeof input.provenance === "object" ? input.provenance : {},
 	};
 	candidate.contentHash = hashPlayerWarValue_({
@@ -236,7 +244,7 @@ function emitPlayerWarEventCandidate_(candidateRaw) {
 	return !duplicate;
 }
 
-function buildRegularPlayerWarCandidate_(warPerformanceRaw, warKeyRaw, clanTagRaw, rosterIdRaw) {
+function buildRegularPlayerWarCandidate_(warPerformanceRaw, warKeyRaw, clanTagRaw, rosterIdRaw, formContextByTagRaw) {
 	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : {};
 	const history = sanitizeRegularWarHistoryByKey_(warPerformance.regularWarHistoryByKey);
 	const warKey = String(warKeyRaw || "").trim();
@@ -262,6 +270,10 @@ function buildRegularPlayerWarCandidate_(warPerformanceRaw, warKeyRaw, clanTagRa
 		classification: entry.incomplete === true ? "partial" : "exact",
 		qualityReason: entry.reason || "",
 		contributionsByTag: contributions,
+		formEvidence: {
+			schemaVersion: REGULAR_WAR_ATTACK_CONTEXT_SCHEMA_VERSION,
+			byTag: sanitizeRegularWarAttackContextByTag_(formContextByTagRaw),
+		},
 	});
 }
 
@@ -291,6 +303,28 @@ function buildCwlPlayerWarCandidate_(statsByTagRaw, warTagRaw, clanTagRaw, roste
 	});
 }
 
+function buildPlayerWarCandidateCoreHash_(candidateRaw) {
+	const candidate = candidateRaw && typeof candidateRaw === "object" ? candidateRaw : {};
+	return hashPlayerWarValue_({
+		kind: candidate.kind,
+		identifier: candidate.identifier,
+		season: candidate.season,
+		clanTag: candidate.clanTag,
+		startTime: candidate.startTime,
+		endTime: candidate.endTime,
+		contributionsByTag: candidate.contributionsByTag,
+	});
+}
+
+function getPlayerWarFormEvidenceRichness_(evidenceRaw) {
+	const evidence = sanitizePlayerWarFormEvidence_(evidenceRaw);
+	const byTag = evidence.byTag && typeof evidence.byTag === "object" ? evidence.byTag : {};
+	return Object.keys(byTag).reduce(function (total, tag) {
+		const context = byTag[tag] && typeof byTag[tag] === "object" ? byTag[tag] : {};
+		return total + 1 + (Array.isArray(context.attacks) ? context.attacks.length : 0);
+	}, 0);
+}
+
 function comparePlayerWarCandidatePriority_(leftRaw, rightRaw) {
 	const left = sanitizePlayerWarEventCandidate_(leftRaw);
 	const right = sanitizePlayerWarEventCandidate_(rightRaw);
@@ -304,6 +338,11 @@ function comparePlayerWarCandidatePriority_(leftRaw, rightRaw) {
 	const rightComplete = right.quality && right.quality.complete === true ? 1 : 0;
 	if (leftComplete !== rightComplete) return leftComplete > rightComplete ? 1 : -1;
 	if (left.contentHash === right.contentHash) return 0;
+	if (buildPlayerWarCandidateCoreHash_(left) === buildPlayerWarCandidateCoreHash_(right)) {
+		const leftEvidence = getPlayerWarFormEvidenceRichness_(left.formEvidence);
+		const rightEvidence = getPlayerWarFormEvidenceRichness_(right.formEvidence);
+		if (leftEvidence !== rightEvidence) return leftEvidence > rightEvidence ? 1 : -1;
+	}
 	// Equal-quality conflicts choose the lexically smaller content hash. The
 	// conflict remains explicit in the private revision record.
 	return left.contentHash < right.contentHash ? 1 : -1;
@@ -337,13 +376,16 @@ function sanitizePlayerWarPerformanceStore_(storeRaw, optionsRaw) {
 		entry.recentRegularWarForm = (Array.isArray(rawEntry.recentRegularWarForm) ? rawEntry.recentRegularWarForm : [])
 			.map(function (item) {
 				const value = item && typeof item === "object" ? item : {};
-				return {
+				const sanitized = {
 					eventId: String(value.eventId || ""),
 					warKey: String(value.warKey || ""),
 					clanTag: normalizeTag_(value.clanTag),
 					finalizedAt: String(value.finalizedAt || ""),
 					stats: sanitizePlayerWarStats_(value.stats),
 				};
+				const context = sanitizeRegularWarAttackContext_(value.context);
+				if (context.playerMapPosition || context.playerTownHallLevel || context.attacks.length) sanitized.context = context;
+				return sanitized;
 			})
 			.filter(function (item) { return item.eventId && hasPlayerWarStats_(item.stats); })
 			.sort(function (a, b) { return String(b.finalizedAt).localeCompare(String(a.finalizedAt)) || a.eventId.localeCompare(b.eventId); })
@@ -393,13 +435,18 @@ function applyPlayerWarEventDelta_(storeRaw, eventRaw, signRaw) {
 		if (event.kind === "regular" && contribution.form && hasPlayerWarStats_(contribution.form)) {
 			entry.recentRegularWarForm = entry.recentRegularWarForm.filter(function (item) { return item.eventId !== event.eventId; });
 			if (sign > 0) {
-				entry.recentRegularWarForm.push({
+				const recent = {
 					eventId: event.eventId,
 					warKey: event.warKey,
 					clanTag: event.clanTag,
 					finalizedAt: event.observedAt,
 					stats: sanitizePlayerWarStats_(contribution.form),
-				});
+				};
+				const context = event.formEvidence && event.formEvidence.byTag
+					? sanitizeRegularWarAttackContext_(event.formEvidence.byTag[tag])
+					: null;
+				if (context && (context.playerMapPosition || context.playerTownHallLevel || context.attacks.length)) recent.context = context;
+				entry.recentRegularWarForm.push(recent);
 			}
 			entry.recentRegularWarForm.sort(function (a, b) {
 				return String(b.finalizedAt).localeCompare(String(a.finalizedAt)) || String(a.eventId).localeCompare(String(b.eventId));
@@ -429,12 +476,22 @@ function applyPlayerWarEventDelta_(storeRaw, eventRaw, signRaw) {
 }
 
 function resolvePlayerWarEventCandidate_(existingRecordRaw, candidateRaw, nowIsoRaw) {
-	const candidate = sanitizePlayerWarEventCandidate_(candidateRaw);
+	let candidate = sanitizePlayerWarEventCandidate_(candidateRaw);
 	if (!candidate) return { accepted: false, reason: "invalid-candidate", record: existingRecordRaw || null };
 	const existingRecord = existingRecordRaw && typeof existingRecordRaw === "object" ? existingRecordRaw : null;
 	const existingEvent = existingRecord && existingRecord.current && typeof existingRecord.current === "object"
 		? sanitizePlayerWarEventCandidate_(existingRecord.current)
 		: null;
+	// Repair/replay paths may rebuild a legacy candidate from aggregate history,
+	// which cannot recover transient opponent context. Preserve already-selected
+	// evidence instead of silently erasing it at equal authority.
+	if (
+		existingEvent &&
+		Object.keys(sanitizePlayerWarFormEvidence_(existingEvent.formEvidence).byTag || {}).length > 0 &&
+		Object.keys(sanitizePlayerWarFormEvidence_(candidate.formEvidence).byTag || {}).length === 0
+	) {
+		candidate = buildPlayerWarEventCandidate_(Object.assign({}, candidate, { formEvidence: existingEvent.formEvidence }));
+	}
 	if (existingEvent && existingEvent.contentHash === candidate.contentHash) {
 		return { accepted: false, idempotent: true, reason: "content-already-current", oldEvent: existingEvent, newEvent: existingEvent, record: existingRecord };
 	}

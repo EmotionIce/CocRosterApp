@@ -4,7 +4,7 @@
 // payload. Reads and writes here must never publish roster versions, enqueue
 // Cloudflare work, or participate in the refresh job.
 
-const WAR_FOLLOWUP_SCHEMA_VERSION = 3;
+const WAR_FOLLOWUP_SCHEMA_VERSION = 4;
 const WAR_FOLLOWUP_PRIVATE_PATH = "private/warFollowup/v1";
 const WAR_FOLLOWUP_SETTINGS_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/settings";
 const WAR_FOLLOWUP_CASES_PATH = WAR_FOLLOWUP_PRIVATE_PATH + "/cases";
@@ -47,6 +47,8 @@ const WAR_FOLLOWUP_REASON_SET = {
 	manual: true,
 	regular_missed: true,
 	regular_performance: true,
+	regular_mirror_pattern: true,
+	regular_timing_pattern: true,
 	cwl_missed: true,
 	cwl_performance: true,
 };
@@ -235,6 +237,7 @@ function createDefaultWarFollowupSettings_() {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
 		regularLookbackWars: 8,
 		regularMissedThreshold: 2,
+		regularContextMode: "explain",
 		regularPerformanceEnabled: true,
 		regularMinimumAttacks: 6,
 		regularAverageStarsThreshold: 1.8,
@@ -260,10 +263,15 @@ function createDefaultWarFollowupSettings_() {
 function sanitizeWarFollowupSettings_(settingsRaw) {
 	const settings = settingsRaw && typeof settingsRaw === "object" ? settingsRaw : {};
 	const defaults = createDefaultWarFollowupSettings_();
+	const regularContextModeRaw = sanitizeWarFollowupText_(settings.regularContextMode, 20).toLowerCase();
+	const regularContextMode = ["off", "explain", "assist", "automatic"].indexOf(regularContextModeRaw) >= 0
+		? regularContextModeRaw
+		: defaults.regularContextMode;
 	return {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
 		regularLookbackWars: clampWarFollowupNumber_(settings.regularLookbackWars, 1, 8, defaults.regularLookbackWars, true),
 		regularMissedThreshold: clampWarFollowupNumber_(settings.regularMissedThreshold, 1, 16, defaults.regularMissedThreshold, true),
+		regularContextMode: regularContextMode,
 		regularPerformanceEnabled: settings.regularPerformanceEnabled == null
 			? defaults.regularPerformanceEnabled
 			: toBooleanFlag_(settings.regularPerformanceEnabled),
@@ -334,13 +342,16 @@ function sanitizeWarFollowupEvidenceEvents_(eventsRaw) {
 		const event = events[i] && typeof events[i] === "object" ? events[i] : {};
 		const id = sanitizeWarFollowupText_(event.id || event.eventId || event.warKey || event.season, 240);
 		if (!id) continue;
-		out.push({
+		const sanitized = {
 			id: id,
 			label: sanitizeWarFollowupText_(event.label || event.season || event.warKey, 160),
 			at: sanitizeWarFollowupTimestamp_(event.at || event.finalizedAt),
 			clanTag: normalizeTag_(event.clanTag),
 			stats: sanitizeWarFollowupEvidenceStats_(event.stats),
-		});
+		};
+		const context = sanitizeRegularWarAttackContext_(event.context);
+		if (context.playerMapPosition || context.playerTownHallLevel || context.attacks.length) sanitized.context = context;
+		out.push(sanitized);
 	}
 	return out;
 }
