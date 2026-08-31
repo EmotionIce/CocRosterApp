@@ -1869,7 +1869,8 @@ function ensureAutoRefreshRosterCwlCoordinatorView_(currentRaw, sourceMetaRaw, s
 	const clanTag = normalizeTag_(clanTagRaw);
 	const sourceMeta = sourceMetaRaw && typeof sourceMetaRaw === "object" ? sourceMetaRaw : {};
 	const sourceRoster = sourceRosterRaw && typeof sourceRosterRaw === "object" ? sourceRosterRaw : {};
-	if (!runId || !clanTag || getRosterTrackingMode_(sourceRoster) !== "cwl") {
+	const captureEnabled = getRosterTrackingMode_(sourceRoster) === "cwl" || !!(current && current.cwlSideWorkEnabled === true);
+	if (!runId || !clanTag || !captureEnabled) {
 		return { view: null, summary: null, coordinatorResult: null, captured: false };
 	}
 	let summary = readAutoRefreshCwlCoordinatorSummary_(runId);
@@ -1982,7 +1983,10 @@ function shouldRunAutoRefreshCwlCoordinatorPreflightBeforeRoster_(currentRaw, ta
 	const connectedClanTagByRosterId = sourceMeta.connectedClanTagByRosterId && typeof sourceMeta.connectedClanTagByRosterId === "object"
 		? sourceMeta.connectedClanTagByRosterId
 		: {};
-	return trackingModeByRosterId[rosterId] !== "regularWar" && !!normalizeTag_(connectedClanTagByRosterId[rosterId]);
+	return (
+		!!normalizeTag_(connectedClanTagByRosterId[rosterId]) &&
+		(trackingModeByRosterId[rosterId] !== "regularWar" || current.cwlSideWorkEnabled === true)
+	);
 }
 
 function runAutoRefreshCwlCoordinatorPreflightBeforeRoster_(currentRaw, taskRaw, executionStartMsRaw) {
@@ -2807,7 +2811,12 @@ function executeAutoRefreshRosterTask_(currentRaw, taskRaw, executionStartMsRaw)
 			logAutoRefreshRosterPhase_("start", current, task, state, { reason: "war-inputs" });
 			let cwlCoordinatorClanView = input.cwlCoordinatorClanView && typeof input.cwlCoordinatorClanView === "object" ? input.cwlCoordinatorClanView : null;
 			let cwlCoordinatorResult = input.cwlCoordinatorResult && typeof input.cwlCoordinatorResult === "object" ? input.cwlCoordinatorResult : null;
-			if (clanTag && getRosterTrackingMode_(sourceRoster) === "cwl" && !cwlCoordinatorClanView && !cwlCoordinatorResult) {
+			if (
+				clanTag &&
+				(getRosterTrackingMode_(sourceRoster) === "cwl" || current.cwlSideWorkEnabled === true) &&
+				!cwlCoordinatorClanView &&
+				!cwlCoordinatorResult
+			) {
 				const cwlCoordinator = ensureAutoRefreshRosterCwlCoordinatorView_(current, sourceMeta, sourceRoster, clanTag, executionStartMsRaw);
 				if (cwlCoordinator && cwlCoordinator.deferred) {
 					return markAutoRefreshRosterPhaseDeferred_(current, task, state, cwlCoordinator.reason || "beforeRosterCwlCoordinator", null, executionStartMsRaw);
@@ -3452,14 +3461,29 @@ function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, 
 	}
 }
 
-// Keep stale CWL lifecycle recovery out of regular-war-only roster runs. A
-// current CWL-tracking roster still opts the run into both coordinator passes.
+// Return whether roster display/tracking mode alone requires CWL side work.
+// Active event-driven capture is handled separately below.
 function hasAutoRefreshCwlTrackingRoster_(rostersRaw) {
 	const rosters = Array.isArray(rostersRaw) ? rostersRaw : [];
 	for (let i = 0; i < rosters.length; i++) {
 		if (getRosterTrackingMode_(rosters[i]) === "cwl") return true;
 	}
 	return false;
+}
+
+// A current CWL lifecycle requires the coordinator even when administrators
+// intentionally leave every roster in regular-war display mode. The roster
+// refresh then consumes the same coordinator view only as a history sidecar.
+function shouldEnableAutoRefreshCwlSideWork_(rostersRaw) {
+	if (hasAutoRefreshCwlTrackingRoster_(rostersRaw)) return true;
+	if (typeof getCurrentCwlSeasonEventRefreshNeed_ !== "function") return false;
+	try {
+		const need = getCurrentCwlSeasonEventRefreshNeed_();
+		return !!(need && need.needsCwl === true);
+	} catch (err) {
+		Logger.log("Unable to determine CWL side-work need for auto-refresh: %s", errorMessage_(err));
+		return false;
+	}
 }
 
 // Create a new sharded auto-refresh run and schedule the worker.
@@ -3564,7 +3588,7 @@ function startAutoRefreshQueueCoordinator_(optionsRaw) {
 			allowRegularWarHistoryRepair: false,
 			allowRegularWarProvisionalFallback: false,
 		});
-		runPlan.cwlSideWorkEnabled = hasAutoRefreshCwlTrackingRoster_(runPlan.targetedSourceRosters);
+		runPlan.cwlSideWorkEnabled = shouldEnableAutoRefreshCwlSideWork_(runPlan.targetedSourceRosters);
 		let metricCopyKeys = [];
 		let metricKeyReadMs = 0;
 		if (sourceVersionId && !(sourceSnapshot && sourceSnapshot.sourceMetricsLoaded === true)) {

@@ -1446,6 +1446,55 @@ function filterWarPerformanceStatsByTag_(statsByTagRaw, tagSetRaw) {
 	return out;
 }
 
+// Apply only settled coordinator contributions to the durable per-roster and
+// canonical player-war histories. This is intentionally independent of the
+// roster's display mode so a live CWL event can be captured while the roster
+// continues to show and refresh its regular-war panels.
+function captureSettledCwlHistoryFromCoordinatorView_(warPerformanceRaw, cwlViewRaw, ctxRaw, trackedHistoryTagSetRaw, nowIsoRaw) {
+	const warPerformance = warPerformanceRaw && typeof warPerformanceRaw === "object" ? warPerformanceRaw : null;
+	const cwlView = cwlViewRaw && typeof cwlViewRaw === "object" ? cwlViewRaw : {};
+	const ctx = ctxRaw && typeof ctxRaw === "object" ? ctxRaw : {};
+	const trackedHistoryTagSet = trackedHistoryTagSetRaw && typeof trackedHistoryTagSetRaw === "object" ? trackedHistoryTagSetRaw : {};
+	const nowIso = String(nowIsoRaw || new Date().toISOString());
+	const contributions = Array.isArray(cwlView.contributions) ? cwlView.contributions : [];
+	const result = {
+		settledWarsSeen: 0,
+		finalizedCwlWars: 0,
+	};
+	if (!warPerformance) return result;
+
+	for (let i = 0; i < contributions.length; i++) {
+		const contribution = contributions[i] && typeof contributions[i] === "object" ? contributions[i] : {};
+		const warTag = normalizeTag_(contribution.warTag);
+		if (!warTag || String(contribution.status || "") !== "settled") continue;
+		result.settledWarsSeen++;
+		const filteredStats = filterWarPerformanceStatsByTag_(contribution.historyStatsByTag, trackedHistoryTagSet);
+		const applied = applyWarSnapshotToLongTermAggregate_(
+			warPerformance,
+			"cwl",
+			warTag,
+			filteredStats,
+			nowIso,
+			"cwlRuntimeSettled",
+			"cwlRuntimeSettled",
+			false,
+		);
+		if (applied && applied.applied && typeof emitPlayerWarEventCandidate_ === "function") {
+			emitPlayerWarEventCandidate_(
+				buildCwlPlayerWarCandidate_(filteredStats, warTag, ctx.clanTag, ctx.rosterId, {
+					season: cwlView.season,
+					startTime: contribution.startTime,
+					endTime: contribution.endTime,
+					observedAt: nowIso,
+					source: "cwlRuntimeSettled",
+				}),
+			);
+		}
+		if (applied && applied.applied) result.finalizedCwlWars++;
+	}
+	return result;
+}
+
 function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, nowIsoRaw) {
 	const ctx = ctxRaw && typeof ctxRaw === "object" ? ctxRaw : {};
 	const cwlView = cwlViewRaw && typeof cwlViewRaw === "object" ? cwlViewRaw : {};
@@ -1471,35 +1520,13 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
 	const byTag = {};
 	mergeFilteredCwlAggregateByTag_(byTag, cwlView.aggregateByTag, statsTrackedTagSet);
-	let finalizedCwlWars = 0;
-	for (let i = 0; i < contributions.length; i++) {
-		const contribution = contributions[i] && typeof contributions[i] === "object" ? contributions[i] : {};
-		const warTag = normalizeTag_(contribution.warTag);
-		if (!warTag || String(contribution.status || "") !== "settled") continue;
-		const filteredStats = filterWarPerformanceStatsByTag_(contribution.historyStatsByTag, trackedHistoryTagSet);
-		const result = applyWarSnapshotToLongTermAggregate_(
-			warPerformance,
-			"cwl",
-			warTag,
-			filteredStats,
-			nowIso,
-			"cwlRuntimeSettled",
-			"cwlRuntimeSettled",
-			false,
-		);
-		if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
-			emitPlayerWarEventCandidate_(
-				buildCwlPlayerWarCandidate_(filteredStats, warTag, ctx.clanTag, ctx.rosterId, {
-					season: cwlView.season,
-					startTime: contribution.startTime,
-					endTime: contribution.endTime,
-					observedAt: nowIso,
-					source: "cwlRuntimeSettled",
-				}),
-			);
-		}
-		if (result && result.applied) finalizedCwlWars++;
-	}
+	const cwlHistoryCapture = captureSettledCwlHistoryFromCoordinatorView_(
+		warPerformance,
+		cwlView,
+		ctx,
+		trackedHistoryTagSet,
+		nowIso,
+	);
 	const cwlCurrentWar = sanitizeCwlCurrentWar_(cwlView.currentWar);
 	ctx.roster.cwlStats = {
 		lastRefreshedAt:
@@ -1522,7 +1549,7 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 			source: "cwlRuntime",
 			warsProcessed: contributions.length,
 			playersTracked: Object.keys(byTag).length,
-			finalizedCwlWars: finalizedCwlWars,
+			finalizedCwlWars: cwlHistoryCapture.finalizedCwlWars,
 			discoveryIncomplete: !!(cwlView.freshness && cwlView.freshness.discoveryIncomplete),
 		},
 	};
@@ -2538,6 +2565,27 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		nextLifecycle.lastFinalizationError = finalization.incomplete ? String(finalization.reason || "") : "";
 	}
 	warPerformance.regularWarLifecycle = nextLifecycle;
+	let cwlHistoryFinalizedWars = 0;
+	const cwlCoordinatorView =
+		typeof getCwlCoordinatorClanViewFromOptions_ === "function"
+			? getCwlCoordinatorClanViewFromOptions_(options, ctx.clanTag)
+			: null;
+	if (cwlCoordinatorView && typeof cwlCoordinatorView === "object") {
+		ensureCwlPreSeasonBaselineForSeason_(
+			warPerformance,
+			typeof cwlCoordinatorView.season === "string" ? cwlCoordinatorView.season : "",
+			ctx.roster.cwlStats,
+			nowIso,
+		);
+		const cwlHistoryCapture = captureSettledCwlHistoryFromCoordinatorView_(
+			warPerformance,
+			cwlCoordinatorView,
+			ctx,
+			trackedHistoryTagSet,
+			nowIso,
+		);
+		cwlHistoryFinalizedWars = cwlHistoryCapture.finalizedCwlWars;
+	}
 	warPerformance.lastRefreshedAt = nowIso;
 	ctx.roster.warPerformance = warPerformance;
 	const aggregateMeta = buildRegularWarAggregateMetaFromWarPerformance_(warPerformance, repairResult, nowIso);
@@ -2642,6 +2690,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			finalizationSource: String((finalization && finalization.source) || ""),
 			finalizationReason: String((finalization && finalization.reason) || ""),
 			finalizationIncomplete: !!(finalization && finalization.incomplete),
+			cwlHistoryFinalizedWars: cwlHistoryFinalizedWars,
 			repairAttemptedWarCount: repairAttemptedWarCount,
 			repairedWarCount: repairedWarCount,
 			teamSize: toNonNegativeInt_(currentWarMeta.teamSize),

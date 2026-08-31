@@ -796,6 +796,105 @@ test("settled CWL coordinator data reaches canonical season history used by foll
   assert.equal(followupSeason.lastEventAt.length > 0, true);
 });
 
+test("regular-war mode captures settled coordinator CWL history without changing its mode or panels", () => {
+  const backend = loadBackend();
+  const rawData = buildRosterData();
+  rawData.rosterOrder = ["main"];
+  rawData.rosters = [rawData.rosters[0]];
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  rawData.rosters[0].trackingMode = "regularWar";
+  const data = backend.validateRosterData_(rawData);
+  const beforeCwlStats = JSON.stringify(data.rosters[0].cwlStats || null);
+  const war = buildOneRoundCwlWar({
+    state: "warEnded",
+    clanTag: "#2LUCULP",
+    opponentTag: "#9PYLQG",
+    playerTag: "#PLAYER",
+    stars: 2,
+    destruction: 81,
+    startTime: "2026-09-03T20:00:00.000Z",
+    endTime: "2026-09-04T20:00:00.000Z",
+  });
+  const historyStatsByTag = backend.computeCwlWarStatsFromWar_(war, "#2LUCULP", { "#PLAYER": true });
+  const cwlCoordinatorClanView = {
+    clanTag: "#2LUCULP",
+    eventId: "cwl-2026-09",
+    season: "2026-09",
+    aggregateByTag: {},
+    contributions: [
+      {
+        warTag: "#CONFIRMING",
+        status: "confirming",
+        historyStatsByTag,
+        startTime: "2026-09-02T20:00:00.000Z",
+        endTime: "2026-09-03T20:00:00.000Z",
+      },
+      {
+        warTag: "#WAR1",
+        status: "settled",
+        historyStatsByTag,
+        startTime: "2026-09-03T20:00:00.000Z",
+        endTime: "2026-09-04T20:00:00.000Z",
+      },
+    ],
+  };
+  const refreshOptions = {
+    autoRefreshSnapshotMode: true,
+    allowRegularWarHistoryRepair: false,
+    prefetchedCurrentRegularWarByClanTag: {
+      "#2LUCULP": backend.buildNoCurrentRegularWarResult_("#2LUCULP"),
+    },
+    cwlCoordinatorClanView,
+  };
+
+  const eventCandidates = [];
+  const previousSink = backend.beginPlayerWarEventCandidateCapture_(eventCandidates);
+  let refreshed;
+  try {
+    refreshed = backend.refreshRegularWarStatsCore_(data, "main", refreshOptions);
+  } finally {
+    backend.endPlayerWarEventCandidateCapture_(previousSink);
+  }
+
+  const roster = refreshed.rosterData.rosters[0];
+  assert.equal(refreshed.result.mode, "regularWar");
+  assert.equal(refreshed.result.cwlHistoryFinalizedWars, 1);
+  assert.equal(roster.trackingMode, "regularWar");
+  assert.equal(roster.regularWar.currentWar.state, "notinwar");
+  assert.equal(JSON.stringify(roster.cwlStats || null), beforeCwlStats);
+  assert.equal(roster.warPerformance.processedCwlWarTags["#WAR1"], true);
+  assert.equal(roster.warPerformance.processedCwlWarTags["#CONFIRMING"], undefined);
+  assert.equal(eventCandidates.length, 1);
+  assert.equal(eventCandidates[0].season, "2026-09");
+  assert.equal(eventCandidates[0].rosterId, "main");
+
+  const finalized = backend.finalizePlayerWarEventCandidates_(
+    backend.createEmptyPlayerWarPerformanceStore_(),
+    eventCandidates,
+    {
+      persist: false,
+      existingRecordsByEventId: {},
+      nowIso: "2026-09-04T20:04:00.000Z",
+      stage: "cutover",
+    },
+  );
+  const followupSeason = finalized.store.byTag["#PLAYER"].cwlSeasonContext.bySeason["2026-09"];
+  assert.equal(followupSeason.stats.possibleAttacks, 1);
+  assert.equal(followupSeason.stats.usedAttacks, 1);
+  assert.equal(followupSeason.stats.starsTotal, 2);
+
+  const replayCandidates = [];
+  const replayPreviousSink = backend.beginPlayerWarEventCandidateCapture_(replayCandidates);
+  let replayed;
+  try {
+    replayed = backend.refreshRegularWarStatsCore_(refreshed.rosterData, "main", refreshOptions);
+  } finally {
+    backend.endPlayerWarEventCandidateCapture_(replayPreviousSink);
+  }
+  assert.equal(replayed.result.cwlHistoryFinalizedWars, 0);
+  assert.equal(replayCandidates.length, 0);
+});
+
 const installPublishedActiveVersion = (backend, dataRaw) => {
   const data = backend.validateRosterData_(dataRaw || buildRosterData());
   return backend.writeActiveRosterVersionShards_("source-1", data, {
@@ -2297,6 +2396,79 @@ test("regular-war-only queue coordinator omits CWL side tasks and persists that 
   assert.equal(current.cwlSideWorkEnabled, false);
   assert.equal(sourceMeta.cwlSideWorkEnabled, false);
   assert.deepEqual(taskTypes, ["roster", "roster", "finalize"]);
+});
+
+test("an active CWL event enables coordinator side tasks even when every roster remains in regular-war mode", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  for (const roster of sourceData.rosters) roster.trackingMode = "regularWar";
+  const data = backend.validateRosterData_(sourceData);
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData: data, text: JSON.stringify(data) });
+  backend.isRecentSuccessfulActiveWrite_ = () => false;
+  backend.tryReconcileRegularWarFinalizationTriggerState_ = () => null;
+  backend.getCurrentCwlSeasonEventRefreshNeed_ = () => ({ needsCwl: true, eventId: "cwl-active" });
+  backend.prefetchClanMembersSnapshotsByTag_ = () => ({
+    snapshotByClanTag: {
+      "#CLAN": { clanTag: "#CLAN", members: [{ tag: "#PLAYER", name: "Player", th: 16 }], metricsMembers: [] },
+      "#CLAN2": { clanTag: "#CLAN2", members: [], metricsMembers: [] },
+    },
+    errorByClanTag: {},
+    requestCount: 2,
+    batchCount: 1,
+  });
+
+  const result = backend.startAutoRefreshQueueCoordinator_({
+    executionStartMs: Date.now(),
+    startedAt: "2026-09-02T00:00:00.000Z",
+  });
+  const current = backend.readAutoRefreshQueueCurrent_();
+  const sourceMeta = backend.readAutoRefreshRunShard_(current.runId, "source/meta");
+  const taskTypes = Array.from(current.taskIds, (taskId) => backend.readAutoRefreshTask_(current.runId, taskId).type);
+
+  assert.equal(result.inProgress, true);
+  assert.equal(current.cwlSideWorkEnabled, true);
+  assert.equal(sourceMeta.cwlSideWorkEnabled, true);
+  assert.deepEqual(taskTypes, ["cwlCoordinator", "roster", "roster", "cwlFinalCoordinator", "finalize"]);
+});
+
+test("a regular-war roster queue reuses the persisted CWL view when event side work is enabled", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const sourceData = buildRosterData();
+  sourceData.rosterOrder = ["main"];
+  sourceData.rosters = [sourceData.rosters[0]];
+  sourceData.rosters[0].connectedClanTag = "#2LUCULP";
+  sourceData.rosters[0].trackingMode = "regularWar";
+  const { data, runId, current } = setupQueueRun(backend, sourceData, { rosterIds: ["main"] });
+  current.cwlSideWorkEnabled = true;
+  backend.writeAutoRefreshQueueCurrent_(current, false);
+  const view = {
+    clanTag: "#2LUCULP",
+    eventId: "cwl-active",
+    season: "2026-09",
+    aggregateByTag: {},
+    contributions: [],
+  };
+  backend.writeAutoRefreshCwlCoordinatorResult_(runId, {
+    eventId: "cwl-active",
+    capturedAt: "2026-09-02T00:00:00.000Z",
+    viewsByClanTag: { "#2LUCULP": view },
+    requestCounts: { leagueGroup: 1, cwlWar: 0, total: 1 },
+  });
+  const sourceMeta = backend.readAutoRefreshRunShard_(runId, "source/meta");
+
+  const result = backend.ensureAutoRefreshRosterCwlCoordinatorView_(
+    backend.readAutoRefreshQueueCurrent_(),
+    sourceMeta,
+    data.rosters[0],
+    "#2LUCULP",
+    Date.now(),
+  );
+
+  assert.equal(result.captured, false);
+  assert.equal(result.view.clanTag, "#2LUCULP");
+  assert.equal(result.view.season, "2026-09");
+  assert.equal(result.summary.completed, true);
 });
 
 test("queue coordinator references published source version without copying full source payloads", () => {
