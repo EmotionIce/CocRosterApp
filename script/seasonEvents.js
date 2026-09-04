@@ -1200,6 +1200,11 @@ function buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterDataRaw, ev
 	const observationAgeMs = parseIsoToMs_(nowIso) - parseIsoToMs_(observedAt);
 	if (!observedAt || !observationId || observationAgeMs < 0 || observationAgeMs > CWL_LIFECYCLE_EVIDENCE_MAX_AGE_MS) return [];
 	const source = sanitizeSeasonEventSource_(options.source || evidence.source || { type: "cwl-group-evidence" });
+	const selectedRosterId = sanitizeSeasonEventText_(options.rosterId || options.selectedRosterId, 120);
+	// A league rank is needed to choose among automatic targets. For an explicitly
+	// selected roster, fresh group membership already proves the exact clan/group
+	// binding, so a missing clan league label must not suppress live war scores.
+	const allowUnresolvedLeague = !!selectedRosterId;
 	const rawByClanTag = evidence.leaguegroupRawByClanTag && typeof evidence.leaguegroupRawByClanTag === "object" ? evidence.leaguegroupRawByClanTag : {};
 	const errorByClanTag = evidence.leaguegroupErrorByClanTag && typeof evidence.leaguegroupErrorByClanTag === "object" ? evidence.leaguegroupErrorByClanTag : {};
 	const clanDetailsByClanTag = evidence.clanDetailsRawByClanTag && typeof evidence.clanDetailsRawByClanTag === "object" ? evidence.clanDetailsRawByClanTag : {};
@@ -1217,8 +1222,9 @@ function buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterDataRaw, ev
 		for (let i = 0; i < suppliedCandidates.length; i++) {
 			const candidate = sanitizeCwlSeasonEventTargetCandidate_(suppliedCandidates[i]);
 			const roster = rosterById[candidate.rosterId];
+			if (selectedRosterId && candidate.rosterId !== selectedRosterId) continue;
 			if (!roster || getRosterTrackingMode_(roster) !== "cwl" || normalizeTag_(roster.connectedClanTag) !== candidate.clanTag) continue;
-			if (!candidate.groupId || !candidate.season || candidate.observedAt !== observedAt || candidate.evidenceObservationId !== observationId || candidate.evidenceProvenance !== "deterministic-fresh-observation-v1" || candidate.leagueRank == null) continue;
+			if (!candidate.groupId || !candidate.season || candidate.observedAt !== observedAt || candidate.evidenceObservationId !== observationId || candidate.evidenceProvenance !== "deterministic-fresh-observation-v1" || (!allowUnresolvedLeague && candidate.leagueRank == null)) continue;
 			const currentEligible = collectCwlSeasonEventRosterEligibleAccountTags_(roster);
 			if (currentEligible.length) candidate.eligibleAccountTags = currentEligible;
 			if (candidate.eligibleAccountTags.length) out.push(candidate);
@@ -1230,6 +1236,7 @@ function buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterDataRaw, ev
 		if (getRosterTrackingMode_(roster) !== "cwl") continue;
 		const rosterId = sanitizeSeasonEventText_(roster.id, 120);
 		const clanTag = normalizeTag_(roster.connectedClanTag);
+		if (selectedRosterId && rosterId !== selectedRosterId) continue;
 		if (!rosterId || !clanTag || Object.prototype.hasOwnProperty.call(errorByClanTag, clanTag)) continue;
 		const leaguegroup = rawByClanTag[clanTag] && typeof rawByClanTag[clanTag] === "object" ? rawByClanTag[clanTag] : null;
 		if (!leaguegroup || !Array.isArray(leaguegroup.clans) || !Array.isArray(leaguegroup.rounds) || !leagueGroupContainsClan_(leaguegroup, clanTag)) continue;
@@ -1245,10 +1252,11 @@ function buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterDataRaw, ev
 			if (leagueName) leagueEvidenceSource = "clan-details";
 		}
 		const leagueSort = parseCwlSeasonEventLeagueSort_(leagueName);
-		if (!leagueName || leagueSort.leagueRank == null) continue;
+		if ((!leagueName || leagueSort.leagueRank == null) && !allowUnresolvedLeague) continue;
 		const eligibleAccountTags = collectCwlSeasonEventRosterEligibleAccountTags_(roster);
 		if (!eligibleAccountTags.length) continue;
 		out.push(sanitizeCwlSeasonEventTargetCandidate_({
+			selectionMode: selectedRosterId ? "explicit" : "automatic",
 			rosterId: rosterId,
 			rosterTitle: sanitizeSeasonEventText_(roster.title, 160) || rosterId,
 			clanTag: clanTag,
@@ -1421,6 +1429,7 @@ function resolveCwlSeasonEventTargetFromRosterData_(rosterDataRaw, optionsRaw) {
 		? buildFreshCwlSeasonEventTargetCandidatesFromEvidence_(rosterData, freshEvidence, {
 			nowIso: nowIso,
 			source: source,
+			rosterId: selectedRosterId,
 			fetchClanLeague: options.fetchClanLeague !== false,
 		})
 		: selectedRosterId
@@ -6483,7 +6492,11 @@ function buildCwlCoordinatorResult_(rosterDataRaw, optionsRaw) {
 			leaguegroupErrorByClanTag: leaguegroupErrorByClanTag,
 			clanDetailsRawByClanTag: clanDetailsRawByClanTag,
 			clanDetailsErrorByClanTag: clanDetailsErrorByClanTag,
-		}, { nowIso: nowIso, source: options.source || { type: "cwl-coordinator" } }),
+		}, {
+			nowIso: nowIso,
+			source: options.source || { type: "cwl-coordinator" },
+			rosterId: initialTarget.selectionMode === "explicit" ? initialTarget.rosterId : "",
+		}),
 	};
 	const result = {
 		ok: true,

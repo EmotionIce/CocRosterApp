@@ -5210,6 +5210,103 @@ test("CWL event target leaves fresh tied league evidence unresolved unless expli
   assert.equal(JSON.stringify(prioritized.target.eligibleAccountTags), JSON.stringify(["#9PYLQG", "#8CCVV"]));
 });
 
+test("explicit CWL event target binds fresh group evidence when the league label is unavailable", () => {
+  const backend = loadBackend();
+  const rosterData = buildValidRosterData();
+  rosterData.rosters[0].cwlLeagueName = "";
+  const freshEvidence = {
+    capturedAt: "2026-09-04T12:00:00.000Z",
+    observationId: "explicit-no-league-observation",
+    leaguegroupRawByClanTag: {
+      "#CLAN": {
+        state: "inWar",
+        season: "2026-09",
+        clans: [{ tag: "#CLAN" }, { tag: "#OPP" }],
+        rounds: [{ warTags: ["#WAR1"] }],
+      },
+    },
+    clanDetailsRawByClanTag: {
+      "#CLAN": { name: "Clan without league metadata" },
+    },
+  };
+
+  const resolved = backend.resolveCwlSeasonEventTargetFromRosterData_(rosterData, {
+    rosterId: "main",
+    nowIso: freshEvidence.capturedAt,
+    freshEvidence,
+  });
+
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.target.selectionMode, "explicit");
+  assert.equal(resolved.target.rosterId, "main");
+  assert.equal(resolved.target.clanTag, "#CLAN");
+  assert.equal(resolved.target.leagueRank, null);
+  assert.ok(resolved.target.groupId);
+  assert.equal(resolved.target.season, "2026-09");
+  assert.equal(resolved.target.evidenceStatus, "authoritative");
+});
+
+test("CWL coordinator preserves league-less explicit target evidence for lifecycle promotion", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    events: {
+      seasonEvents: {
+        currentCwl: { eventId: "cwl-explicit", type: "cwl" },
+        byId: {
+          "cwl-explicit": {
+            eventId: "cwl-explicit",
+            type: "cwl",
+            status: "open",
+            signupsOpen: true,
+            cwlTrackingState: "active",
+            cwl: {
+              target: {
+                resolved: true,
+                status: "resolved",
+                selectionMode: "explicit",
+                rosterId: "main",
+                clanTag: "#CLAN",
+                eligibleAccountTags: ["#PLAYER"],
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const rosterData = buildValidRosterData();
+  rosterData.rosters[0].cwlLeagueName = "";
+  const nowIso = "2026-09-04T12:00:00.000Z";
+  const leaguegroup = {
+    state: "inWar",
+    season: "2026-09",
+    clans: [{ tag: "#CLAN" }, { tag: "#OPP" }],
+    rounds: [{ warTags: ["#WAR1"] }],
+  };
+  const coordinator = backend.buildCwlCoordinatorResult_(rosterData, {
+    event: backend.readSeasonEventById_("cwl-explicit"),
+    nowIso,
+    targetOnly: true,
+    prefetchedLeaguegroupRawByClanTag: { "#CLAN": leaguegroup },
+    prefetchedLeaguegroupErrorByClanTag: {},
+    prefetchedClanDetailsRawByClanTag: { "#CLAN": { name: "Clan without league metadata" } },
+    prefetchedClanDetailsErrorByClanTag: {},
+    prefetchedCwlWarRawByTag: {},
+    prefetchedCwlWarErrorByTag: {},
+  });
+  const promoted = backend.applyCwlSeasonEventTargetResolution_(
+    backend.readSeasonEventById_("cwl-explicit"),
+    rosterData,
+    { nowIso, freshEvidence: coordinator.targetEvidence },
+  );
+
+  assert.equal(coordinator.targetEvidence.candidates.length, 1);
+  assert.equal(coordinator.targetEvidence.candidates[0].leagueRank, null);
+  assert.equal(promoted.changed, true);
+  assert.equal(promoted.target.evidenceStatus, "authoritative");
+  assert.ok(promoted.target.groupId);
+  assert.equal(promoted.target.season, "2026-09");
+});
+
 test("two roster-selected CWL events keep pointers, signups, aggregates, and runtimes isolated", () => {
   const backend = installMemoryFirebase(loadBackend());
   const rosterData = buildSameLeagueCwlSignupRosterData();
