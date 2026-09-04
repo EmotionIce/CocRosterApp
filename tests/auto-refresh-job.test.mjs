@@ -1629,6 +1629,24 @@ test("scheduleAutoRefreshJobResume keeps exactly one resume trigger", () => {
   assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), resumeTriggers[0].getUniqueId());
 });
 
+test("scheduleAutoRefreshJobResume replaces an overdue continuation", () => {
+  const backend = loadBackend();
+  const original = backend.scheduleAutoRefreshJobResume_();
+  const originalId = original.triggerId;
+  backend.__properties.set(
+    "AUTO_REFRESH_JOB_TRIGGER_AT",
+    String(Date.now() - backend.AUTO_REFRESH_JOB_CONTINUATION_STALE_GRACE_MS - 1),
+  );
+
+  const replacement = backend.scheduleAutoRefreshJobResume_();
+  const resumeTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
+
+  assert.equal(replacement.reused, false);
+  assert.notEqual(replacement.triggerId, originalId);
+  assert.equal(resumeTriggers.length, 1);
+  assert.equal(resumeTriggers[0].getUniqueId(), replacement.triggerId);
+});
+
 test("repairAutoRefreshScheduler recreates stale triggers and preserves a running queue", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.__properties.set("AUTO_REFRESH_ENABLED", "1");

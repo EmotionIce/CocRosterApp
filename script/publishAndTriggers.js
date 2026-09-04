@@ -6155,10 +6155,12 @@ function ensureAutoRefreshDynamicTrigger_(kindRaw, desiredAtMsRaw, minimumAtMsRa
 		const configuredId = String(props.getProperty(meta.idProperty) || "").trim();
 		const configuredAtMs = Math.max(0, Number(props.getProperty(meta.atProperty) || 0));
 		const configured = findAutoRefreshTriggerById_(triggers, configuredId);
+		const continuationStillTimely = configuredAtMs >= nowMs - AUTO_REFRESH_JOB_CONTINUATION_STALE_GRACE_MS;
 		const reusable = meta.kind === "watchdog"
 			? !!configured && configuredAtMs >= minimumAtMs
 			: !!configured &&
 				configuredAtMs > 0 &&
+				continuationStillTimely &&
 				configuredAtMs <= desiredAtMs &&
 				(!minimumAtMs || configuredAtMs >= minimumAtMs);
 		if (reusable) {
