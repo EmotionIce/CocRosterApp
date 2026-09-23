@@ -8277,6 +8277,82 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
   assert.equal(resolved.activity.at(-1).type, "resolved");
 });
 
+test("war follow-up automation advances quietly and freezes new recovery terms", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const create = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "create_automatic", tag, discordId: "123456789012345678",
+    reasonCodes: ["regular_performance"], triggerSignalIds: ["regular_performance:war"],
+    evidence: { capturedAt: "2026-08-01T00:00:00.000Z", regular: {}, cwl: {}, regularEvents: [], cwlEvents: [] },
+    automationStage: "checkin", automationCategory: "regular_performance",
+    sendAutomaticDm: false, expectedUpdatedAt: "", mutationId: "auto-create"
+  }, "change-me"]);
+  assert.equal(create.status, "watching");
+  assert.equal(create.automationStage, "checkin");
+  assert.equal(create.assignedModeratorId, "");
+
+  const warned = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "automation_warn", tag, automationCategory: "regular_performance", sendAutomaticDm: false,
+    evidence: { capturedAt: "2026-08-10T00:00:00.000Z", regular: {}, cwl: {}, regularEvents: [], cwlEvents: [] },
+    expectedUpdatedAt: create.updatedAt, mutationId: "auto-warn"
+  }, "change-me"]);
+  assert.equal(warned.status, "watching");
+  assert.equal(warned.automationStage, "warning");
+
+  const reviewed = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "automation_review", tag, automationRecommendation: "recovery",
+    automationReason: "Results remained low after coaching.",
+    expectedUpdatedAt: warned.updatedAt, mutationId: "auto-review"
+  }, "change-me"]);
+  assert.equal(reviewed.status, "needs_review");
+  assert.equal(reviewed.automationRecommendation, "recovery");
+
+  const recovery = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "hero_down", tag, targetRosterId: "training", targetClanTag: "#TRAIN",
+    recoveryWarTarget: 1, requireNoMisses: false, dmText: "Please move to training.",
+    recoveryAverageStarsThreshold: 1.8, recoveryAverageDestructionThreshold: 70,
+    recoveryContextMode: "assist", expectedUpdatedAt: reviewed.updatedAt, mutationId: "auto-recovery"
+  }, "change-me"]);
+  assert.equal(recovery.recoveryPolicyVersion, 1);
+  assert.equal(recovery.recoveryCategory, "regular_performance");
+  assert.equal(recovery.recoveryWarTarget, 3);
+  assert.equal(recovery.requireNoMisses, true);
+  assert.equal(recovery.recoveryContextMode, "assist");
+});
+
+test("a check-in reply cancels a queued automatic warning", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const tag = "#P0LYGQ";
+  const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "create_automatic", tag, discordId: "123456789012345678",
+    automationStage: "checkin", automationCategory: "regular_missed",
+    reasonCodes: ["regular_missed"], sendAutomaticDm: true,
+    dmText: "Please keep war availability current.", mutationId: "auto-dm-create", expectedUpdatedAt: ""
+  }, "change-me"]);
+  assert.equal(created.status, "needs_dm");
+  const sent = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "mark_dm_sent", tag, dmQueueId: created.dmQueueId,
+    dmDeliveryMode: "bot", dmMessageId: "888888888888888888",
+    expectedUpdatedAt: created.updatedAt, mutationId: "auto-dm-sent"
+  }, "change-me"]);
+  assert.equal(sent.status, "watching");
+  assert.deepEqual(Array.from(sent.automationDmMessageIds), ["888888888888888888"]);
+  const warned = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "automation_warn", tag, automationCategory: "regular_missed",
+    sendAutomaticDm: true, dmText: "A further attack was missed.",
+    expectedUpdatedAt: sent.updatedAt, mutationId: "auto-dm-warning"
+  }, "change-me"]);
+  assert.equal(warned.status, "needs_dm");
+  const replied = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "player_response", tag, responseText: "I was away unexpectedly.",
+    responseToMessageId: "888888888888888888", responseMessageId: "999999999999999999",
+    expectedUpdatedAt: warned.updatedAt, mutationId: "auto-dm-reply"
+  }, "change-me"]);
+  assert.equal(replied.status, "needs_review");
+  assert.equal(replied.automationStage, "human_review");
+  assert.equal(replied.dmQueueId, "");
+});
+
 test("war follow-up general player contact moves to a bounded waiting follow-up after the DM", () => {
   const backend = installMemoryFirebase(loadBackend());
   const tag = "#P0LYGQ";

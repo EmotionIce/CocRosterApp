@@ -514,7 +514,7 @@
       );
   };
 
-  const buildRegularEvidence = (entryRaw, settingsRaw) => {
+  const buildRegularEvidence = (entryRaw, settingsRaw, limitRaw) => {
     const settings = sanitizeSettings(settingsRaw);
     const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
     const rawEvents = Array.isArray(entry.recentRegularWarForm) ? entry.recentRegularWarForm : [];
@@ -543,7 +543,7 @@
       })
       .filter(Boolean)
       .sort((left, right) => parseMs(right.at) - parseMs(left.at) || left.id.localeCompare(right.id))
-      .slice(0, settings.regularLookbackWars);
+      .slice(0, limitRaw || settings.regularLookbackWars);
     const totals = emptyStats();
     for (const event of events) addStats(totals, event.stats);
     totals.warCount = events.length;
@@ -611,7 +611,7 @@
     return stats;
   };
 
-  const buildRosterRegularEvidence = (rosterRaw, tagRaw, settingsRaw) => {
+  const buildRosterRegularEvidence = (rosterRaw, tagRaw, settingsRaw, limitRaw) => {
     const settings = sanitizeSettings(settingsRaw);
     const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
     const performance = roster.warPerformance && typeof roster.warPerformance === "object"
@@ -643,14 +643,14 @@
       })
       .filter(Boolean)
       .sort((left, right) => parseMs(right.at) - parseMs(left.at) || right.id.localeCompare(left.id))
-      .slice(0, settings.regularLookbackWars);
+      .slice(0, limitRaw || settings.regularLookbackWars);
     const totals = emptyStats();
     for (const event of events) addStats(totals, event.stats);
     totals.warCount = events.length;
     return { events, totals: statsSummary(totals) };
   };
 
-  const buildRosterRegularEvidenceForTag = (rosterData, tagRaw, settingsRaw, preferredRosterRaw) => {
+  const buildRosterRegularEvidenceForTag = (rosterData, tagRaw, settingsRaw, preferredRosterRaw, limitRaw) => {
     const settings = sanitizeSettings(settingsRaw);
     const preferredRoster = preferredRosterRaw && typeof preferredRosterRaw === "object" ? preferredRosterRaw : null;
     const rosters = getRosters(rosterData);
@@ -660,7 +660,7 @@
     const seen = new Set();
     const events = [];
     for (const roster of orderedRosters) {
-      const rosterEvidence = buildRosterRegularEvidence(roster, tagRaw, settings);
+      const rosterEvidence = buildRosterRegularEvidence(roster, tagRaw, settings, limitRaw);
       for (const event of rosterEvidence.events) {
         const key = normalizeTag(event.clanTag) + "|" + event.id;
         if (seen.has(key)) continue;
@@ -669,7 +669,7 @@
       }
     }
     events.sort((left, right) => parseMs(right.at) - parseMs(left.at) || right.id.localeCompare(left.id));
-    events.splice(settings.regularLookbackWars);
+    events.splice(limitRaw || settings.regularLookbackWars);
     const totals = emptyStats();
     for (const event of events) addStats(totals, event.stats);
     totals.warCount = events.length;
@@ -831,6 +831,43 @@
       cwl: cwl.totals,
       regularEvents: regular.events,
       cwlEvents: cwl.events,
+    };
+  };
+
+  const buildReliabilityProfile = (rosterData, tagRaw, currentEvidenceRaw, settingsRaw) => {
+    const entry = getTaggedValue(rosterData && rosterData.playerWarPerformance && rosterData.playerWarPerformance.byTag, tagRaw) || {};
+    const lifetime = normalizeStats(entry.regular);
+    const recent = normalizeStats(currentEvidenceRaw && currentEvidenceRaw.regular);
+    const settings = sanitizeSettings(settingsRaw);
+    const roster = findEvidenceRoster(rosterData, tagRaw, null);
+    const limit = Number.MAX_SAFE_INTEGER;
+    const history = mergeEvidenceSources(
+      buildRegularEvidence(entry, settings, limit),
+      buildRosterRegularEvidenceForTag(rosterData, tagRaw, settings, roster, limit),
+      limit,
+      "regular"
+    );
+    const recentEvents = Array.isArray(currentEvidenceRaw && currentEvidenceRaw.regularEvents) ? currentEvidenceRaw.regularEvents : [];
+    const oldestCurrentMs = Math.min(Infinity, ...recentEvents.map((event) => parseMs(event.at)).filter(Boolean));
+    const priorEvents = history.events.filter((event) =>
+      Number(event && event.stats && event.stats.possibleAttacks) > 0 && parseMs(event.at) < oldestCurrentMs
+    );
+    const aggregatePriorWars = Math.max(0, lifetime.warCount - recent.warCount);
+    const useHistory = priorEvents.length >= aggregatePriorWars;
+    const priorWars = useHistory ? priorEvents.length : aggregatePriorWars;
+    const priorPossible = useHistory
+      ? priorEvents.reduce((sum, event) => sum + normalizeStats(event.stats).possibleAttacks, 0)
+      : Math.max(0, lifetime.possibleAttacks - recent.possibleAttacks);
+    const priorMissed = useHistory
+      ? priorEvents.reduce((sum, event) => sum + normalizeStats(event.stats).missedAttacks, 0)
+      : Math.max(0, lifetime.missedAttacks - recent.missedAttacks);
+    const priorUseRate = priorPossible > 0 ? (priorPossible - priorMissed) / priorPossible : 0;
+    const credit = priorWars >= 20 && priorUseRate >= 0.95 && priorPossible >= 20
+      ? 2
+      : priorWars >= 10 && priorUseRate >= 0.9 && priorPossible >= 10 ? 1 : 0;
+    return {
+      priorWars, priorPossible, priorMissed, priorUseRate, credit,
+      regularMissedThreshold: Math.min(16, settings.regularMissedThreshold + credit)
     };
   };
 
@@ -1003,6 +1040,22 @@
       reasonCodes: [],
       dismissedSignalIds: [],
       mutationLedger: [],
+      automationVersion: 0,
+      automationStage: "",
+      automationCategory: "",
+      automationStartedAt: "",
+      automationWindowStartAt: "",
+      automationLastDmAt: "",
+      automationDmMessageIds: [],
+      automationRecommendation: "",
+      automationReason: "",
+      automationPriorWars: 0,
+      automationMissedThreshold: 0,
+      recoveryPolicyVersion: 0,
+      recoveryCategory: "",
+      recoveryAverageStarsThreshold: 0,
+      recoveryAverageDestructionThreshold: 0,
+      recoveryContextMode: "",
       evidence: { regular: emptyStats(), cwl: emptyStats(), regularEvents: [], cwlEvents: [] },
       activity: [],
     }, value, { tag });
@@ -1240,8 +1293,13 @@
       value.evidence = cloneValue(request.evidence || {});
       value.dmText = toText(request.dmText).trim();
       value.contactPurpose = "hero_down";
-      value.recoveryWarTarget = Math.floor(clamp(request.recoveryWarTarget, 1, 8, 3));
-      value.requireNoMisses = request.requireNoMisses == null ? true : !!request.requireNoMisses;
+      value.recoveryPolicyVersion = value.automationVersion === 1 ? 1 : 0;
+      value.recoveryCategory = value.recoveryPolicyVersion ? value.automationCategory : "";
+      value.recoveryAverageStarsThreshold = Number(request.recoveryAverageStarsThreshold) || 0;
+      value.recoveryAverageDestructionThreshold = Number(request.recoveryAverageDestructionThreshold) || 0;
+      value.recoveryContextMode = toText(request.recoveryContextMode).trim();
+      value.recoveryWarTarget = Math.floor(clamp(request.recoveryWarTarget, value.recoveryPolicyVersion ? 3 : 1, 8, 3));
+      value.requireNoMisses = value.recoveryPolicyVersion ? true : (request.requireNoMisses == null ? true : !!request.requireNoMisses);
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
       value.dmMessageId = "";
@@ -1271,7 +1329,16 @@
       value.dmQueuedByName = "";
       value.dmDeliveryFailedAt = "";
       value.dmDeliveryFailureReason = "";
-      if (value.contactPurpose === "general") {
+      if (["automated_checkin", "automated_warning"].includes(value.contactPurpose)) {
+        value.status = "watching";
+        value.automationWindowStartAt = nowIso;
+        value.watchStartedAt = nowIso;
+        value.replyCaptureUntil = new Date(parseMs(nowIso) + 90 * 24 * 60 * 60 * 1000).toISOString();
+        if (value.dmDeliveryMode === "bot") {
+          value.automationLastDmAt = nowIso;
+          value.automationDmMessageIds = (value.automationDmMessageIds || []).concat([value.dmMessageId]).slice(-2);
+        }
+      } else if (value.contactPurpose === "general") {
         value.status = "waiting";
         value.contactStage = value.contactAutomaticReminderAllowed ? "awaiting_first_response" : "awaiting_final_response";
         value.waitingUntil = new Date(parseMs(nowIso) + 24 * 60 * 60 * 1000).toISOString();
@@ -1307,11 +1374,11 @@
       value.outcome = "";
       value.recoveryWarTarget = Math.floor(clamp(
         request.recoveryWarTarget,
-        1,
+        value.recoveryPolicyVersion === 1 ? 3 : 1,
         8,
         toInt(value.recoveryWarTarget) || 3,
       ));
-      value.requireNoMisses = request.requireNoMisses == null ? value.requireNoMisses !== false : !!request.requireNoMisses;
+      value.requireNoMisses = value.recoveryPolicyVersion === 1 ? true : (request.requireNoMisses == null ? value.requireNoMisses !== false : !!request.requireNoMisses);
       value.dmText = toText(request.dmText).trim();
       value.dmSentAt = "";
       value.dmDeliveryMode = "";
@@ -1509,12 +1576,14 @@
     };
   };
 
-  const buildRecoveryProgress = (caseRaw, currentEvidenceRaw) => {
+  const buildRecoveryProgress = (caseRaw, currentEvidenceRaw, settingsRaw) => {
     const value = normalizeCase(caseRaw);
     const evidence = currentEvidenceRaw && typeof currentEvidenceRaw === "object" ? currentEvidenceRaw : {};
     if (!value) return { ready: false, completedWars: 0, targetWars: 0, totalWars: 0, usedAttacks: 0, possibleAttacks: 0, missedAttacks: 0 };
-    const events = eventsAfter(evidence.regularEvents, value.recoveryStartedAt || value.dmSentAt, value.targetClanTag);
-    const targetWars = Math.max(1, toInt(value.recoveryWarTarget) || 3);
+    const policy = value.recoveryPolicyVersion === 1;
+    const events = eventsAfter(evidence.regularEvents, value.recoveryStartedAt || value.dmSentAt, value.targetClanTag)
+      .filter((event) => !policy || normalizeStats(event.stats).possibleAttacks > 0);
+    const targetWars = Math.max(policy ? 3 : 1, toInt(value.recoveryWarTarget) || 3);
     let consecutiveCleanWars = 0;
     let usedAttacks = 0;
     let possibleAttacks = 0;
@@ -1527,9 +1596,32 @@
       if (value.requireNoMisses !== false && stats.missedAttacks > 0) consecutiveCleanWars = 0;
       else consecutiveCleanWars += 1;
     }
-    const completedWars = value.requireNoMisses === false ? events.length : consecutiveCleanWars;
+    const completedWars = policy || value.requireNoMisses !== false ? consecutiveCleanWars : events.length;
+    const cleanEvents = consecutiveCleanWars ? events.slice(-consecutiveCleanWars) : [];
+    let performanceMet = true;
+    let countedAttacks = 0;
+    if (policy && value.recoveryCategory === "regular_performance") {
+      const settings = sanitizeSettings(settingsRaw);
+      const totals = emptyStats();
+      for (const event of cleanEvents) addStats(totals, event.stats);
+      totals.warCount = cleanEvents.length;
+      const mode = value.recoveryContextMode || settings.regularContextMode;
+      const summary = statsSummary(totals);
+      const evaluated = mode === "assist" || mode === "automatic"
+        ? analyzeRegularContext(cleanEvents, summary).adjustedStats : summary;
+      countedAttacks = evaluated.countedAttacks;
+      const starsTarget = value.recoveryAverageStarsThreshold || settings.regularAverageStarsThreshold;
+      const destructionTarget = value.recoveryAverageDestructionThreshold || settings.regularAverageDestructionThreshold;
+      performanceMet = countedAttacks >= 6 &&
+        evaluated.averageStars >= starsTarget &&
+        evaluated.averageDestruction >= destructionTarget;
+    }
+    const ready = completedWars >= targetWars && performanceMet;
     return {
-      ready: completedWars >= targetWars,
+      ready,
+      needsReview: policy && !ready && (missedAttacks >= 2 || events.length >= 5),
+      performanceMet,
+      countedAttacks,
       completedWars,
       targetWars,
       totalWars: events.length,
@@ -1596,7 +1688,9 @@
         sourceClanTag: normalizeTag(value && value.sourceClanTag),
       };
       const evidence = buildEvidenceForTag(rosterData, tag, settings, evidenceOwner);
-      const signals = player && player.automaticEligible ? buildSignals(evidence, settings) : [];
+      const reliability = buildReliabilityProfile(rosterData, tag, evidence, settings);
+      const caseSettings = Object.assign({}, settings, { regularMissedThreshold: reliability.regularMissedThreshold });
+      const signals = player && player.automaticEligible ? buildSignals(evidence, caseSettings) : [];
       const dismissed = new Set(Array.isArray(value && value.dismissedSignalIds) ? value.dismissedSignalIds : []);
       let status = value ? toText(value.status).trim() : (signals.length ? "needs_review" : "");
       const wasClosed = status === "closed" || status === "dismissed";
@@ -1604,7 +1698,7 @@
         ? buildEvidenceAfter(evidence, value.closedAt, value.evidence)
         : null;
       const postCloseSignals = postCloseEvidence && player && player.automaticEligible
-        ? buildSignals(postCloseEvidence, settings)
+        ? buildSignals(postCloseEvidence, caseSettings)
         : null;
       const newSignals = postCloseSignals || signals.filter((signal) =>
         ![signal.id].concat(Array.isArray(signal.legacyIds) ? signal.legacyIds : [])
@@ -1613,10 +1707,11 @@
       const hasNewSignal = newSignals.length > 0;
       if ((status === "closed" || status === "dismissed") && hasNewSignal) status = "needs_review";
       if (status === "dismissed") status = "closed";
-      const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, evidence) : null;
-      const watching = value && value.status === "watching" ? buildWatchProgress(value, evidence, settings) : null;
+      const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, evidence, settings) : null;
+      const automatedWatching = value && value.status === "watching" && ["checkin", "warning"].includes(value.automationStage);
+      const watching = value && value.status === "watching" && !automatedWatching ? buildWatchProgress(value, evidence, settings) : null;
       if (recovery && recovery.ready) status = "ready";
-      if (value && value.status === "watching") {
+      if (value && value.status === "watching" && !automatedWatching) {
         if (watching && watching.triggered) status = "needs_review";
         else if (watching && watching.ready) status = "closed";
       }
@@ -1651,6 +1746,7 @@
         currentEvidence: evidence,
         signals: itemSignals,
         signalIds: itemSignals.map((signal) => signal.id),
+        reliability,
         status,
         recovery,
         watching,
@@ -1723,6 +1819,7 @@
       "For now, you will not participate in regular wars in " + sourceClan + ".",
       "Please play regular wars in " + targetClan + " and complete " + recoveryWars + " consecutive " +
         plural(recoveryWars, "war") + " without missing an attack.",
+      options.recoveryPerformance ? "For a results-based return, we will also review at least six counted attacks against the current war-result targets." : "",
       nextWarTimestamp
         ? "The next war there will start " + nextWarTimestamp + ", when the current war ends."
         : "The next war there will start when the current war ends.",
@@ -3257,6 +3354,16 @@
           ? "Reminder delivery failed"
           : (stage === "responded" ? "Player replied" : "Decision"));
       section.appendChild(createElement("h3", "wfu-drawer-section__title", title));
+      if (item.case && item.case.automationStage === "review") {
+        const recommendation = {
+          recovery: "Review for recovery-clan placement",
+          removal: "Review community removal",
+          review: "Review the season context"
+        }[item.case.automationRecommendation] || "Leader review";
+        section.appendChild(createElement("div", "wfu-state-callout is-attention",
+          recommendation + ". " + (toText(item.case.automationReason).trim() || "Automatic observation found a repeated issue.") +
+          " The decision remains with staff."));
+      }
       if (stage === "no_response") {
         section.appendChild(createElement("div", "wfu-state-callout is-attention", item.case && item.case.contactAutomaticReminderAllowed === false
           ? "The player did not reply to the moderator-approved final message. No further message will be sent unless you explicitly approve another one."
@@ -3500,9 +3607,9 @@
       }
       const wars = createElement("input", "wfu-input");
       wars.type = "number";
-      wars.min = "1";
+      wars.min = item.case && (item.case.automationVersion === 1 || item.case.recoveryPolicyVersion === 1) ? "3" : "1";
       wars.max = "8";
-      wars.value = String(toInt(item.case && item.case.recoveryWarTarget) || state.work.settings.defaultRecoveryWars);
+      wars.value = String(Math.max(Number(wars.min), toInt(item.case && item.case.recoveryWarTarget) || state.work.settings.defaultRecoveryWars));
       form.appendChild(setField("Hero-down roster", target));
       form.appendChild(setField("Clean regular wars", wars));
 
@@ -3536,6 +3643,7 @@
           targetClanTag: targetRoster && targetRoster.clanTag,
           nextWarStartAt: targetRoster && targetRoster.nextWarStartAt,
           recoveryWars: wars.value,
+          recoveryPerformance: item.case && (item.case.recoveryCategory === "regular_performance" || item.case.automationCategory === "regular_performance"),
           reasonCodes,
           evidence: item.evidence,
           settings: state.work.settings,
@@ -3577,6 +3685,9 @@
           targetRosterTitle: targetRoster.title,
           targetClanTag: targetRoster.clanTag,
           recoveryWarTarget: toInt(wars.value) || state.work.settings.defaultRecoveryWars,
+          recoveryAverageStarsThreshold: state.work.settings.regularAverageStarsThreshold,
+          recoveryAverageDestructionThreshold: state.work.settings.regularAverageDestructionThreshold,
+          recoveryContextMode: state.work.settings.regularContextMode,
           requireNoMisses: true,
           reasonCodes: reasonCodes.length ? reasonCodes : ["manual"],
           evidence: item.evidence,
@@ -3667,7 +3778,7 @@
     };
 
     const renderTrial = (section, item) => {
-      const progress = item.recovery || buildRecoveryProgress(item.case, item.evidence);
+      const progress = item.recovery || buildRecoveryProgress(item.case, item.evidence, state.work.settings);
       section.appendChild(createElement("h3", "wfu-drawer-section__title", item.status === "ready" ? "Ready to review" : "Hero-down progress"));
       const progressCard = createElement("div", "wfu-trial-progress");
       const score = createElement("div", "wfu-trial-progress__score", progress.completedWars + "/" + progress.targetWars);
@@ -3683,6 +3794,17 @@
       progressCard.appendChild(score);
       progressCard.appendChild(copy);
       section.appendChild(progressCard);
+      if (item.case && item.case.recoveryPolicyVersion === 1) {
+        section.appendChild(createElement("div", "wfu-closed-copy",
+          "Only completed wars in the selected recovery clan where this player had attacks available count. A leader approves the return."));
+        if (item.case.recoveryCategory === "regular_performance") {
+          section.appendChild(createElement("div", "wfu-closed-copy",
+            progress.countedAttacks + "/6 qualifying attacks in the clean run; result targets " +
+            (progress.performanceMet ? "met." : "not yet met.")));
+        }
+        if (progress.needsReview) section.appendChild(createElement("div", "wfu-state-callout is-attention",
+          "Recovery needs a leader review after repeated misses or five eligible wars without meeting the return criteria."));
+      }
 
       const actions = createElement("div", "wfu-form-actions");
       if (progress.ready) {
@@ -3742,6 +3864,28 @@
     };
 
     const renderWatching = (section, item) => {
+      if (item.case && ["checkin", "warning"].includes(item.case.automationStage)) {
+        const category = item.case.automationCategory;
+        const stage = item.case.automationStage === "warning" ? "Final observation" : "Automatic check-in";
+        section.appendChild(createElement("h3", "wfu-drawer-section__title", stage));
+        const start = parseMs(item.case.automationWindowStartAt);
+        const regular = (item.evidence.regularEvents || []).filter((event) =>
+          parseMs(event.at) > start && Number(event.stats && event.stats.possibleAttacks) > 0);
+        const counted = regular.reduce((sum, event) => sum + Number(event.stats && event.stats.countedAttacks || 0), 0);
+        const detail = category === "regular_performance"
+          ? (regular.length + " eligible regular wars; " + counted + "/6 counted attacks. At least three wars are required.")
+          : category === "cwl_missed"
+            ? "The next two CWL opportunities are observed. No clan move is requested during CWL."
+            : (Math.min(regular.length, 3) + "/3 eligible regular wars observed.");
+        section.appendChild(createElement("div", "wfu-closed-copy", detail));
+        section.appendChild(createElement("div", "wfu-closed-copy",
+          "A clean observation closes this case. A repeated issue moves to a warning or a leader decision."));
+        const actions = createElement("div", "wfu-form-actions");
+        actions.appendChild(createButton("Review now", "btn", () => mutate(item, "reopen")));
+        actions.appendChild(createButton("Stop monitoring", "btn secondary", () => dismissInBackground(item)));
+        section.appendChild(actions);
+        return;
+      }
       const progress = item.watching || buildWatchProgress(item.case, item.evidence);
       section.appendChild(createElement("h3", "wfu-drawer-section__title", "Monitoring"));
       const progressCard = createElement("div", "wfu-trial-progress");
@@ -4777,6 +4921,7 @@
     buildPlayerDirectory,
     buildIgnoredPlayerEntries,
     buildEvidenceForTag,
+    buildReliabilityProfile,
     buildSignals,
     buildRecoveryProgress,
     buildWatchProgress,

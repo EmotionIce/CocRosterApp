@@ -5,6 +5,45 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const followup = require("../cloudflarePages/war-followup.js");
 
+test("long confirmed attendance raises only the recent missed-attack threshold", () => {
+  const entries = Array.from({ length: 30 }, (_, index) => ({
+    eventId: "war-" + index,
+    warKey: "war-" + index,
+    finalizedAt: new Date(Date.parse("2026-01-01T00:00:00.000Z") + index * 86400000).toISOString(),
+    clanTag: "#MAIN",
+    stats: { possibleAttacks: 2, usedAttacks: 2, attacksMissed: 0, countedAttacks: 2, starsTotal: 4, totalDestruction: 160 }
+  }));
+  const recentEvents = entries.slice(-8).map((entry) => ({
+    id: entry.warKey, at: entry.finalizedAt, clanTag: "#MAIN", stats: entry.stats
+  }));
+  const profile = followup.buildReliabilityProfile({ playerWarPerformance: { byTag: {
+    "#P0LYGQ": { regular: { warCount: 30, possibleAttacks: 60, usedAttacks: 58, missedAttacks: 2 }, recentRegularWarForm: entries }
+  } } }, "#P0LYGQ", { regular: { warCount: 8, possibleAttacks: 16, usedAttacks: 14, missedAttacks: 2 }, regularEvents: recentEvents }, followup.sanitizeSettings(null));
+  assert.equal(profile.priorWars, 22);
+  assert.equal(profile.credit, 2);
+  assert.equal(profile.regularMissedThreshold, followup.sanitizeSettings(null).regularMissedThreshold + 2);
+});
+
+test("new results-based recovery needs three eligible clean wars and six qualifying attacks", () => {
+  const startedAt = "2026-08-01T00:00:00.000Z";
+  const regularEvents = [1, 2, 3].map((day) => ({
+    id: "war-" + day,
+    at: `2026-08-0${day + 1}T00:00:00.000Z`,
+    clanTag: "#TRAIN",
+    stats: { possibleAttacks: 2, usedAttacks: 2, missedAttacks: 0, countedAttacks: 2, starsTotal: 4, totalDestruction: 160 }
+  }));
+  const value = { tag: "#P0LYGQ", recoveryStartedAt: startedAt, targetClanTag: "#TRAIN",
+    recoveryPolicyVersion: 1, recoveryCategory: "regular_performance", recoveryWarTarget: 3,
+    recoveryAverageStarsThreshold: 1.8, recoveryAverageDestructionThreshold: 70, recoveryContextMode: "off" };
+  const result = followup.buildRecoveryProgress(value, { regularEvents }, followup.sanitizeSettings(null));
+  assert.equal(result.ready, true);
+  assert.equal(result.countedAttacks, 6);
+  const poor = followup.buildRecoveryProgress(value, { regularEvents: regularEvents.map((entry) => ({
+    ...entry, stats: { ...entry.stats, starsTotal: 2, totalDestruction: 100 }
+  })) }, followup.sanitizeSettings(null));
+  assert.equal(poor.ready, false);
+});
+
 const regularEvent = (id, at, clanTag, stats) => ({
   eventId: id,
   warKey: id,

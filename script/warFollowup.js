@@ -575,7 +575,24 @@ function sanitizeWarFollowupCase_(caseRaw, fallbackTagRaw) {
 		dmDeliveryFailureReason: sanitizeWarFollowupText_(value.dmDeliveryFailureReason, 300),
 		watchStartedAt: sanitizeWarFollowupTimestamp_(value.watchStartedAt),
 		watchWarTarget: clampWarFollowupNumber_(value.watchWarTarget, 1, 8, 2, true),
+		automationVersion: value.automationVersion === 1 ? 1 : 0,
+		automationStage: ["checkin", "warning", "review", "human_review", "closed"].indexOf(String(value.automationStage || "")) >= 0 ? String(value.automationStage || "") : "",
+		automationCategory: sanitizeWarFollowupText_(value.automationCategory, 40),
+		automationStartedAt: sanitizeWarFollowupTimestamp_(value.automationStartedAt),
+		automationWindowStartAt: sanitizeWarFollowupTimestamp_(value.automationWindowStartAt),
+		automationLastDmAt: sanitizeWarFollowupTimestamp_(value.automationLastDmAt),
+		automationDmMessageIds: sanitizeWarFollowupStringList_(value.automationDmMessageIds, { maxItems: 2, maxLength: 20 })
+			.filter(function (id) { return /^\d{17,20}$/.test(id); }),
+		automationRecommendation: ["recovery", "removal", "review"].indexOf(String(value.automationRecommendation || "")) >= 0 ? String(value.automationRecommendation || "") : "",
+		automationReason: sanitizeWarFollowupText_(value.automationReason, 500),
+		automationPriorWars: clampWarFollowupNumber_(value.automationPriorWars, 0, 100000, 0, true),
+		automationMissedThreshold: clampWarFollowupNumber_(value.automationMissedThreshold, 0, 16, 0, true),
 		recoveryStartedAt: sanitizeWarFollowupTimestamp_(value.recoveryStartedAt),
+		recoveryPolicyVersion: value.recoveryPolicyVersion === 1 ? 1 : 0,
+		recoveryCategory: sanitizeWarFollowupText_(value.recoveryCategory, 40),
+		recoveryAverageStarsThreshold: clampWarFollowupNumber_(value.recoveryAverageStarsThreshold, 0, 3, 0, false),
+		recoveryAverageDestructionThreshold: clampWarFollowupNumber_(value.recoveryAverageDestructionThreshold, 0, 100, 0, false),
+		recoveryContextMode: ["off", "explain", "assist", "automatic"].indexOf(String(value.recoveryContextMode || "")) >= 0 ? String(value.recoveryContextMode || "") : "",
 		recoveryWarTarget: clampWarFollowupNumber_(value.recoveryWarTarget, 1, 8, 3, true),
 		requireNoMisses: value.requireNoMisses == null ? true : toBooleanFlag_(value.requireNoMisses),
 		removalReason: sanitizeWarFollowupMultilineText_(value.removalReason, 1000),
@@ -928,6 +945,38 @@ function setWarFollowupTrustedAccount(tagRaw, trustedRaw, password, mutationIdRa
 	}
 }
 
+function startWarFollowupAutomationStage_(value, request, stage, nowIso) {
+	const sendDm = request.sendAutomaticDm === true && /^\d{17,20}$/.test(String(value.discordId || ""));
+	value.automationVersion = 1;
+	value.automationStage = stage;
+	value.automationCategory = sanitizeWarFollowupText_(request.automationCategory || value.automationCategory, 40);
+	value.automationStartedAt = value.automationStartedAt || nowIso;
+	value.automationRecommendation = "";
+	value.automationReason = "";
+	value.assignedModeratorId = "";
+	value.assignedModeratorName = "";
+	value.assignmentCoverageOverride = false;
+	value.handledBy = "";
+	value.assignedAt = "";
+	value.assignmentUpdatedAt = "";
+	value.contactPurpose = stage === "warning" ? "automated_warning" : "automated_checkin";
+	value.dmText = sendDm ? sanitizeWarFollowupMultilineText_(request.dmText, 2000) : "";
+	value.dmDeliveryMode = "";
+	value.dmMessageId = "";
+	value.dmSentAt = "";
+	value.dmDeliveryFailedAt = "";
+	value.dmDeliveryFailureReason = "";
+	value.dmQueueId = sendDm && value.dmText ? sanitizeWarFollowupText_(request.mutationId, 160) : "";
+	value.dmQueuedAt = value.dmQueueId ? nowIso : "";
+	value.dmQueuedByName = value.dmQueueId ? "War Follow Up" : "";
+	value.dmQueuedByDiscordId = "";
+	value.status = value.dmQueueId ? "needs_dm" : "watching";
+	value.automationWindowStartAt = value.dmQueueId ? "" : nowIso;
+	value.watchStartedAt = value.automationWindowStartAt;
+	value.replyCaptureUntil = "";
+	value.closedAt = "";
+}
+
 function mutateWarFollowupCase(requestRaw, password) {
 	assertWarFollowupAccess_(password);
 	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
@@ -1007,11 +1056,16 @@ function mutateWarFollowupCase(requestRaw, password) {
 		if (action === "player_response") {
 			const responseReference = String(request.responseToMessageId || "").trim();
 			const exactReply = /^\d{17,20}$/.test(responseReference) &&
-				(responseReference === value.dmMessageId || responseReference === value.contactReminderMessageId);
+				(responseReference === value.dmMessageId || responseReference === value.contactReminderMessageId ||
+					(Array.isArray(value.automationDmMessageIds) && value.automationDmMessageIds.indexOf(responseReference) >= 0));
 			const captureWindowOpen = parseIsoToMs_(value.replyCaptureUntil) >= parseIsoToMs_(nowIso);
+			const automatedContact = ["automated_checkin", "automated_warning"].indexOf(value.contactPurpose) >= 0;
 			const responseStateAllowed = value.status === "waiting" ||
+				(automatedContact && ["watching", "needs_dm"].indexOf(value.status) >= 0) ||
 				(["needs_review", "closed", "dismissed"].indexOf(value.status) >= 0 && (captureWindowOpen || exactReply));
-			if (!responseStateAllowed || value.contactPurpose !== "general" || !value.dmSentAt || value.dmDeliveryMode !== "bot" || !value.dmMessageId) {
+			const priorAutomaticDm = automatedContact && value.automationLastDmAt && value.automationDmMessageIds.length > 0;
+			if (!responseStateAllowed || (value.contactPurpose !== "general" && !automatedContact) ||
+				!((value.dmSentAt && value.dmDeliveryMode === "bot" && value.dmMessageId) || priorAutomaticDm)) {
 				throw new Error("This case is not currently awaiting a bot-captured player response.");
 			}
 		}
@@ -1048,9 +1102,16 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.escalatedAt = "";
 				value.escalatedBy = "";
 				appendWarFollowupActivity_(value, "automatic_case", "Opened from automated war evidence.", actor || "War Follow Up", nowIso);
-				if (request.assignedModeratorId) {
+				if (request.automationStage === "checkin") {
+					value.automationPriorWars = clampWarFollowupNumber_(request.automationPriorWars, 0, 100000, 0, true);
+					value.automationMissedThreshold = clampWarFollowupNumber_(request.automationMissedThreshold, 0, 16, 0, true);
+					startWarFollowupAutomationStage_(value, request, "checkin", nowIso);
+					appendWarFollowupActivity_(value, "automation_checkin", "Automatic check-in started. The next eligible wars will be monitored.", "War Follow Up", nowIso);
+				} else if (request.assignedModeratorId) {
+					if (value.automationVersion === 1) value.automationStage = "human_review";
 					applyWarFollowupOwner_(value, request, actor || "War Follow Up", nowIso);
 				} else {
+					if (value.automationVersion === 1) value.automationStage = "human_review";
 					value.assignedModeratorId = "";
 					value.assignedModeratorName = "";
 					value.assignmentCoverageOverride = false;
@@ -1058,6 +1119,42 @@ function mutateWarFollowupCase(requestRaw, password) {
 					value.assignedAt = "";
 					value.assignmentUpdatedAt = nowIso;
 				}
+				break;
+			case "automation_adopt":
+				if (value.status !== "needs_review" || value.automationVersion ||
+					!(Array.isArray(value.activity) && value.activity.some(function (entry) { return entry.type === "automatic_case"; })) ||
+					(Array.isArray(value.activity) ? value.activity : []).some(function (entry) {
+						return ["automatic_case", "assigned", "unassigned"].indexOf(entry.type) < 0;
+					})) {
+					throw new Error("Only an untouched automatic case can enter quiet monitoring.");
+				}
+				request.sendAutomaticDm = false;
+				startWarFollowupAutomationStage_(value, request, "checkin", nowIso);
+				appendWarFollowupActivity_(value, "automation_adopt", "Existing automatic case moved to quiet monitoring without a new message.", "War Follow Up", nowIso);
+				break;
+			case "automation_warn":
+				if (value.status !== "watching" || value.automationStage !== "checkin") throw new Error("This automatic check-in is no longer active.");
+				if (request.evidence) value.evidence = sanitizeWarFollowupEvidenceSnapshot_(request.evidence);
+				startWarFollowupAutomationStage_(value, request, "warning", nowIso);
+				appendWarFollowupActivity_(value, "automation_warning", "A repeated participation problem started the final observation period.", "War Follow Up", nowIso);
+				break;
+			case "automation_clear":
+				if (value.status !== "watching" || ["checkin", "warning"].indexOf(value.automationStage) < 0) throw new Error("This automatic observation is no longer active.");
+				value.status = "dismissed";
+				value.outcome = "no_action";
+				value.automationStage = "closed";
+				value.automationReason = sanitizeWarFollowupText_(request.automationReason, 500);
+				value.dismissedSignalIds = dismissibleSignalIds;
+				value.closedAt = nowIso;
+				appendWarFollowupActivity_(value, "automation_clear", value.automationReason || "Participation recovered during automatic monitoring.", "War Follow Up", nowIso);
+				break;
+			case "automation_review":
+				if (value.status !== "watching" || ["checkin", "warning"].indexOf(value.automationStage) < 0) throw new Error("This automatic observation is no longer active.");
+				value.status = "needs_review";
+				value.automationStage = "review";
+				value.automationRecommendation = ["recovery", "removal", "review"].indexOf(request.automationRecommendation) >= 0 ? request.automationRecommendation : "review";
+				value.automationReason = sanitizeWarFollowupText_(request.automationReason, 500);
+				appendWarFollowupActivity_(value, "automation_review", value.automationReason || "Automatic monitoring requests a leader decision.", "War Follow Up", nowIso);
 				break;
 			case "manual_review":
 				value.status = "needs_review";
@@ -1221,8 +1318,13 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				value.contactPurpose = "hero_down";
 				value.contactStage = "";
-				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, 1, 8, 3, true);
-				value.requireNoMisses = request.requireNoMisses == null ? true : toBooleanFlag_(request.requireNoMisses);
+				value.recoveryPolicyVersion = value.automationVersion === 1 ? 1 : 0;
+				value.recoveryCategory = value.recoveryPolicyVersion ? value.automationCategory : "";
+				value.recoveryAverageStarsThreshold = clampWarFollowupNumber_(request.recoveryAverageStarsThreshold, 0, 3, 0, false);
+				value.recoveryAverageDestructionThreshold = clampWarFollowupNumber_(request.recoveryAverageDestructionThreshold, 0, 100, 0, false);
+				value.recoveryContextMode = ["off", "explain", "assist", "automatic"].indexOf(request.recoveryContextMode) >= 0 ? request.recoveryContextMode : "";
+				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, value.recoveryPolicyVersion ? 3 : 1, 8, 3, true);
+				value.requireNoMisses = value.recoveryPolicyVersion ? true : (request.requireNoMisses == null ? true : toBooleanFlag_(request.requireNoMisses));
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
 				value.dmMessageId = "";
@@ -1264,7 +1366,16 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmQueuedByName = "";
 				value.dmDeliveryFailedAt = "";
 				value.dmDeliveryFailureReason = "";
-				if (value.contactPurpose === "general") {
+				if (["automated_checkin", "automated_warning"].indexOf(value.contactPurpose) >= 0) {
+					value.status = "watching";
+					if (value.dmDeliveryMode === "bot") {
+						value.automationLastDmAt = nowIso;
+						value.automationDmMessageIds = value.automationDmMessageIds.concat([value.dmMessageId]).slice(-2);
+					}
+					value.automationWindowStartAt = nowIso;
+					value.watchStartedAt = nowIso;
+					value.replyCaptureUntil = new Date(parseIsoToMs_(nowIso) + 90 * 24 * 60 * 60 * 1000).toISOString();
+				} else if (value.contactPurpose === "general") {
 					value.status = "waiting";
 					value.contactStage = value.contactAutomaticReminderAllowed ? "awaiting_first_response" : "awaiting_final_response";
 					value.waitingUntil = new Date(parseIsoToMs_(nowIso) + 24 * 60 * 60 * 1000).toISOString();
@@ -1308,7 +1419,16 @@ function mutateWarFollowupCase(requestRaw, password) {
 				value.dmQueuedByName = "";
 				value.dmDeliveryFailedAt = nowIso;
 				value.dmDeliveryFailureReason = sanitizeWarFollowupText_(request.dmDeliveryFailureReason, 300) || "Discord could not deliver the message.";
-				appendWarFollowupActivity_(value, "dm_delivery_failed", "Discord bot delivery failed. The message still needs attention.", actor || "War Follow Up", nowIso);
+				if (["automated_checkin", "automated_warning"].indexOf(value.contactPurpose) >= 0) {
+					value.status = "watching";
+					value.automationWindowStartAt = nowIso;
+					value.watchStartedAt = nowIso;
+				}
+				appendWarFollowupActivity_(value, "dm_delivery_failed",
+					["automated_checkin", "automated_warning"].indexOf(value.contactPurpose) >= 0
+						? "Automatic DM could not be delivered; quiet observation continues."
+						: "Discord bot delivery failed. The message still needs attention.",
+					actor || "War Follow Up", nowIso);
 				break;
 			case "contact_reminder_sent": {
 				if (value.contactReminderSentAt) throw new Error("The automatic contact reminder was already sent.");
@@ -1366,6 +1486,13 @@ function mutateWarFollowupCase(requestRaw, password) {
 				const responseText = sanitizeWarFollowupMultilineText_(request.responseText, 2000);
 				if (!responseText) throw new Error("The player response is empty.");
 				value.status = "needs_review";
+				if (value.automationVersion === 1) value.automationStage = "human_review";
+				if (["automated_checkin", "automated_warning"].indexOf(value.contactPurpose) >= 0) {
+					value.dmQueueId = "";
+					value.dmQueuedAt = "";
+					value.dmQueuedByName = "";
+					value.dmQueuedByDiscordId = "";
+				}
 				value.outcome = "";
 				value.closedAt = "";
 				value.contactStage = "responded";
@@ -1486,8 +1613,8 @@ function mutateWarFollowupCase(requestRaw, password) {
 				if (value.status !== "hero_down") throw new Error("Only an active hero-down period can be extended.");
 				value.status = "needs_dm";
 				value.outcome = "";
-				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, 1, 8, value.recoveryWarTarget || 3, true);
-				value.requireNoMisses = request.requireNoMisses == null ? value.requireNoMisses : toBooleanFlag_(request.requireNoMisses);
+				value.recoveryWarTarget = clampWarFollowupNumber_(request.recoveryWarTarget, value.recoveryPolicyVersion === 1 ? 3 : 1, 8, value.recoveryWarTarget || 3, true);
+				value.requireNoMisses = value.recoveryPolicyVersion === 1 ? true : (request.requireNoMisses == null ? value.requireNoMisses : toBooleanFlag_(request.requireNoMisses));
 				value.dmText = sanitizeWarFollowupMultilineText_(request.dmText, 6000);
 				value.dmSentAt = "";
 				value.dmDeliveryMode = "";
@@ -1540,6 +1667,7 @@ function mutateWarFollowupCase(requestRaw, password) {
 				break;
 			case "reopen":
 				value.status = "needs_review";
+				if (value.automationVersion === 1) value.automationStage = "human_review";
 				value.outcome = "";
 				value.dmQueueId = "";
 				value.dmQueuedAt = "";
