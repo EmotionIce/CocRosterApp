@@ -3842,6 +3842,125 @@ function assertAutoRefreshActiveRosterShardTagsUnique_(runIdRaw, rosterIdsRaw) {
 	return Object.keys(seen).sort();
 }
 
+// Roster tasks use snapshots taken at different times. If their combined output
+// omits a source player who is still inside the missing grace period, keep the
+// source record as missing. This normally does no roster reads or writes: only
+// a detected gap needs its source and output roster shards.
+function restoreAutoRefreshUnplacedSourcePlayers_(runIdRaw, rosterIdsRaw, sourceVersionIdRaw, finalTagsRaw, activeRosterByIdRaw, rosterWriteByRosterIdRaw, nowIsoRaw) {
+	const runId = String(runIdRaw || "").trim();
+	const rosterIds = Array.isArray(rosterIdsRaw) ? rosterIdsRaw : [];
+	const rosterIdSet = {};
+	for (let i = 0; i < rosterIds.length; i++) rosterIdSet[String(rosterIds[i] || "").trim()] = true;
+	const finalTagSet = {};
+	const finalTags = Array.isArray(finalTagsRaw) ? finalTagsRaw : [];
+	for (let i = 0; i < finalTags.length; i++) {
+		const tag = normalizeTag_(finalTags[i]);
+		if (tag) finalTagSet[tag] = true;
+	}
+	const ownership = readAutoRefreshSourceOwnershipShardForTask_(runId);
+	if (!ownership.sourceOwnerRosterIdByTag || typeof ownership.sourceOwnerRosterIdByTag !== "object") {
+		throw new Error("Auto-refresh source ownership index is missing; refusing to publish roster results.");
+	}
+	const sourceOwnerByTag = ownership.sourceOwnerRosterIdByTag && typeof ownership.sourceOwnerRosterIdByTag === "object" ? ownership.sourceOwnerRosterIdByTag : {};
+	const liveOwnerByTag = ownership.liveOwnerRosterIdByTag && typeof ownership.liveOwnerRosterIdByTag === "object" ? ownership.liveOwnerRosterIdByTag : {};
+	const excludedOwnerByTag = ownership.prepExcludedRosterIdByTag && typeof ownership.prepExcludedRosterIdByTag === "object" ? ownership.prepExcludedRosterIdByTag : {};
+	const candidateTags = Object.keys(sourceOwnerByTag).filter((rawTag) => {
+		const tag = normalizeTag_(rawTag);
+		return tag && !finalTagSet[tag] && !excludedOwnerByTag[tag];
+	});
+	if (!candidateTags.length) return finalTags;
+
+	const nowIso = String(nowIsoRaw || new Date().toISOString());
+	const nowMs = parseIsoToMs_(nowIso) || Date.now();
+	const sourceRosterById = {};
+	const outputRosterById = activeRosterByIdRaw && typeof activeRosterByIdRaw === "object" ? activeRosterByIdRaw : {};
+	const markerByRosterId = rosterWriteByRosterIdRaw && typeof rosterWriteByRosterIdRaw === "object" ? rosterWriteByRosterIdRaw : {};
+	const changedRosterIds = {};
+	const restoredTags = [];
+	for (let i = 0; i < candidateTags.length; i++) {
+		const tag = normalizeTag_(candidateTags[i]);
+		const rosterId = String(sourceOwnerByTag[candidateTags[i]] || "").trim();
+		if (!tag || !rosterId || !rosterIdSet[rosterId]) continue;
+		if (!sourceRosterById[rosterId]) sourceRosterById[rosterId] = readAutoRefreshSourceRosterShardForTask_(runId, rosterId, sourceVersionIdRaw);
+		const sourceRoster = sourceRosterById[rosterId];
+		let sourcePlayer = null;
+		let sourceSection = "";
+		for (const section of ["main", "subs", "missing"]) {
+			const players = Array.isArray(sourceRoster[section]) ? sourceRoster[section] : [];
+			for (let j = 0; j < players.length; j++) {
+				if (normalizeTag_(players[j] && players[j].tag) !== tag) continue;
+				sourcePlayer = players[j];
+				sourceSection = section;
+				break;
+			}
+			if (sourcePlayer) break;
+		}
+		if (!sourcePlayer) throw new Error("Auto-refresh source player is missing for " + tag + ".");
+		const sourceWarMembership = sourceRoster.warPerformance && sourceRoster.warPerformance.membershipByTag && sourceRoster.warPerformance.membershipByTag[tag];
+		const sourceRegularMembership = sourceRoster.regularWar && sourceRoster.regularWar.membershipByTag && sourceRoster.regularWar.membershipByTag[tag];
+		const missingSinceCandidates = [sourceWarMembership, sourceRegularMembership]
+			.map((entry) => parseIsoToMs_(entry && entry.missingSince))
+			.filter((ms) => ms > 0);
+		const sourceMissingSinceMs = missingSinceCandidates.length ? Math.min.apply(null, missingSinceCandidates) : 0;
+		if (sourceSection === "missing" && sourceMissingSinceMs > 0 && nowMs - sourceMissingSinceMs >= REGULAR_WAR_MISSING_GRACE_MS && !liveOwnerByTag[tag]) continue;
+
+		if (!outputRosterById[rosterId]) {
+			const encoded = firebaseRequestJson_(buildActiveVersionPath_(runId, "rosters/" + encodeFirebaseObjectKey_(rosterId)), "GET");
+			const decoded = decodeFirebaseObjectKeysRecursive_(encoded);
+			if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("Auto-refresh output roster is missing for " + rosterId + ".");
+			outputRosterById[rosterId] = decoded;
+		}
+		const outputRoster = outputRosterById[rosterId];
+		const existingTagSet = buildRosterPoolTagSet_(outputRoster);
+		if (!existingTagSet[tag]) {
+			if (!Array.isArray(outputRoster.missing)) outputRoster.missing = [];
+			outputRoster.missing.push(createRosterPlayerFromSeed_(tag, sourcePlayer, null));
+			const missingSince = sourceSection === "missing" && sourceMissingSinceMs > 0 && nowMs - sourceMissingSinceMs < REGULAR_WAR_MISSING_GRACE_MS
+				? new Date(sourceMissingSinceMs).toISOString()
+				: nowIso;
+			for (const stateKey of ["warPerformance", "regularWar"]) {
+				const sourceState = sourceRoster[stateKey] && typeof sourceRoster[stateKey] === "object" ? sourceRoster[stateKey] : {};
+				if (!outputRoster[stateKey] || typeof outputRoster[stateKey] !== "object") outputRoster[stateKey] = {};
+				const outputState = outputRoster[stateKey];
+				if (!outputState.byTag || typeof outputState.byTag !== "object") outputState.byTag = {};
+				if (sourceState.byTag && sourceState.byTag[tag] && !outputState.byTag[tag]) outputState.byTag[tag] = sourceState.byTag[tag];
+				if (!outputState.membershipByTag || typeof outputState.membershipByTag !== "object") outputState.membershipByTag = {};
+				outputState.membershipByTag[tag] = Object.assign({}, sourceState.membershipByTag && sourceState.membershipByTag[tag] || {}, {
+					status: "temporaryMissing",
+					missingSince: missingSince,
+				});
+			}
+			const sourceCwlStats = sourceRoster.cwlStats && typeof sourceRoster.cwlStats === "object" ? sourceRoster.cwlStats : null;
+			if (sourceCwlStats && sourceCwlStats.byTag && sourceCwlStats.byTag[tag]) {
+				if (!outputRoster.cwlStats || typeof outputRoster.cwlStats !== "object") outputRoster.cwlStats = {};
+				if (!outputRoster.cwlStats.byTag || typeof outputRoster.cwlStats.byTag !== "object") outputRoster.cwlStats.byTag = {};
+				outputRoster.cwlStats.byTag[tag] = sourceCwlStats.byTag[tag];
+			}
+			changedRosterIds[rosterId] = true;
+		}
+		const marker = markerByRosterId[rosterId] && typeof markerByRosterId[rosterId] === "object" ? markerByRosterId[rosterId] : null;
+		if (marker && (!Array.isArray(marker.playerTags) || !marker.playerTags.some((rawTag) => normalizeTag_(rawTag) === tag))) {
+			changedRosterIds[rosterId] = true;
+		}
+		finalTagSet[tag] = true;
+		restoredTags.push(tag);
+	}
+	const changedIds = Object.keys(changedRosterIds);
+	for (let i = 0; i < changedIds.length; i++) {
+		const rosterId = changedIds[i];
+		const validated = validateRosterData_({ rosters: [outputRosterById[rosterId]] }).rosters[0];
+		outputRosterById[rosterId] = validated;
+		const encodedRosterId = encodeFirebaseObjectKey_(rosterId);
+		firebaseRequestJson_(buildActiveVersionPath_(runId, "rosters/" + encodedRosterId), "PUT", encodeFirebaseObjectKeysRecursive_(validated));
+		if (markerByRosterId[rosterId] && typeof markerByRosterId[rosterId] === "object") {
+			markerByRosterId[rosterId].playerTags = collectAutoRefreshRosterPlayerTags_(validated);
+			firebaseRequestJson_(buildAutoRefreshRunPath_(runId, "rosterWrites/" + encodedRosterId), "PUT", encodeFirebaseObjectKeysRecursive_(markerByRosterId[rosterId]));
+		}
+	}
+	if (restoredTags.length) Logger.log("autoRefresh restored %s unplaced source player(s) before publish", restoredTags.length);
+	return Object.keys(finalTagSet).sort();
+}
+
 // Count active-version metric entries using a shallow byTag read.
 function countActiveVersionPlayerMetricEntriesShallow_(versionIdRaw) {
 	const versionId = normalizeActiveVersionId_(versionIdRaw);
@@ -5105,6 +5224,9 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: false });
 		let rosterPlayerTags = assertAutoRefreshRosterWriteTagsUnique_(verifiedResults.rosterWriteByRosterId, rosterIds);
 		if (!rosterPlayerTags) rosterPlayerTags = assertAutoRefreshActiveRosterShardTagsUnique_(runId, rosterIds);
+		rosterPlayerTags = restoreAutoRefreshUnplacedSourcePlayers_(
+			runId, rosterIds, sourceVersionId, rosterPlayerTags, null, verifiedResults.rosterWriteByRosterId, new Date().toISOString(),
+		);
 		const playerWarFinalization = finalizeAutoRefreshPlayerWarPerformance_(runId, verifiedResults, { nowIso: new Date().toISOString() });
 		const writeStartMs = Date.now();
 		const writtenAt = new Date().toISOString();
@@ -5215,6 +5337,14 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 	const verifiedResults = verifyAutoRefreshFinalizeResultMarkers_(runId, rosterIds, { includeActiveRosters: true });
 	const activeRosterById = verifiedResults.activeRosterById;
 	const metricResultByRosterId = verifiedResults.metricResultByRosterId;
+	const activeRosterPlayerTags = [];
+	for (let i = 0; i < rosterIds.length; i++) {
+		const tags = collectAutoRefreshRosterPlayerTags_(activeRosterById[rosterIds[i]]);
+		for (let j = 0; j < tags.length; j++) activeRosterPlayerTags.push(tags[j]);
+	}
+	restoreAutoRefreshUnplacedSourcePlayers_(
+		runId, rosterIds, sourceVersionId, activeRosterPlayerTags, activeRosterById, null, new Date().toISOString(),
+	);
 	const playerWarFinalization = finalizeAutoRefreshPlayerWarPerformance_(runId, verifiedResults, { nowIso: new Date().toISOString() });
 	const writeStartMs = Date.now();
 	const writtenAt = new Date().toISOString();

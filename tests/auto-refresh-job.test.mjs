@@ -2943,6 +2943,101 @@ test("roster ownership snapshot preserves live cross-roster owners for isolated 
   assert.equal(workingRosterData.rosters[0].missing.length, 0);
 });
 
+test("full-roster sync retains a moving player's row until the destination accepts it", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const source = buildRosterData();
+  source.rosters[0].trackingMode = "regularWar";
+  source.rosters[1].trackingMode = "regularWar";
+  source.rosters[0].connectedClanTag = "#2LUCULP";
+  source.rosters[1].connectedClanTag = "#9PYLQG";
+  source.rosters[0].main[0].notes = ["retain this note"];
+  source.rosters[0].regularWar = {
+    byTag: { "#PLAYER": { current: {}, aggregate: { warsInLineup: 2 } } },
+    membershipByTag: { "#PLAYER": { status: "active", firstSeenAt: "2026-05-01T00:00:00.000Z" } },
+  };
+  source.rosters[0].warPerformance = {
+    byTag: { "#PLAYER": { regular: { warsInLineup: 2 } } },
+    membershipByTag: { "#PLAYER": { status: "active", firstSeenAt: "2026-05-01T00:00:00.000Z" } },
+  };
+  backend.fetchClanMembersSnapshot_ = (clanTag) => ({
+    clanTag,
+    members: clanTag === "#9PYLQG" ? [{ tag: "#PLAYER", name: "Player", th: 16 }] : [],
+    metricsMembers: [],
+  });
+
+  const afterSource = backend.syncClanRosterPoolCore_(backend.validateRosterData_(source), "main").rosterData;
+  assert.deepEqual(playerTags(afterSource.rosters[0].missing), ["#PLAYER"]);
+  assert.deepEqual(playerTags(afterSource.rosters[1].subs), []);
+
+  const afterDestination = backend.syncClanRosterPoolCore_(afterSource, "second").rosterData;
+  assert.deepEqual(playerTags(afterDestination.rosters[0].missing), []);
+  assert.deepEqual(playerTags(afterDestination.rosters[1].subs), ["#PLAYER"]);
+  assert.deepEqual(Array.from(afterDestination.rosters[1].subs[0].notes), ["retain this note"]);
+  assert.equal(afterDestination.rosters[0].warPerformance.byTag["#PLAYER"].regular.warsInLineup, 2);
+  assert.equal(afterDestination.rosters[0].warPerformance.membershipByTag["#PLAYER"].status, "temporaryMissing");
+  assert.equal(afterDestination.rosters[0].regularWar.byTag["#PLAYER"].aggregate.warsInLineup, 2);
+});
+
+test("queued refresh restores a source player omitted by every isolated roster result", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const source = backend.validateRosterData_(buildRosterData());
+  source.rosters[0].main[0].notes = ["retain this note"];
+  const runId = "handoff-run";
+  const encodedId = backend.encodeFirebaseObjectKey_("main");
+  backend.writeAutoRefreshRunShard_(runId, "source/ownership", {
+    sourceOwnerRosterIdByTag: { "#PLAYER": "main" },
+  }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "source/rosters/main", source.rosters[0], "PUT");
+  const outputRoster = clone(source.rosters[0]);
+  outputRoster.main = [];
+  backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/${encodedId}`, "PUT", backend.encodeFirebaseObjectKeysRecursive_(outputRoster));
+  backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", playerTags: [] }, "PUT");
+  const markers = { main: { rosterId: "main", playerTags: [] } };
+  let writeCount = 0;
+  const originalRequest = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (path, method, payload, options) => {
+    if (method === "PUT") writeCount++;
+    return originalRequest(path, method, payload, options);
+  };
+
+  const tags = backend.restoreAutoRefreshUnplacedSourcePlayers_(runId, ["main"], "", [], null, markers, "2026-05-25T00:00:00.000Z");
+  const restored = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/${encodedId}`, "GET"));
+  assert.deepEqual(Array.from(tags), ["#PLAYER"]);
+  assert.deepEqual(playerTags(restored.missing), ["#PLAYER"]);
+  assert.deepEqual(Array.from(restored.missing[0].notes), ["retain this note"]);
+  assert.equal(restored.warPerformance.membershipByTag["#PLAYER"].status, "temporaryMissing");
+  assert.deepEqual(Array.from(markers.main.playerTags), ["#PLAYER"]);
+  assert.equal(writeCount, 2);
+  backend.restoreAutoRefreshUnplacedSourcePlayers_(runId, ["main"], "", markers.main.playerTags, null, markers, "2026-05-25T00:00:00.000Z");
+  assert.equal(writeCount, 2);
+  markers.main.playerTags = [];
+  backend.restoreAutoRefreshUnplacedSourcePlayers_(runId, ["main"], "", [], null, markers, "2026-05-25T00:00:00.000Z");
+  assert.deepEqual(Array.from(markers.main.playerTags), ["#PLAYER"]);
+  assert.equal(writeCount, 4, "a completed roster write repairs a missing marker on retry");
+});
+
+test("queued refresh does not restore a source player whose missing grace already expired", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const source = buildRosterData().rosters[0];
+  source.missing = source.main;
+  source.main = [];
+  source.warPerformance = {
+    membershipByTag: {
+      "#PLAYER": { status: "temporaryMissing", missingSince: "2026-04-01T00:00:00.000Z" },
+    },
+  };
+  const runId = "expired-handoff-run";
+  backend.writeAutoRefreshRunShard_(runId, "source/ownership", { sourceOwnerRosterIdByTag: { "#PLAYER": "main" } }, "PUT");
+  backend.writeAutoRefreshRunShard_(runId, "source/rosters/main", source, "PUT");
+  const output = clone(source);
+  output.missing = [];
+  backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/main`, "PUT", backend.encodeFirebaseObjectKeysRecursive_(output));
+  const result = backend.restoreAutoRefreshUnplacedSourcePlayers_(runId, ["main"], "", [], null, {}, "2026-05-25T00:00:00.000Z");
+  const unchanged = backend.decodeFirebaseObjectKeysRecursive_(backend.firebaseRequestJson_(`activeVersions/${runId}/rosters/main`, "GET"));
+  assert.deepEqual(Array.from(result), []);
+  assert.deepEqual(playerTags(unchanged.missing), []);
+});
+
 test("isolated refresh workers keep CWL prep placement ahead of live clan ownership", () => {
   const backend = installMemoryFirebase(loadBackend());
   const sourceData = buildRosterData();
@@ -4842,10 +4937,11 @@ test("queue finalization publishes completed shards through the active version p
   assert.equal(result.status, "completed");
   assert.equal(publishedVersion, runId);
   assert.equal(manifest.rosterIds.length, 2);
-  assert.deepEqual(Array.from(manifest.rosterPlayerTags), ["#8CCVV"]);
+  assert.deepEqual(Array.from(manifest.rosterPlayerTags), ["#8CCVV", "#PLAYER"]);
   assert.equal(linkedIndexManifest.complete, true);
   assert.equal(linkedIndexManifest.versionId, runId);
   assert.equal(activeRosterShard.id, "main");
+  assert.deepEqual(playerTags(activeRosterShard.missing), ["#PLAYER"]);
   assert.equal(lastJob.status, "completed");
   assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
   assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/run-1", "GET"), null);

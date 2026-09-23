@@ -646,6 +646,26 @@ function pruneTagFromRosterTrackingState_(roster, tagRaw) {
 	return changed;
 }
 
+// A cross-clan handoff removes the roster row, but its clan-specific tracking
+// remains on the former roster for the same grace period as a missing member.
+// Copying those totals to the new clan would count the same wars twice.
+function markCrossRosterTrackingHandoff_(rosterRaw, tagRaw, nowIsoRaw) {
+	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : null;
+	const tag = normalizeTag_(tagRaw);
+	if (!roster || !tag) return;
+	const nowIso = String(nowIsoRaw || new Date().toISOString());
+	for (const stateKey of ["warPerformance", "regularWar"]) {
+		const state = roster[stateKey] && typeof roster[stateKey] === "object" ? roster[stateKey] : null;
+		if (!state) continue;
+		if (!state.membershipByTag || typeof state.membershipByTag !== "object") state.membershipByTag = {};
+		const membership = sanitizeRegularWarMembershipEntry_(state.membershipByTag[tag]);
+		if (!membership.firstSeenAt) membership.firstSeenAt = nowIso;
+		if (!(parseIsoToMs_(membership.missingSince) > 0)) membership.missingSince = nowIso;
+		membership.status = "temporaryMissing";
+		state.membershipByTag[tag] = membership;
+	}
+}
+
 // Evict owned source tags from other rosters.
 function evictOwnedSourceTagsFromOtherRosters_(rosterData, ownerRosterIdRaw, sourceTagsRaw, ownerRosterIdByTagRaw) {
 	const ownerRosterId = String(ownerRosterIdRaw == null ? "" : ownerRosterIdRaw).trim();
@@ -710,7 +730,7 @@ function evictOwnedSourceTagsFromOtherRosters_(rosterData, ownerRosterIdRaw, sou
 		roster.missing = nextMissing;
 		const removedTags = Object.keys(removedTagSet);
 		for (let j = 0; j < removedTags.length; j++) {
-			pruneTagFromRosterTrackingState_(roster, removedTags[j]);
+			markCrossRosterTrackingHandoff_(roster, removedTags[j]);
 		}
 		normalizeRosterSlots_(roster);
 		clearRosterBenchSuggestions_(roster);
@@ -722,6 +742,19 @@ function evictOwnedSourceTagsFromOtherRosters_(rosterData, ownerRosterIdRaw, sou
 		seedByTag: seedByTag,
 		removedFromOtherRosters: removedFromOtherRosters,
 	};
+}
+
+// A full-roster refresh must not discard the source row before the destination
+// actually contains it. Isolated queue tasks cannot see other roster results;
+// their finalizer performs the corresponding handoff check instead.
+function isCrossRosterHandoffPending_(rosterData, ownerRosterIdRaw, tagRaw, ownershipSnapshotRaw) {
+	const snapshot = ownershipSnapshotRaw && typeof ownershipSnapshotRaw === "object" ? ownershipSnapshotRaw : {};
+	if (snapshot.autoRefreshSnapshotMode === true) return false;
+	const ownerRosterId = String(ownerRosterIdRaw == null ? "" : ownerRosterIdRaw).trim();
+	const tag = normalizeTag_(tagRaw);
+	if (!ownerRosterId || !tag) return false;
+	const destination = findRosterInDataById_(rosterData, ownerRosterId);
+	return !destination || !buildRosterPoolTagSet_(destination)[tag];
 }
 
 // Apply roster pool sync.
@@ -891,9 +924,18 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 		}
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
+			if (isCrossRosterHandoffPending_(rosterData, owner, tag, ownershipSnapshot)) {
+				movedToMissing++;
+				if (!missingSet[tag]) {
+					missing.push(player);
+					missingSet[tag] = true;
+				}
+				setMembershipTemporaryMissing(tag);
+				continue;
+			}
 			removed++;
 			removedCrossOwned++;
-			pruneTagFromRosterTrackingState_(roster, tag);
+			markCrossRosterTrackingHandoff_(roster, tag, nowText);
 			continue;
 		}
 		movedToMissing++;
@@ -921,9 +963,18 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 		}
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
+			if (isCrossRosterHandoffPending_(rosterData, owner, tag, ownershipSnapshot)) {
+				movedToMissing++;
+				if (!missingSet[tag]) {
+					missing.push(player);
+					missingSet[tag] = true;
+				}
+				setMembershipTemporaryMissing(tag);
+				continue;
+			}
 			removed++;
 			removedCrossOwned++;
-			pruneTagFromRosterTrackingState_(roster, tag);
+			markCrossRosterTrackingHandoff_(roster, tag, nowText);
 			continue;
 		}
 		movedToMissing++;
@@ -973,9 +1024,15 @@ function applyRosterPoolSync_(rosterData, roster, sourceMembers, sourceUsed, own
 
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
+			if (isCrossRosterHandoffPending_(rosterData, owner, tag, ownershipSnapshot)) {
+				setMembershipTemporaryMissing(tag);
+				retainedMissing++;
+				nextMissing.push(player);
+				continue;
+			}
 			removed++;
 			removedCrossOwned++;
-			pruneTagFromRosterTrackingState_(roster, tag);
+			markCrossRosterTrackingHandoff_(roster, tag, nowText);
 			continue;
 		}
 
@@ -1212,9 +1269,18 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
+			if (isCrossRosterHandoffPending_(rosterData, owner, tag, ownershipSnapshot)) {
+				movedToMissing++;
+				if (!missingSet[tag]) {
+					missing.push(player);
+					missingSet[tag] = true;
+				}
+				setMembershipTemporaryMissing(tag);
+				continue;
+			}
 			removed++;
 			removedCrossOwned++;
-			pruneRegularWarTrackedTag(tag);
+			markCrossRosterTrackingHandoff_(roster, tag, nowText);
 			continue;
 		}
 
@@ -1239,9 +1305,18 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
+			if (isCrossRosterHandoffPending_(rosterData, owner, tag, ownershipSnapshot)) {
+				movedToMissing++;
+				if (!missingSet[tag]) {
+					missing.push(player);
+					missingSet[tag] = true;
+				}
+				setMembershipTemporaryMissing(tag);
+				continue;
+			}
 			removed++;
 			removedCrossOwned++;
-			pruneRegularWarTrackedTag(tag);
+			markCrossRosterTrackingHandoff_(roster, tag, nowText);
 			continue;
 		}
 
@@ -1284,9 +1359,15 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 
 		const owner = String(ownerRosterIdByTag[tag] || "").trim();
 		if (owner && owner !== rosterId) {
+			if (isCrossRosterHandoffPending_(rosterData, owner, tag, ownershipSnapshot)) {
+				setMembershipTemporaryMissing(tag);
+				retainedMissing++;
+				nextMissing.push(player);
+				continue;
+			}
 			removed++;
 			removedCrossOwned++;
-			pruneRegularWarTrackedTag(tag);
+			markCrossRosterTrackingHandoff_(roster, tag, nowText);
 			continue;
 		}
 
@@ -1348,14 +1429,8 @@ function applyRegularWarRosterPoolSync_(rosterData, roster, sourceMembers, nowIs
 		);
 	}
 
-	const finalTagSet = buildRosterPoolTagSet_(roster);
 	const projectedFinalTagSet = buildRosterPublicLineupProjectionTagSet_(roster);
-	const projectedFinalTags = Object.keys(projectedFinalTagSet);
-	for (let i = 0; i < projectedFinalTags.length; i++) {
-		const tag = normalizeTag_(projectedFinalTags[i]);
-		if (!tag) continue;
-		finalTagSet[tag] = true;
-	}
+	const finalTagSet = buildHistoryRetentionTagSet_(buildRosterPoolTagSet_(roster), roster.warPerformance, regularWar, nowText, projectedFinalTagSet);
 	const byTagKeys = Object.keys(byTag);
 	for (let i = 0; i < byTagKeys.length; i++) {
 		const tag = normalizeTag_(byTagKeys[i]);
@@ -2659,6 +2734,18 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			missingSince: "",
 			status: "active",
 		};
+	}
+	// Keep detached cross-clan tracking until its existing missing grace expires.
+	// A returning player can then recover the former clan's war aggregates.
+	const previousMembershipTags = Object.keys(previousMembershipByTag);
+	for (let i = 0; i < previousMembershipTags.length; i++) {
+		const tag = normalizeTag_(previousMembershipTags[i]);
+		if (!tag || trackedTagSet[tag]) continue;
+		const previousMembership = sanitizeRegularWarMembershipEntry_(previousMembershipByTag[previousMembershipTags[i]]);
+		const missingSinceMs = parseIsoToMs_(previousMembership.missingSince);
+		if (previousMembership.status !== "temporaryMissing" || !(missingSinceMs > 0) || Date.now() - missingSinceMs >= REGULAR_WAR_MISSING_GRACE_MS) continue;
+		membershipByTag[tag] = previousMembership;
+		if (previousByTag[tag]) byTag[tag] = previousByTag[tag];
 	}
 
 	ctx.roster.regularWar = {
