@@ -468,7 +468,7 @@
             hasDiscord: !!(discordId || displayDiscord),
             th: toInt(player.th),
             role,
-            automaticEligible: true,
+            automaticEligible: !settings.defaultHeroDownRosterId || rosterInfo.id !== settings.defaultHeroDownRosterId,
             trusted: trustedTags.has(tag),
             rosterId: rosterInfo.id,
             rosterTitle: rosterInfo.title,
@@ -478,7 +478,8 @@
         }
       }
     }
-    return { byTag, players: Object.values(byTag), rosters: rosterList, missingTags };
+    const exemptWarClanTag = (rosterList.find((roster) => roster.id === settings.defaultHeroDownRosterId) || {}).clanTag || "";
+    return { byTag, players: Object.values(byTag), rosters: rosterList, missingTags, exemptWarClanTag };
   };
 
   const buildIgnoredPlayerEntries = (directoryRaw, settingsRaw, casesRaw) => {
@@ -832,6 +833,25 @@
       regularEvents: regular.events,
       cwlEvents: cwl.events,
     };
+  };
+
+  const excludeClanFromEvidence = (evidenceRaw, clanTagRaw) => {
+    const evidence = evidenceRaw && typeof evidenceRaw === "object" ? evidenceRaw : {};
+    const clanTag = normalizeTag(clanTagRaw);
+    if (!clanTag) return evidence;
+    const regularEvents = (Array.isArray(evidence.regularEvents) ? evidence.regularEvents : [])
+      .filter((event) => normalizeTag(event.clanTag) !== clanTag);
+    const cwlEvents = (Array.isArray(evidence.cwlEvents) ? evidence.cwlEvents : [])
+      .filter((event) => normalizeTag(event.clanTag) !== clanTag);
+    const regular = emptyStats();
+    const cwl = emptyStats();
+    for (const event of regularEvents) addStats(regular, event.stats);
+    for (const event of cwlEvents) addStats(cwl, event.stats);
+    regular.warCount = regularEvents.length;
+    cwl.warCount = cwlEvents.reduce((sum, event) => sum + toInt(event.stats && event.stats.warCount), 0);
+    return Object.assign({}, evidence, {
+      regular: statsSummary(regular), cwl: statsSummary(cwl), regularEvents, cwlEvents,
+    });
   };
 
   const buildReliabilityProfile = (rosterData, tagRaw, currentEvidenceRaw, settingsRaw) => {
@@ -1687,7 +1707,8 @@
         sourceRosterId: toText(value && value.sourceRosterId).trim(),
         sourceClanTag: normalizeTag(value && value.sourceClanTag),
       };
-      const evidence = buildEvidenceForTag(rosterData, tag, settings, evidenceOwner);
+      const fullEvidence = buildEvidenceForTag(rosterData, tag, settings, evidenceOwner);
+      const evidence = excludeClanFromEvidence(fullEvidence, directory.exemptWarClanTag);
       const reliability = buildReliabilityProfile(rosterData, tag, evidence, settings);
       const caseSettings = Object.assign({}, settings, { regularMissedThreshold: reliability.regularMissedThreshold });
       const signals = player && player.automaticEligible ? buildSignals(evidence, caseSettings) : [];
@@ -1707,7 +1728,7 @@
       const hasNewSignal = newSignals.length > 0;
       if ((status === "closed" || status === "dismissed") && hasNewSignal) status = "needs_review";
       if (status === "dismissed") status = "closed";
-      const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, evidence, settings) : null;
+      const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, fullEvidence, settings) : null;
       const automatedWatching = value && value.status === "watching" && ["checkin", "warning"].includes(value.automationStage);
       const watching = value && value.status === "watching" && !automatedWatching ? buildWatchProgress(value, evidence, settings) : null;
       if (recovery && recovery.ready) status = "ready";

@@ -185,6 +185,41 @@ const buildRosterData = () => ({
   },
 });
 
+test("voluntary hero-down members are exempt while assigned recovery still counts missed wars", () => {
+  const data = buildRosterData();
+  const player = data.rosters[0].main.shift();
+  data.rosters[1].main.push(player);
+  data.playerWarPerformance.byTag[player.tag].recentRegularWarForm = [
+    regularEvent("training-miss", "2026-08-04T00:00:00.000Z", "#TRAIN", {
+      possibleAttacks: 2, usedAttacks: 0, attacksMissed: 2,
+    }),
+  ];
+  delete data.playerWarPerformance.byTag[player.tag].cwlSeasonContext;
+  const settings = { defaultHeroDownRosterId: "training" };
+  const voluntary = followup.buildWorkItems(data, { settings, cases: [] });
+  assert.equal(voluntary.directory.byTag[player.tag].automaticEligible, false);
+  assert.equal(voluntary.items.some((item) => item.tag === player.tag), false);
+
+  const assigned = followup.buildWorkItems(data, { settings, cases: [{
+    tag: player.tag, status: "hero_down", targetRosterId: "training", targetClanTag: "#TRAIN",
+    recoveryStartedAt: "2026-08-01T00:00:00.000Z", recoveryWarTarget: 1, requireNoMisses: true,
+  }] }).items.find((item) => item.tag === player.tag);
+  assert.equal(assigned.recovery.totalWars, 1);
+  assert.equal(assigned.recovery.missedAttacks, 2);
+  assert.equal(assigned.recovery.ready, false);
+
+  data.rosters[1].main = [];
+  data.rosters[0].main.push(player);
+  assert.equal(followup.buildWorkItems(data, { settings, cases: [] }).items.some((item) => item.tag === player.tag), false);
+  data.playerWarPerformance.byTag[player.tag].recentRegularWarForm.push(
+    regularEvent("main-miss", "2026-08-05T00:00:00.000Z", "#MAIN", {
+      possibleAttacks: 2, usedAttacks: 0, attacksMissed: 2,
+    })
+  );
+  assert.deepEqual(followup.buildWorkItems(data, { settings, cases: [] }).items
+    .find((item) => item.tag === player.tag).signals.map((signal) => signal.reasonCode), ["regular_missed"]);
+});
+
 test("follow-up dates always use compact international English formatting", () => {
   assert.equal(followup.formatDate("2026-07-04T12:00:00.000Z"), "04 Jul 2026");
   assert.equal(followup.formatDate("not-a-date"), "");
