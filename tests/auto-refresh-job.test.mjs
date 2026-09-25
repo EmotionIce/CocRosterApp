@@ -1583,6 +1583,86 @@ test("coordinator deadline escape installs continuation and watchdog without fai
   assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
 });
 
+test("deadline before queue creation retains a fresh-start intent and the worker creates the queue", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  installPublishedActiveVersion(backend, buildRosterData());
+  const originalRead = backend.readAutoRefreshCoordinatorSourceSnapshot_;
+  backend.readAutoRefreshCoordinatorSourceSnapshot_ = () => {
+    const err = new Error("source read deadline");
+    err.code = "EXECUTION_DEADLINE";
+    throw err;
+  };
+
+  const first = backend.autoRefreshActiveRosterTickInternal_();
+  const pending = backend.readAutoRefreshFreshRetryPending_();
+  assert.equal(first.reason, "executionDeadline");
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(pending.attempt, 1);
+  assert.ok(pending.attemptId);
+  assert.ok(pending.notBeforeMs > Date.now());
+
+  backend.readAutoRefreshCoordinatorSourceSnapshot_ = originalRead;
+  backend.markAutoRefreshFreshRetryPending_("retryDue", Date.now() - 1, {
+    preserveAttempt: true, expectedAttemptId: pending.attemptId, failureRetry: true,
+    attempt: pending.attempt, phase: "retry",
+  });
+  const second = backend.autoRefreshWorkerTickInternal_();
+  assert.equal(second.inProgress, true);
+  assert.ok(backend.readAutoRefreshQueueCurrent_()?.runId);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+});
+
+test("hard stop before queue creation leaves an intent and watchdog for a later worker", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  installPublishedActiveVersion(backend, buildRosterData());
+  const originalRead = backend.readAutoRefreshCoordinatorSourceSnapshot_;
+  backend.readAutoRefreshCoordinatorSourceSnapshot_ = () => { throw new Error("abrupt stop before queue"); };
+  assert.throws(() => backend.startAutoRefreshQueueCoordinator_({ startedAt: new Date().toISOString() }), /abrupt stop/);
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.ok(backend.readAutoRefreshFreshRetryPending_()?.attemptId);
+  assert.ok(backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
+
+  backend.readAutoRefreshCoordinatorSourceSnapshot_ = originalRead;
+  const recovered = backend.autoRefreshWorkerTickInternal_();
+  assert.equal(recovered.inProgress, true);
+  assert.ok(backend.readAutoRefreshQueueCurrent_()?.runId);
+});
+
+test("temporary version-read failure never expands into a full source snapshot", () => {
+  const backend = loadBackend();
+  backend.readPublishedActiveVersionId_ = () => "version-1";
+  backend.firebaseRequestJson_ = () => ({ rosterIds: ["main"] });
+  backend.readActiveVersionRosterShards_ = () => {
+    const err = new Error("Firebase batch failed");
+    err.code = "FIREBASE_BATCH_DEFERRED";
+    throw err;
+  };
+  let fullReads = 0;
+  backend.readActiveRosterSnapshot_ = () => { fullReads++; throw new Error("full fallback must not run"); };
+  assert.throws(() => backend.readAutoRefreshCoordinatorSourceSnapshot_(), /Firebase batch failed/);
+  assert.equal(fullReads, 0);
+});
+
+test("Firebase bandwidth exhaustion pauses a fresh start without discarding its intent", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  backend.markAutoRefreshFreshRetryPending_("due", 0, { phase: "retry" });
+  backend.readAutoRefreshQueueCurrent_ = () => null;
+  let starts = 0;
+  backend.startAutoRefreshQueueCoordinator_ = () => { starts++; throw new Error("Firebase Realtime Database request failed (403): Bandwidth quota exceeded"); };
+
+  const first = backend.autoRefreshWorkerTickInternal_();
+  const second = backend.autoRefreshWorkerTickInternal_();
+
+  assert.equal(first.reason, "firebaseBandwidthQuota");
+  assert.equal(second.reason, "firebaseBandwidthCooldown");
+  assert.equal(starts, 1);
+  assert.ok(backend.readAutoRefreshFreshRetryPending_()?.attemptId);
+  assert.ok(backend.getAutoRefreshBandwidthCooldownUntilMs_() > Date.now());
+});
+
 test("deferred finalization leaves the task pending with one normal continuation", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { runId, tasks } = setupSyntheticQueueRun(backend, [
@@ -1676,8 +1756,11 @@ test("repairAutoRefreshScheduler recreates stale triggers and preserves a runnin
   assert.equal(result.removedAutoRefreshTriggers, 1);
   assert.equal(result.removedResumeTriggers, 0);
   const autoTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshActiveRosterTick");
+  const livenessTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshLivenessTick");
   const resumeTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
   assert.equal(autoTriggers.length, 1);
+  assert.equal(livenessTriggers.length, 1);
+  assert.equal(result.livenessTriggerId, livenessTriggers[0].getUniqueId());
   assert.equal(resumeTriggers.length, 1);
   assert.equal(backend.__properties.get("AUTO_REFRESH_TRIGGER_ID"), autoTriggers[0].getUniqueId());
   assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), resumeTriggers[0].getUniqueId());
@@ -1844,6 +1927,87 @@ test("permanent watchdog leaves a recent periodic heartbeat alone", () => {
   assert.equal(backend.__triggers.some((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick"), false);
 });
 
+test("15-minute liveness trigger repairs a missed periodic run after checking only queue state", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  const previousAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  backend.__properties.set("AUTO_REFRESH_LAST_PERIODIC_TICK_AT", previousAt);
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_STARTED_AT", previousAt);
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_FINISHED_AT", previousAt);
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_STATUS", "ok");
+  let queueReads = 0;
+  backend.readAutoRefreshQueueCurrent_ = () => { queueReads++; return null; };
+  backend.firebaseRequestJson_ = () => assert.fail("liveness must not read roster payloads");
+
+  const trigger = backend.ensureAutoRefreshLivenessTrigger_();
+  const result = backend.autoRefreshLivenessTick();
+  assert.equal(trigger.scheduled, true);
+  assert.equal(result.reason, "periodicHeartbeatOverdue");
+  assert.equal(queueReads, 1);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_().phase, "reconcile");
+  assert.ok(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"));
+});
+
+test("liveness resumes a slow active queue without creating a duplicate fresh intent", () => {
+  const backend = loadBackend();
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  const oldAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  backend.__properties.set("AUTO_REFRESH_LAST_PERIODIC_TICK_AT", oldAt);
+  backend.readAutoRefreshQueueCurrent_ = () => ({ kind: "auto-refresh-queue", status: "running", runId: "slow-run" });
+
+  const result = backend.autoRefreshLivenessTick();
+
+  assert.equal(result.reason, "activeRun");
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+  assert.ok(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"));
+});
+
+test("a finished fresh-start intent cannot be recreated by a late failure handler", () => {
+  const backend = loadBackend();
+  const intent = backend.markAutoRefreshFreshRetryPending_("starting", 0, { phase: "prequeue" });
+  assert.equal(backend.clearAutoRefreshFreshRetryPending_(intent.attemptId), true);
+
+  const staleRetry = backend.scheduleAutoRefreshFailureRetry_("lateFailure", intent);
+
+  assert.equal(staleRetry.superseded, true);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+});
+
+test("legacy pending cooldown is preserved when it gains an attempt identity", () => {
+  const backend = loadBackend();
+  const notBeforeMs = Date.now() + 75 * 60_000;
+  backend.__properties.set("AUTO_REFRESH_JOB_PENDING_FRESH_RETRY", `legacyCooldown|2026-09-25T00:00:00.000Z|${notBeforeMs}`);
+
+  const upgraded = backend.ensureAutoRefreshFreshIntent_("coordinatorStart");
+
+  assert.equal(upgraded.reason, "legacyCooldown");
+  assert.equal(upgraded.notBeforeMs, notBeforeMs);
+  assert.ok(upgraded.attemptId);
+});
+
+test("a periodic tick that finds an active queue does not leave a duplicate fresh intent", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId } = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+
+  const result = backend.startAutoRefreshQueueCoordinator_();
+
+  assert.equal(result.reason, "existingRun");
+  assert.equal(result.runId, runId);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+});
+
+test("liveness detects a started invocation with no terminal outcome after the lock lease", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  const startedAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+  backend.__properties.set("AUTO_REFRESH_LAST_PERIODIC_TICK_AT", startedAt);
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_STARTED_AT", startedAt);
+  backend.__properties.set("AUTO_REFRESH_LAST_RUN_FINISHED_AT", new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString());
+  const result = backend.autoRefreshLivenessTick();
+  assert.equal(result.reason, "unfinishedAttempt");
+  assert.ok(backend.readAutoRefreshFreshRetryPending_()?.attemptId);
+});
+
 test("admin diagnostics exposes current auto-refresh queue state without roster payloads", () => {
   const backend = installMemoryFirebase(loadBackend());
   backend.__properties.set("ADMIN_PW", "secret");
@@ -1938,8 +2102,8 @@ test("unexpected coordinator failures receive bounded exponential fresh retries"
   assert.equal(thirdPending.attempt, 3);
   assert.equal(fourth.retry.scheduled, false);
   assert.equal(fourth.retry.exhausted, true);
-  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
-  assert.equal(backend.__triggers.some((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick"), false);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_().phase, "exhausted");
+  assert.equal(fourth.retry.backstopScheduled, true);
 });
 
 test("autoRefreshActiveRosterTick schedules worker retry when overlap blocks coordinator", () => {
@@ -2031,9 +2195,9 @@ test("recent active write cooldown schedules a catch-up at the freshness boundar
   assert.equal(pending.reason, "recentActiveWriteCooldown");
   assert.ok(Math.abs(pending.notBeforeMs - expectedNotBeforeMs) < 10);
   assert.equal(workerTriggers.length, 1);
-  assert.equal(workerRequests.length, 1);
-  assert.ok(workerRequests[0].delayMs >= remainingCooldownMs + retryGraceMs - 1000);
-  assert.ok(workerRequests[0].delayMs <= remainingCooldownMs + retryGraceMs + 1000);
+  assert.equal(workerRequests.length, 2);
+  assert.ok(workerRequests[1].delayMs >= remainingCooldownMs + retryGraceMs - 1000);
+  assert.ok(workerRequests[1].delayMs <= remainingCooldownMs + retryGraceMs + 1000);
   assert.match(backend.__properties.get("AUTO_REFRESH_LAST_RUN_SUMMARY"), /Catch-up scheduled for/);
 });
 
@@ -2380,7 +2544,8 @@ test("queue coordinator stores tiny current state and sharded run data", () => {
   assert.equal(sourceOwnership.liveOwnerRosterIdByTag["#PLAYER"], "main");
   assert.equal(sourceOwnership.sourceOwnerRosterIdByTag["#PLAYER"], "main");
   const resumeTriggers = backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick");
-  assert.equal(resumeTriggers.length, 1);
+  assert.equal(resumeTriggers.length, 2);
+  assert.notEqual(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"), backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
 });
 
 test("regular-war-only queue coordinator omits CWL side tasks and persists that decision", () => {
@@ -5940,6 +6105,56 @@ test("terminal cleanup preserves a newer run and its owned dynamic triggers", ()
 
   assert.equal(backend.readAutoRefreshQueueCurrent_().runId, "new-run");
   assert.deepEqual(backend.__triggers.map((trigger) => trigger.getUniqueId()).sort(), triggerIds);
+});
+
+test("terminal cleanup retains a newer due intent and schedules its continuation", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const oldRun = setupQueueRun(backend, buildRosterData(), { runId: "old-run", rosterIds: ["main"] });
+  const due = backend.markAutoRefreshFreshRetryPending_("newerDue", Date.now() + 60_000, { phase: "retry" });
+  backend.scheduleAutoRefreshJobWatchdog_();
+
+  backend.archiveAndClearAutoRefreshQueueStateBestEffort_(oldRun.current, "completed", "old complete", "", "newer-intent-test");
+
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_().attemptId, due.attemptId);
+  assert.ok(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_ID"));
+  assert.equal(backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"), undefined);
+});
+
+test("a failed older queue keeps the newer refresh deadline and retry count", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  setupQueueRun(backend, buildRosterData(), { runId: "older-run", rosterIds: ["main"] });
+  const pending = backend.markAutoRefreshFreshRetryPending_("newerDue", Date.now() + 20 * 60_000, {
+    phase: "retry", failureRetry: true, attempt: 2,
+  });
+  backend.continueAutoRefreshQueueWorker_ = () => { throw new Error("older queue failed"); };
+
+  const result = backend.autoRefreshWorkerTickInternal_();
+  const retained = backend.readAutoRefreshFreshRetryPending_();
+
+  assert.equal(result.retry.preservedNewerIntent, true);
+  assert.equal(retained.attemptId, pending.attemptId);
+  assert.equal(retained.notBeforeMs, pending.notBeforeMs);
+  assert.equal(retained.attempt, 2);
+});
+
+test("a committed pre-queue run is recognized without starting a duplicate refresh", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  installPublishedActiveVersion(backend, buildRosterData());
+  const intent = backend.markAutoRefreshFreshRetryPending_("staging", 0, { runId: "source-1", phase: "staging" });
+  let queued = 0;
+  backend.enqueueCloudflareActiveTarget_ = (versionId) => { queued++; return { ok: true, versionId }; };
+  backend.readAutoRefreshCoordinatorSourceSnapshot_ = () => assert.fail("committed recovery must not reread roster source");
+
+  const result = backend.startAutoRefreshQueueCoordinator_();
+
+  assert.equal(result.reason, "alreadyCommitted");
+  assert.equal(queued, 1);
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_(), null);
+  assert.ok(backend.__properties.get("AUTO_REFRESH_LAST_CANONICAL_COMMIT_AT"));
+  assert.ok(intent.attemptId);
 });
 
 test("queue finalization completes canonically while Cloudflare publication is unavailable", () => {

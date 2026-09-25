@@ -378,7 +378,10 @@ function parseFirebaseJsonResponse_(responseRaw, contextRaw) {
 	const text = response && typeof response.getContentText === "function" ? String(response.getContentText() || "") : "";
 	const contextLabel = formatFirebaseRequestContext_(contextRaw);
 	if (!code || code < 200 || code >= 300) {
-		throw new Error("Firebase Realtime Database request failed" + contextLabel + " (" + code + "): " + text);
+		const failure = new Error("Firebase Realtime Database request failed" + contextLabel + " (" + code + "): " + text);
+		failure.code = "FIREBASE_HTTP";
+		failure.firebaseStatusCode = code;
+		throw failure;
 	}
 	const trimmed = text.trim();
 	if (!trimmed) return null;
@@ -404,6 +407,12 @@ function isFirebaseDailyUrlFetchQuotaError_(errRaw) {
 		text.indexOf("an einem tag") >= 0 ||
 		text.indexOf("zu häufig") >= 0
 	);
+}
+
+// Realtime Database bandwidth limits are independent of Apps Script's UrlFetch quota.
+function isFirebaseBandwidthQuotaError_(errRaw) {
+	const message = errorMessage_(errRaw).toLowerCase();
+	return message.indexOf("bandwidth quota exceeded") >= 0 || message.indexOf("download quota exceeded") >= 0;
 }
 
 // Preserve a resumable queue pause marker on a daily UrlFetch quota error.
@@ -473,6 +482,7 @@ function firebaseRequestJson_(pathRaw, methodRaw, payloadRaw, queryParamsRaw) {
 			code = response && typeof response.getResponseCode === "function" ? Number(response.getResponseCode()) : 0;
 		}
 	} catch (err) {
+		if (!isFirebaseDailyUrlFetchQuotaError_(err) && err && typeof err === "object" && !err.code) err.code = "FIREBASE_TRANSPORT";
 		throw markFirebaseDailyUrlFetchQuotaError_(err);
 	}
 
@@ -577,6 +587,7 @@ function buildFirebaseBatchFallbackDisabledError_(operationRaw, detailRaw) {
 	const detail = String(detailRaw == null ? "" : detailRaw).trim();
 	const err = new Error(operation + " failed with queue fallback disabled" + (detail ? ": " + detail : "") + ".");
 	err.name = "FirebaseBatchFallbackDisabledError";
+	err.code = "FIREBASE_BATCH_DEFERRED";
 	err.autoRefreshDefer = true;
 	err.reason = "firebaseBatch";
 	return markFirebaseDailyUrlFetchQuotaError_(err);
