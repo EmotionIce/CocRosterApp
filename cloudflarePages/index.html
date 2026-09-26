@@ -78,9 +78,10 @@
   }
   </script>
   <link rel="stylesheet" href="./styles.css?v=20260724a" />
+  <link rel="stylesheet" href="./observatory.css?v=20260926a" />
 </head>
 <body style="margin:0;">
-<div class="container public-shell">
+<div class="container public-shell" data-active-view="landing">
   <!-- Shared public header and navigation across all public views. -->
   <header class="public-header glass-surface glass-surface--strong">
     <div class="public-brand">
@@ -111,7 +112,7 @@
   </div>
 
   <!-- Marketing and clan-family landing experience. -->
-  <section id="publicViewLanding" class="public-view public-view--landing">
+  <section id="publicViewLanding" class="public-view public-view--landing" data-landing-experience="observatory">
     <div class="landing-shell">
       <section class="landing-hero" data-landing-reveal>
         <figure id="landingBannerSlot" class="landing-media-slot landing-media-slot--banner is-placeholder">
@@ -119,6 +120,13 @@
           <figcaption id="landingBannerPlaceholderText" class="landing-media-slot__placeholder">TURTLE banner preview</figcaption>
         </figure>
         <div class="landing-hero__constellation" aria-hidden="true"></div>
+        <div class="observatory-orbit" aria-hidden="true">
+          <span class="observatory-orbit__ring observatory-orbit__ring--outer"></span>
+          <span class="observatory-orbit__ring observatory-orbit__ring--inner"></span>
+          <span class="observatory-orbit__axis"></span>
+          <img class="observatory-orbit__emblem" src="./android-chrome-512x512.png" width="512" height="512" alt="" fetchpriority="high" />
+          <span class="observatory-orbit__caption">ONE FAMILY. EVERY ORBIT.</span>
+        </div>
         <div class="landing-hero__content">
           <p id="landingHeroEyebrow" class="landing-eyebrow">Join &bull; Match &bull; War</p>
           <h2 id="landingHeroTitle">TURTLE</h2>
@@ -367,7 +375,7 @@
 
 
   <script src="./public-config.js?v=20260721a"></script>
-  <script defer src="./client.js?v=20260724a"></script>
+  <script defer src="./client.js?v=20260926a"></script>
 </body>
 </html>
 

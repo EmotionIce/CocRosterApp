@@ -8902,6 +8902,8 @@
     // Pin scroll stories only when the viewport has enough vertical room to keep them usable.
     const canUseLandingPinnedStories_ = () => {
         if (typeof window === "undefined") return false;
+        // The Observatory layout keeps every chapter in the normal scroll flow.
+        if (document.querySelector('[data-landing-experience="observatory"]')) return false;
         const width = Number(window.innerWidth) || 0;
         const height = Number(window.innerHeight) || 0;
         if (typeof window.matchMedia !== "function") return height >= (width <= 820 ? 760 : 700);
