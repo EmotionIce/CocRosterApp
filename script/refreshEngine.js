@@ -411,7 +411,13 @@ function buildAutoRefreshSnapshotWaveOne_(connectedClanTagsRaw, currentWarClanTa
 		if (!key) continue;
 		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, key)) {
 			const data = fetched.dataByKey[key];
-			const items = Array.isArray(data && data.items) ? data.items : [];
+			let items;
+			try {
+				items = requireCocClanMemberItems_(data);
+			} catch (err) {
+				clanMembersErrorByTag[clanTag] = err;
+				continue;
+			}
 			clanMembersSnapshotByTag[clanTag] = {
 				clanTag: clanTag,
 				capturedAt: capturedAt,

@@ -3480,7 +3480,7 @@ function cleanupAutoRefreshRunRetention_(stateRaw) {
 // Apply all Firebase storage retention cleanup. This is intentionally separate
 // from archive cleanup: archives keep bounded backups, while activeVersions and
 // internal run shards are working storage and should not grow indefinitely.
-function cleanupFirebaseStorageRetention_(optionsRaw) {
+function cleanupFirebaseStorageRetention_(optionsRaw, stateRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	// Standalone/admin cleanup must not race a writer creating a new version or
 	// run after the protected references have been read. Reuse a held job lock.
@@ -3490,7 +3490,9 @@ function cleanupFirebaseStorageRetention_(optionsRaw) {
 		});
 	}
 	const cleanupAt = new Date().toISOString();
-	const state = buildFirebaseStorageRetentionState_(options);
+	// A supplied snapshot is internal to the currently held lock. The standalone
+	// path above deliberately discards it before acquiring a new lock.
+	const state = stateRaw || buildFirebaseStorageRetentionState_(options);
 	const activeVersions = cleanupActiveVersionRetention_(state);
 	const legacyCurrent = state.errors.length
 		? { deleted: false, reason: "retention-state-indeterminate" }
@@ -3516,10 +3518,10 @@ function cleanupFirebaseStorageRetention_(optionsRaw) {
 
 // Best-effort wrapper for hot paths where retention cleanup must never fail an
 // otherwise successful publish/refresh.
-function cleanupFirebaseStorageRetentionBestEffort_(labelRaw, optionsRaw) {
+function cleanupFirebaseStorageRetentionBestEffort_(labelRaw, optionsRaw, stateRaw) {
 	const label = String(labelRaw == null ? "Firebase storage retention cleanup" : labelRaw).trim() || "Firebase storage retention cleanup";
 	try {
-		return cleanupFirebaseStorageRetention_(optionsRaw);
+		return cleanupFirebaseStorageRetention_(optionsRaw, stateRaw);
 	} catch (err) {
 		Logger.log("%s failed: %s", label, errorMessage_(err));
 		return { ok: false, error: errorMessage_(err) };

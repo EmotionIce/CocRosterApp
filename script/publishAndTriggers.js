@@ -3439,7 +3439,7 @@ function writeAutoRefreshQueueLastJobState_(currentRaw, statusRaw, summaryRaw, e
 
 // Delete terminal run storage only when no live refresh, publisher, or repair
 // still references it. Unknown protection state must never authorize deletion.
-function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelRaw) {
+function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelRaw, stateRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const label = String(labelRaw == null ? "auto-refresh queue terminal cleanup" : labelRaw).trim() || "auto-refresh queue terminal cleanup";
 	const runId = normalizeActiveVersionId_(current && current.runId);
@@ -3447,7 +3447,13 @@ function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelR
 	let deletedRunShard = false;
 	let deletedStagingVersion = false;
 	try {
-		const state = buildFirebaseStorageRetentionState_();
+		if (!hasActiveRosterJobLockContext_()) {
+			return withActiveRosterJobLock_("auto-refresh-terminal-cleanup", 0, function () {
+				// Read fresh protection state only after acquiring the lock.
+				return cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(current, label);
+			});
+		}
+		const state = stateRaw || buildFirebaseStorageRetentionState_();
 		if (state.errors.length) {
 			Logger.log("%s: skipped terminal storage cleanup for %s because retention state is indeterminate.", label, runId);
 			return { deletedRunShard: false, deletedStagingVersion: false, skippedReason: "retention-state-indeterminate" };
@@ -3470,6 +3476,16 @@ function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelR
 function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, summaryRaw, errorRaw, labelRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const label = String(labelRaw == null ? "auto-refresh queue cleanup" : labelRaw).trim() || "auto-refresh queue cleanup";
+	if (!hasActiveRosterJobLockContext_()) {
+		try {
+			return withActiveRosterJobLock_("auto-refresh-archive-cleanup", 0, function () {
+				return archiveAndClearAutoRefreshQueueStateBestEffort_(current, statusRaw, summaryRaw, errorRaw, label);
+			});
+		} catch (err) {
+			Logger.log("%s: unable to acquire queue cleanup lock: %s", label, errorMessage_(err));
+			return;
+		}
+	}
 	try {
 		writeAutoRefreshQueueLastJobState_(current, statusRaw, summaryRaw, errorRaw);
 	} catch (err) {
@@ -3504,11 +3520,14 @@ function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, 
 			Logger.log("%s: unable to remove worker triggers: %s", label, errorMessage_(err));
 		}
 	}
-	cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(current, label);
 	try {
+		// Build once after the clear attempt, so a failed clear still protects the
+		// live run and both cleanup passes use the same references under this lock.
+		const state = buildFirebaseStorageRetentionState_();
+		cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(current, label, state);
 		cleanupFirebaseStorageRetentionBestEffort_(label + " storage retention", {
 			reason: label,
-		});
+		}, state);
 	} catch (err) {
 		Logger.log("%s: unable to run storage retention cleanup: %s", label, errorMessage_(err));
 	}
