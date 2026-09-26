@@ -1044,6 +1044,171 @@ test("storage retention cleanup keeps live active versions and deletes historica
   assert.equal(result.autoRefreshRuns.deletedCount, 1);
 });
 
+test("storage retention skips all deletion when a protected reference read fails", () => {
+  for (const failedPath of ["activePublished/currentVersionId", "internal/autoRefresh/current", "internal/cloudflarePublish/state", "internal/autoRefresh/canonicalRepairs"]) {
+    const backend = installMemoryFirebase(loadBackend(), {
+      activePublished: { currentVersionId: "current" },
+      activeVersions: { current: { manifest: {} }, staging: { needed: true } },
+      internal: { autoRefresh: {
+        current: { kind: "auto-refresh-queue", runId: "staging", sourceVersionId: "current", status: "running" },
+        runs: { staging: { tasks: { unfinished: true } } },
+      } },
+    });
+    const request = backend.firebaseRequestJson_;
+    const deletes = [];
+    backend.firebaseRequestJson_ = (path, method, ...args) => {
+      if (path === failedPath && method === "GET") throw new Error("simulated read failure");
+      if (method === "DELETE") deletes.push(path);
+      return request(path, method, ...args);
+    };
+    const result = backend.cleanupFirebaseStorageRetention_();
+    assert.equal(result.ok, false, failedPath);
+    assert.equal(result.activeVersions.skippedReason, "retention-state-indeterminate");
+    assert.equal(result.autoRefreshRuns.skippedReason, "retention-state-indeterminate");
+    assert.equal(result.legacyAutoRefreshCurrent.deleted, false);
+    assert.deepEqual(deletes, []);
+    assert.ok(request("internal/autoRefresh/runs/staging", "GET"));
+    assert.ok(request("internal/autoRefresh/current", "GET"));
+  }
+});
+
+test("legacy cleanup preserves the current queue when its kind read fails", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    internal: { autoRefresh: { current: { kind: "auto-refresh-queue", runId: "live" } } },
+  });
+  const request = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (path, method, ...args) => {
+    if (path === "internal/autoRefresh/current/kind" && method === "GET") throw new Error("simulated read failure");
+    return request(path, method, ...args);
+  };
+  const result = backend.cleanupLegacyAutoRefreshCurrentState_();
+  assert.equal(result.deleted, false);
+  assert.equal(result.reason, "classification-failed");
+  assert.equal(request("internal/autoRefresh/current", "GET").runId, "live");
+});
+
+test("retention protects publisher references until they are released", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    activePublished: { currentVersionId: "canonical" },
+    activeVersions: {
+      canonical: {}, committed: {}, pending: {}, "migration-source": {}, unrelated: {},
+    },
+    internal: { cloudflarePublish: { state: {
+      schemaVersion: 6, paused: true,
+      active: { committedVersionId: "committed", targetVersionId: "pending", phase: "commit",
+        migration: { sourceVersionId: "migration-source", targetVersionId: "pending" } },
+    } } },
+  });
+  let result = backend.cleanupFirebaseStorageRetention_();
+  assert.equal(result.ok, true);
+  assert.equal(result.activeVersions.deletedCount, 1);
+  for (const version of ["canonical", "committed", "pending", "migration-source"]) {
+    assert.ok(backend.firebaseRequestJson_("activeVersions/" + version, "GET"));
+  }
+  assert.equal(backend.firebaseRequestJson_("activeVersions/unrelated", "GET"), null);
+  backend.firebaseRequestJson_("internal/cloudflarePublish/state/active", "PUT", {
+    committedVersionId: "canonical", targetVersionId: "canonical", phase: "idle", migration: null,
+  });
+  result = backend.cleanupFirebaseStorageRetention_();
+  assert.equal(result.activeVersions.deletedCount, 3);
+  assert.ok(backend.firebaseRequestJson_("activeVersions/canonical", "GET"));
+});
+
+test("malformed publication references prevent retention deletion", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    activePublished: { currentVersionId: "current" },
+    activeVersions: { current: {}, needed: {} },
+    internal: { cloudflarePublish: { state: { active: "corrupt" } }, autoRefresh: { runs: { needed: {} } } },
+  });
+  const result = backend.cleanupFirebaseStorageRetention_();
+  assert.equal(result.ok, false);
+  assert.match(result.errors[0], /cloudflarePublishState/);
+  assert.ok(backend.firebaseRequestJson_("activeVersions/needed", "GET"));
+  assert.ok(backend.firebaseRequestJson_("internal/autoRefresh/runs/needed", "GET"));
+});
+
+test("standalone retention obtains the writer lock and does no reads when busy", () => {
+  const backend = installMemoryFirebase(loadBackend(), { activePublished: { currentVersionId: "current" } });
+  const request = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (...args) => {
+    assert.equal(backend.hasActiveRosterJobLockContext_(), true);
+    return request(...args);
+  };
+  assert.equal(backend.cleanupFirebaseStorageRetention_().ok, true);
+  assert.equal(backend.hasActiveRosterJobLockContext_(), false);
+  backend.PropertiesService.getScriptProperties().setProperty("ACTIVE_ROSTER_JOB_LOCK", JSON.stringify({
+    token: "writer", owner: "manual-publish", expiresAt: Date.now() + 60000,
+  }));
+  backend.firebaseRequestJson_ = () => assert.fail("Cleanup must not read stale protection state while a writer holds the lock");
+  assert.throws(() => backend.cleanupFirebaseStorageRetention_(), { code: "activeRosterJobLockBusy" });
+});
+
+test("terminal cleanup preserves publisher source versions and live run tasks", () => {
+  const backend = installMemoryFirebase(loadBackend(), {
+    activePublished: { currentVersionId: "canonical" },
+    activeVersions: { committed: {}, live: {}, unrelated: {} },
+    internal: {
+      cloudflarePublish: { state: { active: { committedVersionId: "committed", targetVersionId: "canonical" } } },
+      autoRefresh: {
+        current: { kind: "auto-refresh-queue", runId: "live", sourceVersionId: "canonical", status: "running" },
+        runs: { committed: {}, live: {}, unrelated: {} },
+      },
+    },
+  });
+  const terminal = runId => backend.cleanupTerminalAutoRefreshQueueRunStorageBestEffort_({ kind: "auto-refresh-queue", runId, status: "failed" });
+  assert.equal(terminal("committed").deletedStagingVersion, false);
+  assert.equal(backend.firebaseRequestJson_("internal/autoRefresh/runs/committed", "GET"), null);
+  assert.equal(terminal("live").deletedRunShard, false);
+  assert.ok(backend.firebaseRequestJson_("internal/autoRefresh/runs/live", "GET"));
+  assert.equal(terminal("unrelated").deletedStagingVersion, true);
+  backend.firebaseRequestJson_ = () => { throw new Error("simulated read failure"); };
+  assert.equal(terminal("committed").skippedReason, "retention-state-indeterminate");
+});
+
+test("malformed successful Clash responses are errors without extra retry traffic", () => {
+  const backend = loadBackend();
+  for (const body of ["<html>unavailable</html>", "", "null", "[]", "42", '"text"']) {
+    const err = captureError(() => backend.parseCocFetchResponse_({ getResponseCode: () => 200, getContentText: () => body }));
+    assert.equal(err.code, "COC_API_INVALID_RESPONSE");
+    assert.equal(backend.shouldRetryCocFetchError_(err), false);
+  }
+  const rateLimit = captureError(() => backend.parseCocFetchResponse_({
+    getResponseCode: () => 429, getContentText: () => "unavailable", getAllHeaders: () => ({ "Retry-After": "2" }),
+  }));
+  assert.equal(backend.shouldRetryCocFetchError_(rateLimit), true);
+  assert.equal(rateLimit.retryAfter, "2");
+});
+
+test("single and batched member reads reject malformed collections but accept empty clans", () => {
+  const backend = loadBackend();
+  const malformed = [{}, { items: null }, { items: {} }, { items: [null] }, { items: [[]] }, { items: [{}] }, { items: [{ tag: " " }] }];
+  for (const data of malformed) {
+    backend.cocFetch_ = () => data;
+    assert.throws(() => backend.fetchClanMembersSnapshot_("#CLAN"), { code: "COC_API_INVALID_RESPONSE" });
+    backend.cocFetchAllByPathEntries_ = () => ({
+      dataByKey: { "#BAD": data, "#EMPTY": { items: [] }, "#GOOD": { items: [{ tag: "#P0Y2", name: "Player", townHallLevel: 16 }] } },
+      errorByKey: {}, requestCount: 3, batchCount: 1,
+    });
+    const batch = backend.prefetchClanMembersSnapshotsByTag_(["#BAD", "#EMPTY", "#GOOD"]);
+    assert.equal(batch.snapshotByClanTag["#BAD"], undefined);
+    assert.equal(batch.errorByClanTag["#BAD"].code, "COC_API_INVALID_RESPONSE");
+    assert.equal(batch.snapshotByClanTag["#EMPTY"].members.length, 0);
+    assert.equal(batch.snapshotByClanTag["#GOOD"].members[0].tag, "#P0Y2");
+    assert.equal(batch.requestCount, 3);
+  }
+  backend.cocFetch_ = () => ({ items: [] });
+  assert.equal(backend.fetchClanMembersSnapshot_("#CLAN").members.length, 0);
+
+  const original = buildValidRosterData();
+  original.rosters[0].trackingMode = "regularWar";
+  original.rosters[0].connectedClanTag = "#P0Y2";
+  backend.cocFetch_ = () => ({});
+  const ownership = backend.buildLiveRosterOwnershipSnapshot_(original);
+  assert.throws(() => backend.syncClanRosterPoolCore_(original, "main", { ownershipSnapshot: ownership }), /Invalid Clash API response/);
+  assert.equal(original.rosters[0].main[0].tag, "#PLAYER");
+  assert.equal(original.rosters[0].missing.length, 0);
+});
+
 test("storage retention cleanup clears legacy full auto-refresh current state", () => {
   const backend = installMemoryFirebase(loadBackend(), {
     activePublished: {

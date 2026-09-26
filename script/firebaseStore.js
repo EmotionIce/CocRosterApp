@@ -3277,8 +3277,8 @@ function markFirebaseStorageRetentionId_(setRaw, idRaw) {
 	return id;
 }
 
-// Read current retention-protected ids. Only the published active version and a
-// live queue's source/staging versions are protected; historical copies are not.
+// Protect versions referenced by canonical data, live refresh/publication work,
+// and durable repairs. Unreferenced historical copies remain eligible for cleanup.
 function buildFirebaseStorageRetentionState_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
 	const retainedActiveVersionIds = {};
@@ -3318,6 +3318,24 @@ function buildFirebaseStorageRetentionState_(optionsRaw) {
 		const runId = markFirebaseStorageRetentionId_(retainedAutoRefreshRunIds, currentQueue.runId);
 		if (runId) markFirebaseStorageRetentionId_(retainedActiveVersionIds, runId);
 		markFirebaseStorageRetentionId_(retainedActiveVersionIds, currentQueue.sourceVersionId);
+	}
+	try {
+		const encoded = firebaseRequestJson_(FIREBASE_INTERNAL_CLOUDFLARE_PUBLISH_STATE_PATH, "GET");
+		const publicationQueue = encoded == null ? null : decodeFirebaseObjectKeysRecursive_(encoded);
+		if (publicationQueue != null) {
+			const active = publicationQueue.active;
+			if (!active || typeof active !== "object" || Array.isArray(active)) {
+				throw new Error("Cloudflare publication references are invalid.");
+			}
+			markFirebaseStorageRetentionId_(retainedActiveVersionIds, active.committedVersionId);
+			markFirebaseStorageRetentionId_(retainedActiveVersionIds, active.targetVersionId);
+			if (active.migration) {
+				markFirebaseStorageRetentionId_(retainedActiveVersionIds, active.migration.sourceVersionId);
+				markFirebaseStorageRetentionId_(retainedActiveVersionIds, active.migration.targetVersionId);
+			}
+		}
+	} catch (err) {
+		errors.push("cloudflarePublishState: " + errorMessage_(err));
 	}
 
 	// Canonical repair markers are durable references to immutable source and
@@ -3428,7 +3446,7 @@ function cleanupLegacyAutoRefreshCurrentState_() {
 	try {
 		kind = String(firebaseRequestJson_(buildFirebaseChildPath_(FIREBASE_INTERNAL_AUTO_REFRESH_JOB_PATH, "kind"), "GET") || "").trim();
 	} catch (err) {
-		kind = "";
+		return { deleted: false, reason: "classification-failed", error: errorMessage_(err) };
 	}
 	if (kind === "auto-refresh-queue") {
 		return { deleted: false, reason: "queue-current" };
@@ -3441,6 +3459,15 @@ function cleanupLegacyAutoRefreshCurrentState_() {
 // protected so workers can continue safely.
 function cleanupAutoRefreshRunRetention_(stateRaw) {
 	const state = stateRaw && typeof stateRaw === "object" ? stateRaw : buildFirebaseStorageRetentionState_();
+	if (state.errors && state.errors.length) {
+		return {
+			attempted: false,
+			deletedCount: 0,
+			skippedReason: "retention-state-indeterminate",
+			retainedRunIds: Object.keys(state.retainedAutoRefreshRunIds || {}).sort(),
+			retentionStateErrors: state.errors.slice(),
+		};
+	}
 	const result = cleanupFirebaseChildNodesExceptRetained_(FIREBASE_INTERNAL_AUTO_REFRESH_RUNS_PATH, state.retainedAutoRefreshRunIds, {
 		requireRetained: FIREBASE_AUTOREFRESH_RUN_HISTORY_KEEP_COUNT > 0,
 		keepNewestCount: FIREBASE_AUTOREFRESH_RUN_HISTORY_KEEP_COUNT,
@@ -3455,10 +3482,19 @@ function cleanupAutoRefreshRunRetention_(stateRaw) {
 // internal run shards are working storage and should not grow indefinitely.
 function cleanupFirebaseStorageRetention_(optionsRaw) {
 	const options = optionsRaw && typeof optionsRaw === "object" ? optionsRaw : {};
+	// Standalone/admin cleanup must not race a writer creating a new version or
+	// run after the protected references have been read. Reuse a held job lock.
+	if (!hasActiveRosterJobLockContext_()) {
+		return withActiveRosterJobLock_("storage-retention-cleanup", 0, function () {
+			return cleanupFirebaseStorageRetention_(options);
+		});
+	}
 	const cleanupAt = new Date().toISOString();
 	const state = buildFirebaseStorageRetentionState_(options);
 	const activeVersions = cleanupActiveVersionRetention_(state);
-	const legacyCurrent = cleanupLegacyAutoRefreshCurrentState_();
+	const legacyCurrent = state.errors.length
+		? { deleted: false, reason: "retention-state-indeterminate" }
+		: cleanupLegacyAutoRefreshCurrentState_();
 	const autoRefreshRuns = cleanupAutoRefreshRunRetention_(state);
 	firebaseRequestJson_(FIREBASE_META_PATH, "PATCH", {
 		layoutVersion: FIREBASE_LAYOUT_VERSION,
@@ -3469,7 +3505,7 @@ function cleanupFirebaseStorageRetention_(optionsRaw) {
 		storageRetentionLegacyAutoRefreshCurrentDeleted: !!legacyCurrent.deleted,
 	});
 	return {
-		ok: true,
+		ok: state.errors.length === 0 && !legacyCurrent.error,
 		cleanedAt: cleanupAt,
 		activeVersions: activeVersions,
 		autoRefreshRuns: autoRefreshRuns,

@@ -283,6 +283,16 @@ function cocFetchWithRetry_(requestConfigRaw, labelRaw, optionsRaw) {
 	throw new Error("Clash API request failed after retries.");
 }
 
+function buildInvalidCocResponseError_(detailRaw, statusRaw) {
+	const err = new Error("Invalid Clash API response: " + detailRaw + ".");
+	err.name = "CocApiError";
+	err.code = "COC_API_INVALID_RESPONSE";
+	err.statusCode = Number(statusRaw) || 200;
+	err.retryAfter = "";
+	err.apiBody = null;
+	return err;
+}
+
 // Parse CoC fetch response.
 function parseCocFetchResponse_(resRaw) {
 	const res = resRaw && typeof resRaw === "object" ? resRaw : null;
@@ -307,7 +317,10 @@ function parseCocFetchResponse_(resRaw) {
 	}
 
 	if (status >= 200 && status < 300) {
-		return body && typeof body === "object" ? body : {};
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			throw buildInvalidCocResponseError_("expected a JSON object", status);
+		}
+		return body;
 	}
 
 	let msg = "Clash API request failed (" + status + ").";
@@ -509,12 +522,28 @@ function getOpponentSideForClan_(war, clanTagRaw) {
 	return null;
 }
 
+// Reject malformed collections before any caller can interpret them as a real
+// empty clan. A valid empty items array is authoritative and remains supported.
+function requireCocClanMemberItems_(dataRaw) {
+	if (!dataRaw || typeof dataRaw !== "object" || !Array.isArray(dataRaw.items)) {
+		throw buildInvalidCocResponseError_("clan members items must be an array", 200);
+	}
+	const items = dataRaw.items;
+	for (let i = 0; i < items.length; i++) {
+		const member = items[i];
+		if (!member || typeof member !== "object" || Array.isArray(member) || typeof member.tag !== "string" || !normalizeTag_(member.tag)) {
+			throw buildInvalidCocResponseError_("clan member at index " + i + " has no valid tag", 200);
+		}
+	}
+	return items;
+}
+
 // Fetch clan members snapshot.
 function fetchClanMembersSnapshot_(clanTagRaw) {
 	const clanTag = normalizeTag_(clanTagRaw);
 	if (!clanTag) throw new Error("Clan tag is required.");
 	const data = cocFetch_("/clans/" + encodeTagForPath_(clanTag) + "/members");
-	const items = Array.isArray(data && data.items) ? data.items : [];
+	const items = requireCocClanMemberItems_(data);
 	return {
 		clanTag: clanTag,
 		capturedAt: new Date().toISOString(),
@@ -550,7 +579,13 @@ function prefetchClanMembersSnapshotsByTag_(clanTagsRaw, optionsRaw) {
 		const clanTag = entries[i].key;
 		if (Object.prototype.hasOwnProperty.call(fetched.dataByKey, clanTag)) {
 			const data = fetched.dataByKey[clanTag];
-			const items = Array.isArray(data && data.items) ? data.items : [];
+			let items;
+			try {
+				items = requireCocClanMemberItems_(data);
+			} catch (err) {
+				errorByClanTag[clanTag] = err;
+				continue;
+			}
 			snapshotByClanTag[clanTag] = {
 				clanTag: clanTag,
 				capturedAt: capturedAt,

@@ -3437,8 +3437,8 @@ function writeAutoRefreshQueueLastJobState_(currentRaw, statusRaw, summaryRaw, e
 	return summary;
 }
 
-// Delete terminal queue run storage. The published active version is preserved;
-// failed/stale staging versions are removed even if no published pointer exists.
+// Delete terminal run storage only when no live refresh, publisher, or repair
+// still references it. Unknown protection state must never authorize deletion.
 function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelRaw) {
 	const current = normalizeAutoRefreshQueueCurrent_(currentRaw);
 	const label = String(labelRaw == null ? "auto-refresh queue terminal cleanup" : labelRaw).trim() || "auto-refresh queue terminal cleanup";
@@ -3447,18 +3447,21 @@ function cleanupTerminalAutoRefreshQueueRunStorageBestEffort_(currentRaw, labelR
 	let deletedRunShard = false;
 	let deletedStagingVersion = false;
 	try {
-		firebaseRequestJson_(buildAutoRefreshRunPath_(runId, ""), "DELETE");
-		deletedRunShard = true;
-	} catch (err) {
-		Logger.log("%s: unable to delete run shard %s: %s", label, runId, errorMessage_(err));
-	}
-	try {
-		if (readPublishedActiveVersionId_() !== runId) {
+		const state = buildFirebaseStorageRetentionState_();
+		if (state.errors.length) {
+			Logger.log("%s: skipped terminal storage cleanup for %s because retention state is indeterminate.", label, runId);
+			return { deletedRunShard: false, deletedStagingVersion: false, skippedReason: "retention-state-indeterminate" };
+		}
+		if (!state.retainedAutoRefreshRunIds[runId]) {
+			firebaseRequestJson_(buildAutoRefreshRunPath_(runId, ""), "DELETE");
+			deletedRunShard = true;
+		}
+		if (!state.retainedActiveVersionIds[runId]) {
 			firebaseRequestJson_(buildActiveVersionPath_(runId, ""), "DELETE");
 			deletedStagingVersion = true;
 		}
 	} catch (err) {
-		Logger.log("%s: unable to delete staging active version %s: %s", label, runId, errorMessage_(err));
+		Logger.log("%s: terminal storage cleanup failed for %s: %s", label, runId, errorMessage_(err));
 	}
 	return { deletedRunShard: deletedRunShard, deletedStagingVersion: deletedStagingVersion };
 }
