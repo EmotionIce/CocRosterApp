@@ -456,6 +456,8 @@ body:has([data-active-view="landing"])::after{ display:none; }
   background:radial-gradient(ellipse at 20% 90%,rgba(214,247,109,.075),transparent 65%);
 }
 #publicViewLanding .landing-rhythm-beat h3{ font-size:clamp(27px,3vw,40px); max-width:19ch; }
+#publicViewLanding .landing-rhythm-beat{ width:100%; align-self:flex-start; }
+#publicViewLanding .landing-rhythm-chapter::after{ display:none; }
 #publicViewLanding .landing-rhythm .landing-rhythm-scene{ filter:none; }
 #publicViewLanding .landing-rhythm :is(.landing-war-plan__brief,.landing-war-attack,.landing-cwl-step,.landing-extra-event,.landing-progress-node){
   border-color:rgba(214,247,109,.2);
@@ -511,9 +513,92 @@ body:has([data-active-view="landing"])::after{ display:none; }
   from{ transform:scaleX(0); }
   to{ transform:scaleX(1); }
 }
+/* A readable progression sequence: the rail joins markers, never labels. */
+#publicViewLanding .landing-rhythm .landing-rhythm-scene--progress{
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  gap:24px;
+  padding:24px 0 0;
+}
+#publicViewLanding .landing-rhythm-scene--progress .landing-life-panel__top{ display:none; }
+#publicViewLanding .landing-rhythm .landing-progress-route{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  align-items:start;
+  gap:24px;
+  min-height:0;
+}
+#publicViewLanding .landing-rhythm .landing-progress-node{
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+  gap:14px;
+  min-height:0;
+  padding:0;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+  overflow:visible;
+}
+#publicViewLanding .landing-progress-node b{
+  display:grid;
+  place-items:center;
+  width:38px;
+  height:38px;
+  flex:none;
+  border:1px solid rgba(214,247,109,.28);
+  border-radius:50%;
+  background:#15191a;
+  color:var(--obs-accent);
+  font-size:11px;
+  font-weight:500;
+  letter-spacing:0;
+}
+#publicViewLanding .landing-progress-node em{
+  color:var(--obs-ink);
+  font-size:16px;
+  font-weight:500;
+  line-height:1.5;
+  overflow-wrap:anywhere;
+}
+#publicViewLanding .landing-progress-node > i{ display:none; }
+#publicViewLanding .landing-progress-path{
+  top:19px;
+  left:19px;
+  right:calc(33.333% - 11px);
+  height:1px;
+  z-index:0;
+  background:rgba(214,247,109,.15);
+}
+#publicViewLanding .landing-progress-path i{ opacity:.45; }
+#publicViewLanding .landing-progress-route.is-dense{ grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }
+#publicViewLanding .landing-progress-route.is-dense .landing-progress-path{ display:none; }
+#publicViewLanding .landing-progress-outcome{ justify-content:flex-start; padding:0; border:0; }
+#publicViewLanding .landing-progress-outcome > span{ display:none; }
+#publicViewLanding .landing-rhythm .landing-progress-outcome strong{
+  color:var(--obs-muted);
+  font-size:12px;
+  font-weight:400;
+  letter-spacing:.03em;
+  text-align:left;
+}
+#publicViewLanding .landing-rhythm .landing-extra-event{
+  padding:0;
+  border:0;
+  background:transparent;
+  gap:8px;
+}
+#publicViewLanding .landing-extra-event > i,
+#publicViewLanding .landing-extra-timeline__line{ display:none; }
+#publicViewLanding .landing-extra-event b{ font-size:15px; font-weight:500; line-height:1.4; }
+#publicViewLanding .landing-extra-event em{ color:var(--obs-muted); font-size:12px; line-height:1.5; }
 @media (max-width:640px){
   #publicViewLanding .landing-rhythm .landing-rhythm-chapter{ padding:24px; gap:24px; }
   #publicViewLanding .landing-rhythm-beat h3{ font-size:28px; }
+  #publicViewLanding .landing-rhythm .landing-progress-route{ grid-template-columns:1fr; gap:22px; }
+  #publicViewLanding .landing-rhythm .landing-progress-node{ flex-direction:row; align-items:center; gap:16px; }
+  #publicViewLanding .landing-progress-path{ display:none; }
 }
 @media (prefers-reduced-motion:reduce){
   #publicViewLanding *,#publicViewLanding *::before,#publicViewLanding *::after{ animation:none !important; transition:none !important; }
