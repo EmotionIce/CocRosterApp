@@ -1,0 +1,173 @@
+/* Decorative water stays in normal page flow; content never depends on animation. */
+#publicViewLanding{
+  --water-gutter:52px;
+  position:relative;
+  isolation:isolate;
+}
+#publicViewLanding .landing-shell{ position:relative; isolation:isolate; }
+.public-shell[data-active-view="landing"] .public-header{
+  position:sticky;
+  top:0;
+  z-index:50;
+  padding-block:16px;
+  background:rgba(9,10,13,.97);
+}
+#publicViewLanding .landing-hero{
+  z-index:1;
+  min-height:600px;
+  padding-bottom:136px;
+  border-bottom:0;
+  overflow:clip;
+}
+#publicViewLanding .landing-hero::before{
+  background:linear-gradient(90deg,#090a0d 0%,rgba(9,10,13,.88) 36%,rgba(9,10,13,.24)),linear-gradient(0deg,#090a0d,transparent 48%);
+}
+#publicViewLanding .observatory-orbit{
+  background:radial-gradient(ellipse at 50% 72%,rgba(214,247,109,.07),transparent 64%);
+}
+#publicViewLanding .observatory-orbit__emblem{ filter:saturate(.72); box-shadow:none; }
+#publicViewLanding .observatory-orbit__ring--outer{ animation:none; }
+#publicViewLanding .observatory-orbit__axis{ border-color:rgba(214,247,109,.09); }
+#publicViewLanding .observatory-orbit__caption{ z-index:3; color:#a1ad90; }
+.water-reflection{
+  position:absolute;
+  z-index:0;
+  top:79%;
+  left:18.5%;
+  width:63%;
+  height:24%;
+  overflow:hidden;
+  opacity:.22;
+  mask-image:linear-gradient(#000,transparent 96%);
+  -webkit-mask-image:linear-gradient(#000,transparent 96%);
+  pointer-events:none;
+}
+.water-reflection img{
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  object-position:50% 80%;
+  transform:scaleY(-1) scaleX(1.08);
+  filter:saturate(.3);
+}
+.water-surface{
+  position:relative;
+  z-index:2;
+  height:210px;
+  margin:-88px calc(-1 * clamp(20px,5vw,76px)) -32px;
+  overflow:clip;
+  contain:paint;
+  pointer-events:none;
+  mask-image:linear-gradient(transparent,#000 12%,#000 65%,transparent);
+  -webkit-mask-image:linear-gradient(transparent,#000 12%,#000 65%,transparent);
+}
+.water-surface__waves{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  transform:translate3d(0,var(--water-lift,0px),0);
+}
+.water-surface__back{ fill:#111e19; opacity:.65; }
+.water-surface__body{ fill:url(#waterSurfaceDepth); }
+.water-surface__edge{ fill:none; stroke:url(#waterSurfaceLight); stroke-width:1.4; }
+.water-surface__echo{ fill:none; stroke:url(#waterSurfaceLight); stroke-width:.7; opacity:.4; }
+.water-surface__echo--far{ opacity:.15; }
+.water-surface__sheen{
+  position:absolute;
+  inset:28% 4% 0;
+  background:repeating-radial-gradient(ellipse at 68% -65%,transparent 0 28px,rgba(214,247,109,.035) 29px,transparent 30px 48px);
+  transform:translate3d(var(--water-sheen,0px),0,0) scaleY(.55);
+  mask-image:linear-gradient(transparent,#000 35%,transparent);
+  -webkit-mask-image:linear-gradient(transparent,#000 35%,transparent);
+}
+.water-current{
+  position:absolute;
+  inset:0;
+  z-index:2;
+  display:block;
+  width:100%;
+  height:100%;
+  overflow:clip;
+  opacity:0;
+  pointer-events:none;
+  user-select:none;
+  color:var(--turtle-lime);
+}
+.water-ready .water-current{ opacity:1; }
+.water-current path{ fill:none; stroke-linecap:round; stroke-linejoin:round; }
+.water-current__track{ stroke:currentColor; stroke-width:1; opacity:.1; }
+.water-current__bloom{ stroke:currentColor; stroke-width:7; opacity:.055; }
+.water-current__flow{ stroke:currentColor; stroke-width:1.4; opacity:.6; }
+.water-current__branches path{ stroke:currentColor; stroke-width:1; opacity:.2; }
+.water-current__ripples ellipse{ fill:none; stroke:currentColor; stroke-width:1; opacity:0; }
+.water-current__head{ opacity:0; }
+.water-ready .water-current__head{ opacity:var(--water-head-opacity,0); }
+#publicViewLanding .landing-chapter{
+  position:relative;
+  z-index:1;
+  padding-left:var(--water-gutter);
+  border-bottom:0;
+}
+#publicViewLanding .landing-discovery{ padding-top:48px; }
+#publicViewLanding .landing-family-overview{ padding-top:64px; }
+#publicViewLanding .landing-family-overview::before,
+#publicViewLanding .landing-rhythm::before{
+  content:"";
+  display:block;
+  position:absolute;
+  inset:0 -20px;
+  z-index:-1;
+  background:radial-gradient(ellipse at 0 20%,rgba(214,247,109,.025),transparent 60%);
+  pointer-events:none;
+}
+#publicViewLanding .landing-fit-lane{ background:linear-gradient(135deg,rgba(214,247,109,.025),transparent 70%),#0d1112; }
+#publicViewLanding .landing-family-roster{ border-color:rgba(214,247,109,.12); background:rgba(214,247,109,.09); }
+#publicViewLanding .landing-family-roster__row{ background:#0d1112; }
+#publicViewLanding .landing-rhythm .landing-rhythm-chapter{
+  background:linear-gradient(145deg,#151c18,#0d1011 70%);
+  border-color:rgba(214,247,109,.12);
+}
+#publicViewLanding .landing-rhythm-chapter::before{
+  background:radial-gradient(ellipse at 5% 0,rgba(214,247,109,.085),transparent 70%);
+  opacity:calc(.18 + var(--life-focus,.5) * .75);
+}
+#publicViewLanding .landing-rhythm-chapter:nth-child(even)::before{
+  background:radial-gradient(ellipse at 90% 100%,rgba(214,247,109,.07),transparent 70%);
+}
+#publicViewLanding .landing-rhythm .landing-rhythm-chapter.is-life-revealed{ animation-duration:.8s; }
+@media (min-width:641px) and (max-width:980px){
+  #publicViewLanding .landing-discovery{ grid-template-columns:1fr; }
+  #publicViewLanding .landing-hero__content{ width:54%; }
+  #publicViewLanding .landing-hero__content h2{ font-size:clamp(62px,9vw,90px); }
+}
+@media (max-width:640px){
+  #publicViewLanding{ --water-gutter:22px; }
+  .public-shell[data-active-view="landing"] .public-header{ padding-block:12px 8px; }
+  #publicViewLanding .landing-hero{ min-height:0; padding-bottom:70px; }
+  #publicViewLanding .landing-hero__content{ width:100%; }
+  #publicViewLanding .observatory-orbit{ width:80%; margin-bottom:20px; }
+  .water-surface{ height:132px; margin-top:-66px; margin-bottom:-12px; }
+  .water-reflection{ opacity:.16; }
+  #publicViewLanding .landing-discovery{ padding-top:32px; }
+  #publicViewLanding .landing-family-overview{ padding-top:48px; }
+  #publicViewLanding .landing-rhythm .landing-rhythm-chapter{ padding:22px; }
+  #publicViewLanding .landing-family-roster__row{ grid-template-columns:18px minmax(0,1fr) auto; gap:8px; padding-inline:10px; }
+  #publicViewLanding .landing-family-roster__title{ font-size:18px; }
+  #publicViewLanding .landing-family-roster__count{ min-width:66px; }
+  #publicViewLanding .landing-family-roster__count strong{ font-size:26px; }
+  .water-current__flow{ stroke-width:1.1; opacity:.5; }
+  .water-current__bloom{ stroke-width:4; }
+}
+@media (max-width:359px){
+  #publicViewLanding .landing-fit-lane{ padding:12px; }
+  #publicViewLanding .landing-fit-lane strong{ font-size:16px; }
+}
+@media (prefers-reduced-motion:reduce){
+  .water-current__head{ display:none; }
+  .water-current__flow{ opacity:.18; }
+  .water-current__bloom,.water-current__ripples{ display:none; }
+  .water-surface__waves,.water-surface__sheen{ transform:none; }
+  #publicViewLanding .landing-rhythm-scene{ transform:none !important; }
+}

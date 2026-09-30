@@ -79,6 +79,7 @@
   </script>
   <link rel="stylesheet" href="./styles.css?v=20260724a" />
   <link rel="stylesheet" href="./observatory.css?v=20260930c" />
+  <link rel="stylesheet" href="./home-water.css?v=20260930a" />
 </head>
 <body style="margin:0;">
 <div class="container public-shell" data-active-view="landing">
@@ -114,6 +115,17 @@
   <!-- Marketing and clan-family landing experience. -->
   <section id="publicViewLanding" class="public-view public-view--landing" data-landing-experience="observatory">
     <div class="landing-shell">
+      <svg class="water-current" viewBox="0 0 1200 4000" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+        <defs>
+          <radialGradient id="waterCurrentGlow"><stop stop-color="#d6f76d" stop-opacity=".28"/><stop offset="1" stop-color="#d6f76d" stop-opacity="0"/></radialGradient>
+        </defs>
+        <path class="water-current__track" d="M 900 570 C 900 720 24 650 24 850 L 24 3800" />
+        <path class="water-current__bloom" pathLength="1" d="M 900 570 C 900 720 24 650 24 850 L 24 3800" />
+        <path class="water-current__flow" pathLength="1" d="M 900 570 C 900 720 24 650 24 850 L 24 3800" />
+        <g class="water-current__branches"></g>
+        <g class="water-current__ripples"></g>
+        <g class="water-current__head"><circle r="22" fill="url(#waterCurrentGlow)"/><circle r="3" fill="#d6f76d"/></g>
+      </svg>
       <section class="landing-hero" data-landing-reveal>
         <figure id="landingBannerSlot" class="landing-media-slot landing-media-slot--banner is-placeholder">
           <div id="landingBannerMediaHost" class="landing-media-slot__media hidden" aria-hidden="true"></div>
@@ -140,6 +152,21 @@
           </div>
         </div>
       </section>
+
+      <div class="water-surface" aria-hidden="true">
+        <svg class="water-surface__waves" viewBox="0 0 1440 260" preserveAspectRatio="none" focusable="false">
+          <defs>
+            <linearGradient id="waterSurfaceDepth" x2="0" y2="1"><stop stop-color="#1b2721"/><stop offset=".45" stop-color="#0e1815"/><stop offset="1" stop-color="#090a0d"/></linearGradient>
+            <linearGradient id="waterSurfaceLight"><stop stop-color="#d6f76d" stop-opacity="0"/><stop offset=".42" stop-color="#d6f76d" stop-opacity=".45"/><stop offset=".75" stop-color="#d6f76d" stop-opacity=".12"/><stop offset="1" stop-color="#d6f76d" stop-opacity="0"/></linearGradient>
+          </defs>
+          <path class="water-surface__back" d="M -20 85 C 320 12 530 164 810 92 S 1170 20 1460 68 L 1460 280 L -20 280 Z"/>
+          <path class="water-surface__body" d="M -20 118 C 280 40 580 200 850 110 S 1220 65 1460 100 L 1460 280 L -20 280 Z"/>
+          <path class="water-surface__edge" d="M -20 118 C 280 40 580 200 850 110 S 1220 65 1460 100"/>
+          <path class="water-surface__echo" d="M -20 140 C 280 62 580 222 850 132 S 1220 87 1460 122"/>
+          <path class="water-surface__echo water-surface__echo--far" d="M -20 160 C 280 82 580 242 850 152 S 1220 107 1460 142"/>
+        </svg>
+        <span class="water-surface__sheen"></span>
+      </div>
 
       <section class="landing-chapter landing-discovery" aria-labelledby="landingDiscoveryTitle" data-landing-reveal>
         <div class="landing-discovery__intro">
@@ -376,7 +403,7 @@
 
   <script src="./public-config.js?v=20260721a"></script>
   <script defer src="./client.js?v=20260926a"></script>
-  <script defer src="./life-motion.js?v=20260930a"></script>
+  <script defer src="./home-water.js?v=20260930a"></script>
 </body>
 </html>
 
