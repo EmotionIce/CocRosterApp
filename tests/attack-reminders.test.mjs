@@ -42,6 +42,8 @@ test('malformed, partial and inconsistent API observations never become reminder
     value => { value.opponent.members = []; },
     value => { value.clan.members[0].attacks = null; },
     value => { value.clan.attacks = 0; },
+    value => { delete value.clan.attacks; },
+    value => { delete value.opponent.attacks; },
     value => { delete value.teamSize; },
     value => { delete value._warObservedAt; },
     value => { value.clan.members[0].attacks[0].stars = '3'; },

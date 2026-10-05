@@ -50,7 +50,8 @@ function buildAttackReminderWarSnapshot_(warRaw, clanTagRaw, mode, warTagRaw, ob
 				attacksUsed: attacks.length,
 			};
 		}
-		if (side.attacks != null && (!Number.isInteger(side.attacks) || side.attacks !== totalAttacks)) return null;
+		if ((state !== "preparation" || side.attacks != null) &&
+			(!Number.isInteger(side.attacks) || side.attacks !== totalAttacks)) return null;
 	}
 	return sanitizeAttackReminderWarSnapshot_({
 		mode: mode, warId: mode === "cwl" ? normalizeTag_(warTagRaw) : getStableRegularWarKey_(war, clanTagRaw),
