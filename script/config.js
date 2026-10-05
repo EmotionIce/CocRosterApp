@@ -462,15 +462,8 @@ const PLAYER_METRICS_PLAYER_HOUSE_MAX_ELEMENTS = 8;
 const PLAYER_METRICS_MIN_ROSTER_COVERAGE_FOR_PUBLISH = 0.9;
 let activeRosterLockContextStack_ = [];
 
-// Bench planner weights and solver limits.
-const CWL_BENCH_PLANNER_CONFIG = {
-	algorithm: "cwl_bench_exact_dp_v2",
-	defaultSeasonDays: 7,
-	// Legacy strength scorer inputs are still used by CWL Preparation Mode.
-	priorMeanStarsPerStart: 2.0,
-	priorWeightAttacks: 2.5,
-	minExpectedStarsPerStart: 1.25,
-	maxExpectedStarsPerStart: 2.75,
+// Initial roster selection has separate inputs from in-season swap decisions.
+const CWL_PREPARATION_SCORING_CONFIG = {
 	perfPriorWeight: 3.0,
 	starsPerfPriorMean: 0.5,
 	destructionPerfPriorMean: 0.5,
@@ -483,43 +476,25 @@ const CWL_BENCH_PLANNER_CONFIG = {
 	weightThreeStarRate: 0.1,
 	weightHitUpAbility: 0.08,
 	weightHitEvenAbility: 0.08,
-	weightReliabilityPenalty: 0.2,
-	churnPenalty: 0.03,
-	reasonStrengthDeltaThreshold: 0.05,
-	// Bench planner v2 uses a separate fixed-scale value model.
-	supportedTownHallMin: 1,
-	supportedTownHallMax: 18,
-	unknownTownHallNormalized: 0.5,
-	qualityPriorMeanStarsWhenUsed: 3.0,
-	qualityPriorMeanDestruction: 100.0,
-	qualityPriorMeanThreeStarProbability: 1.0,
-	qualityPriorWeightAttacks: 2.0,
-	reliabilityPriorMean: 0.98,
-	reliabilityPriorWeight: 5.0,
-	currentCwlQualityWeight: 1.0,
-	previousCwlQualityWeight: 0.7,
-	regularWarQualityWeight: 0.35,
-	currentCwlReliabilityWeight: 1.0,
-	previousCwlReliabilityWeight: 0.7,
-	regularWarReliabilityWeight: 0.35,
-	previousCwlMaxAttacks: 12,
-	regularWarMaxAttacks: 24,
-	previousCwlMaxOpportunities: 12,
-	regularWarMaxOpportunities: 30,
-	benchWeightTownHall: 0.42,
-	benchWeightStarsWhenUsed: 0.28,
-	benchWeightDestructionWhenUsed: 0.12,
-	benchWeightThreeStarProbability: 0.12,
-	benchReliabilityExponent: 1.35,
-	rewardSelectionValueScale: 100000,
-	baselineValueScale: 100000,
-	optionalSwapMinScoreDelta: 0.08,
-	maxOptionalSwaps: 2,
-	reasonReliabilityDeltaThreshold: 0.12,
-	rewardOptimizerMaxPlayers: 60,
-	rewardOptimizerMaxCapacity: 240,
-	optimizerMaxPlayers: 42,
-	optimizerMaxDays: 8,
-	optimizerMaxStateCells: 250000,
-	optimizerScoreScale: 100000,
+};
+
+// Values are in stars per appearance, with explicit poor-result penalties.
+const CWL_BENCH_PLANNER_CONFIG = {
+	algorithm: "cwl_performance_swaps_v3",
+	defaultSeasonDays: 7,
+	unknownStarsPerAppearance: 2.0,
+	priorAppearances: 1.0,
+	currentSeasonDecay: 0.8,
+	oneStarPenalty: 1.0,
+	zeroStarPenalty: 1.25,
+	missedAttackPenalty: 1.5,
+	seasonMissPenalty: 0.75,
+	townHallBonus: 0.15,
+	poorAttackRateThreshold: 0.25,
+	minimumReplacementValue: 1.5,
+	maxReplacementTownHallDrop: 2,
+	poorPerformanceMinGain: 0.15,
+	meaningfulUpgradeMinGain: 0.35,
+	maxMarginalSwaps: 2,
+	rewardRotationMaxLoss: 0.05,
 };

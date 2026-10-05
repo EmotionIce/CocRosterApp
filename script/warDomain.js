@@ -92,6 +92,31 @@ function sanitizeAttackReminderWarSnapshot_(raw) {
 		complete: true, authoritative: true, byTag: byTag };
 }
 
+// Keep at most one result per war. Pending attacks have no result and cannot
+// become missed-attack evidence before the war ends.
+function sanitizeCwlAttackResults_(resultsRaw) {
+	const byWar = {};
+	const results = Array.isArray(resultsRaw) ? resultsRaw : [];
+	for (let i = 0; i < results.length; i++) {
+		const result = results[i];
+		if (!result || typeof result !== "object") continue;
+		const warId = String(result.warId || "").trim().slice(0, 180);
+		if (!warId || (result.missed !== true && (!Number.isInteger(result.stars) || result.stars < 0 || result.stars > 3))) continue;
+		const delta = result.townHallDelta;
+		const endedMs = parseIsoToMs_(result.endedAt);
+		byWar[warId] = {
+			warId: warId,
+			endedAt: endedMs > 0 ? new Date(endedMs).toISOString() : "",
+			missed: result.missed === true,
+			stars: result.missed === true ? 0 : result.stars,
+			destruction: Math.min(100, toNonNegativeInt_(result.destruction)),
+			townHallDelta: Number.isInteger(delta) ? Math.max(-18, Math.min(18, delta)) : null,
+		};
+	}
+	return Object.keys(byWar).map(function (key) { return byWar[key]; })
+		.sort(function (a, b) { return b.endedAt.localeCompare(a.endedAt) || a.warId.localeCompare(b.warId); }).slice(0, 8);
+}
+
 // Create an empty CWL stat entry.
 function createEmptyCwlStatEntry_() {
 	return {
@@ -1403,6 +1428,8 @@ function mergeCwlStatEntry_(dest, srcRaw) {
 	dest.bestStarsConceded = toNonNegativeInt_(dest.bestStarsConceded) + src.bestStarsConceded;
 	dest.bestDestructionConceded = toNonNegativeInt_(dest.bestDestructionConceded) + src.bestDestructionConceded;
 	dest.unattackedDefenseDays = toNonNegativeInt_(dest.unattackedDefenseDays) + src.unattackedDefenseDays;
+	const attackResults = sanitizeCwlAttackResults_((dest.attackResults || []).concat(src.attackResults || []));
+	if (attackResults.length) dest.attackResults = attackResults;
 }
 
 // Build incoming attack lists by defender tag.
@@ -1499,7 +1526,7 @@ function applyCwlDefenseToStatEntry_(stats, incomingAttacksRaw, warStateRaw) {
 }
 
 // Build compact CWL stats for one connected clan side in one war.
-function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw) {
+function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw, warTagRaw) {
 	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
 	const clanTag = normalizeTag_(clanTagRaw);
 	const sides = getWarSidesForClan_(war, clanTag);
@@ -1521,6 +1548,21 @@ function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw) {
 		const stats = createEmptyCwlStatEntry_();
 		applyCwlOffenseToStatEntry_(stats, member, opponentThByTag, warState);
 		applyCwlDefenseToStatEntry_(stats, incomingByDefenderTag[tag] || [], warState);
+		const attacks = Array.isArray(member.attacks) ? member.attacks : [];
+		const warId = normalizeTag_(warTagRaw || war.warTag) || String(war.endTime || war.startTime || "");
+		if (warId && (warState === "warended" || (warState === "inwar" && attacks.length > 0))) {
+			const attack = attacks[0] || {};
+			const defenderTh = opponentThByTag[normalizeTag_(attack.defenderTag)];
+			const attackerTh = readTownHallLevel_(member);
+			stats.attackResults = sanitizeCwlAttackResults_([{
+				warId: warId,
+				endedAt: String(war.endTime || war.startTime || ""),
+				missed: attacks.length === 0,
+				stars: attack.stars,
+				destruction: readAttackDestruction_(attack),
+				townHallDelta: attackerTh > 0 && defenderTh > 0 ? defenderTh - attackerTh : null,
+			}]);
+		}
 		out[tag] = stats;
 	}
 	return out;
@@ -2904,6 +2946,8 @@ function sanitizeCwlStatEntry_(entryRaw) {
 	out.bestStarsConceded = out.defenseStarsConceded;
 	out.bestDestructionConceded = toNonNegativeInt_(entry.bestDestructionConceded);
 	out.unattackedDefenseDays = toNonNegativeInt_(entry.unattackedDefenseDays);
+	const attackResults = sanitizeCwlAttackResults_(entry.attackResults);
+	if (attackResults.length) out.attackResults = attackResults;
 	return out;
 }
 

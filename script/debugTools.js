@@ -195,120 +195,18 @@ function runRegularWarFormStatsDebugScenarios() {
 // Handle run bench planner debug scenarios.
 function runBenchPlannerDebugScenarios() {
 	const config = getBenchPlannerConfig_();
-	const runScenario = (name, roster, remainingEditableDays, check, contextOptions) => {
-		const opts = contextOptions && typeof contextOptions === "object" ? contextOptions : {};
-		const seasonContext = {
-			source: opts.estimated ? "stats_estimate" : "debug",
-			contextSource: opts.estimated ? "stats_estimate" : "debug",
-			estimated: !!opts.estimated,
-			season: "debug",
-			totalSeasonDays: Math.max(0, toNonNegativeInt_(remainingEditableDays)),
-			completedDays: 0,
-			lockedDays: 0,
-			remainingEditableDays: Math.max(0, toNonNegativeInt_(remainingEditableDays)),
-			nextEditableDayIndex: remainingEditableDays > 0 ? toNonNegativeInt_(opts.nextEditableDayIndex) : -1,
-			roundStates: remainingEditableDays > 0 ? ["editable"] : [],
-			warnings: opts.estimated ? ["season-context-estimated"] : [],
-		};
-		const snapshot = buildCwlPlanningSnapshot_(roster, seasonContext, config);
-		const plan = solveSeasonLineupPlan_(snapshot, config);
-		const suggestions = deriveNextDaySwapSuggestionsFromPlan_(roster, plan, snapshot, config);
-		const summary = buildBenchSuggestionSummary_(roster, plan, suggestions, snapshot, config);
-		let pass = false;
-		try {
-			pass = !!check({ snapshot: snapshot, plan: plan, suggestions: suggestions, summary: summary });
-		} catch (err) {
-			pass = false;
-		}
-		return {
-			name: name,
-			pass: pass,
-			solverMode: plan.solverMode,
-			benchTags: suggestions.benchTags,
-			swapInTags: suggestions.swapInTags,
-			targetMainTags: suggestions.targetMainTags,
-			warnings: plan.warnings,
-		};
-	};
-
-	const rewardRoster = {
-		id: "dbg-reward",
-		title: "Reward",
-		badges: { main: 1, subs: 2 },
-		main: [createDebugPlayer_("#MAIN1", "StrongDone", 18)],
-		subs: [createDebugPlayer_("#NEED1", "NeedOne", 16, { isSub: true }), createDebugPlayer_("#BAD2", "NeedTwo", 18, { isSub: true })],
-		cwlStats: {
-			season: "debug",
-			byTag: {
-				"#MAIN1": createDebugStats_({ starsTotal: 9, resolvedWarDays: 3, attacksMade: 3, countedAttacks: 3, threeStarCount: 3, totalDestruction: 300 }),
-				"#NEED1": createDebugStats_({ starsTotal: 7, resolvedWarDays: 3, attacksMade: 3, countedAttacks: 3, threeStarCount: 3, totalDestruction: 300 }),
-				"#BAD2": createDebugStats_({ starsTotal: 2, resolvedWarDays: 3, attacksMade: 3, countedAttacks: 3, threeStarCount: 3, totalDestruction: 300 }),
-			},
-		},
-	};
-
-	const pendingRoster = {
-		id: "dbg-pending",
-		title: "Pending",
-		badges: { main: 1, subs: 1 },
-		main: [createDebugPlayer_("#PEND1", "PendingSecure", 16)],
-		subs: [createDebugPlayer_("#PEND2", "PendingNeedsFuture", 16, { isSub: true })],
-		cwlStats: {
-			season: "debug",
-			byTag: {
-				"#PEND1": createDebugStats_({ starsTotal: 5, currentWarAttackPending: 1 }),
-				"#PEND2": createDebugStats_({ starsTotal: 1, currentWarAttackPending: 1 }),
-			},
-		},
-	};
-
-	const restrictionRoster = {
-		id: "dbg-restrict",
-		title: "Restrictions",
-		badges: { main: 2, subs: 2 },
-		main: [createDebugPlayer_("#NEVER", "Never", 18, { excludeAsSwapTarget: true }), createDebugPlayer_("#KEEP", "Keep", 16)],
-		subs: [createDebugPlayer_("#ALWAYS", "Always", 15, { isSub: true, excludeAsSwapSource: true }), createDebugPlayer_("#FILL", "Fill", 15, { isSub: true })],
-		cwlStats: { season: "debug", byTag: {} },
-	};
-
-	const conflictRoster = {
-		id: "dbg-conflict",
-		title: "Conflict",
-		badges: { main: 1, subs: 0 },
-		main: [createDebugPlayer_("#BOTH", "Both", 16, { excludeAsSwapTarget: true, excludeAsSwapSource: true })],
-		subs: [],
-		cwlStats: { season: "debug", byTag: {} },
-	};
-
-	const optionalRoster = {
-		id: "dbg-optional",
-		title: "Optional",
-		badges: { main: 1, subs: 1 },
-		main: [createDebugPlayer_("#LOW", "Low", 12)],
-		subs: [createDebugPlayer_("#HIGH", "High", 18, { isSub: true })],
-		cwlStats: {
-			season: "debug",
-			byTag: {
-				"#LOW": createDebugStats_({ starsTotal: 8, resolvedWarDays: 3, attacksMade: 3, countedAttacks: 3, totalDestruction: 180 }),
-				"#HIGH": createDebugStats_({ starsTotal: 8, resolvedWarDays: 3, attacksMade: 3, countedAttacks: 3, threeStarCount: 3, totalDestruction: 300 }),
-			},
-		},
-	};
-
-	const scenarios = [
-		runScenario("feasible_reward_beats_impossible", rewardRoster, 1, (ctx) => ctx.suggestions.swapInTags.indexOf("#NEED1") >= 0 && ctx.suggestions.swapInTags.indexOf("#BAD2") < 0),
-		runScenario("pending_attack_cases", pendingRoster, 2, (ctx) => {
-			const one = ctx.snapshot.playersByTag["#PEND1"].rewardStatus;
-			const two = ctx.snapshot.playersByTag["#PEND2"].appearancesNeeded;
-			return one === "pending_current_attack" && two > 0;
-		}),
-		runScenario("hard_restrictions_apply", restrictionRoster, 2, (ctx) => ctx.suggestions.benchTags.indexOf("#NEVER") >= 0 && ctx.suggestions.swapInTags.indexOf("#ALWAYS") >= 0),
-		runScenario("conflicting_restrictions_noop", conflictRoster, 1, (ctx) => ctx.plan.invalidConstraints && ctx.suggestions.swapInTags.length === 0),
-		runScenario("estimated_context_suppresses_optional", optionalRoster, 2, (ctx) => ctx.suggestions.swapInTags.length === 0 && ctx.plan.warnings.indexOf("optional-swaps-suppressed-estimated-context") >= 0, { estimated: true }),
+	const main = createDebugPlayer_("#P0L", "Main", 16);
+	const sub = createDebugPlayer_("#Y0L", "Sub", 16, { isSub: true });
+	const cases = [
+		{ name: "good_main_stays", main: { starsTotal: 9, resolvedWarDays: 3, attacksMade: 3, countedAttacks: 3, threeStarCount: 3 }, sub: { starsTotal: 7, resolvedWarDays: 5, attacksMade: 5, countedAttacks: 5, threeStarCount: 1 }, reason: "" },
+		{ name: "missed_attack_replaced", main: { starsTotal: 3, resolvedWarDays: 2, attacksMade: 1, countedAttacks: 1, missedAttacks: 1, threeStarCount: 1 }, sub: { starsTotal: 4, resolvedWarDays: 2, attacksMade: 2, countedAttacks: 2 }, reason: "missed_attack" },
+		{ name: "one_star_replaced", main: { starsTotal: 2, resolvedWarDays: 2, attacksMade: 2, countedAttacks: 2 }, sub: { starsTotal: 4, resolvedWarDays: 2, attacksMade: 2, countedAttacks: 2 }, reason: "poor_performance" },
 	];
-
-	return {
-		ok: scenarios.every((s) => !!s.pass),
-		scenarios: scenarios,
-	};
+	const scenarios = cases.map(function (entry) {
+		const roster = { main: [main], subs: [sub], badges: { main: 1 }, cwlStats: { byTag: { "#P0L": entry.main, "#Y0L": entry.sub } } };
+		const snapshot = buildCwlPlanningSnapshot_(roster, { season: "debug", remainingEditableDays: 1, nextEditableDayIndex: 0 }, config);
+		const plan = solveSeasonLineupPlan_(snapshot, config);
+		return { name: entry.name, pass: entry.reason ? plan.pairs.length === 1 && plan.pairs[0].reasonCode === entry.reason : plan.pairs.length === 0, pairs: plan.pairs };
+	});
+	return { ok: scenarios.every(function (entry) { return entry.pass; }), scenarios: scenarios };
 }

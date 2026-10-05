@@ -4631,6 +4631,24 @@ function sanitizeCwlRuntimeContributionAggregate_(aggregateRaw, kindRaw) {
 
 function sanitizeCwlRuntimeContribution_(contributionRaw) {
 	const contribution = contributionRaw && typeof contributionRaw === "object" ? contributionRaw : {};
+	const aggregateByTag = sanitizeCwlRuntimeContributionAggregate_(contribution.aggregateByTag);
+	const warTag = normalizeTag_(contribution.warTag);
+	const state = normalizeWarState_(contribution.state);
+	// Settled records already contain one attack's exact stars and TH direction.
+	// Project those into the new bounded evidence without refetching ended wars.
+	if (warTag && (state === "warended" || state === "inwar")) {
+		Object.keys(aggregateByTag).forEach(function (tag) {
+			const stats = aggregateByTag[tag];
+			if (stats.attackResults && stats.attackResults.length) return;
+			const missed = state === "warended" && stats.missedAttacks === 1 && stats.countedAttacks === 0;
+			if (!missed && !(stats.countedAttacks === 1 && stats.starsTotal <= 3)) return;
+			stats.attackResults = sanitizeCwlAttackResults_([{
+				warId: warTag, endedAt: sanitizeSeasonEventTimestampOrEmpty_(contribution.endTime || contribution.startTime),
+				missed: missed, stars: stats.starsTotal, destruction: stats.totalDestruction,
+				townHallDelta: stats.hitUpCount === 1 ? 1 : stats.hitDownCount === 1 ? -1 : stats.sameThHitCount === 1 ? 0 : null,
+			}]);
+		});
+	}
 	const membersRaw = Array.isArray(contribution.members) ? contribution.members : [];
 	const members = [];
 	for (let i = 0; i < membersRaw.length; i++) {
@@ -4661,7 +4679,7 @@ function sanitizeCwlRuntimeContribution_(contributionRaw) {
 		startTime: sanitizeSeasonEventTimestampOrEmpty_(contribution.startTime),
 		endTime: sanitizeSeasonEventTimestampOrEmpty_(contribution.endTime),
 		members: members,
-		aggregateByTag: sanitizeCwlRuntimeContributionAggregate_(contribution.aggregateByTag),
+		aggregateByTag: aggregateByTag,
 		reminderWar: sanitizeAttackReminderWarSnapshot_(contribution.reminderWar),
 		historyStatsByTag: sanitizeCwlRuntimeContributionAggregate_(contribution.historyStatsByTag, "history"),
 		hash: sanitizeSeasonEventText_(contribution.hash, 120),
@@ -5538,7 +5556,7 @@ function buildCwlRuntimeContributionFromWar_(warRaw, warTagRaw, clanTagRaw, grou
 	if (!warTag || !clanTag || !sides) return null;
 	const state = normalizeWarState_(war.state);
 	const currentWar = buildCwlCurrentWarFromWar_(war, warTag, clanTag, roundIndexRaw);
-	const aggregateByTag = sanitizeCwlRuntimeContributionAggregate_(buildCwlWarAggregateForClan_(war, clanTag, null));
+	const aggregateByTag = sanitizeCwlRuntimeContributionAggregate_(buildCwlWarAggregateForClan_(war, clanTag, null, warTag));
 	const contribution = {
 		warTag: warTag,
 		clanTag: clanTag,
@@ -7782,7 +7800,7 @@ function buildCwlSeasonEventAggregateFromSnapshot_(eventRaw, rosterDataRaw, snap
 				const key = warTag + "|" + clanTag;
 				if (processedWarClanKey[key]) continue;
 				processedWarClanKey[key] = true;
-				mergeCwlAggregateByTag_(aggregateByTag, buildCwlWarAggregateForClan_(war, clanTag, null));
+				mergeCwlAggregateByTag_(aggregateByTag, buildCwlWarAggregateForClan_(war, clanTag, null, warTag));
 			}
 			if (relevantClanRoundCount > 0) {
 				relevantWarTagSet[warTag] = true;

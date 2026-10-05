@@ -2343,7 +2343,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			if (ingested) finalizedCwlWars++;
 		}
 
-		mergeCwlAggregateByTag_(byTag, buildCwlWarAggregateForClan_(war, ctx.clanTag, statsTrackedTagSet));
+		mergeCwlAggregateByTag_(byTag, buildCwlWarAggregateForClan_(war, ctx.clanTag, statsTrackedTagSet, warTag));
 	}
 
 	ctx.roster.cwlStats = {

@@ -201,8 +201,6 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 		if (scoreDelta != null) pairOut.scoreDelta = scoreDelta;
 		const reliabilityDelta = toFiniteNumberOrNull(pair.reliabilityDelta);
 		if (reliabilityDelta != null) pairOut.reliabilityDelta = reliabilityDelta;
-		if (typeof pair.rewardImpact === "string") pairOut.rewardImpact = pair.rewardImpact;
-		if (pair.optional === true) pairOut.optional = true;
 		pairs.push(pairOut);
 	}
 
@@ -219,18 +217,6 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 	const plannerSummaryRaw = suggestions.plannerSummary && typeof suggestions.plannerSummary === "object" ? suggestions.plannerSummary : null;
 	let plannerSummary = null;
 	if (plannerSummaryRaw) {
-		const rewardStatusByTagRaw = plannerSummaryRaw.rewardStatusByTag && typeof plannerSummaryRaw.rewardStatusByTag === "object" ? plannerSummaryRaw.rewardStatusByTag : {};
-		const rewardStatusByTag = {};
-		const rewardStatusTags = Object.keys(rewardStatusByTagRaw);
-		for (let i = 0; i < rewardStatusTags.length; i++) {
-			const tag = normalizeTag_(rewardStatusTags[i]);
-			if (!tag || !allowedTags[tag]) continue;
-			const status = String(rewardStatusByTagRaw[rewardStatusTags[i]] == null ? "" : rewardStatusByTagRaw[rewardStatusTags[i]])
-				.trim()
-				.slice(0, 80);
-			if (!status) continue;
-			rewardStatusByTag[tag] = status;
-		}
 		const roundStatesRaw = Array.isArray(plannerSummaryRaw.roundStates) ? plannerSummaryRaw.roundStates : [];
 		const roundStates = [];
 		for (let i = 0; i < roundStatesRaw.length && i < 10; i++) {
@@ -244,16 +230,12 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 			estimatedContext: toBooleanFlag_(plannerSummaryRaw.estimatedContext),
 			roundStates: roundStates,
 			historyStatus: String(plannerSummaryRaw.historyStatus == null ? "" : plannerSummaryRaw.historyStatus).trim(),
-			selectedRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.selectedRewardPlayerTags),
-			projectedRewardCompletePlayerTags: sanitizeTagList(plannerSummaryRaw.projectedRewardCompletePlayerTags),
-			securedRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.securedRewardPlayerTags),
-			requiredNextRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.requiredNextRewardPlayerTags),
-			capacityNextRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.capacityNextRewardPlayerTags),
-			selectedLaterRewardPlayerTags: sanitizeTagList(plannerSummaryRaw.selectedLaterRewardPlayerTags),
-			rewardStatusByTag: rewardStatusByTag,
-			rewardAppearancesReserved: toNonNegativeInt_(plannerSummaryRaw.rewardAppearancesReserved),
-			rewardCapacity: toNonNegativeInt_(plannerSummaryRaw.rewardCapacity),
-			optionalSwapCount: toNonNegativeInt_(plannerSummaryRaw.optionalSwapCount),
+			missedAttackSwapCount: toNonNegativeInt_(plannerSummaryRaw.missedAttackSwapCount),
+			performanceSwapCount: toNonNegativeInt_(plannerSummaryRaw.performanceSwapCount),
+			marginalSwapCount: toNonNegativeInt_(plannerSummaryRaw.marginalSwapCount),
+			rewardRotationCount: toNonNegativeInt_(plannerSummaryRaw.rewardRotationCount),
+			unreplacedMissedAttackTags: sanitizeTagList(plannerSummaryRaw.unreplacedMissedAttackTags),
+			unreplacedPoorPerformanceTags: sanitizeTagList(plannerSummaryRaw.unreplacedPoorPerformanceTags),
 			invalidConstraints: toBooleanFlag_(plannerSummaryRaw.invalidConstraints),
 			invalidReason: String(plannerSummaryRaw.invalidReason == null ? "" : plannerSummaryRaw.invalidReason).trim(),
 		};
@@ -269,34 +251,21 @@ function sanitizeRosterBenchSuggestions_(rawSuggestions, rosterPoolTagSet) {
 		const next = {};
 		const numericConfigKeys = [
 			"defaultSeasonDays",
-			"priorMeanStarsPerStart",
-			"priorWeightAttacks",
-			"minExpectedStarsPerStart",
-			"maxExpectedStarsPerStart",
-			"weightTH",
-			"weightStarsPerf",
-			"weightDestructionPerf",
-			"weightThreeStarRate",
-			"weightHitUpAbility",
-			"weightHitEvenAbility",
-			"weightReliabilityPenalty",
-			"preparationReliabilityExponent",
-			"churnPenalty",
-			"supportedTownHallMin",
-			"supportedTownHallMax",
-			"qualityPriorMeanStarsWhenUsed",
-			"qualityPriorMeanDestruction",
-			"qualityPriorMeanThreeStarProbability",
-			"qualityPriorWeightAttacks",
-			"reliabilityPriorMean",
-			"reliabilityPriorWeight",
-			"benchWeightTownHall",
-			"benchWeightStarsWhenUsed",
-			"benchWeightDestructionWhenUsed",
-			"benchWeightThreeStarProbability",
-			"benchReliabilityExponent",
-			"optionalSwapMinScoreDelta",
-			"maxOptionalSwaps",
+			"unknownStarsPerAppearance",
+			"priorAppearances",
+			"currentSeasonDecay",
+			"oneStarPenalty",
+			"zeroStarPenalty",
+			"missedAttackPenalty",
+			"seasonMissPenalty",
+			"townHallBonus",
+			"poorAttackRateThreshold",
+			"minimumReplacementValue",
+			"maxReplacementTownHallDrop",
+			"poorPerformanceMinGain",
+			"meaningfulUpgradeMinGain",
+			"maxMarginalSwaps",
+			"rewardRotationMaxLoss",
 		];
 		for (let i = 0; i < numericConfigKeys.length; i++) {
 			const key = numericConfigKeys[i];
@@ -792,6 +761,59 @@ function reconcileCwlPreparationAssignments_(rosterRaw) {
 	};
 }
 
+// Score the initial CWL preparation roster.
+function computeCwlPreparationStrengthScore_(playerStats, planningContext, config) {
+	const stats = playerStats && typeof playerStats === "object" ? playerStats : {};
+	const ctx = planningContext && typeof planningContext === "object" ? planningContext : {};
+	const weights = config && typeof config === "object" ? config : {};
+	const th = toNonNegativeInt_(stats.th);
+	const countedAttacks = toNonNegativeInt_(stats.countedAttacks);
+	const resolvedWarDays = toNonNegativeInt_(stats.resolvedWarDays);
+	const attackOpportunities = toNonNegativeInt_(stats.attackOpportunities) || resolvedWarDays;
+	const thMin = toNonNegativeInt_(ctx.thMin);
+	const thMax = toNonNegativeInt_(ctx.thMax);
+	const normTH = thMax > thMin ? clampNumber_((th - thMin) / (thMax - thMin), 0, 1) : 0.5;
+
+	const starsPerfPrior = normalizeUnitMetric_(weights.starsPerfPriorMean, 0.5);
+	const destructionPrior = normalizeUnitMetric_(weights.destructionPerfPriorMean, 0.5);
+	const perfPriorWeight = Math.max(0, Number(weights.perfPriorWeight) || 0);
+	const starsPerfRaw = normalizeUnitMetric_(stats.starsPerf, starsPerfPrior);
+	const destructionPerfRaw = normalizeUnitMetric_(stats.destructionPerf, destructionPrior);
+	const shrinkedStarsPerf = normalizeUnitMetric_(shrinkToward_(starsPerfRaw, starsPerfPrior, countedAttacks, perfPriorWeight), starsPerfPrior);
+	const shrinkedDestructionPerf = normalizeUnitMetric_(shrinkToward_(destructionPerfRaw, destructionPrior, countedAttacks, perfPriorWeight), destructionPrior);
+
+	const threeStarRateRaw = clampNumber_(toNonNegativeInt_(stats.threeStarCount) / Math.max(1, countedAttacks), 0, 1);
+	const threeStarRateMean = normalizeUnitMetric_(ctx.poolThreeStarRateMean, 0.33);
+	const shrinkedThreeStarRate = normalizeUnitMetric_(shrinkToward_(threeStarRateRaw, threeStarRateMean, countedAttacks, Math.max(0, Number(weights.threeStarRatePriorWeight) || 0)), threeStarRateMean);
+
+	const hitUpShare = clampNumber_(toNonNegativeInt_(stats.hitUpCount) / Math.max(1, countedAttacks), 0, 1);
+	const hitEvenShare = clampNumber_(toNonNegativeInt_(stats.sameThHitCount) / Math.max(1, countedAttacks), 0, 1);
+	const hitUpAbility = clampNumber_(0.65 * shrinkedStarsPerf + 0.35 * hitUpShare, 0, 1);
+	const hitEvenAbility = clampNumber_(0.65 * shrinkedStarsPerf + 0.35 * hitEvenShare, 0, 1);
+
+	const missRateRaw = clampNumber_(toNonNegativeInt_(stats.missedAttacks) / Math.max(1, attackOpportunities), 0, 1);
+	const poolMissRateMean = normalizeUnitMetric_(ctx.poolMissRateMean, 0.1);
+	const reliabilityPenalty = normalizeUnitMetric_(shrinkToward_(missRateRaw, poolMissRateMean, attackOpportunities, Math.max(0, Number(weights.reliabilityPriorWeight) || 0)), poolMissRateMean);
+
+	const baseScore = (Number(weights.weightTH) || 0) * normTH + (Number(weights.weightStarsPerf) || 0) * shrinkedStarsPerf + (Number(weights.weightDestructionPerf) || 0) * shrinkedDestructionPerf + (Number(weights.weightThreeStarRate) || 0) * shrinkedThreeStarRate + (Number(weights.weightHitUpAbility) || 0) * hitUpAbility + (Number(weights.weightHitEvenAbility) || 0) * hitEvenAbility;
+	const reliability = clampNumber_(1 - reliabilityPenalty, 0, 1);
+	const reliabilityExponent = Math.max(0.1, Number(weights.preparationReliabilityExponent) || 1);
+	const score = baseScore * Math.pow(reliability, reliabilityExponent);
+
+	return {
+		score: score,
+		baseScore: baseScore,
+		normTH: normTH,
+		shrinkedStarsPerf: shrinkedStarsPerf,
+		shrinkedDestructionPerf: shrinkedDestructionPerf,
+		shrinkedThreeStarRate: shrinkedThreeStarRate,
+		hitUpAbility: hitUpAbility,
+		hitEvenAbility: hitEvenAbility,
+		reliability: reliability,
+		reliabilityPenalty: reliabilityPenalty,
+	};
+}
+
 // Build CWL preparation ranking.
 function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	const roster = rosterRaw && typeof rosterRaw === "object" ? rosterRaw : {};
@@ -800,7 +822,7 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	const cwlStatsByTag = roster && roster.cwlStats && roster.cwlStats.byTag && typeof roster.cwlStats.byTag === "object" ? roster.cwlStats.byTag : {};
 	const warPerformance = roster && roster.warPerformance && typeof roster.warPerformance === "object" ? roster.warPerformance : {};
 	const warPerformanceByTag = warPerformance.byTag && typeof warPerformance.byTag === "object" ? warPerformance.byTag : {};
-	const config = options.config && typeof options.config === "object" ? options.config : getBenchPlannerConfig_();
+	const config = options.config && typeof options.config === "object" ? options.config : CWL_PREPARATION_SCORING_CONFIG;
 	const ranked = [];
 	let thMin = Number.MAX_SAFE_INTEGER;
 	let thMax = 0;
@@ -866,7 +888,7 @@ function buildCwlPreparationRanking_(rosterRaw, optionsRaw) {
 	};
 	const sectionPriority = { main: 0, subs: 1, missing: 2 };
 	for (let i = 0; i < ranked.length; i++) {
-		const strength = computeStrengthScore_(ranked[i].playerStats, planningContext, config);
+		const strength = computeCwlPreparationStrengthScore_(ranked[i].playerStats, planningContext, config);
 		const score = strength && isFinite(Number(strength.score)) ? Number(strength.score) : Number.NEGATIVE_INFINITY;
 		ranked[i].strengthScore = score;
 		ranked[i].strengthComponents = strength && typeof strength === "object" ? strength : null;
