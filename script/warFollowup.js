@@ -715,6 +715,26 @@ function applyWarFollowupOwner_(caseRaw, requestRaw, actorRaw, nowIsoRaw) {
 	);
 }
 
+// Read-only, bounded verification: one exact war, with no cached/retained
+// fallback and no roster refresh, publication or Firebase writes.
+function verifyAttackReminderWar(requestRaw, credential) {
+	assertWarFollowupAccess_(credential);
+	const request = requestRaw && typeof requestRaw === "object" ? requestRaw : {};
+	const clanTag = normalizeTag_(request.clanTag);
+	const mode = request.mode;
+	const warId = String(request.warId || "").trim();
+	if (!isValidClanTag_(clanTag) || (mode !== "regular" && mode !== "cwl") ||
+		!warId || warId.length > 240 || (mode === "cwl" && !isValidPlayerTag_(warId)) ||
+		(mode === "regular" && warId.split("|")[0] !== clanTag)) throw new Error("Invalid reminder war request.");
+	const path = mode === "cwl" ? "/clanwarleagues/wars/" + encodeTagForPath_(warId)
+		: "/clans/" + encodeTagForPath_(clanTag) + "/currentwar";
+	const war = cocFetch_(path);
+	const snapshot = buildAttackReminderWarSnapshot_(war, clanTag, mode, warId, war && war._warObservedAt);
+	if (!snapshot) return { snapshot: null, reason: "incomplete-war-response" };
+	if (snapshot.warId !== warId) return { snapshot: null, reason: "war-identifier-mismatch" };
+	return { snapshot: snapshot };
+}
+
 function getWarFollowupState(password) {
 	assertWarFollowupAccess_(password);
 	const values = firebaseBatchGetJson_([WAR_FOLLOWUP_SETTINGS_PATH, WAR_FOLLOWUP_CASES_PATH, WAR_FOLLOWUP_MODERATORS_PATH]);

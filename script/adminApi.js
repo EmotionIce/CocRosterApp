@@ -155,6 +155,8 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return setPlayerWarTrackingRolloutStage(args[0], args[1]);
 		case "getWarFollowupState":
 			return getWarFollowupState(args[0]);
+		case "verifyAttackReminderWar":
+			return verifyAttackReminderWar(args[0], args[1]);
 		case "syncWarFollowupModerator":
 			return syncWarFollowupModerator(args[0], args[1]);
 		case "getWarFollowupCase":

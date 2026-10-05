@@ -344,7 +344,15 @@ function parseCocFetchResponse_(resRaw) {
 function cocFetch_(path) {
 	const token = getCocApiToken_();
 	const req = buildCocFetchRequestConfig_(path, token);
-	return cocFetchWithRetry_(req, path);
+	return stampAttackReminderWarObservation_(cocFetchWithRetry_(req, path), path);
+}
+
+function stampAttackReminderWarObservation_(data, path) {
+	if (data && typeof data === "object" &&
+		(/^\/clans\/[^/]+\/currentwar$/.test(path) || /^\/clanwarleagues\/wars\/[^/]+$/.test(path))) {
+		data._warObservedAt = new Date().toISOString();
+	}
+	return data;
 }
 
 // Handle CoC fetch all by path entries.
@@ -440,7 +448,7 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 			try {
 				const response = responses && Array.isArray(responses) && responses[i] && typeof responses[i].getResponseCode === "function" ? responses[i] : null;
 				if (!response) throw new Error("Clash API fetchAll returned no response for " + entry.path + ".");
-				out.dataByKey[entry.key] = parseCocFetchResponse_(response);
+				out.dataByKey[entry.key] = stampAttackReminderWarObservation_(parseCocFetchResponse_(response), entry.path);
 			} catch (err) {
 				if (maxBatchRetryAttempts > 0 && shouldRetryCocFetchError_(err)) retryItems.push({ entry: entry, error: err });
 				else out.errorByKey[entry.key] = err;
@@ -481,7 +489,7 @@ function cocFetchAllByPathEntries_(entriesRaw, optionsRaw) {
 				try {
 					const response = retryResponses && retryResponses[i] && typeof retryResponses[i].getResponseCode === "function" ? retryResponses[i] : null;
 					if (!response) throw new Error("Clash API failed-chunk retry returned no response for " + entry.path + ".");
-					out.dataByKey[entry.key] = parseCocFetchResponse_(response);
+					out.dataByKey[entry.key] = stampAttackReminderWarObservation_(parseCocFetchResponse_(response), entry.path);
 				} catch (err) {
 					out.errorByKey[entry.key] = err;
 				}
@@ -766,6 +774,7 @@ function mapCurrentRegularWarFromApiData_(clanTagRaw, warRaw) {
 	return {
 		available: true,
 		state: currentWarMeta.state,
+		reminderWar: buildAttackReminderWarSnapshot_(warObj, clanTag, "regular", "", warObj._warObservedAt),
 		participants: mapApiMembers_(clanSide.members),
 		clanSide: clanSide,
 		opponentSide: opponentSide,

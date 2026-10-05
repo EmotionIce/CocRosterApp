@@ -4662,6 +4662,7 @@ function sanitizeCwlRuntimeContribution_(contributionRaw) {
 		endTime: sanitizeSeasonEventTimestampOrEmpty_(contribution.endTime),
 		members: members,
 		aggregateByTag: sanitizeCwlRuntimeContributionAggregate_(contribution.aggregateByTag),
+		reminderWar: sanitizeAttackReminderWarSnapshot_(contribution.reminderWar),
 		historyStatsByTag: sanitizeCwlRuntimeContributionAggregate_(contribution.historyStatsByTag, "history"),
 		hash: sanitizeSeasonEventText_(contribution.hash, 120),
 	};
@@ -5554,6 +5555,7 @@ function buildCwlRuntimeContributionFromWar_(warRaw, warTagRaw, clanTagRaw, grou
 		members: mapApiMembers_(sides.side && sides.side.members),
 		aggregateByTag: aggregateByTag,
 		historyStatsByTag: sanitizeCwlRuntimeContributionAggregate_(convertCwlAggregateToWarPerformanceStatsByTag_(aggregateByTag), "history"),
+		reminderWar: buildAttackReminderWarSnapshot_(war, clanTag, "cwl", warTag, war._warObservedAt),
 		hash: "",
 	};
 	contribution.hash = buildCwlRuntimeContributionHash_(contribution);
@@ -6045,6 +6047,7 @@ function buildCwlRuntimeViews_(runtimeRaw, clanTagsRaw) {
 		const contributions = [];
 		const roundIndexes = Object.keys(roundsRaw).sort((left, right) => toNonNegativeInt_(left) - toNonNegativeInt_(right));
 		let currentWar = null;
+		let reminderWar = null;
 		for (let j = 0; j < roundIndexes.length; j++) {
 			const round = sanitizeCwlRuntimeRound_(roundsRaw[roundIndexes[j]]);
 			if (!round.warTag) continue;
@@ -6069,7 +6072,9 @@ function buildCwlRuntimeViews_(runtimeRaw, clanTagsRaw) {
 					endTime: contribution.endTime,
 				});
 			}
-			if (!currentWar && (record.state === "preparation" || record.state === "inwar")) {
+			if ((record.state === "preparation" || record.state === "inwar") &&
+				(!currentWar || (currentWar.state !== "inwar" && record.state === "inwar"))) {
+				reminderWar = sanitizeAttackReminderWarSnapshot_(contribution.reminderWar);
 				currentWar = {
 					warTag: record.warTag,
 					state: record.state,
@@ -6119,6 +6124,7 @@ function buildCwlRuntimeViews_(runtimeRaw, clanTagsRaw) {
 			rounds: roundIndexes.map((key) => sanitizeCwlRuntimeRound_(roundsRaw[key])),
 			currentWar: currentWar,
 			aggregateByTag: sanitizeCwlRuntimeContributionAggregate_(aggregateByTag),
+			reminderWar: reminderWar,
 			settledAggregateByTag: sanitizeCwlRuntimeContributionAggregate_(settledAggregateByTag),
 			contributions: contributions,
 			seasonContext: buildCwlRuntimeSeasonContextForClan_(runtime, clanTag),

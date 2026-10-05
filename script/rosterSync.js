@@ -1612,6 +1612,7 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 		byTag: byTag,
 	};
 	if (cwlCurrentWar) ctx.roster.cwlStats.currentWar = cwlCurrentWar;
+	ctx.roster.cwlStats.reminderWar = sanitizeAttackReminderWarSnapshot_(cwlView.reminderWar);
 	warPerformance.lastRefreshedAt = nowIso;
 	ctx.roster.warPerformance = warPerformance;
 	clearRosterBenchSuggestions_(ctx.roster);
@@ -2317,14 +2318,16 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	let cwlCurrentWar = preparationWar
 		? buildCwlCurrentWarFromWar_(preparationWar.war, preparationWar.warTag, ctx.clanTag, preparationWar.roundIndex)
 		: null;
+	let reminderWar = null;
 
 	for (let i = 0; i < usableWars.length; i++) {
 		const warTag = usableWars[i].warTag;
 		const war = usableWars[i].war;
 		const warState = usableWars[i].warState;
 		warsProcessed++;
-		if (!cwlCurrentWar && warState === "inwar") {
+		if (warState === "inwar" && (!cwlCurrentWar || cwlCurrentWar.state !== "inwar")) {
 			cwlCurrentWar = buildCwlCurrentWarFromWar_(war, warTag, ctx.clanTag, i);
+			reminderWar = buildAttackReminderWarSnapshot_(war, ctx.clanTag, "cwl", warTag, war._warObservedAt);
 		}
 		if (warState === "warended") {
 			const ingested = ingestCwlWarIntoWarPerformance_(
@@ -2349,6 +2352,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		byTag: byTag,
 	};
 	if (cwlCurrentWar) ctx.roster.cwlStats.currentWar = cwlCurrentWar;
+	ctx.roster.cwlStats.reminderWar = reminderWar;
 	warPerformance.lastRefreshedAt = nowIso;
 	ctx.roster.warPerformance = warPerformance;
 	clearRosterBenchSuggestions_(ctx.roster);
@@ -2751,6 +2755,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	ctx.roster.regularWar = {
 		lastRefreshedAt: nowIso,
 		currentWar: currentWarMeta,
+		reminderWar: !isCurrentWarPrivate && currentWar ? sanitizeAttackReminderWarSnapshot_(currentWar.reminderWar) : null,
 		aggregateMeta: sanitizeRegularWarAggregateMeta_(aggregateMeta),
 		byTag: byTag,
 		membershipByTag: membershipByTag,

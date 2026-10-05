@@ -72,6 +72,8 @@ const loadQueue = (dateOverride = Date) => {
       deleteProperty: (key) => properties.delete(key),
     }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, waitLock() {}, releaseLock() {} }) },
+    hasActiveRosterJobLockContext_: () => false,
+    withActiveRosterJobLock_: (_owner, _wait, callback) => callback(),
     ScriptApp: {
       getProjectTriggers: () => { triggerCalls.enumerations += 1; return triggers.slice(); },
       deleteTrigger: (trigger) => {

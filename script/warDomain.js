@@ -3,6 +3,94 @@
 const REGULAR_WAR_ATTACK_CONTEXT_SCHEMA_VERSION = 1;
 const REGULAR_WAR_ATTACK_CONTEXT_MAX_ATTACKS = 4;
 
+// Reminder evidence belongs to one API observation of one war, never a season
+// aggregate. Missing attack arrays mean zero attacks in the Clash API; malformed
+// arrays, incomplete lineups and inconsistent totals must fail closed.
+function buildAttackReminderWarSnapshot_(warRaw, clanTagRaw, mode, warTagRaw, observedAtRaw) {
+	const war = warRaw && typeof warRaw === "object" ? warRaw : {};
+	const meta = war.currentWarMeta || war;
+	const sides = getWarSidesForClan_(war, normalizeTag_(clanTagRaw));
+	if (!sides || (mode !== "regular" && mode !== "cwl")) return null;
+	const state = normalizeWarState_(meta.state || war.state);
+	const teamSize = Number(meta.teamSize);
+	const allowed = mode === "cwl" ? 1 : Number(meta.attacksPerMember);
+	const startMs = parseIsoToMs_(meta.startTime);
+	const endMs = parseIsoToMs_(meta.endTime);
+	const observedMs = parseIsoToMs_(observedAtRaw || war._warObservedAt);
+	if (["preparation", "inwar", "warended"].indexOf(state) < 0 ||
+		!Number.isInteger(teamSize) || teamSize < 1 || teamSize > 100 ||
+		!Number.isInteger(allowed) || allowed < 1 || allowed > 4 ||
+		!startMs || endMs <= startMs || !observedMs) return null;
+	const byTag = {};
+	const seenTags = {};
+	for (const side of [sides.side, sides.opponentSide]) {
+		if (!side || !Array.isArray(side.members) || side.members.length !== teamSize) return null;
+		let totalAttacks = 0;
+		for (const member of side.members) {
+			const tag = normalizeTag_(member && member.tag);
+			if (!isValidPlayerTag_(tag) || seenTags[tag] ||
+				(member.attacks !== undefined && !Array.isArray(member.attacks))) return null;
+			seenTags[tag] = true;
+			const attacks = member.attacks || [];
+			if (attacks.length > allowed) return null;
+			const orders = {};
+			for (const attack of attacks) {
+				if (!attack || typeof attack !== "object" || Array.isArray(attack) ||
+					!isValidPlayerTag_(attack.defenderTag) ||
+					!Number.isInteger(attack.stars) || attack.stars < 0 || attack.stars > 3 ||
+					(attack.attackerTag != null && normalizeTag_(attack.attackerTag) !== tag)) return null;
+				if (attack.order != null) {
+					if (!Number.isInteger(attack.order) || attack.order < 1 || orders[attack.order]) return null;
+					orders[attack.order] = true;
+				}
+			}
+			totalAttacks += attacks.length;
+			if (side === sides.side) byTag[tag] = {
+				name: String(member.name || tag).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 80),
+				attacksUsed: attacks.length,
+			};
+		}
+		if (side.attacks != null && (!Number.isInteger(side.attacks) || side.attacks !== totalAttacks)) return null;
+	}
+	return sanitizeAttackReminderWarSnapshot_({
+		mode: mode, warId: mode === "cwl" ? normalizeTag_(warTagRaw) : getStableRegularWarKey_(war, clanTagRaw),
+		clanTag: normalizeTag_(sides.side.tag), clanName: String(sides.side.name || ""),
+		state: state, startTime: new Date(startMs).toISOString(), endTime: new Date(endMs).toISOString(),
+		observedAt: new Date(observedMs).toISOString(), teamSize: teamSize, attacksAllowed: allowed,
+		complete: true, authoritative: true, byTag: byTag,
+	});
+}
+
+function sanitizeAttackReminderWarSnapshot_(raw) {
+	if (!raw || raw.complete !== true || raw.authoritative !== true ||
+		(raw.mode !== "regular" && raw.mode !== "cwl")) return null;
+	const clanTag = normalizeTag_(raw.clanTag);
+	const warId = String(raw.warId || "").trim();
+	const state = normalizeWarState_(raw.state);
+	const startMs = parseIsoToMs_(raw.startTime), endMs = parseIsoToMs_(raw.endTime), observedMs = parseIsoToMs_(raw.observedAt);
+	const allowed = raw.attacksAllowed, size = raw.teamSize;
+	if (!isValidClanTag_(clanTag) || !warId || warId.length > 240 ||
+		(raw.mode === "cwl" && !isValidPlayerTag_(warId)) ||
+		(raw.mode === "regular" && warId.split("|")[0] !== clanTag) ||
+		["preparation", "inwar", "warended"].indexOf(state) < 0 || !startMs || endMs <= startMs || !observedMs ||
+		!Number.isInteger(size) || size < 1 || size > 100 ||
+		!Number.isInteger(allowed) || allowed < 1 || allowed > 4 || (raw.mode === "cwl" && allowed !== 1) ||
+		!raw.byTag || typeof raw.byTag !== "object" || Array.isArray(raw.byTag)) return null;
+	const byTag = {};
+	for (const key of Object.keys(raw.byTag)) {
+		const tag = normalizeTag_(key), entry = raw.byTag[key];
+		if (!isValidPlayerTag_(tag) || byTag[tag] || !entry || !Number.isInteger(entry.attacksUsed) ||
+			entry.attacksUsed < 0 || entry.attacksUsed > allowed) return null;
+		byTag[tag] = { name: String(entry.name || tag).slice(0, 80), attacksUsed: entry.attacksUsed,
+			attacksAllowed: allowed, attacksRemaining: allowed - entry.attacksUsed };
+	}
+	if (Object.keys(byTag).length !== size) return null;
+	return { mode: raw.mode, warId: warId, clanTag: clanTag, clanName: String(raw.clanName || "").slice(0, 80),
+		state: state, startTime: new Date(startMs).toISOString(), endTime: new Date(endMs).toISOString(),
+		observedAt: new Date(observedMs).toISOString(), teamSize: size, attacksAllowed: allowed,
+		complete: true, authoritative: true, byTag: byTag };
+}
+
 // Create an empty CWL stat entry.
 function createEmptyCwlStatEntry_() {
 	return {
@@ -2952,6 +3040,8 @@ function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
 	};
 	const currentWar = sanitizeCwlCurrentWar_(stats.currentWar);
 	if (currentWar) out.currentWar = currentWar;
+	const reminderWar = sanitizeAttackReminderWarSnapshot_(stats.reminderWar);
+	if (reminderWar && reminderWar.mode === "cwl") out.reminderWar = reminderWar;
 	return out;
 }
 
@@ -2989,5 +3079,7 @@ function sanitizeRosterRegularWar_(regularWarRaw, retainedTagSet) {
 		aggregateMeta: sanitizeRegularWarAggregateMeta_(regularWar.aggregateMeta),
 		byTag: byTag,
 		membershipByTag: membershipByTag,
+		reminderWar: regularWar.reminderWar && regularWar.reminderWar.mode === "regular"
+			? sanitizeAttackReminderWarSnapshot_(regularWar.reminderWar) : null,
 	};
 }
