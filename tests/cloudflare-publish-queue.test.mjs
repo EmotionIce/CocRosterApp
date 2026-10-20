@@ -1256,6 +1256,59 @@ test("active public manifest/roster phase reads no metrics", () => {
   assert.equal(reads.some((path) => path.includes("playerMetrics")), false);
 });
 
+test("immutable roster publication preserves Firebase keys without a decode/encode round trip", () => {
+  const q = loadQueue();
+  const codec = loadRealFirebaseCodec();
+  const rosterId = "main.war#1";
+  const encodedId = Object.keys(codec.encode({ [rosterId]: true }))[0];
+  const roster = { id: rosterId, history: [{ byTag: { "#PLAYER": { "__FB64__literal": { "a.b": 3 } } } }] };
+  const encodedRoster = codec.encode(roster);
+  const manifest = { versionId: "version-B", rosterIds: [rosterId] };
+  const encodedManifest = codec.encode(manifest);
+  q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
+  q.encodeFirebaseObjectKey_ = (key) => Object.keys(codec.encode({ [key]: true }))[0];
+  q.firebaseRequestJson_ = (path) => {
+    assert.equal(path, "activeVersions/version-B/manifest");
+    return encodedManifest;
+  };
+  q.firebaseBatchGetJson_ = (paths, options) => {
+    assert.deepEqual(Array.from(paths), [`activeVersions/version-B/rosters/${encodedId}`]);
+    assert.equal(options.disableFallback, true);
+    return { [paths[0]]: encodedRoster };
+  };
+  q.decodeFirebaseObjectKeysRecursive_ = (value) => {
+    assert.strictEqual(value, encodedManifest, "only the small manifest needs decoding");
+    return codec.decode(value);
+  };
+  q.encodeFirebaseObjectKeysRecursive_ = (value) => {
+    assert.equal(value.versionId, manifest.versionId, "only the manifest needs re-encoding");
+    return codec.encode(value);
+  };
+  const built = q.buildCloudflareActivePhaseRequest_(activeState(q), { phase: "public-manifest-rosters" });
+  const payload = built.request.objects.find((object) => object.path.endsWith("/rosters")).payload;
+  assert.strictEqual(payload[encodedId], encodedRoster);
+  assert.deepEqual(JSON.parse(JSON.stringify(codec.decode(payload))), { [rosterId]: roster });
+});
+
+test("legacy roster-map publication preserves its existing encoded representation", () => {
+  const q = loadQueue();
+  const codec = loadRealFirebaseCodec();
+  const encoded = codec.encode({ "main.war": { byTag: { "#PLAYER": { stars: 3 } } } });
+  q.buildActiveVersionPath_ = (version, child) => `activeVersions/${version}/${child}`;
+  q.firebaseRequestJson_ = (path) => {
+    assert.equal(path, "activeVersions/version-B/rosters");
+    return encoded;
+  };
+  assert.strictEqual(q.readCloudflareTargetEncodedRosterMap_("version-B", {}), encoded);
+});
+
+test("immutable roster publication rejects a missing shard before building a publish request", () => {
+  const q = loadQueue();
+  q.firebaseRequestJson_ = () => ({ versionId: "version-B", rosterIds: ["main"] });
+  q.firebaseBatchGetJson_ = () => ({});
+  assert.throws(() => q.buildCloudflareActivePhaseRequest_(activeState(q), { phase: "public-manifest-rosters" }), /Missing active version roster shard 'main'/);
+});
+
 test("legacy bot-active phase performs no Firebase reads and derives only private indexes", () => {
   const q = loadQueue();
   const state = activeState(q, "bot-active");

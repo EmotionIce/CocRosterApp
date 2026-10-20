@@ -251,30 +251,21 @@ function decodeFirebaseObjectKey_(keyRaw) {
 
 // Encode Firebase object keys recursive.
 function encodeFirebaseObjectKeysRecursive_(valueRaw) {
-	if (Array.isArray(valueRaw)) {
-		const outArray = [];
-		for (let i = 0; i < valueRaw.length; i++) outArray.push(encodeFirebaseObjectKeysRecursive_(valueRaw[i]));
-		return outArray;
-	}
-	if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
-	const out = {};
-	const keys = Object.keys(valueRaw);
-	for (let i = 0; i < keys.length; i++) {
-		const key = keys[i];
-		const encodedKey = encodeFirebaseObjectKey_(key);
-		if (Object.prototype.hasOwnProperty.call(out, encodedKey) && encodedKey !== key) {
-			throw new Error("Firebase key encoding collision for object key '" + key + "'.");
-		}
-		out[encodedKey] = encodeFirebaseObjectKeysRecursive_(valueRaw[key]);
-	}
-	return out;
+	return transformFirebaseObjectKeysRecursive_(valueRaw, encodeFirebaseObjectKey_, "encoding", new Map());
 }
 
 // Decode Firebase object keys recursive.
 function decodeFirebaseObjectKeysRecursive_(valueRaw) {
+	return transformFirebaseObjectKeysRecursive_(valueRaw, decodeFirebaseObjectKey_, "decoding", new Map());
+}
+
+// One conversion per distinct key within this traversal. Player tags recur in
+// war history and metrics; Apps Script Utilities calls for every occurrence can
+// otherwise exhaust an execution. The memo is local and never survives a call.
+function transformFirebaseObjectKeysRecursive_(valueRaw, transformKey, operation, keyMemo) {
 	if (Array.isArray(valueRaw)) {
 		const outArray = [];
-		for (let i = 0; i < valueRaw.length; i++) outArray.push(decodeFirebaseObjectKeysRecursive_(valueRaw[i]));
+		for (let i = 0; i < valueRaw.length; i++) outArray.push(transformFirebaseObjectKeysRecursive_(valueRaw[i], transformKey, operation, keyMemo));
 		return outArray;
 	}
 	if (!valueRaw || typeof valueRaw !== "object") return valueRaw;
@@ -282,11 +273,12 @@ function decodeFirebaseObjectKeysRecursive_(valueRaw) {
 	const keys = Object.keys(valueRaw);
 	for (let i = 0; i < keys.length; i++) {
 		const key = keys[i];
-		const decodedKey = decodeFirebaseObjectKey_(key);
-		if (Object.prototype.hasOwnProperty.call(out, decodedKey) && decodedKey !== key) {
-			throw new Error("Firebase key decoding collision for object key '" + key + "'.");
+		if (!keyMemo.has(key)) keyMemo.set(key, transformKey(key));
+		const transformedKey = keyMemo.get(key);
+		if (Object.prototype.hasOwnProperty.call(out, transformedKey) && transformedKey !== key) {
+			throw new Error("Firebase key " + operation + " collision for object key '" + key + "'.");
 		}
-		out[decodedKey] = decodeFirebaseObjectKeysRecursive_(valueRaw[key]);
+		out[transformedKey] = transformFirebaseObjectKeysRecursive_(valueRaw[key], transformKey, operation, keyMemo);
 	}
 	return out;
 }

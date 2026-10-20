@@ -1526,7 +1526,10 @@ function readCloudflareTargetManifest_(versionIdRaw) {
 	return manifest;
 }
 
-function readCloudflareTargetRosterMap_(versionIdRaw, manifestRaw) {
+// Firebase and Cloudflare share the same encoded-key representation. Immutable
+// roster shards can cross this boundary unchanged; decoding and re-encoding
+// thousands of historical player keys invokes slow Apps Script services twice.
+function readCloudflareTargetEncodedRosterMap_(versionIdRaw, manifestRaw) {
 	const manifest = manifestRaw && typeof manifestRaw === "object" ? manifestRaw : {};
 	const rosterIds = Array.isArray(manifest.rosterIds) ? manifest.rosterIds.map((id) => String(id || "").trim()).filter(Boolean) : [];
 	if (rosterIds.length > Number(cloudflareQueueConstant_("CLOUDFLARE_PUBLISH_QUEUE_MAX_ACTIVE_ROSTERS_PER_PHASE", 24))) throw new Error("Active roster count exceeds one bounded publication phase.");
@@ -1535,17 +1538,20 @@ function readCloudflareTargetRosterMap_(versionIdRaw, manifestRaw) {
 		: buildFirebaseChildPath_("activeVersions", encodeFirebaseObjectKey_(versionIdRaw), child);
 	const paths = rosterIds.map((id) => buildPath("rosters/" + encodeFirebaseObjectKey_(id)));
 	let encodedByPath = {};
+	recordCloudflarePublishQueueHeartbeat_("firebase-rosters-read");
 	if (paths.length && typeof firebaseBatchGetJson_ === "function") encodedByPath = firebaseBatchGetJson_(paths, { disableFallback: true });
 	else if (!paths.length) {
-		const fallback = readDecodedCloudflareQueueObject_(buildPath("rosters"));
+		assertCloudflarePublishQueueDeadline_(15000, "Firebase publication rosters read");
+		const fallback = firebaseRequestJson_(buildPath("rosters"), "GET");
 		return fallback && typeof fallback === "object" && !Array.isArray(fallback) ? fallback : {};
 	}
 	const rosterMap = {};
 	for (let i = 0; i < paths.length; i++) {
 		const encoded = encodedByPath[paths[i]];
 		if (!encoded || typeof encoded !== "object" || Array.isArray(encoded)) throw new Error("Missing active version roster shard '" + rosterIds[i] + "'.");
-		rosterMap[rosterIds[i]] = decodeFirebaseObjectKeysRecursive_(encoded);
+		rosterMap[encodeFirebaseObjectKey_(rosterIds[i])] = encoded;
 	}
+	recordCloudflarePublishQueueHeartbeat_("firebase-rosters-ready");
 	return rosterMap;
 }
 
@@ -1633,8 +1639,8 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 	if (phase === "public-manifest-rosters") {
 		assertCloudflarePublishQueueDeadline_(60000, "active public manifest and rosters reconstruction");
 		const manifest = readCloudflareTargetManifest_(versionId);
-		const rosters = readCloudflareTargetRosterMap_(versionId, manifest);
-		return { label: "active-public-manifest-rosters", request: { batchId: "active:" + versionId + ":public-manifest-rosters", objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/manifest", manifest, "public"), makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/rosters", rosters, "public")] } };
+		const encodedRosters = readCloudflareTargetEncodedRosterMap_(versionId, manifest);
+		return { label: "active-public-manifest-rosters", request: { batchId: "active:" + versionId + ":public-manifest-rosters", objects: [makeCloudflareQueueObject_("activeVersions/" + encodedVersionId + "/manifest", manifest, "public"), makeCloudflareDataObject_("activeVersions/" + encodedVersionId + "/rosters", encodedRosters, "public")] } };
 	}
 	if (phase === "public-player-metrics") {
 		assertCloudflarePublishQueueDeadline_(45000, "active player metrics read");
