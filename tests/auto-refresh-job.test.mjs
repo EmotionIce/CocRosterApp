@@ -1101,6 +1101,75 @@ test("queue worker preserves continuation after a deferred task", () => {
   assert.equal(backend.__triggers.filter((trigger) => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
 });
 
+test("a Firebase timeout resumes the failed metric chunk without discarding completed tasks", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const { runId, tasks } = setupSyntheticQueueRun(backend, [
+    { type: "metricCopy" }, { type: "metricCopy" }, { type: "cwlCoordinator" },
+  ]);
+  disableQueueCwlPreflights(backend);
+  const calls = [];
+  backend.executeAutoRefreshMetricCopyTask_ = (_current, task) => {
+    calls.push(task.taskId);
+    if (calls.length === 2) {
+      const error = new Error("Zeitüberschreitung: Firebase metric range");
+      error.code = "FIREBASE_TRANSPORT";
+      throw error;
+    }
+    return {};
+  };
+  const deferred = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  const retained = backend.readAutoRefreshQueueCurrent_();
+  assert.equal(deferred.reason, "firebaseTransient");
+  assert.equal(retained.runId, runId);
+  assert.equal(retained.currentTaskIndex, 1);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[0].taskId).status, "completed");
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "pending");
+  assert.equal(backend.readAutoRefreshLastJobState_(), null);
+  assert.equal(backend.__triggers.filter(trigger => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
+
+  const resumed = backend.continueAutoRefreshQueueWorker_({ executionStartMs: Date.now() });
+  assert.equal(resumed.reason, "cwlBoundary");
+  assert.deepEqual(calls, [tasks[0].taskId, tasks[1].taskId, tasks[1].taskId]);
+  assert.equal(backend.readAutoRefreshTask_(runId, tasks[1].taskId).status, "completed");
+});
+
+test("transient Firebase classification excludes invalid data and authorization failures", () => {
+  const backend = loadBackend();
+  for (const code of ["FIREBASE_TRANSPORT", "FIREBASE_BATCH_DEFERRED"]) {
+    assert.equal(backend.isAutoRefreshRetryableFirebaseError_({ code }), true);
+  }
+  for (const status of [0, 408, 429, 500, 503]) {
+    assert.equal(backend.isAutoRefreshRetryableFirebaseError_({ code: "FIREBASE_HTTP", firebaseStatusCode: status }), true);
+  }
+  for (const status of [400, 401, 403, 404, 422]) {
+    assert.equal(backend.isAutoRefreshRetryableFirebaseError_({ code: "FIREBASE_HTTP", firebaseStatusCode: status }), false);
+  }
+  assert.equal(backend.isAutoRefreshRetryableFirebaseError_(new Error("invalid metric range response")), false);
+  assert.equal(backend.isAutoRefreshRetryableFirebaseError_({ code: "FIREBASE_TRANSPORT", message: "Bandwidth quota exceeded" }), false);
+  assert.equal(backend.isAutoRefreshRetryableFirebaseError_({ code: "FIREBASE_TRANSPORT", message: "Service invoked too many times for one day: urlfetch" }), false);
+});
+
+test("a transient Firebase error escaping a worker checkpoint retains the run with local recovery", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "1");
+  const { runId } = setupSyntheticQueueRun(backend, [{ type: "metricCopy" }]);
+  backend.continueAutoRefreshQueueWorker_ = () => {
+    const error = new Error("Firebase unavailable");
+    error.code = "FIREBASE_HTTP";
+    error.firebaseStatusCode = 503;
+    throw error;
+  };
+  backend.failCurrentAutoRefreshJobAfterError_ = () => assert.fail("transient failures must retain the run");
+  backend.maybeRepairCloudflareActiveRosterMirrorAfterAutoRefreshTick_ = () => null;
+  const request = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = () => assert.fail("recovery after transport failure must be local-only");
+  const result = backend.autoRefreshWorkerTickInternal_();
+  backend.firebaseRequestJson_ = request;
+  assert.equal(result.reason, "firebaseTransient");
+  assert.equal(backend.readAutoRefreshQueueCurrent_().runId, runId);
+  assert.equal(backend.__triggers.filter(trigger => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
+});
+
 test("queue worker stops at a newly reached CWL boundary", () => {
   const backend = installMemoryFirebase(loadBackend());
   const { runId, tasks } = setupSyntheticQueueRun(backend, [

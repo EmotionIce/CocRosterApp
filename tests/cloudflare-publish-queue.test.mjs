@@ -1309,6 +1309,66 @@ test("immutable roster publication rejects a missing shard before building a pub
   assert.throws(() => q.buildCloudflareActivePhaseRequest_(activeState(q), { phase: "public-manifest-rosters" }), /Missing active version roster shard 'main'/);
 });
 
+test("an optional legacy performance phase checkpoints locally and then commits without an empty HTTP request", () => {
+  const q = installCasFirebase(loadQueue());
+  const state = activeState(q, "public-player-war-performance");
+  state.active.botDerivedReady = true;
+  q.__setState(state);
+  q.readCloudflareTargetManifest_ = () => ({ versionId: "version-B", requiredShards: ["manifest", "rosters", "playerMetrics"] });
+  q.verifyCloudflareActiveVersionObjects_ = () => ({ ok: true });
+  const requests = [];
+  q.sendCloudflareQueuedV2Request_ = (request) => {
+    assert.ok(request.commits?.length, "the optional phase must never send an empty envelope");
+    requests.push(request);
+    return { response: { ok: true, acceptedCommit: { targetVersionId: "version-B", generation: 7 } } };
+  };
+
+  const skipped = q.processCloudflareActiveQueueRequest_(q.__getState());
+  assert.equal(skipped.ok, true);
+  assert.equal(requests.length, 0);
+  assert.equal(q.__getState().active.phase, "commit");
+  assert.equal(q.__getState().active.committedVersionId, "version-A");
+  assert.equal(q.__getState().active.dispatch, null);
+  assert.deepEqual(q.__getState().deadLetters, {});
+
+  const committed = q.processCloudflareActiveQueueRequest_(q.__getState());
+  assert.equal(committed.ok, true);
+  assert.equal(requests.length, 1);
+  assert.equal(q.__getState().active.committedVersionId, "version-B");
+  assert.equal(q.__getState().active.phase, "idle");
+});
+
+test("an optional phase cannot advance a newer generation after its manifest read", () => {
+  const q = installCasFirebase(loadQueue(), activeState(loadQueue(), "public-player-war-performance"));
+  q.readCloudflareTargetManifest_ = () => {
+    const newer = activeState(q);
+    newer.active.targetVersionId = "version-C";
+    newer.active.targetGeneration = 8;
+    q.__setState(newer);
+    return { versionId: "version-B" };
+  };
+  q.sendCloudflareQueuedV2Request_ = () => assert.fail("optional phase must not send HTTP");
+  const result = q.processCloudflareActiveQueueRequest_(q.__getState());
+  assert.equal(result.stale, true);
+  assert.equal(q.__getState().active.targetVersionId, "version-C");
+  assert.equal(q.__getState().active.phase, "public-manifest-rosters");
+  assert.equal(q.__getState().active.committedVersionId, "version-A");
+});
+
+test("performance schema v2 requires its shard even without a requiredShards list", () => {
+  const q = loadQueue();
+  q.readCloudflareTargetManifest_ = () => ({ versionId: "version-B", playerWarPerformanceSchemaVersion: 2 });
+  q.firebaseRequestJson_ = (path) => {
+    assert.equal(path, "activeVersions/version-B/playerWarPerformance");
+    return { schemaVersion: 2, byTag: {} };
+  };
+  const built = q.buildCloudflareActivePhaseRequest_(activeState(q, "public-player-war-performance"), {});
+  assert.notEqual(built.skip, true);
+  assert.equal(built.request.objects.length, 1);
+  q.firebaseRequestJson_ = () => null;
+  assert.throws(() => q.buildCloudflareActivePhaseRequest_(activeState(q, "public-player-war-performance"), {}), /Missing active version player-war performance/);
+});
+
 test("legacy bot-active phase performs no Firebase reads and derives only private indexes", () => {
   const q = loadQueue();
   const state = activeState(q, "bot-active");

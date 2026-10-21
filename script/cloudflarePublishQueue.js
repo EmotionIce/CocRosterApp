@@ -1658,9 +1658,10 @@ function buildCloudflareActivePhaseRequest_(stateRaw, claimRaw) {
 		assertCloudflarePublishQueueDeadline_(45000, "active player war performance read");
 		const manifest = readCloudflareTargetManifest_(versionId);
 		const requiredShards = Array.isArray(manifest.requiredShards) ? manifest.requiredShards.map(String) : [];
-		if (requiredShards.indexOf("playerWarPerformance") < 0) {
+		if (requiredShards.indexOf("playerWarPerformance") < 0 && toNonNegativeInt_(manifest.playerWarPerformanceSchemaVersion) < 2) {
 			return {
 				label: "active-public-player-war-performance-legacy-skip",
+				skip: true,
 				request: { batchId: "active:" + versionId + ":public-player-war-performance", objects: [] },
 			};
 		}
@@ -2334,6 +2335,13 @@ function processCloudflareActiveQueueRequest_(stateRaw, ownerTokenRaw) {
 		ensureCloudflareClaimRecoveryScheduled_(ownerTokenRaw, claim);
 		recordCloudflarePublishQueueHeartbeat_("firebase-build", { claim: claim });
 		const built = buildCloudflareActivePhaseRequest_(state, claim);
+		if (built.skip === true && claim.phase === "public-player-war-performance") {
+			// An optional shard absent from this immutable manifest needs no HTTP
+			// request. Advance through the same owner/generation-checked checkpoint;
+			// the Worker correctly rejects an empty publication envelope.
+			recordCloudflarePublishQueueHeartbeat_("completion-cas", { claim: claim, status: "optional-shard-not-required" });
+			return completeCloudflareActivePhase_(claim, { response: { ok: true } }, ownerTokenRaw);
+		}
 		const request = Object.assign({}, built.request, { dispatchGuard: claim.dispatchGuard, revision: claim.generation });
 		request.batchId = claim.dispatchGuard.batchId;
 		if (claim.phase === "commit") request.commitGuard = { kind: "active", generation: claim.generation, targetVersionId: claim.targetVersionId };

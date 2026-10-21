@@ -537,6 +537,17 @@ function writeAutoRefreshRunShard_(runIdRaw, childPathRaw, valueRaw, methodRaw) 
 	return firebaseRequestJson_(buildAutoRefreshRunPath_(runIdRaw, childPathRaw), method, encodeFirebaseObjectKeysRecursive_(valueRaw));
 }
 
+// Transport interruptions and transient Firebase status codes must retain the
+// current run's checkpoints. Invalid data and authorization errors still fail.
+function isAutoRefreshRetryableFirebaseError_(errRaw) {
+	const err = errRaw && typeof errRaw === "object" ? errRaw : {};
+	if (isFirebaseDailyUrlFetchQuotaError_(err) || isFirebaseBandwidthQuotaError_(err)) return false;
+	if (err.code === "FIREBASE_TRANSPORT" || err.code === "FIREBASE_BATCH_DEFERRED") return true;
+	if (err.code !== "FIREBASE_HTTP") return false;
+	const status = Number(err.firebaseStatusCode) || 0;
+	return status === 0 || status === 408 || status === 429 || (status >= 500 && status < 600);
+}
+
 // Read only the source fields the coordinator needs when the active payload is
 // already published as immutable version shards. Full playerMetrics stay out of
 // this phase and are copied by bounded worker tasks.
@@ -5872,11 +5883,13 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 				continue;
 			}
 			if (isFirebaseDailyUrlFetchQuotaError_(err)) return buildAutoRefreshUrlFetchQuotaPauseResult_(current);
-			if (err && err.autoRefreshDefer) {
+			if (isFirebaseBandwidthQuotaError_(err)) throw err;
+			const retryableFirebase = isAutoRefreshRetryableFirebaseError_(err);
+			if (err && (err.autoRefreshDefer || retryableFirebase)) {
 				const message = errorMessage_(err);
 				task.status = "pending";
 				task.error = message;
-				task.summary = String(err.reason || "deferred");
+				task.summary = String(err.reason || (retryableFirebase ? "firebaseTransient" : "deferred"));
 				task.updatedAt = new Date().toISOString();
 				writeAutoRefreshTask_(current.runId, task);
 				current.error = message;
@@ -5887,7 +5900,7 @@ function continueAutoRefreshQueueWorker_(optionsRaw) {
 					ok: true,
 					status: "inProgress",
 					inProgress: true,
-					reason: String(err.reason || "autoRefreshDefer"),
+					reason: String(err.reason || (retryableFirebase ? "firebaseTransient" : "autoRefreshDefer")),
 					processedRosters: current.processedRosters,
 					totalRosters: current.rosterIds.length,
 				};
@@ -7728,23 +7741,23 @@ function autoRefreshActiveRosterTickInternal_() {
 			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseBandwidthQuota", quotaPaused: true, cooldown: cooldown };
 			return resultForLog;
 		}
-		if (isExecutionDeadlineError_(err)) {
-			// Deadline recovery must be local-only. Firebase checkpoint attempts are
-			// no longer admissible here, but replacing both one-shot paths prevents a
-			// task left running by the interrupted request from becoming orphaned.
+		if (isExecutionDeadlineError_(err) || isAutoRefreshRetryableFirebaseError_(err)) {
+			// A deadline or failed transport may prevent further checkpoint writes.
+			// Preserve the run and its independent recovery paths using local state.
+			const deferredReason = isExecutionDeadlineError_(err) ? "executionDeadline" : "firebaseTransient";
 			const pending = readAutoRefreshFreshRetryPending_();
-			const retry = pending ? scheduleAutoRefreshFailureRetry_("coordinatorDeadline", pending) : null;
+			const retry = pending ? scheduleAutoRefreshFailureRetry_(deferredReason === "executionDeadline" ? "coordinatorDeadline" : "coordinatorFirebaseTransient", pending) : null;
 			const continuation = scheduleAutoRefreshJobResume_();
 			const watchdog = scheduleAutoRefreshJobWatchdog_();
 			resultForLog = {
 				ok: true,
 				status: "inProgress",
 				inProgress: true,
-				reason: "executionDeadline",
+				reason: deferredReason,
 				deferred: true,
 				scheduling: { continuation: continuation, watchdog: watchdog, retry: retry },
 			};
-			Logger.log("Auto-refresh coordinator deadline deferred with continuation and watchdog recovery.");
+			Logger.log("Auto-refresh coordinator deferred after %s with continuation and watchdog recovery.", deferredReason);
 			return resultForLog;
 		}
 		if (isActiveRosterJobLockBusyError_(err)) {
@@ -7879,22 +7892,23 @@ function autoRefreshWorkerTickInternal_() {
 			resultForLog = { ok: true, status: "inProgress", inProgress: true, reason: "firebaseBandwidthQuota", quotaPaused: true, cooldown: cooldown };
 			return resultForLog;
 		}
-		if (isExecutionDeadlineError_(err)) {
-			// The deadline guard intentionally prevents further Firebase access. Keep
-			// recovery local-only and preserve both independent one-shot paths.
+		if (isExecutionDeadlineError_(err) || isAutoRefreshRetryableFirebaseError_(err)) {
+			// Keep recovery local-only when Firebase or the execution budget is
+			// unavailable, and preserve both independent one-shot paths.
+			const deferredReason = isExecutionDeadlineError_(err) ? "executionDeadline" : "firebaseTransient";
 			const pending = startingFresh ? readAutoRefreshFreshRetryPending_() : null;
-			const retry = pending ? scheduleAutoRefreshFailureRetry_("workerFreshStartDeadline", pending) : null;
+			const retry = pending ? scheduleAutoRefreshFailureRetry_(deferredReason === "executionDeadline" ? "workerFreshStartDeadline" : "workerFreshStartFirebaseTransient", pending) : null;
 			const continuation = scheduleAutoRefreshJobResume_();
 			const watchdog = scheduleAutoRefreshJobWatchdog_();
 			resultForLog = {
 				ok: true,
 				status: "inProgress",
 				inProgress: true,
-				reason: "executionDeadline",
+				reason: deferredReason,
 				deferred: true,
 				scheduling: { continuation: continuation, watchdog: watchdog, retry: retry },
 			};
-			Logger.log("Auto-refresh worker deadline deferred with continuation and watchdog recovery.");
+			Logger.log("Auto-refresh worker deferred after %s with continuation and watchdog recovery.", deferredReason);
 			return resultForLog;
 		}
 		if (isActiveRosterJobLockBusyError_(err)) {
