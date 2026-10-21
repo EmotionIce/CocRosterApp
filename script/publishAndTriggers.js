@@ -3502,22 +3502,36 @@ function archiveAndClearAutoRefreshQueueStateBestEffort_(currentRaw, statusRaw, 
 	} catch (err) {
 		Logger.log("%s: unable to write queue last job summary: %s", label, errorMessage_(err));
 	}
-	let ownsCurrent = false;
+	let clearedCurrent = false;
 	try {
 		const latest = readAutoRefreshQueueCurrent_();
-		ownsCurrent = !!(
+		const ownsCurrent = !!(
 			current &&
 			current.runId &&
 			latest &&
 			latest.kind === "auto-refresh-queue" &&
 			latest.runId === current.runId
 		);
-		if (ownsCurrent) clearAutoRefreshQueueCurrent_();
+		if (ownsCurrent) {
+			clearAutoRefreshQueueCurrent_();
+			clearedCurrent = true;
+		}
 		else Logger.log("%s: skipped current queue cleanup because run ownership changed runId=%s currentRunId=%s", label, current && current.runId, latest && latest.runId);
 	} catch (err) {
 		Logger.log("%s: unable to clear queue current state: %s", label, errorMessage_(err));
+		// A failed/ambiguous DELETE must not remove the only paths that can
+		// finish this run. Keep recovery local when Firebase/the budget is down,
+		// and retain any newer fresh-start intent's existing not-before boundary.
+		try {
+			if (isAutoRefreshFreshRetryPending_()) scheduleAutoRefreshFreshRetry_();
+			else scheduleAutoRefreshJobResume_();
+			scheduleAutoRefreshJobWatchdog_();
+		} catch (scheduleErr) {
+			markAutoRefreshSchedulerRepairNeeded_("continuation", "queue-cleanup-retry:" + errorMessage_(scheduleErr), 0);
+		}
+		return;
 	}
-	if (ownsCurrent) {
+	if (clearedCurrent) {
 		try {
 			const pending = readAutoRefreshFreshRetryPending_();
 			if (pending && pending.runId === current.runId && String(statusRaw || "") !== "failed") clearAutoRefreshFreshRetryPending_(pending.attemptId);

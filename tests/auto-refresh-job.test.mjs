@@ -6161,6 +6161,52 @@ test("transient canonical inspection is indeterminate and never changes selector
   backend.firebaseBatchGetJson_ = originalBatchGet;
 });
 
+test("a failed current-state DELETE preserves cleanup recovery until the deletion is confirmed", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const run = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  backend.scheduleAutoRefreshJobResume_();
+  backend.scheduleAutoRefreshJobWatchdog_();
+  const request = backend.firebaseRequestJson_;
+  const retention = backend.buildFirebaseStorageRetentionState_;
+  let retentionCalls = 0;
+  backend.buildFirebaseStorageRetentionState_ = () => { retentionCalls++; return {}; };
+  backend.firebaseRequestJson_ = (path, method, ...args) => {
+    if (path === "internal/autoRefresh/current" && method === "DELETE") {
+      const error = new Error("Execution deadline before queue DELETE");
+      error.code = "EXECUTION_DEADLINE";
+      throw error;
+    }
+    return request(path, method, ...args);
+  };
+  backend.archiveAndClearAutoRefreshQueueStateBestEffort_(run.current, "completed", "done", "", "deadline-cleanup");
+  assert.equal(backend.readAutoRefreshQueueCurrent_().runId, run.runId);
+  assert.equal(backend.__triggers.filter(trigger => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 2);
+  assert.equal(retentionCalls, 0, "no further Firebase cleanup is admitted after the failed DELETE");
+
+  backend.firebaseRequestJson_ = request;
+  backend.buildFirebaseStorageRetentionState_ = retention;
+  backend.archiveAndClearAutoRefreshQueueStateBestEffort_(run.current, "completed", "done", "", "cleanup-retry");
+  assert.equal(backend.readAutoRefreshQueueCurrent_(), null);
+  assert.equal(backend.__triggers.filter(trigger => trigger.getHandlerFunction() === "autoRefreshWorkerTick").length, 0);
+});
+
+test("unconfirmed queue cleanup preserves a newer retry intent and its not-before time", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  const run = setupQueueRun(backend, buildRosterData(), { rosterIds: ["main"] });
+  const pending = backend.markAutoRefreshFreshRetryPending_("newerDue", Date.now() + 20 * 60_000, { phase: "retry" });
+  const request = backend.firebaseRequestJson_;
+  backend.firebaseRequestJson_ = (path, method, ...args) => {
+    if (path === "internal/autoRefresh/current" && method === "GET") throw new Error("Firebase unavailable during cleanup read");
+    return request(path, method, ...args);
+  };
+  backend.archiveAndClearAutoRefreshQueueStateBestEffort_(run.current, "completed", "done", "", "cleanup-read-failure");
+  backend.firebaseRequestJson_ = request;
+  assert.equal(backend.readAutoRefreshQueueCurrent_().runId, run.runId);
+  assert.equal(backend.readAutoRefreshFreshRetryPending_().attemptId, pending.attemptId);
+  assert.ok(Number(backend.__properties.get("AUTO_REFRESH_JOB_TRIGGER_AT")) >= pending.notBeforeMs);
+  assert.ok(backend.__properties.get("AUTO_REFRESH_JOB_WATCHDOG_TRIGGER_ID"));
+});
+
 test("terminal cleanup preserves a newer run and its owned dynamic triggers", () => {
   const backend = installMemoryFirebase(loadBackend());
   const oldRun = setupQueueRun(backend, buildRosterData(), { runId: "old-run", rosterIds: ["main"] });
