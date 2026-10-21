@@ -79,7 +79,7 @@
   </script>
   <link rel="stylesheet" href="./styles.css?v=20260724a" />
   <link rel="stylesheet" href="./observatory.css?v=20260930c" />
-  <link rel="stylesheet" href="./home-water.css?v=20260930a" />
+  <link rel="stylesheet" href="./home-water.css?v=20261021a" />
 </head>
 <body style="margin:0;">
 <div class="container public-shell" data-active-view="landing">
@@ -133,10 +133,17 @@
         </figure>
         <div class="landing-hero__constellation" aria-hidden="true"></div>
         <div class="observatory-orbit" aria-hidden="true">
-          <span class="observatory-orbit__ring observatory-orbit__ring--outer"></span>
-          <span class="observatory-orbit__ring observatory-orbit__ring--inner"></span>
-          <span class="observatory-orbit__axis"></span>
-          <img class="observatory-orbit__emblem" src="./assets/images/home-emblem.png?v=20260930b" width="1254" height="1254" alt="" fetchpriority="high" />
+          <div class="observatory-orbit__system">
+            <span class="observatory-orbit__aura"></span>
+            <span class="observatory-orbit__ticks"></span>
+            <span class="observatory-orbit__ring observatory-orbit__ring--outer"></span>
+            <span class="observatory-orbit__ring observatory-orbit__ring--inner"></span>
+            <span class="observatory-orbit__axis"></span>
+            <span class="observatory-orbit__axis observatory-orbit__axis--cross"></span>
+            <img class="observatory-orbit__emblem" src="./assets/images/home-emblem.png?v=20260930b" width="1254" height="1254" alt="" fetchpriority="high" />
+            <span class="observatory-orbit__signal observatory-orbit__signal--war"><i></i>WARS + CWL</span>
+            <span class="observatory-orbit__signal observatory-orbit__signal--family"><i></i>PROGRESS TOGETHER</span>
+          </div>
           <span class="observatory-orbit__caption">ONE FAMILY. EVERY ORBIT.</span>
         </div>
         <div class="landing-hero__content">
@@ -150,6 +157,11 @@
               rel="noopener noreferrer">Join Discord</a>
             <button id="landingHeroRostersCta" class="landing-cta landing-cta--secondary" type="button">View Rosters</button>
           </div>
+          <p class="landing-hero__note"><span aria-hidden="true"></span>A place for every player.</p>
+        </div>
+        <div class="landing-hero__footer">
+          <a class="landing-scroll-cue" href="#landingDiscoveryTitle"><span aria-hidden="true">&darr;</span>Explore the family</a>
+          <span>WARS. PROGRESS. GOOD COMPANY.</span>
         </div>
       </section>
 
@@ -215,6 +227,7 @@
                     <span>WAR DAY</span>
                     <strong>Hit your mirror</strong>
                     <small>Follow rules</small>
+                    <span class="landing-war-stars" aria-hidden="true">&#9733; &#9733; &#9733;</span>
                   </div>
                   <i class="landing-war-plan__link" aria-hidden="true"></i>
                   <div class="landing-war-attacks">
@@ -403,7 +416,7 @@
 
   <script src="./public-config.js?v=20260721a"></script>
   <script defer src="./client.js?v=20260926a"></script>
-  <script defer src="./home-water.js?v=20260930a"></script>
+  <script defer src="./home-water.js?v=20261021a"></script>
 </body>
 </html>
 

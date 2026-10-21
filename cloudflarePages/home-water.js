@@ -1,4 +1,4 @@
-/* One event-driven frame for the water, trail and existing Life enhancements. */
+/* One event-driven frame for water, pointer depth and the Life enhancements. */
 (() => {
   const root = document.querySelector('[data-landing-experience="observatory"]');
   if (!root || !window.matchMedia) return;
@@ -10,6 +10,9 @@
   if (!shell || !hero || !surface || !flow) return;
   const ns = 'http://www.w3.org/2000/svg';
   const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const finePointer = window.matchMedia('(hover: hover) and (pointer: fine)');
+  const orbitSystem = root.querySelector('.observatory-orbit__system');
+  const family = root.querySelector('.landing-family-overview');
   const story = root.querySelector('.landing-rhythm');
   const cards = Array.from(root.querySelectorAll('.landing-rhythm-chapter'));
   const cardSet = new Set(cards);
@@ -30,6 +33,9 @@
   let dirty = true;
   let frame = 0;
   let lastWidth = 0;
+  let scrollDirty = true;
+  let pointerDirty = false;
+  let pointer = null;
   const clamp = value => Math.max(0, Math.min(1, value));
   const active = () => !document.hidden && !root.classList.contains('hidden');
 
@@ -96,7 +102,8 @@
       ripples.append(point.ripple, point.mark);
     }
     head.querySelector('circle').setAttribute('r', railX < 10 ? '13' : '22');
-    layout = { width, railX, pageY: shell.getBoundingClientRect().top + window.scrollY, startY, endY: previousY, samples, points, branches: branchPoints, cards: cardLayouts, surface: surfaceBox };
+    const shellRect = shell.getBoundingClientRect();
+    layout = { width, railX, pageX: shellRect.left || 0, pageY: shellRect.top + window.scrollY, hero: heroBox, startY, endY: previousY, samples, points, branches: branchPoints, cards: cardLayouts, surface: surfaceBox };
     lastWidth = width;
     dirty = false;
     root.classList.add('water-ready');
@@ -135,6 +142,20 @@
     if (dirty) measure();
     if (!layout) return;
     const reduced = preference.matches;
+    if (pointerDirty && orbitSystem) {
+      const bounds = layout.hero;
+      const enabled = pointer && finePointer.matches && !reduced;
+      const x = enabled ? clamp((pointer.x - layout.pageX - bounds.x) / Math.max(1, bounds.width)) * 2 - 1 : 0;
+      const y = enabled ? clamp((pointer.y + window.scrollY - layout.pageY - bounds.y) / Math.max(1, bounds.height)) * 2 - 1 : 0;
+      orbitSystem.style.setProperty('--orbit-shift-x', (x * 9).toFixed(2) + 'px');
+      orbitSystem.style.setProperty('--orbit-shift-y', (y * 7).toFixed(2) + 'px');
+      orbitSystem.style.setProperty('--orbit-rotate-x', (-y * 6).toFixed(2) + 'deg');
+      orbitSystem.style.setProperty('--orbit-rotate-y', (x * 8).toFixed(2) + 'deg');
+      pointerDirty = false;
+    }
+    // Pointer frames only update the four transform inputs, never the SVGs.
+    if (!scrollDirty) return;
+    scrollDirty = false;
     const viewY = window.scrollY - layout.pageY;
     const height = Math.max(1, window.innerHeight);
     const focusY = viewY + height * .68;
@@ -170,7 +191,13 @@
   const schedule = () => {
     if (!frame && active() && (dirty || !preference.matches)) frame = window.requestAnimationFrame(render);
   };
-  const invalidate = () => { dirty = true; schedule(); };
+  const invalidate = () => {
+    dirty = true;
+    scrollDirty = true;
+    root.classList.toggle('is-home-active', active());
+    if (!active() && frame) { window.cancelAnimationFrame(frame); frame = 0; }
+    schedule();
+  };
   const syncMotion = () => {
     if (observer) observer.disconnect();
     observer = null;
@@ -179,18 +206,26 @@
     frame = 0;
     root.classList.toggle('water-motion-reduced', preference.matches);
     if (story) story.classList.toggle('life-motion-ready', !preference.matches);
-    const targets = [...cards, root.querySelector('.landing-rhythm__intro')].filter(Boolean);
+    if (family) family.classList.toggle('family-motion-ready', !preference.matches);
+    pointer = null;
+    pointerDirty = true;
+    const targets = [...cards, root.querySelector('.landing-rhythm__intro'), hero, family].filter(Boolean);
     if (preference.matches || !window.IntersectionObserver) {
       targets.forEach(node => node.classList.add('is-life-revealed', 'is-life-in-view'));
+      hero.classList.add('is-hero-in-view');
+      if (family) family.classList.add('is-family-in-view');
     } else {
       observer = new window.IntersectionObserver(entries => {
         for (const entry of entries) {
           if (entry.isIntersecting) entry.target.classList.add('is-life-revealed');
+          if (entry.target === hero) hero.classList.toggle('is-hero-in-view', entry.isIntersecting);
+          if (entry.target === family) family.classList.toggle('is-family-in-view', entry.isIntersecting);
           if (!cardSet.has(entry.target)) continue;
           entry.target.classList.toggle('is-life-in-view', entry.isIntersecting);
           if (entry.isIntersecting) visibleCards.add(entry.target);
           else visibleCards.delete(entry.target);
         }
+        scrollDirty = true;
         schedule();
       }, { threshold: .08 });
       targets.forEach(node => observer.observe(node));
@@ -211,16 +246,32 @@
     image.width = emblem.width;
     image.height = emblem.height;
     reflection.appendChild(image);
-    orbit.appendChild(reflection);
+    (orbitSystem || orbit).appendChild(reflection);
   }
-  window.addEventListener('scroll', schedule, { passive: true });
+  if (orbitSystem) {
+    hero.addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' || preference.matches || !finePointer.matches || !active()) return;
+      pointer = { x: event.clientX, y: event.clientY };
+      pointerDirty = true;
+      schedule();
+    }, { passive: true });
+    hero.addEventListener('pointerleave', () => {
+      if (!pointer) return;
+      pointer = null;
+      pointerDirty = true;
+      schedule();
+    }, { passive: true });
+  }
+  window.addEventListener('scroll', () => { scrollDirty = true; schedule(); }, { passive: true });
   window.addEventListener('resize', () => {
     if (shell.clientWidth !== lastWidth) dirty = true;
+    scrollDirty = true;
     schedule();
   }, { passive: true });
   document.addEventListener('visibilitychange', () => {
+    root.classList.toggle('is-home-active', active());
     if (document.hidden && frame) { window.cancelAnimationFrame(frame); frame = 0; }
-    else schedule();
+    else { scrollDirty = true; schedule(); }
   });
   if (preference.addEventListener) preference.addEventListener('change', syncMotion);
   else if (preference.addListener) preference.addListener(syncMotion);
