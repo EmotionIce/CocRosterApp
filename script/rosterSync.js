@@ -1603,6 +1603,16 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 		nowIso,
 	);
 	const cwlCurrentWar = sanitizeCwlCurrentWar_(cwlView.currentWar);
+	const attackDays = contributions.map((contribution) => buildCwlAttackDay_(
+		contribution.roundIndex, contribution.warTag, contribution.state, contribution.aggregateByTag, statsTrackedTagSet,
+	)).filter(Boolean);
+	if (cwlCurrentWar && !attackDays.some((day) => day.warTag === cwlCurrentWar.warTag)) {
+		const lineup = {};
+		const members = Array.isArray(cwlView.currentWar.members) ? cwlView.currentWar.members : [];
+		members.forEach((member) => { const tag = normalizeTag_(member && member.tag); if (tag) lineup[tag] = {}; });
+		const day = buildCwlAttackDay_(cwlCurrentWar.roundIndex, cwlCurrentWar.warTag, cwlCurrentWar.state, lineup, statsTrackedTagSet);
+		if (day && members.length) attackDays.push(day);
+	}
 	ctx.roster.cwlStats = {
 		lastRefreshedAt:
 			cwlView.freshness && typeof cwlView.freshness.dataSuccessAt === "string" && cwlView.freshness.dataSuccessAt
@@ -1610,6 +1620,7 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 				: nowIso,
 		season: typeof cwlView.season === "string" ? cwlView.season : "",
 		byTag: byTag,
+		attackDays: sanitizeCwlAttackDays_(attackDays, statsTrackedTagSet),
 	};
 	if (cwlCurrentWar) ctx.roster.cwlStats.currentWar = cwlCurrentWar;
 	ctx.roster.cwlStats.reminderWar = sanitizeAttackReminderWarSnapshot_(cwlView.reminderWar);
@@ -2249,6 +2260,11 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 	const usableWars = [];
 	let preparationWar = null;
 	let sawWarTag404 = false;
+	const roundIndexByWarTag = {};
+	leaguegroup.rounds.forEach((round, roundIndex) => {
+		const tags = Array.isArray(round && round.warTags) ? round.warTags : [];
+		tags.forEach((tag) => { roundIndexByWarTag[normalizeTag_(tag)] = roundIndex; });
+	});
 	for (let i = 0; i < warTags.length; i++) {
 		const warTag = warTags[i];
 		let war = null;
@@ -2284,7 +2300,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		const side = pickWarSideForClan_(war, ctx.clanTag);
 		if (!side) continue;
 		if (warState === "preparation") {
-			if (!preparationWar) preparationWar = { warTag: warTag, war: war, roundIndex: i };
+			if (!preparationWar) preparationWar = { warTag: warTag, war: war, roundIndex: roundIndexByWarTag[warTag] };
 			continue;
 		}
 
@@ -2292,6 +2308,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			warTag: warTag,
 			war: war,
 			warState: warState,
+			roundIndex: roundIndexByWarTag[warTag],
 		});
 	}
 	if (!usableWars.length && !preparationWar) {
@@ -2319,6 +2336,11 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		? buildCwlCurrentWarFromWar_(preparationWar.war, preparationWar.warTag, ctx.clanTag, preparationWar.roundIndex)
 		: null;
 	let reminderWar = null;
+	const attackDays = [];
+	if (preparationWar) attackDays.push(buildCwlAttackDay_(
+		preparationWar.roundIndex, preparationWar.warTag, "preparation",
+		buildCwlWarAggregateForClan_(preparationWar.war, ctx.clanTag, statsTrackedTagSet, preparationWar.warTag), statsTrackedTagSet,
+	));
 
 	for (let i = 0; i < usableWars.length; i++) {
 		const warTag = usableWars[i].warTag;
@@ -2326,7 +2348,7 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 		const warState = usableWars[i].warState;
 		warsProcessed++;
 		if (warState === "inwar" && (!cwlCurrentWar || cwlCurrentWar.state !== "inwar")) {
-			cwlCurrentWar = buildCwlCurrentWarFromWar_(war, warTag, ctx.clanTag, i);
+			cwlCurrentWar = buildCwlCurrentWarFromWar_(war, warTag, ctx.clanTag, usableWars[i].roundIndex);
 			reminderWar = buildAttackReminderWarSnapshot_(war, ctx.clanTag, "cwl", warTag, war._warObservedAt);
 		}
 		if (warState === "warended") {
@@ -2343,13 +2365,16 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 			if (ingested) finalizedCwlWars++;
 		}
 
-		mergeCwlAggregateByTag_(byTag, buildCwlWarAggregateForClan_(war, ctx.clanTag, statsTrackedTagSet, warTag));
+		const aggregate = buildCwlWarAggregateForClan_(war, ctx.clanTag, statsTrackedTagSet, warTag);
+		mergeCwlAggregateByTag_(byTag, aggregate);
+		attackDays.push(buildCwlAttackDay_(usableWars[i].roundIndex, warTag, warState, aggregate, statsTrackedTagSet));
 	}
 
 	ctx.roster.cwlStats = {
 		lastRefreshedAt: nowIso,
 		season: typeof leaguegroup.season === "string" ? leaguegroup.season : "",
 		byTag: byTag,
+		attackDays: sanitizeCwlAttackDays_(attackDays, statsTrackedTagSet),
 	};
 	if (cwlCurrentWar) ctx.roster.cwlStats.currentWar = cwlCurrentWar;
 	ctx.roster.cwlStats.reminderWar = reminderWar;

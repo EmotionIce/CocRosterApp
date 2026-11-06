@@ -1,12 +1,63 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const clientCode = fs.readFileSync(new URL("../cloudflarePages/client.js", import.meta.url), "utf8");
 const stylesCode = fs.readFileSync(new URL("../cloudflarePages/styles.css", import.meta.url), "utf8");
 const styleStart = stylesCode.indexOf("/* Public roster player rows: dense warm-charcoal four-zone cards. */");
 const styleEnd = stylesCode.indexOf("/* TURTLE public Home redesign", styleStart);
 const playerCardStyles = stylesCode.slice(styleStart, styleEnd);
+
+const loadAttackTileInternals = () => {
+  const makeElement = (tagName) => ({
+    tagName, children: [], attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    appendChild(child) { this.children.push(child); return child; },
+  });
+  const context = {
+    window: {}, console, setTimeout, clearTimeout,
+    document: { createElement: makeElement, createElementNS: (_namespace, name) => makeElement(name) },
+  };
+  const marker = '    markBootTiming("shell-boot-start");';
+  assert.ok(clientCode.includes(marker));
+  vm.runInNewContext(clientCode.replace(marker,
+    "    window.tiles = { getPlayerCwlAttackDays, renderPlayerCwlAttackDays }; return;\n" + marker), context);
+  return context.window.tiles;
+};
+
+test("a two-star first day renders seven tiles, three stars each and six grey days", () => {
+  const { renderPlayerCwlAttackDays } = loadAttackTileInternals();
+  const strip = renderPlayerCwlAttackDays({ attackDays: [
+    { roundIndex: 0, state: "warended", starsByTag: { "#P0L": 2 } },
+  ] }, "#p0l");
+  assert.equal(strip.children.length, 7);
+  const first = strip.children[0];
+  assert.equal(first.className, "player-cwl-day is-attacked");
+  assert.equal(first.attributes["aria-label"], "Day 1: 2 of 3 stars");
+  for (const tile of strip.children) assert.equal(tile.children[1].children.length, 3);
+  assert.equal(first.children[1].children.filter((star) => star.attributes.class.includes("is-earned")).length, 2);
+  assert.equal(strip.children.slice(1).filter((tile) => tile.className.endsWith("is-unavailable")).length, 6);
+});
+
+test("league day positions distinguish zero stars, missed attacks, bench, preparation and pending", () => {
+  const { getPlayerCwlAttackDays } = loadAttackTileInternals();
+  const days = getPlayerCwlAttackDays({ attackDays: [
+    { roundIndex: 0, state: "warended", starsByTag: { "#P0L": 0 } },
+    { roundIndex: 1, state: "warended", starsByTag: { "#P0L": null } },
+    { roundIndex: 2, state: "warended", starsByTag: { "#Y0L": 3 } },
+    { roundIndex: 4, state: "inwar", starsByTag: { "#P0L": null } },
+    { roundIndex: 5, state: "preparation", starsByTag: { "#P0L": null } },
+    { roundIndex: 6, state: "inwar", starsByTag: { "#P0L": 3 } },
+    { roundIndex: 10, state: "warended", starsByTag: { "#P0L": 3 } },
+  ] }, "#P0L");
+  assert.deepEqual(Array.from(days, (day) => [day.day, day.state, day.stars]), [
+    [1, "attacked", 0], [2, "missed", 0], [3, "benched", 0], [4, "unavailable", 0],
+    [5, "pending", 0], [6, "upcoming", 0], [7, "attacked", 3],
+  ]);
+  assert.equal(getPlayerCwlAttackDays(null, "#P0L").length, 7);
+  assert.doesNotMatch(clientCode, /cwlStats\.starsTotal \+ "\/8"/);
+});
 
 test("preserves player content order while adding compact stat labels", () => {
   const townHallIndex = clientCode.indexOf("right.appendChild(townHallBadge)");

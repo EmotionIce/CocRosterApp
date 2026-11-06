@@ -659,6 +659,35 @@ test("direct CWL refresh retains a preparation-day matchup from prefetched data"
   );
 });
 
+test("CWL daily tiles retain real round indexes across other clans' wars and missing rounds", () => {
+  const backend = loadBackend();
+  const rawData = buildRosterData();
+  rawData.rosters[0].connectedClanTag = "#2LUCULP";
+  const data = backend.validateRosterData_(rawData);
+  const leaguegroup = buildOneRoundCwlLeagueGroup({ clanTag: "#2LUCULP", opponentTag: "#9PYLQG" });
+  leaguegroup.rounds = [{ warTags: ["#OTHER", "#WAR1"] }, { warTags: ["#0"] }, { warTags: ["#WAR3"] }];
+  const war = buildOneRoundCwlWar({ clanTag: "#2LUCULP", opponentTag: "#9PYLQG", stars: 0 });
+  const preparation = buildOneRoundCwlWar({ state: "preparation", clanTag: "#2LUCULP", opponentTag: "#9PYLQG" });
+  const refreshed = backend.refreshCwlStatsCore_(data, "main", {
+    autoRefreshSnapshotMode: true,
+    prefetchedLeaguegroupRawByClanTag: { "#2LUCULP": leaguegroup },
+    prefetchedCwlWarRawByTag: {
+      "#OTHER": buildOneRoundCwlWar({ clanTag: "#ELSEWHERE" }), "#WAR1": war, "#WAR3": preparation,
+    },
+  });
+  const stats = refreshed.rosterData.rosters[0].cwlStats;
+  assert.equal(stats.currentWar.roundIndex, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(stats.attackDays)), [
+    { roundIndex: 0, warTag: "#WAR1", state: "inwar", starsByTag: { "#PLAYER": 0 } },
+    { roundIndex: 2, warTag: "#WAR3", state: "preparation", starsByTag: { "#PLAYER": null } },
+  ]);
+  const sanitized = backend.sanitizeRosterCwlStats_({ ...stats, attackDays: [
+    ...stats.attackDays, { roundIndex: 7, warTag: "#BAD", state: "inwar", starsByTag: { "#PLAYER": 3 } },
+  ] }, { "#PLAYER": true });
+  assert.equal(sanitized.attackDays.length, 2);
+  assert.equal(sanitized.attackDays[0].starsByTag["#PLAYER"], 0);
+});
+
 test("direct CWL fallback finalization carries its season into canonical follow-up history exactly once", () => {
   const backend = loadBackend();
   const rawData = buildRosterData();
@@ -772,7 +801,10 @@ test("settled CWL coordinator data reaches canonical season history used by foll
   const eventCandidates = [];
   const previousSink = backend.beginPlayerWarEventCandidateCapture_(eventCandidates);
   try {
-    backend.refreshCwlStatsCore_(data, "main", { cwlCoordinatorResult: settled });
+    const refreshed = backend.refreshCwlStatsCore_(data, "main", { cwlCoordinatorResult: settled });
+    assert.deepEqual(JSON.parse(JSON.stringify(refreshed.rosterData.rosters[0].cwlStats.attackDays)), [
+      { roundIndex: 0, warTag: "#WAR1", state: "warended", starsByTag: { "#PLAYER": 2 } },
+    ]);
   } finally {
     backend.endPlayerWarEventCandidateCapture_(previousSink);
   }

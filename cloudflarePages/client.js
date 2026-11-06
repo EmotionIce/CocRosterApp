@@ -1440,6 +1440,62 @@
         };
     };
 
+    // Preserve league-day positions, including days when this player could not attack.
+    const getPlayerCwlAttackDays = (cwlStatsRaw, tagRaw) => {
+        const tag = normalizeClanTag(tagRaw);
+        const snapshots = Array.isArray(cwlStatsRaw && cwlStatsRaw.attackDays) ? cwlStatsRaw.attackDays : [];
+        const days = Array.from({ length: 7 }, (_, index) => ({ day: index + 1, state: "unavailable", stars: 0 }));
+        snapshots.forEach((snapshot) => {
+            if (!snapshot || !Number.isInteger(snapshot.roundIndex) || snapshot.roundIndex < 0 || snapshot.roundIndex >= 7) return;
+            const warState = toStr(snapshot.state).toLowerCase();
+            if (!["preparation", "inwar", "warended"].includes(warState)) return;
+            const starsByTag = snapshot.starsByTag && typeof snapshot.starsByTag === "object" ? snapshot.starsByTag : {};
+            const inLineup = Object.prototype.hasOwnProperty.call(starsByTag, tag);
+            const stars = inLineup ? starsByTag[tag] : null;
+            const attacked = Number.isInteger(stars) && stars >= 0 && stars <= 3;
+            const state = !inLineup ? "benched" : warState === "preparation" ? "upcoming"
+                : attacked ? "attacked" : warState === "warended" ? "missed" : "pending";
+            days[snapshot.roundIndex] = { day: snapshot.roundIndex + 1, state: state, stars: state === "attacked" ? stars : 0 };
+        });
+        return days;
+    };
+
+    const renderPlayerCwlAttackDays = (cwlStatsRaw, tagRaw) => {
+        const strip = el("div", "player-cwl player-cwl--days");
+        strip.setAttribute("role", "group");
+        strip.setAttribute("aria-label", "CWL attacks by day");
+        getPlayerCwlAttackDays(cwlStatsRaw, tagRaw).forEach((day) => {
+            const details = day.state === "attacked" ? day.stars + " of 3 stars"
+                : day.state === "benched" ? "not in the active lineup; no attack possible"
+                : day.state === "missed" ? "missed attack"
+                : day.state === "pending" ? "attack pending"
+                : day.state === "upcoming" ? "war has not started"
+                : "no lineup data yet";
+            const tile = el("span", "player-cwl-day is-" + day.state);
+            tile.setAttribute("role", "img");
+            tile.setAttribute("aria-label", "Day " + day.day + ": " + details);
+            tile.title = "Day " + day.day + ": " + details;
+            const dayLabel = el("span", "player-cwl-day__number", String(day.day));
+            dayLabel.setAttribute("aria-hidden", "true");
+            tile.appendChild(dayLabel);
+            const stars = el("span", "player-cwl-day__stars");
+            stars.setAttribute("aria-hidden", "true");
+            for (let index = 0; index < 3; index++) {
+                const star = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+                star.setAttribute("class", "player-cwl-day__star" + (index < day.stars ? " is-earned" : ""));
+                star.setAttribute("viewBox", "0 0 24 24");
+                star.setAttribute("focusable", "false");
+                const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                path.setAttribute("d", "m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01Z");
+                star.appendChild(path);
+                stars.appendChild(star);
+            }
+            tile.appendChild(stars);
+            strip.appendChild(tile);
+        });
+        return strip;
+    };
+
     // Get player regular war stats.
     const getPlayerRegularWarStats = (regularWarRaw, tagRaw, warPerformanceRaw) => {
         const tag = normalizeClanTag(tagRaw);
@@ -7459,6 +7515,7 @@
 
         const wrap = el("div", "player");
         wrap.classList.add("roster-player-card");
+        if (trackingMode === "cwl") wrap.classList.add("roster-player-card--cwl");
         wrap.dataset.tag = playerTag;
         wrap.dataset.rosterId = toStr(context.rosterId).trim();
         if (trackingMode === "cwl" && playerSuggestion && playerSuggestion.status === "out") wrap.classList.add("suggest-bench");
@@ -7529,28 +7586,18 @@
             right.appendChild(leagueBadge);
         }
 
-        const cwlBadge = el("div", "player-cwl");
-        cwlBadge.classList.add(trackingMode === "regularWar" ? "player-cwl--attacks" : "player-cwl--stars");
-        const cwlStatGlyph = el("span", "player-stat-glyph", trackingMode === "regularWar" ? "↗" : "✦");
-        cwlStatGlyph.setAttribute("aria-hidden", "true");
-        cwlBadge.appendChild(cwlStatGlyph);
-        cwlBadge.appendChild(el("span", "player-cwl-label", trackingMode === "regularWar" ? "Atk" : "Stars"));
+        const cwlBadge = trackingMode === "cwl" ? renderPlayerCwlAttackDays(context.cwlStats, playerTag) : el("div", "player-cwl player-cwl--attacks");
         if (trackingMode === "regularWar") {
+            const cwlStatGlyph = el("span", "player-stat-glyph", "↗");
+            cwlStatGlyph.setAttribute("aria-hidden", "true");
+            cwlBadge.appendChild(cwlStatGlyph);
+            cwlBadge.appendChild(el("span", "player-cwl-label", "Atk"));
             const attacksUsed = toNonNegativeInt(regularWarStats.current.attacksUsed);
             const attacksAllowed = toNonNegativeInt(regularWarStats.current.attacksAllowed);
             const attacksRemaining = toNonNegativeInt(regularWarStats.current.attacksRemaining);
             const pendingAttack = role === "main" && regularWarStats.currentWarState === "inwar" && attacksRemaining > 0;
             if (pendingAttack) cwlBadge.classList.add("alert");
             cwlBadge.appendChild(el("span", "player-cwl-value", attacksUsed + "/" + attacksAllowed));
-            if (pendingAttack) {
-                cwlBadge.appendChild(el("span", "player-cwl-indicator", "!"));
-            }
-        } else {
-            const belowFullRewardThreshold = cwlStats.starsTotal < 8;
-            const pendingAttack = cwlStats.currentWarAttackPending >= 1;
-            if (belowFullRewardThreshold) cwlBadge.classList.add("needs-stars");
-            if (pendingAttack) cwlBadge.classList.add("pending");
-            cwlBadge.appendChild(el("span", "player-cwl-value", cwlStats.starsTotal + "/8"));
             if (pendingAttack) {
                 cwlBadge.appendChild(el("span", "player-cwl-indicator", "!"));
             }

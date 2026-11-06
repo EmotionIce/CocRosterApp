@@ -3062,6 +3062,42 @@ function buildHistoryRetentionTagSet_(rosterPoolTagSetRaw, warPerformanceRaw, re
 	return out;
 }
 
+// Keep one compact lineup/result snapshot per actual league round.
+function sanitizeCwlAttackDays_(daysRaw, retainedTagSet) {
+	const days = Array.isArray(daysRaw) ? daysRaw : [];
+	const byRound = {};
+	const allowedTags = retainedTagSet && typeof retainedTagSet === "object" ? retainedTagSet : {};
+	for (let i = 0; i < days.length; i++) {
+		const day = days[i] && typeof days[i] === "object" ? days[i] : {};
+		const roundIndex = day.roundIndex;
+		const state = normalizeWarState_(day.state);
+		const warTag = normalizeTag_(day.warTag);
+		if (!Number.isInteger(roundIndex) || roundIndex < 0 || roundIndex >= 7 || !warTag) continue;
+		if (state !== "preparation" && state !== "inwar" && state !== "warended") continue;
+		const rawStars = day.starsByTag && typeof day.starsByTag === "object" ? day.starsByTag : {};
+		const starsByTag = {};
+		Object.keys(rawStars).forEach(function (rawTag) {
+			const tag = normalizeTag_(rawTag);
+			if (!tag || !allowedTags[tag]) return;
+			const stars = rawStars[rawTag];
+			if (stars === null || (Number.isInteger(stars) && stars >= 0 && stars <= 3)) starsByTag[tag] = stars;
+		});
+		byRound[roundIndex] = { roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag };
+	}
+	return Object.keys(byRound).sort((left, right) => Number(left) - Number(right)).map((key) => byRound[key]);
+}
+
+function buildCwlAttackDay_(roundIndex, warTag, state, aggregateByTagRaw, retainedTagSet) {
+	const aggregate = aggregateByTagRaw && typeof aggregateByTagRaw === "object" ? aggregateByTagRaw : {};
+	const starsByTag = {};
+	Object.keys(aggregate).forEach(function (tag) {
+		const stats = aggregate[tag] || {};
+		starsByTag[tag] = normalizeWarState_(state) !== "preparation" && (toNonNegativeInt_(stats.attacksMade) > 0 || toNonNegativeInt_(stats.countedAttacks) > 0)
+			? Math.min(3, toNonNegativeInt_(stats.starsTotal)) : null;
+	});
+	return sanitizeCwlAttackDays_([{ roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag }], retainedTagSet)[0] || null;
+}
+
 // Sanitize roster CWL stats.
 function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
 	if (rawStats == null) return null;
@@ -3083,6 +3119,7 @@ function sanitizeRosterCwlStats_(rawStats, retainedTagSet) {
 		season: typeof stats.season === "string" ? stats.season : "",
 		byTag: byTag,
 	};
+	if (Array.isArray(stats.attackDays)) out.attackDays = sanitizeCwlAttackDays_(stats.attackDays, allowedTags);
 	const currentWar = sanitizeCwlCurrentWar_(stats.currentWar);
 	if (currentWar) out.currentWar = currentWar;
 	const reminderWar = sanitizeAttackReminderWarSnapshot_(stats.reminderWar);
