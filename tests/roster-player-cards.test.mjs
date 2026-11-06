@@ -47,9 +47,9 @@ test("league day positions distinguish zero stars, missed attacks, bench, prepar
   const { getPlayerCwlAttackDays } = loadAttackTileInternals();
   const days = getPlayerCwlAttackDays({ attackDays: [
     { roundIndex: 0, state: "warended", starsByTag: { "#P0L": 0 } },
-    { roundIndex: 1, state: "warended", starsByTag: { "#P0L": null } },
+    { roundIndex: 1, state: "warended", starsByTag: { "#P0L": -1 } },
     { roundIndex: 2, state: "warended", starsByTag: { "#Y0L": 3 } },
-    { roundIndex: 4, state: "inwar", starsByTag: { "#P0L": null } },
+    { roundIndex: 4, state: "inwar", starsByTag: { "#P0L": -1 } },
     { roundIndex: 5, state: "preparation", starsByTag: { "#P0L": null } },
     { roundIndex: 6, state: "inwar", starsByTag: { "#P0L": 3 } },
     { roundIndex: 10, state: "warended", starsByTag: { "#P0L": 3 } },

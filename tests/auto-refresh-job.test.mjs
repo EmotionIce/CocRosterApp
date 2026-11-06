@@ -679,13 +679,29 @@ test("CWL daily tiles retain real round indexes across other clans' wars and mis
   assert.equal(stats.currentWar.roundIndex, 0);
   assert.deepEqual(JSON.parse(JSON.stringify(stats.attackDays)), [
     { roundIndex: 0, warTag: "#WAR1", state: "inwar", starsByTag: { "#PLAYER": 0 } },
-    { roundIndex: 2, warTag: "#WAR3", state: "preparation", starsByTag: { "#PLAYER": null } },
+    { roundIndex: 2, warTag: "#WAR3", state: "preparation", starsByTag: { "#PLAYER": -1 } },
   ]);
   const sanitized = backend.sanitizeRosterCwlStats_({ ...stats, attackDays: [
     ...stats.attackDays, { roundIndex: 7, warTag: "#BAD", state: "inwar", starsByTag: { "#PLAYER": 3 } },
   ] }, { "#PLAYER": true });
   assert.equal(sanitized.attackDays.length, 2);
   assert.equal(sanitized.attackDays[0].starsByTag["#PLAYER"], 0);
+});
+
+test("CWL lineup slots survive Firebase null deletion for pending and missed attacks", () => {
+  const backend = loadBackend();
+  const retained = { "#PLAYER": true, "#PENDING": true, "#ZERO": true };
+  const aggregate = { "#PLAYER": { attacksMade: 1, starsTotal: 2 }, "#PENDING": {}, "#ZERO": { attacksMade: 1, starsTotal: 0 } };
+  const active = backend.buildCwlAttackDay_(3, "#WAR4", "inwar", aggregate, retained);
+  const ended = backend.buildCwlAttackDay_(2, "#WAR3", "warended", aggregate, retained);
+  const legacy = { roundIndex: 1, warTag: "#WAR2", state: "warended", starsByTag: { "#PENDING": null } };
+  const beforeWrite = backend.sanitizeRosterCwlStats_({ attackDays: [legacy, ended, active] }, retained);
+  const persisted = JSON.parse(JSON.stringify(beforeWrite), (_key, value) => value === null ? undefined : value);
+  const afterRead = backend.sanitizeRosterCwlStats_(persisted, retained);
+  for (const day of afterRead.attackDays) assert.equal(day.starsByTag["#PENDING"], -1);
+  assert.equal(afterRead.attackDays[2].starsByTag["#PLAYER"], 2);
+  assert.equal(afterRead.attackDays[2].starsByTag["#ZERO"], 0);
+  assert.equal(Object.hasOwn(afterRead.attackDays[2].starsByTag, "#BENCHED"), false);
 });
 
 test("direct CWL fallback finalization carries its season into canonical follow-up history exactly once", () => {

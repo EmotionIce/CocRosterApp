@@ -3080,7 +3080,9 @@ function sanitizeCwlAttackDays_(daysRaw, retainedTagSet) {
 			const tag = normalizeTag_(rawTag);
 			if (!tag || !allowedTags[tag]) return;
 			const stars = rawStars[rawTag];
-			if (stars === null || (Number.isInteger(stars) && stars >= 0 && stars <= 3)) starsByTag[tag] = stars;
+			// Firebase removes null-valued keys. Keep unused lineup slots as -1,
+			// so a pending or missed attack stays distinct from being benched.
+			if (stars === null || (Number.isInteger(stars) && stars >= -1 && stars <= 3)) starsByTag[tag] = stars === null ? -1 : stars;
 		});
 		byRound[roundIndex] = { roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag };
 	}
@@ -3093,7 +3095,7 @@ function buildCwlAttackDay_(roundIndex, warTag, state, aggregateByTagRaw, retain
 	Object.keys(aggregate).forEach(function (tag) {
 		const stats = aggregate[tag] || {};
 		starsByTag[tag] = normalizeWarState_(state) !== "preparation" && (toNonNegativeInt_(stats.attacksMade) > 0 || toNonNegativeInt_(stats.countedAttacks) > 0)
-			? Math.min(3, toNonNegativeInt_(stats.starsTotal)) : null;
+			? Math.min(3, toNonNegativeInt_(stats.starsTotal)) : -1;
 	});
 	return sanitizeCwlAttackDays_([{ roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag }], retainedTagSet)[0] || null;
 }
