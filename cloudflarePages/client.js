@@ -1475,9 +1475,6 @@
             tile.setAttribute("role", "img");
             tile.setAttribute("aria-label", "Day " + day.day + ": " + details);
             tile.title = "Day " + day.day + ": " + details;
-            const dayLabel = el("span", "player-cwl-day__number", String(day.day));
-            dayLabel.setAttribute("aria-hidden", "true");
-            tile.appendChild(dayLabel);
             const stars = el("span", "player-cwl-day__stars");
             stars.setAttribute("aria-hidden", "true");
             for (let index = 0; index < 3; index++) {

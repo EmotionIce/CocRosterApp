@@ -35,8 +35,11 @@ test("a two-star first day renders seven tiles, three stars each and six grey da
   const first = strip.children[0];
   assert.equal(first.className, "player-cwl-day is-attacked");
   assert.equal(first.attributes["aria-label"], "Day 1: 2 of 3 stars");
-  for (const tile of strip.children) assert.equal(tile.children[1].children.length, 3);
-  assert.equal(first.children[1].children.filter((star) => star.attributes.class.includes("is-earned")).length, 2);
+  for (const tile of strip.children) {
+    assert.equal(tile.children.length, 1);
+    assert.equal(tile.children[0].children.length, 3);
+  }
+  assert.equal(first.children[0].children.filter((star) => star.attributes.class.includes("is-earned")).length, 2);
   assert.equal(strip.children.slice(1).filter((tile) => tile.className.endsWith("is-unavailable")).length, 6);
 });
 

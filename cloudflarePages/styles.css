@@ -1342,11 +1342,11 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card--cwl{
-  --player-row-height:90px;
+  --player-row-height:78px;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card--cwl > .player-top{
-  grid-template-rows:28px 33px 29px;
+  grid-template-rows:28px 21px 29px;
 }
 
 body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card--cwl .player-left{
@@ -1365,7 +1365,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   grid-row:2;
   grid-template-columns:repeat(7, minmax(0, 1fr));
   width:auto;
-  height:30px;
+  height:18px;
   gap:3px;
   margin:0 8px 0 10px;
   padding:0;
@@ -1542,7 +1542,7 @@ body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-pl
   }
 
   body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card--cwl{
-    --player-row-height:90px;
+    --player-row-height:78px;
   }
 
   body:not(.admin-shell-page) .public-shell[data-active-view="rosters"] .roster-player-card .player-cwl--days{
@@ -5883,7 +5883,7 @@ table.roster{ display:none !important; }
   gap:3px;
   width:240px;
   max-width:100%;
-  height:30px;
+  height:18px;
   padding:0;
   border:0 !important;
   border-radius:0 !important;
@@ -5892,22 +5892,14 @@ table.roster{ display:none !important; }
 
 .player-cwl-day{
   display:flex;
-  flex-direction:column;
   align-items:center;
   justify-content:center;
-  gap:2px;
   min-width:0;
-  height:30px;
+  height:18px;
   border:1px solid #5c574c;
   border-radius:4px;
   background:#201e19;
   color:#c1b9a6;
-}
-
-.player-cwl-day__number{
-  font-size:8px;
-  font-weight:700;
-  line-height:1;
 }
 
 .player-cwl-day__stars{
