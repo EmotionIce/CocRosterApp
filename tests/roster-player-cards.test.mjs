@@ -62,6 +62,27 @@ test("league day positions distinguish zero stars, missed attacks, bench, prepar
   assert.doesNotMatch(clientCode, /cwlStats\.starsTotal \+ "\/8"/);
 });
 
+test("recovers missing lineup slots only from matching war results and authoritative lineup evidence", () => {
+  const { getPlayerCwlAttackDays } = loadAttackTileInternals();
+  const stats = {
+    byTag: { "#P0L": { attackResults: [
+      { warId: "#WAR1", missed: true, stars: 0 },
+      { warId: "#WAR2", missed: false, stars: 0 },
+      { warId: "#OTHER", missed: false, stars: 3 },
+    ] } },
+    attackDays: [
+      { roundIndex: 0, warTag: "#WAR1", state: "warended", starsByTag: {} },
+      { roundIndex: 1, warTag: "#WAR2", state: "warended", starsByTag: {} },
+      { roundIndex: 2, warTag: "#WAR3", state: "inwar", starsByTag: {} },
+      { roundIndex: 3, warTag: "#WAR4", state: "preparation", starsByTag: {} },
+    ],
+    reminderWar: { mode: "cwl", complete: true, authoritative: true, warId: "#WAR3", byTag: { "#P0L": { attacksRemaining: 1 } } },
+  };
+  assert.deepEqual(Array.from(getPlayerCwlAttackDays(stats, "#P0L").slice(0, 4), day => day.state), ["missed", "attacked", "pending", "benched"]);
+  stats.reminderWar.authoritative = false;
+  assert.equal(getPlayerCwlAttackDays(stats, "#P0L")[2].state, "benched");
+});
+
 test("preserves player content order while adding compact stat labels", () => {
   const townHallIndex = clientCode.indexOf("right.appendChild(townHallBadge)");
   const leagueIndex = clientCode.indexOf("right.appendChild(leagueBadge)", townHallIndex);

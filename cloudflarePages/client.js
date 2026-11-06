@@ -1444,14 +1444,23 @@
     const getPlayerCwlAttackDays = (cwlStatsRaw, tagRaw) => {
         const tag = normalizeClanTag(tagRaw);
         const snapshots = Array.isArray(cwlStatsRaw && cwlStatsRaw.attackDays) ? cwlStatsRaw.attackDays : [];
+        const entry = cwlStatsRaw && cwlStatsRaw.byTag && cwlStatsRaw.byTag[tag];
+        const results = Array.isArray(entry && entry.attackResults) ? entry.attackResults : [];
+        const reminder = cwlStatsRaw && cwlStatsRaw.reminderWar;
         const days = Array.from({ length: 7 }, (_, index) => ({ day: index + 1, state: "unavailable", stars: 0 }));
         snapshots.forEach((snapshot) => {
             if (!snapshot || !Number.isInteger(snapshot.roundIndex) || snapshot.roundIndex < 0 || snapshot.roundIndex >= 7) return;
             const warState = toStr(snapshot.state).toLowerCase();
             if (!["preparation", "inwar", "warended"].includes(warState)) return;
             const starsByTag = snapshot.starsByTag && typeof snapshot.starsByTag === "object" ? snapshot.starsByTag : {};
-            const inLineup = Object.prototype.hasOwnProperty.call(starsByTag, tag);
-            const stars = inLineup ? starsByTag[tag] : null;
+            const hasSlot = Object.prototype.hasOwnProperty.call(starsByTag, tag);
+            // Older persisted snapshots lost null-valued slots. Recover only
+            // from evidence for this exact war, never from season totals.
+            const result = snapshot.warTag ? results.find((attack) => attack && attack.warId === snapshot.warTag) : null;
+            const reminderMember = reminder && reminder.mode === "cwl" && reminder.complete === true && reminder.authoritative === true &&
+                reminder.warId === snapshot.warTag && reminder.byTag && reminder.byTag[tag];
+            const inLineup = hasSlot || !!result || !!reminderMember;
+            const stars = hasSlot ? starsByTag[tag] : result && result.missed !== true ? result.stars : null;
             const attacked = Number.isInteger(stars) && stars >= 0 && stars <= 3;
             const state = !inLineup ? "benched" : warState === "preparation" ? "upcoming"
                 : attacked ? "attacked" : warState === "warended" ? "missed" : "pending";
