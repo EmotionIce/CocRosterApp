@@ -161,6 +161,10 @@ function runAdminApiMethod_(methodNameRaw, argsRaw) {
 			return syncWarFollowupModerator(args[0], args[1]);
 		case "getWarFollowupCase":
 			return getWarFollowupCase(args[0], args[1]);
+		case "verifyWarFollowupDelivery":
+			return verifyWarFollowupDelivery(args[0], args[1]);
+		case "checkWarFollowupGameAction":
+			return checkWarFollowupGameAction(args[0], args[1], args[2]);
 		case "saveWarFollowupSettings":
 			return saveWarFollowupSettings(args[0], args[1], args[2], args[3]);
 		case "getWarFollowupRulesStatus":

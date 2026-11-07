@@ -591,9 +591,26 @@ function sanitizeRegularWarHistoryEntry_(entryRaw, warKeyRaw) {
 	out.repairedAt = typeof entry.repairedAt === "string" ? entry.repairedAt : "";
 	out.statsByTag = sanitizeRegularWarHistoryStatsByTag_(entry.statsByTag);
 	out.formStatsByTag = sanitizeRegularWarHistoryStatsByTag_(entry.formStatsByTag);
+	const timing = sanitizeRegularWarModerationTiming_(entry.moderationTiming);
+	if (out.authoritative && timing) out.moderationTiming = timing;
 	if (!out.lastUpdatedAt) out.lastUpdatedAt = out.finalizedAt;
 	if (out.incomplete && !out.firstIncompleteAt) out.firstIncompleteAt = out.finalizedAt || out.lastUpdatedAt;
 	return out;
+}
+
+function sanitizeRegularWarModerationTiming_(raw) {
+	const preparation = parseIsoToMs_(raw && raw.preparationStartTime);
+	const end = parseIsoToMs_(raw && raw.endTime);
+	return preparation > 0 && end > preparation ? {
+		preparationStartTime: new Date(preparation).toISOString(),
+		endTime: new Date(end).toISOString(),
+	} : null;
+}
+
+function buildModerationFinalWarSnapshot_(war, clanTag, mode, warTag, nowIso) {
+	const snapshot = buildAttackReminderWarSnapshot_(war, clanTag, mode, warTag, nowIso);
+	return snapshot && snapshot.state === "warended" &&
+		parseIsoToMs_(snapshot.endTime) <= parseIsoToMs_(snapshot.observedAt) ? snapshot : null;
 }
 
 // Sanitize regular war history by key.
@@ -2028,6 +2045,9 @@ function upsertRegularWarHistoryEntry_(warPerformanceRaw, warKeyRaw, statsByTagR
 	next.reason = reason || next.reason;
 	next.incomplete = !!incomplete;
 	next.authoritative = authoritative && !incomplete;
+	if (Object.prototype.hasOwnProperty.call(options, "moderationTiming")) {
+		next.moderationTiming = options.moderationTiming;
+	}
 	if (next.incomplete) {
 		next.firstIncompleteAt = next.firstIncompleteAt || nowText;
 	} else if (!next.firstIncompleteAt && existing && existing.firstIncompleteAt) {
@@ -2171,7 +2191,7 @@ function markWarPerformanceFinalization_(warPerformance, modeRaw, identifierRaw,
 }
 
 // Apply war snapshot to long term aggregate.
-function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifierRaw, statsByTagRaw, nowIso, source, reason, incomplete, formStatsByTagRaw) {
+function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifierRaw, statsByTagRaw, nowIso, source, reason, incomplete, formStatsByTagRaw, moderationTiming) {
 	const target = resolveWarPerformanceFinalizationTarget_(modeRaw, identifierRaw);
 	const mode = target.mode;
 	if (!warPerformance || typeof warPerformance !== "object") {
@@ -2194,6 +2214,7 @@ function applyWarSnapshotToLongTermAggregate_(warPerformance, modeRaw, identifie
 			incomplete: incomplete,
 			authoritative: !toBooleanFlag_(incomplete),
 			formStatsByTag: formStatsByTagRaw,
+			moderationTiming: moderationTiming,
 		});
 		return {
 			applied: !!historyResult.applied,
@@ -2231,6 +2252,13 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 	const formAnalysis = computeRegularWarFormAnalysisFromWar_(war, clanTag, trackedTagSet);
 	const formStatsByTag = formAnalysis ? formAnalysis.statsByTag : null;
 	const formContextByTag = formAnalysis ? formAnalysis.contextByTag : {};
+	// The history's finalization time can move during repair. Use the actual
+	// preparation/end times only when the finished API lineup was complete.
+	const finalWar = incomplete ? null : buildModerationFinalWarSnapshot_(war, clanTag, "regular", "", nowIso);
+	const moderationTiming = finalWar && {
+		preparationStartTime: war.preparationStartTime,
+		endTime: finalWar.endTime,
+	};
 	const result = applyWarSnapshotToLongTermAggregate_(
 		warPerformance,
 		"regular",
@@ -2241,6 +2269,7 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 		reason || "regularWarFinalized",
 		!!incomplete,
 		formStatsByTag,
+		moderationTiming,
 	);
 	if (result && result.applied && typeof emitPlayerWarEventCandidate_ === "function") {
 		emitPlayerWarEventCandidate_(buildRegularPlayerWarCandidate_(warPerformance, warKey, clanTag, "", formContextByTag));
@@ -3085,11 +3114,13 @@ function sanitizeCwlAttackDays_(daysRaw, retainedTagSet) {
 			if (stars === null || (Number.isInteger(stars) && stars >= -1 && stars <= 3)) starsByTag[tag] = stars === null ? -1 : stars;
 		});
 		byRound[roundIndex] = { roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag };
+		const endedAt = parseIsoToMs_(day.verifiedEndedAt);
+		if (state === "warended" && endedAt > 0) byRound[roundIndex].verifiedEndedAt = new Date(endedAt).toISOString();
 	}
 	return Object.keys(byRound).sort((left, right) => Number(left) - Number(right)).map((key) => byRound[key]);
 }
 
-function buildCwlAttackDay_(roundIndex, warTag, state, aggregateByTagRaw, retainedTagSet) {
+function buildCwlAttackDay_(roundIndex, warTag, state, aggregateByTagRaw, retainedTagSet, verifiedEndedAt) {
 	const aggregate = aggregateByTagRaw && typeof aggregateByTagRaw === "object" ? aggregateByTagRaw : {};
 	const starsByTag = {};
 	Object.keys(aggregate).forEach(function (tag) {
@@ -3097,7 +3128,7 @@ function buildCwlAttackDay_(roundIndex, warTag, state, aggregateByTagRaw, retain
 		starsByTag[tag] = normalizeWarState_(state) !== "preparation" && (toNonNegativeInt_(stats.attacksMade) > 0 || toNonNegativeInt_(stats.countedAttacks) > 0)
 			? Math.min(3, toNonNegativeInt_(stats.starsTotal)) : -1;
 	});
-	return sanitizeCwlAttackDays_([{ roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag }], retainedTagSet)[0] || null;
+	return sanitizeCwlAttackDays_([{ roundIndex: roundIndex, warTag: warTag, state: state, starsByTag: starsByTag, verifiedEndedAt: verifiedEndedAt }], retainedTagSet)[0] || null;
 }
 
 // Sanitize roster CWL stats.

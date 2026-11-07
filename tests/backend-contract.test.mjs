@@ -23,6 +23,8 @@ const appScriptFiles = [
   "script/assets.js",
   "script/cwlLeagueSignups.js",
   "script/warFollowup.js",
+  "script/warFollowupPolicy.js",
+  "script/warFollowupSafety.js",
   "script/adminApi.js",
   "script/entrypoints.js",
 ];
@@ -8148,6 +8150,9 @@ test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, an
   const backend = installMemoryFirebase(loadBackend(), {
     activePublished: { currentVersionId: "v-existing" },
   });
+  backend.assertWarFollowupMoveSafety_ = () => ({ currentClanTag: "#TRAIN" });
+  backend.readWarFollowupPlayerClan_ = () => "#TRAIN";
+  backend.assertWarFollowupRecoveryReady_ = (value) => assert.ok(value.recoveryArrivedAt);
   const tag = "#P0LYGQ";
   const evidence = {
     capturedAt: "2026-07-20T00:00:00.000Z",
@@ -8179,6 +8184,7 @@ test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, an
     dmText: "Specific moderation DM.",
     recoveryWarTarget: 3,
     requireNoMisses: true,
+    recoveryAgreed: true,
     signalIds: ["regular_missed:event"],
   }, "change-me"]);
   assert.equal(decided.status, "needs_dm");
@@ -8196,12 +8202,17 @@ test("war follow-up case lifecycle preserves evidence, DM handoff, ownership, an
   assert.equal(sent.status, "hero_down");
   assert.ok(sent.dmSentAt);
   assert.equal(sent.activity.at(-1).type, "dm_sent");
+  assert.equal(sent.recoveryStartedAt, "");
+  const arrived = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "recovery_arrived", tag, expectedUpdatedAt: sent.updatedAt,
+  }, "secret"]);
+  assert.equal(arrived.recoveryStartedAt, arrived.recoveryArrivedAt);
 
   const noted = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "add_note",
     tag,
     actor: "Sam",
-    expectedUpdatedAt: sent.updatedAt,
+    expectedUpdatedAt: arrived.updatedAt,
     note: "Player acknowledged the decision.",
   }, "change-me"]);
   assert.equal(noted.activity.at(-1).text, "Player acknowledged the decision.");
@@ -8444,6 +8455,7 @@ test("war follow-up automated cases keep their trigger snapshot and enforce one 
 
 test("war follow-up automation advances quietly and freezes new recovery terms", () => {
   const backend = installMemoryFirebase(loadBackend());
+  backend.assertWarFollowupMoveSafety_ = () => ({ safe: true });
   const tag = "#P0LYGQ";
   const create = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "create_automatic", tag, discordId: "123456789012345678",
@@ -8474,6 +8486,7 @@ test("war follow-up automation advances quietly and freezes new recovery terms",
 
   const recovery = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "hero_down", tag, targetRosterId: "training", targetClanTag: "#TRAIN",
+    recoveryAgreed: true,
     recoveryWarTarget: 1, requireNoMisses: false, dmText: "Please move to training.",
     recoveryAverageStarsThreshold: 1.8, recoveryAverageDestructionThreshold: 70,
     recoveryContextMode: "assist", expectedUpdatedAt: reviewed.updatedAt, mutationId: "auto-recovery"
@@ -8780,8 +8793,122 @@ test("war follow-up captures a player response exactly once and returns the case
   assert.equal(followup.conversation.at(-1).text, "I can provide more details if needed.");
 });
 
+test("moderation holds for sign-up, a different clan's CWL group, unsettled rounds, and selected regular wars", () => {
+  const backend = loadBackend();
+  const now = Date.parse("2026-11-15T12:00:00Z");
+  backend.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  const player = "#P0LYGQ";
+  const home = "#P0YQL";
+  const leagueClan = "#9PYLQG";
+  let signups = {};
+  let events = [];
+  let groupState = "inWar";
+  let round = "#QPYLQ";
+  let regularWar = { state: "notInWar" };
+  backend.readActiveRosterLayoutSnapshot_ = () => ({
+    rosterData: { rosters: [{ connectedClanTag: home }, { connectedClanTag: leagueClan }] },
+  });
+  backend.readActiveCwlLeagueSignups_ = () => signups;
+  backend.listCurrentCwlSeasonEvents_ = () => events;
+  backend.getCwlSeasonEventRolloverReason_ = () => "";
+  backend.readWarFollowupPlayerClan_ = () => home;
+  backend.prefetchLeagueGroupRawByClanTag_ = () => ({
+    rawByClanTag: { [leagueClan]: { state: groupState, season: "2026-11", clans: [{ tag: leagueClan }], rounds: [{ warTags: [round] }] } },
+    errorByClanTag: { [home]: { statusCode: 404 } },
+  });
+  backend.cocFetchAllByPathEntries_ = () => ({ dataByKey: { [home]: regularWar }, errorByKey: {} });
+  backend.buildAttackReminderWarSnapshot_ = () => ({ byTag: { [player]: {} } });
+  const check = () => backend.inspectWarFollowupGameSafety_(player, home, "", false);
+
+  signups = { signupId: "season-signup", preferencesByTag: { [player]: { targetClanTag: leagueClan } } };
+  assert.match(check().reason, /pending family CWL sign-up/);
+  signups = {};
+  events = [{ cwlTrackingState: "waiting", startsAt: "2026-11-16T00:00:00Z" }];
+  assert.match(check().reason, /sign-up, season, or final verification/);
+  events = [];
+  assert.match(check().reason, /league group is active/);
+  groupState = "ended";
+  round = "#0";
+  assert.match(check().reason, /could not be verified/);
+  round = "#QPYLQ";
+  regularWar = { state: "preparation" };
+  assert.match(check().reason, /regular war is in preparation/);
+  regularWar = { state: "notInWar" };
+  assert.equal(check().safe, true);
+});
+
+test("a v2 reply wins over a queued follow-up and the moderator's delivered reply closes the case", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  let now = Date.parse("2026-11-15T12:00:00Z");
+  backend.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  const tag = "#P0LYGQ";
+  const clan = "#9PYLQG";
+  const discordId = "123456789012345678";
+  const guildId = "234567890123456789";
+  const firstMessageId = "345678901234567890";
+  const apply = (action, value, patch, actor = "secret") => backend.mutateWarFollowupCase({
+    tag, action, expectedUpdatedAt: value?.updatedAt || "", mutationId: `test-${action}-${now}`, ...patch,
+  }, actor);
+  backend.saveWarFollowupSettings({ moderationPilotClanTag: clan }, "change-me");
+  backend.saveWarFollowupSettings({ moderationLineupPauses: true }, "change-me");
+  now += 60_000;
+  const started = apply("policy_start", null, {
+    sourceClanTag: clan, discordId, automationCategory: "regular_missed", sendAutomaticDm: true,
+    evidenceAt: new Date(now - 500).toISOString(), dmText: "Check-in", policy: { guildId, discordId, warIds: ["first"] },
+  });
+  assert.equal(started.status, "needs_dm");
+  const sent = apply("mark_dm_sent", started, {
+    dmQueueId: started.dmQueueId, dmDeliveryMode: "bot", dmMessageId: firstMessageId,
+  });
+  assert.equal(sent.policy.checkedInAt, sent.dmSentAt);
+  now += 5 * 24 * 60 * 60 * 1000;
+  let safe = false;
+  backend.inspectWarFollowupGameSafety_ = () => ({ safe, reason: "Active CWL group." });
+  const held = apply("policy_lineup", sent, { policy: { warIds: ["second", "third"] }, dmText: "One-war follow-up" });
+  assert.equal(held.policy.task.state, "held");
+  assert.equal(held.dmQueueId, "");
+  safe = true;
+  now += 3600_000;
+  const followup = apply("policy_lineup", held, { policy: { warIds: ["second", "third"] }, dmText: "One-war follow-up" });
+  assert.equal(followup.status, "needs_dm");
+  assert.equal(followup.policy.task.state, "held");
+  assert.throws(() => apply("player_response", followup, {
+    responseDiscordId: "123456789012345679", responseToMessageId: firstMessageId, responseText: "wrong account",
+  }), /not currently awaiting/);
+  const response = apply("player_response", followup, {
+    responseDiscordId: discordId, responseToMessageId: firstMessageId, responseText: "I was opted out.",
+    responseMessageId: "456789012345678901",
+  });
+  assert.equal(response.status, "needs_review");
+  assert.equal(response.dmQueueId, "");
+  assert.equal(response.policy.task, null);
+  assert.equal(backend.verifyWarFollowupDelivery({
+    tag, guildId, dmQueueId: followup.dmQueueId, expectedUpdatedAt: followup.updatedAt,
+  }, "secret").allowed, false);
+  const queued = apply("contact", response, { replyMode: "excuse", actor: "Alex", dmText: "Thanks for explaining." }, "change-me");
+  assert.equal(queued.status, "needs_dm");
+  assert.match(queued.dmText, /^Alex, TURTLE moderator/);
+  assert.equal(queued.playerResponse, "I was opted out.");
+  const resolved = apply("mark_dm_sent", queued, {
+    dmQueueId: queued.dmQueueId, dmDeliveryMode: "bot", dmMessageId: "567890123456789012",
+  });
+  assert.equal(resolved.status, "closed");
+  assert.ok(resolved.policy.excusedUntil > resolved.closedAt);
+  assert.equal(resolved.conversation.at(-1).text, queued.dmText);
+});
+
 test("war follow-up removal stays open until roster confirmation and preserves rejoin monitoring", () => {
   const backend = installMemoryFirebase(loadBackend());
+  backend.assertWarFollowupMoveSafety_ = () => ({ safe: true });
+  backend.readActiveRosterLayoutSnapshot_ = () => ({ rosterData: { rosters: [{ connectedClanTag: "#9PYLQG" }] } });
+  let actualClan = "#9PYLQG";
+  backend.readWarFollowupPlayerClan_ = () => actualClan;
   const tag = "#P0LYGQ";
   const created = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "manual_review",
@@ -8825,7 +8952,11 @@ test("war follow-up removal stays open until roster confirmation and preserves r
   }, "change-me"]);
   assert.equal(actioned.status, "removal_pending", "a moderator click cannot replace authoritative roster confirmation");
   assert.ok(actioned.removalActionedAt);
+  assert.throws(() => backend.runAdminApiMethod_("mutateWarFollowupCase", [{
+    action: "removal_confirmed", tag, expectedUpdatedAt: actioned.updatedAt,
+  }, "secret"]), /Live clan membership/);
 
+  actualClan = "";
   const confirmed = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "removal_confirmed",
     tag,
@@ -8837,6 +8968,7 @@ test("war follow-up removal stays open until roster confirmation and preserves r
   assert.equal(confirmed.outcome, "removed");
   assert.ok(confirmed.removalAbsentObservedAt);
 
+  actualClan = "#9PYLQG";
   const rejoined = backend.runAdminApiMethod_("mutateWarFollowupCase", [{
     action: "removal_rejoined",
     tag,

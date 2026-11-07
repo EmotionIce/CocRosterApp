@@ -32,8 +32,10 @@
     rulesUpdatedAt: "",
   };
 
-  const STATUS_ORDER = ["needs_review", "waiting", "needs_dm", "removal_pending", "hero_down", "ready", "watching", "closed"];
+  const STATUS_ORDER = ["needs_reply", "in_game", "needs_review", "waiting", "needs_dm", "removal_pending", "hero_down", "ready", "watching", "closed"];
   const STATUS_META = {
+    needs_reply: { label: "Needs a reply", next: "Send a human response", tone: "contact" },
+    in_game: { label: "Ready in game", next: "Verify live timing", tone: "ready" },
     needs_review: { label: "Review", next: "Review the war evidence", tone: "review" },
     waiting: { label: "Waiting", next: "Wait for the scheduled follow-up", tone: "watching" },
     needs_dm: { label: "Needs DM", next: "Send the decision message", tone: "contact" },
@@ -133,6 +135,10 @@
       cwlAverageDestructionThreshold: clamp(value.cwlAverageDestructionThreshold, 25, 100, DEFAULT_SETTINGS.cwlAverageDestructionThreshold),
       defaultRecoveryWars: Math.floor(clamp(value.defaultRecoveryWars, 1, 8, DEFAULT_SETTINGS.defaultRecoveryWars)),
       defaultHeroDownRosterId: toText(value.defaultHeroDownRosterId).trim(),
+      moderationVersion: value.moderationVersion === 2 ? 2 : 0,
+      moderationPilotClanTag: normalizeTag(value.moderationPilotClanTag),
+      moderationPilotSince: toText(value.moderationPilotSince).trim(),
+      moderationLineupPauses: value.moderationLineupPauses === true,
       missingDiscordEnabled: value.missingDiscordEnabled == null ? true : !!value.missingDiscordEnabled,
       moderatorNames: (Array.isArray(value.moderatorNames) ? value.moderatorNames : [])
         .map((name) => toText(name).trim())
@@ -638,6 +644,7 @@
           legacyIds: [],
           label: id,
           at: toText(entry.finalizedAt || entry.lastUpdatedAt).trim(),
+          moderationTiming: entry.incomplete ? null : entry.moderationTiming,
           clanTag,
           stats: normalized,
         };
@@ -1601,7 +1608,13 @@
     const evidence = currentEvidenceRaw && typeof currentEvidenceRaw === "object" ? currentEvidenceRaw : {};
     if (!value) return { ready: false, completedWars: 0, targetWars: 0, totalWars: 0, usedAttacks: 0, possibleAttacks: 0, missedAttacks: 0 };
     const policy = value.recoveryPolicyVersion === 1;
-    const events = eventsAfter(evidence.regularEvents, value.recoveryStartedAt || value.dmSentAt, value.targetClanTag)
+    const arrived = parseMs(value.recoveryArrivedAt);
+    const candidates = value.recoveryRequiresArrival ? (evidence.regularEvents || [])
+      .filter((event) => arrived && parseMs(event.moderationTiming?.preparationStartTime) > arrived &&
+        parseMs(event.moderationTiming?.endTime) > parseMs(event.moderationTiming?.preparationStartTime) &&
+        parseMs(event.moderationTiming?.endTime) <= Date.now() && event.stats.possibleAttacks > 0)
+      .map((event) => Object.assign({}, event, { at: event.moderationTiming.endTime })) : evidence.regularEvents;
+    const events = eventsAfter(candidates, value.recoveryStartedAt || value.dmSentAt, value.targetClanTag)
       .filter((event) => !policy || normalizeStats(event.stats).possibleAttacks > 0);
     const targetWars = Math.max(policy ? 3 : 1, toInt(value.recoveryWarTarget) || 3);
     let consecutiveCleanWars = 0;
@@ -1713,7 +1726,7 @@
       const caseSettings = Object.assign({}, settings, { regularMissedThreshold: reliability.regularMissedThreshold });
       const signals = player && player.automaticEligible ? buildSignals(evidence, caseSettings) : [];
       const dismissed = new Set(Array.isArray(value && value.dismissedSignalIds) ? value.dismissedSignalIds : []);
-      let status = value ? toText(value.status).trim() : (signals.length ? "needs_review" : "");
+      let status = value ? toText(value.status).trim() : (settings.moderationVersion !== 2 && signals.length ? "needs_review" : "");
       const wasClosed = status === "closed" || status === "dismissed";
       const postCloseEvidence = wasClosed && parseMs(value && value.closedAt) > 0
         ? buildEvidenceAfter(evidence, value.closedAt, value.evidence)
@@ -1726,9 +1739,14 @@
           .some((id) => dismissed.has(id))
       );
       const hasNewSignal = newSignals.length > 0;
-      if ((status === "closed" || status === "dismissed") && hasNewSignal) status = "needs_review";
+      if ((status === "closed" || status === "dismissed") && hasNewSignal && settings.moderationVersion !== 2) status = "needs_review";
       if (status === "dismissed") status = "closed";
-      const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, fullEvidence, settings) : null;
+      const recoveryEvidence = value?.recoveryRequiresArrival ? {
+        regularEvents: buildRosterRegularEvidenceForTag({
+          rosters: getRosters(rosterData).filter((roster) => normalizeTag(roster.connectedClanTag) === value.targetClanTag),
+        }, tag, settings, null, 32).events,
+      } : fullEvidence;
+      const recovery = value && value.status === "hero_down" ? buildRecoveryProgress(value, recoveryEvidence, settings) : null;
       const automatedWatching = value && value.status === "watching" && ["checkin", "warning"].includes(value.automationStage);
       const watching = value && value.status === "watching" && !automatedWatching ? buildWatchProgress(value, evidence, settings) : null;
       if (recovery && recovery.ready) status = "ready";
@@ -2214,6 +2232,7 @@
           : "";
         state.trustUpdatedAtByTag = {};
         state.trustBaselineUpdatedAt = toText(state.privateState.settings.updatedAt).trim();
+        if (!state.loaded && state.privateState.settings.moderationVersion === 2) state.status = "needs_reply";
         state.loaded = true;
         for (const detail of state.queuedTrustEvents.values()) {
           applyLocalIgnoreState(detail.tag, detail.trusted, detail.updatedAt);
@@ -2240,7 +2259,8 @@
         sourceRosterId: toText((caseValue && caseValue.sourceRosterId) || player.rosterId).trim(),
         sourceRosterTitle: toText((caseValue && caseValue.sourceRosterTitle) || player.rosterTitle).trim(),
         sourceClanTag: normalizeTag((caseValue && caseValue.sourceClanTag) || player.clanTag),
-        actor: moderator ? moderator.displayName : toText(caseValue && caseValue.handledBy).trim(),
+        actor: moderator ? moderator.displayName : (toText(caseValue && caseValue.handledBy).trim() || "Website moderator"),
+        dmQueuedByDiscordId: moderator ? moderator.discordId : "",
         handledBy: toText(caseValue && caseValue.handledBy).trim(),
         signalIds: item && Array.isArray(item.signalIds) ? item.signalIds : [],
         expectedUpdatedAt: toText(caseValue && caseValue.updatedAt).trim(),
@@ -2637,7 +2657,15 @@
 
     const getSelectedItem = () => state.work.items.find((item) => item.tag === state.selectedTag) || null;
 
-    const statusForItem = (item) => item && STATUS_META[item.status] ? item.status : "needs_review";
+    const statusForItem = (item) => {
+      if (state.work.settings.moderationVersion === 2 && item) {
+        if (item.status === "needs_review" && item.case?.contactStage === "responded") return "needs_reply";
+        if (item.status === "ready" || item.status === "removal_pending" && !item.case?.removalActionedAt) return "in_game";
+        const task = item.case?.policy?.task;
+        if (item.status === "watching" && ["ready", "claimed"].includes(task?.state) && parseMs(task.expiresAt) > Date.now()) return "in_game";
+      }
+      return item && STATUS_META[item.status] ? item.status : "needs_review";
+    };
     const isActiveCase = (item) => ["needs_review", "waiting", "needs_dm", "removal_pending", "removal_evasion", "hero_down", "ready"].includes(toText(item && item.status));
     const mineGroupForItem = (item) => {
       if (!item) return "";
@@ -2651,6 +2679,10 @@
     };
     const casePresentation = (item) => {
       const caseValue = item && item.case ? item.case : {};
+      if (statusForItem(item) === "in_game") return STATUS_META.in_game;
+      if (caseValue.policy?.task?.state === "held" && item?.status === "watching") {
+        return { label: "On hold", next: caseValue.policy.task.reason, tone: "watching" };
+      }
       if (item && item.status === "needs_dm" && caseValue.dmQueueId) {
         return { label: "Sending DM", next: "Queued for secure delivery by the Discord bot", tone: "contact" };
       }
@@ -2922,7 +2954,8 @@
       const appendStatusButton = (parent, key) => {
         const meta = STATUS_META[key];
         const button = createButton(
-          meta.label + (counts[key] ? " " + counts[key] : ""),
+          (key === "needs_review" && state.work.settings.moderationVersion === 2 ? "Exceptions" : meta.label) +
+            (counts[key] ? " " + counts[key] : ""),
           "wfu-status-tab" + (state.status === key ? " is-active" : ""),
           () => {
             const parentDetails = typeof button.closest === "function" ? button.closest("details") : null;
@@ -2936,10 +2969,13 @@
         button.setAttribute("aria-pressed", state.status === key ? "true" : "false");
         parent.appendChild(button);
       };
-      for (const key of ["needs_review", "needs_dm", "removal_pending", "hero_down", "ready"]) {
+      const primary = state.work.settings.moderationVersion === 2
+        ? ["needs_reply", "in_game", "needs_review"] : ["needs_review", "needs_dm", "removal_pending", "hero_down", "ready"];
+      for (const key of primary) {
         appendStatusButton(tabs, key);
       }
       const secondaryKeys = ["waiting", "watching", "closed"];
+      if (state.work.settings.moderationVersion === 2) secondaryKeys.unshift("needs_dm", "removal_pending", "hero_down", "ready");
       const more = createElement("details", "wfu-status-more" + (secondaryKeys.includes(state.status) ? " is-active" : ""));
       more.dataset.wfuRootDetails = "status-more";
       const activeSecondary = secondaryKeys.includes(state.status) ? STATUS_META[state.status].label : "More";
@@ -3367,6 +3403,11 @@
     };
 
     const renderDecisionStart = (section, item) => {
+      if (state.work.settings.moderationVersion === 2 && item.case?.contactStage === "responded") {
+        section.appendChild(createElement("h3", "wfu-drawer-section__title", "Player reply"));
+        section.appendChild(createButton("Reply to player", "btn", () => { state.decisionMode = "contact"; render(); }));
+        return;
+      }
       const stage = toText(item.case && item.case.contactStage).trim();
       const needsApprovedFinalMessage = ["no_response", "reminder_failed"].includes(stage);
       const title = stage === "no_response"
@@ -3469,19 +3510,29 @@
       const stage = toText(item.case && item.case.contactStage).trim();
       const isFinal = ["no_response", "reminder_failed"].includes(stage);
       const hasPlayerReply = Array.isArray(item.case && item.case.conversation) && item.case.conversation.some((entry) => entry && entry.direction === "player");
+      const humanReply = stage === "responded" && state.work.settings.moderationVersion === 2 && item.player.discordId;
       section.appendChild(createElement("h3", "wfu-drawer-section__title", isFinal ? "Send final message" : (hasPlayerReply ? "Reply to player" : "Contact player")));
       const form = createElement("form", "wfu-form");
       const message = createElement("textarea", "wfu-textarea wfu-dm-textarea");
       message.rows = 7;
       message.required = true;
       message.maxLength = 1800;
-      message.value = isFinal
+      message.value = humanReply ? "" : isFinal
         ? "Hi " + (item.player.name || item.tag) + ". We still need your response before leadership can finish reviewing this. Please reply when you can."
         : (hasPlayerReply
           ? "Hi " + (item.player.name || item.tag) + ". Thanks for getting back to us. We would like to follow up about your recent war activity."
           : "Hi " + (item.player.name || item.tag) + ". A leader is reviewing your recent war activity and would like to follow up with you.");
       form.appendChild(setField("Message", message));
-      form.appendChild(createElement("div", "wfu-closed-copy", isFinal
+      const disposition = createSelect("wfu-select");
+      if (humanReply) {
+        addOption(disposition, "close", "Send and close", true);
+        addOption(disposition, "watch", "Send and resume quiet monitoring");
+        addOption(disposition, "excuse", "Send and excuse for 30 days");
+        form.appendChild(setField("After sending", disposition));
+      }
+      form.appendChild(createElement("div", "wfu-closed-copy", humanReply
+        ? "The bot sends your message in the same Discord conversation with your moderator name."
+        : isFinal
         ? "The Discord bot sends this privately and captures the reply in the case conversation. This is a moderator-approved final message, so no automatic reminder will follow; after 24 hours without a reply the case returns to Needs action."
         : "The Discord bot sends this privately and captures the player’s reply in the case conversation. One automatic reminder is sent after 24 hours; after another 24 hours the case returns to Needs action."));
       const actions = createElement("div", "wfu-form-actions");
@@ -3491,7 +3542,7 @@
       }));
       const submit = createElement("button", "btn");
       submit.type = "submit";
-      submit.textContent = "Prepare message";
+      submit.textContent = humanReply ? "Send moderator reply" : "Prepare message";
       actions.appendChild(submit);
       form.appendChild(actions);
       form.addEventListener("submit", async (event) => {
@@ -3501,9 +3552,37 @@
           ? message.value.trim()
           : message.value.trim() + "\n\n" + CONTACT_REPLY_PROMPT;
         await mutate(item, "contact", {
-          dmText: prepared,
+          dmText: humanReply ? message.value.trim() : prepared,
           suppressAutomaticReminder: isFinal,
+          ...(humanReply ? { replyMode: disposition.value } : {}),
         });
+      });
+      section.appendChild(form);
+    };
+
+    const renderPolicyException = (section, item) => {
+      section.appendChild(createElement("h3", "wfu-drawer-section__title", "Record a war exception"));
+      const form = createElement("form", "wfu-form");
+      const note = createElement("input", "wfu-input");
+      note.required = true;
+      note.maxLength = 300;
+      const days = createElement("input", "wfu-input");
+      days.type = "number";
+      days.min = "1";
+      days.max = "90";
+      days.value = "30";
+      form.appendChild(setField("Reason, such as leave or a lineup error", note));
+      form.appendChild(setField("Days to excuse", days));
+      const actions = createElement("div", "wfu-form-actions");
+      const submit = createElement("button", "btn");
+      submit.type = "submit";
+      submit.textContent = "Save exception";
+      actions.appendChild(submit);
+      actions.appendChild(createButton("Back", "btn secondary", () => { state.decisionMode = ""; render(); }));
+      form.appendChild(actions);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await mutate(item, "policy_excuse", { note: note.value.trim(), excuseDays: Number(days.value) });
       });
       section.appendChild(form);
     };
@@ -3633,6 +3712,16 @@
       wars.value = String(Math.max(Number(wars.min), toInt(item.case && item.case.recoveryWarTarget) || state.work.settings.defaultRecoveryWars));
       form.appendChild(setField("Hero-down roster", target));
       form.appendChild(setField("Clean regular wars", wars));
+      const agreement = createElement("input");
+      agreement.type = "checkbox";
+      const agreementLabel = createElement("label", "wfu-check");
+      agreementLabel.appendChild(agreement);
+      agreementLabel.appendChild(createElement("span", "", "The player agreed and the destination can receive them"));
+      form.appendChild(agreementLabel);
+      target.addEventListener("change", () => {
+        agreement.required = !extending || target.value !== existingTarget;
+      });
+      agreement.required = !extending;
 
       const reasons = createElement("fieldset", "wfu-reason-picker");
       reasons.appendChild(createElement("legend", "wfu-field__label", "Include in DM"));
@@ -3710,6 +3799,7 @@
           recoveryAverageDestructionThreshold: state.work.settings.regularAverageDestructionThreshold,
           recoveryContextMode: state.work.settings.regularContextMode,
           requireNoMisses: true,
+          recoveryAgreed: agreement.checked,
           reasonCodes: reasonCodes.length ? reasonCodes : ["manual"],
           evidence: item.evidence,
           dmText: message.value,
@@ -3885,6 +3975,32 @@
     };
 
     const renderWatching = (section, item) => {
+      if (item.case?.automationVersion === 2 && item.case.policy) {
+        const policy = item.case.policy;
+        const task = policy.task;
+        const actionable = statusForItem(item) === "in_game";
+        const claimIsCurrent = task?.state === "claimed" && Date.now() - parseMs(task.claimedAt) < 10 * 60 * 1000;
+        section.appendChild(createElement("h3", "wfu-drawer-section__title", actionable ? "One regular-war selection" : "Automatic monitoring"));
+        section.appendChild(createElement("div", "wfu-closed-copy", task?.reason || item.case.automationReason));
+        if (item.case.automationCategory !== "cwl_missed") {
+          section.appendChild(createElement("div", "wfu-closed-copy", policy.observedWars + " of 3 eligible wars observed · " + policy.cleanWars + " clean"));
+        }
+        const actions = createElement("div", "wfu-form-actions");
+        if (actionable) {
+          section.appendChild(createElement("div", "wfu-closed-copy", claimIsCurrent
+            ? "Timing verified for " + task.claimedBy + ". Confirm the account has no other CWL commitment in game, then sit it out of one upcoming regular war in its current clan."
+            : "Recheck CWL, regular-war timing, and membership before opening the in-game task."));
+          actions.appendChild(createButton("Check timing and claim", "btn", () => mutate(item, "policy_claim")));
+          if (claimIsCurrent) actions.appendChild(createButton("Record one-war pause done", "btn secondary", () => mutate(item, "policy_complete")));
+        }
+        actions.appendChild(createButton("Record an exception", "btn secondary", () => {
+          state.decisionMode = "excuse";
+          render();
+        }));
+        actions.appendChild(createButton("Review now", "btn secondary", () => mutate(item, "reopen")));
+        section.appendChild(actions);
+        return;
+      }
       if (item.case && ["checkin", "warning"].includes(item.case.automationStage)) {
         const category = item.case.automationCategory;
         const stage = item.case.automationStage === "warning" ? "Final observation" : "Automatic check-in";
@@ -3929,9 +4045,18 @@
         "wfu-closed-copy",
         item.case && item.case.removalActionedAt
           ? "Removal recorded. Waiting for refreshed roster data to confirm the account has left."
-          : "Remove the player from the clan in game. The case closes after roster data confirms they are no longer in any connected clan.",
+          : "Check live timing and confirm any other league commitment in game before acting. The case closes when live clan membership confirms the account has left.",
       ));
       const actions = createElement("div", "wfu-form-actions");
+      if (!item.case?.removalActionedAt) {
+        actions.appendChild(createButton("Check live timing", "btn", async () => {
+          try {
+            const result = await callServer("checkWarFollowupGameAction", [item.tag, item.case.updatedAt, getPassword()]);
+            setNotice(result.safe ? "Timing verified. Confirm the account in game before acting." : result.reason, !result.safe);
+          } catch (error) { setNotice(error.message, true); }
+          render();
+        }));
+      }
       const removed = createButton(item.case && item.case.removalActionedAt ? "Removal recorded" : "I removed them in game", "btn is-danger", () => mutate(item, "removal_actioned"));
       removed.disabled = !!(item.case && item.case.removalActionedAt);
       actions.appendChild(removed);
@@ -3990,7 +4115,8 @@
         "wfu-drawer-section wfu-case-action" +
           (state.pendingCaseMutations.has(item.tag) ? " is-pending" : ""),
       );
-      if (state.decisionMode === "watch") renderWatchForm(section, item);
+      if (state.decisionMode === "excuse") renderPolicyException(section, item);
+      else if (state.decisionMode === "watch") renderWatchForm(section, item);
       else if (state.decisionMode === "contact") renderContactForm(section, item);
       else if (state.decisionMode === "wait") renderWaitForm(section, item);
       else if (state.decisionMode === "resolve") renderResolveForm(section, item);
@@ -4339,6 +4465,31 @@
         setField("Default hero-down roster", target),
       ]);
       workflow.appendChild(workflowGrid);
+      let pilot = null;
+      let lineup = null;
+      if (settings.moderationVersion === 2) {
+        pilot = createSelect("wfu-select");
+        addOption(pilot, "", "Quiet monitoring only", !settings.moderationPilotClanTag);
+        const clans = new Set();
+        for (const roster of state.work.directory.rosters) {
+          if (!roster.clanTag || clans.has(roster.clanTag)) continue;
+          clans.add(roster.clanTag);
+          addOption(pilot, roster.clanTag, roster.title, roster.clanTag === settings.moderationPilotClanTag);
+        }
+        setControlKey(pilot, "rules-moderation-pilot");
+        workflow.appendChild(setField("Clan piloting automatic DMs", pilot));
+        const lineupLabel = createElement("label", "wfu-check");
+        lineup = createElement("input");
+        lineup.type = "checkbox";
+        lineup.checked = settings.moderationLineupPauses;
+        lineup.disabled = !settings.moderationPilotClanTag;
+        setControlKey(lineup, "rules-moderation-lineup");
+        lineupLabel.appendChild(lineup);
+        lineupLabel.appendChild(createElement("span", "", "Enable one-war lineup tasks for the current pilot"));
+        workflow.appendChild(lineupLabel);
+        workflow.appendChild(createElement("div", "wfu-closed-copy",
+          "The pilot uses the Discord server's automatic DM opt-in. Changing the pilot resets lineup tasks and starts from new war results. Quiet monitoring keeps player replies open."));
+      }
       const gapLabel = createElement("label", "wfu-check");
       const gaps = createElement("input");
       gaps.type = "checkbox"; gaps.checked = settings.missingDiscordEnabled;
@@ -4376,6 +4527,7 @@
           defaultRecoveryWars: recovery.value,
           defaultHeroDownRosterId: target.value,
           missingDiscordEnabled: gaps.checked,
+          ...(pilot ? { moderationPilotClanTag: pilot.value, moderationLineupPauses: lineup.checked } : {}),
         };
         saveRulesInBackground(next, settings.rulesUpdatedAt);
       });

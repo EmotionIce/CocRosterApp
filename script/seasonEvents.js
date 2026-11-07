@@ -6088,6 +6088,10 @@ function buildCwlRuntimeViews_(runtimeRaw, clanTagsRaw) {
 					historyStatsByTag: contribution.historyStatsByTag,
 					startTime: contribution.startTime,
 					endTime: contribution.endTime,
+					verifiedEndedAt: record.status === "settled" && record.state === "warended" &&
+						contribution.reminderWar && contribution.reminderWar.state === "warended" &&
+						parseIsoToMs_(contribution.reminderWar.endTime) <= parseIsoToMs_(contribution.reminderWar.observedAt)
+						? contribution.reminderWar.endTime : "",
 				});
 			}
 			if ((record.state === "preparation" || record.state === "inwar") &&

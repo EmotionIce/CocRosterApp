@@ -1605,6 +1605,7 @@ function refreshCwlStatsFromCoordinatorView_(ctxRaw, cwlViewRaw, optionsRaw, now
 	const cwlCurrentWar = sanitizeCwlCurrentWar_(cwlView.currentWar);
 	const attackDays = contributions.map((contribution) => buildCwlAttackDay_(
 		contribution.roundIndex, contribution.warTag, contribution.state, contribution.aggregateByTag, statsTrackedTagSet,
+		contribution.verifiedEndedAt,
 	)).filter(Boolean);
 	if (cwlCurrentWar && !attackDays.some((day) => day.warTag === cwlCurrentWar.warTag)) {
 		const lineup = {};
@@ -2367,7 +2368,8 @@ function refreshCwlStatsCore_(rosterData, rosterId, optionsRaw) {
 
 		const aggregate = buildCwlWarAggregateForClan_(war, ctx.clanTag, statsTrackedTagSet, warTag);
 		mergeCwlAggregateByTag_(byTag, aggregate);
-		attackDays.push(buildCwlAttackDay_(usableWars[i].roundIndex, warTag, warState, aggregate, statsTrackedTagSet));
+		const finalWar = warState === "warended" ? buildModerationFinalWarSnapshot_(war, ctx.clanTag, "cwl", warTag, nowIso) : null;
+		attackDays.push(buildCwlAttackDay_(usableWars[i].roundIndex, warTag, warState, aggregate, statsTrackedTagSet, finalWar && finalWar.endTime));
 	}
 
 	ctx.roster.cwlStats = {
