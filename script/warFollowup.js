@@ -243,13 +243,14 @@ function createDefaultWarFollowupSettings_() {
 		regularAverageStarsThreshold: 1.8,
 		regularAverageDestructionThreshold: 75,
 		cwlLookbackSeasons: 2,
-		cwlMissedThreshold: 1,
+		cwlMissedThreshold: 2,
 		cwlPerformanceEnabled: true,
 		cwlMinimumAttacks: 4,
 		cwlAverageStarsThreshold: 1.8,
 		cwlAverageDestructionThreshold: 75,
 		defaultRecoveryWars: 3,
 		defaultHeroDownRosterId: "",
+		moderationOutreachMode: "quiet",
 		moderationPilotClanTag: "",
 		moderationPilotSince: "",
 		moderationLineupPauses: false,
@@ -270,6 +271,8 @@ function sanitizeWarFollowupSettings_(settingsRaw) {
 	const regularContextMode = ["off", "explain", "assist", "automatic"].indexOf(regularContextModeRaw) >= 0
 		? regularContextModeRaw
 		: defaults.regularContextMode;
+	const pilotTag = isValidClanTag_(settings.moderationPilotClanTag) ? normalizeTag_(settings.moderationPilotClanTag) : "";
+	const outreachMode = settings.moderationOutreachMode === "all" ? "all" : (pilotTag ? "pilot" : "quiet");
 	return {
 		schemaVersion: WAR_FOLLOWUP_SCHEMA_VERSION,
 		regularLookbackWars: clampWarFollowupNumber_(settings.regularLookbackWars, 1, 8, defaults.regularLookbackWars, true),
@@ -292,7 +295,8 @@ function sanitizeWarFollowupSettings_(settingsRaw) {
 		defaultRecoveryWars: clampWarFollowupNumber_(settings.defaultRecoveryWars, 1, 8, defaults.defaultRecoveryWars, true),
 		defaultHeroDownRosterId: sanitizeWarFollowupText_(settings.defaultHeroDownRosterId, 120),
 		moderationVersion: 2,
-		moderationPilotClanTag: isValidClanTag_(settings.moderationPilotClanTag) ? normalizeTag_(settings.moderationPilotClanTag) : "",
+		moderationOutreachMode: outreachMode,
+		moderationPilotClanTag: outreachMode === "pilot" ? pilotTag : "",
 		moderationPilotSince: sanitizeWarFollowupTimestamp_(settings.moderationPilotSince),
 		moderationLineupPauses: toBooleanFlag_(settings.moderationLineupPauses),
 		missingDiscordEnabled: settings.missingDiscordEnabled == null
@@ -759,10 +763,10 @@ function verifyWarFollowupDelivery(requestRaw, credential) {
 		const settings = readWarFollowupSettings_();
 		const followup = value.contactPurpose === "automated_warning";
 		if (value.automationVersion !== 2 || !value.policy || value.policy.guildId !== request.guildId ||
-			!warFollowupPilotAllows_(value, settings, followup) ||
+			!warFollowupOutreachAllows_(value, settings, followup) ||
 			value.policy.discordId !== value.discordId || parseIsoToMs_(value.automationStartedAt) < parseIsoToMs_(settings.moderationPilotSince) ||
 			Date.now() - parseIsoToMs_(value.dmQueuedAt) > 6 * 60 * 60 * 1000) {
-			return { allowed: false, reason: "This automatic message is outside the current pilot or its recipient changed." };
+			return { allowed: false, reason: "This automatic message is outside the current outreach scope or its recipient changed." };
 		}
 		if (followup) {
 			checkedLive = true;
@@ -772,15 +776,27 @@ function verifyWarFollowupDelivery(requestRaw, credential) {
 				after: value.policy.checkedInAt,
 			});
 			if (!safety || !safety.safe) return { allowed: false, reason: safety && safety.reason || "The lineup follow-up is on hold.", held: true };
-		} else if (value.automationCategory === "cwl_missed") {
+		} else {
+			if (!warFollowupCheckinHasEnoughWars_(value.automationCategory, value.policy.warIds, settings)) {
+				return { allowed: false, reason: "The queued check-in does not meet the current repeated-war threshold." };
+			}
 			checkedLive = true;
-			const warTag = value.policy.upcomingWarTag;
-			if (!warTag) return { allowed: false, reason: "There is no verified upcoming round for this player." };
-			const result = verifyAttackReminderWar({ mode: "cwl", clanTag: value.sourceClanTag, warId: warTag }, credential);
-			const war = result.snapshot;
-			const player = war && war.byTag[value.tag];
-			if (!player || !isActiveWarState_(war.state) || parseIsoToMs_(war.endTime) <= Date.now() || player.attacksUsed !== 0) {
-				return { allowed: false, reason: "The upcoming CWL attack is no longer available." };
+			try {
+				if (readWarFollowupPlayerClan_(value.tag) !== value.sourceClanTag) {
+					return { allowed: false, reason: "The player changed clans before the queued check-in." };
+				}
+			} catch (error) {
+				return { allowed: false, reason: "Current clan membership could not be verified." };
+			}
+			if (isCwlWarFollowupCategory_(value.automationCategory)) {
+				const warTag = value.policy.upcomingWarTag;
+				if (!warTag) return { allowed: false, reason: "There is no verified upcoming round for this player." };
+				const result = verifyAttackReminderWar({ mode: "cwl", clanTag: value.sourceClanTag, warId: warTag }, credential);
+				const war = result.snapshot;
+				const player = war && war.byTag[value.tag];
+				if (!player || !isActiveWarState_(war.state) || parseIsoToMs_(war.endTime) <= Date.now() || player.attacksUsed !== 0) {
+					return { allowed: false, reason: "The upcoming CWL attack is no longer available." };
+				}
 			}
 		}
 	} else if (["hero_down", "removal"].indexOf(value.contactPurpose) >= 0) {
@@ -894,9 +910,15 @@ function saveWarFollowupSettings(settingsRaw, password, expectedRulesUpdatedAtRa
 		const currentUpdatedMs = parseIsoToMs_(current.updatedAt);
 		settings.updatedAt = new Date(Math.max(Date.now(), currentUpdatedMs + 1)).toISOString();
 		settings.rulesUpdatedAt = settings.updatedAt;
-		settings.moderationPilotSince = settings.moderationPilotClanTag === current.moderationPilotClanTag
-			? current.moderationPilotSince : (settings.moderationPilotClanTag ? settings.updatedAt : "");
-		if (!settings.moderationPilotClanTag || settings.moderationPilotClanTag !== current.moderationPilotClanTag) {
+		const scopeChanged = settings.moderationOutreachMode !== current.moderationOutreachMode ||
+			settings.moderationPilotClanTag !== current.moderationPilotClanTag;
+		if (settings.moderationOutreachMode === "all" && !settings.defaultHeroDownRosterId) {
+			throw new Error("Select the hero-down roster before enabling outreach for all clans.");
+		}
+		settings.moderationPilotSince = scopeChanged
+			? (settings.moderationOutreachMode === "quiet" ? "" : settings.updatedAt)
+			: current.moderationPilotSince;
+		if (settings.moderationOutreachMode === "quiet" || scopeChanged) {
 			settings.moderationLineupPauses = false;
 		}
 		if (mutationId) {

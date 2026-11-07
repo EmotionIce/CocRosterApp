@@ -53,10 +53,26 @@ function closeWarFollowupPolicy_(value, nowIso) {
 	}
 }
 
-function warFollowupPilotAllows_(value, settings, lineupPause) {
-	return settings.moderationPilotClanTag && settings.moderationPilotClanTag === value.sourceClanTag &&
+function warFollowupOutreachAllows_(value, settings, lineupPause) {
+	const allowedClan = settings.moderationOutreachMode === "all"
+		? !!settings.defaultHeroDownRosterId
+		: settings.moderationPilotClanTag === value.sourceClanTag;
+	return !!value.sourceClanTag && allowedClan &&
+		(!settings.defaultHeroDownRosterId || value.sourceRosterId !== settings.defaultHeroDownRosterId) &&
 		settings.trustedPlayerTags.indexOf(value.tag) < 0 &&
 		(!lineupPause || settings.moderationLineupPauses === true);
+}
+
+function isCwlWarFollowupCategory_(category) {
+	return category === "cwl_missed" || category === "cwl_performance";
+}
+
+function warFollowupCheckinHasEnoughWars_(category, warIds, settings) {
+	const count = warIds.length;
+	if (category === "cwl_missed") return count >= Math.max(2, settings.cwlMissedThreshold);
+	if (category === "cwl_performance") return settings.cwlPerformanceEnabled && count >= Math.max(4, settings.cwlMinimumAttacks);
+	if (category === "regular_performance") return settings.regularPerformanceEnabled && count >= 6;
+	return category === "regular_missed" && count >= 2;
 }
 
 function queueWarFollowupPolicyDm_(value, request, nowIso, purpose) {
@@ -97,9 +113,13 @@ function applyWarFollowupPolicyAction_(value, current, action, request, credenti
 
 	if (action === "policy_start") {
 		const adopting = current && isUntouchedWarFollowupAutomation_(value) && value.automationVersion !== 2;
-		if (current && !adopting && ["closed", "dismissed"].indexOf(value.status) < 0) throw new Error("This case is already open.");
+		const quiet = current && watching && value.status === "watching" && value.automationStage === "checkin" &&
+			value.policy.guildId === (incoming && incoming.guildId) && !value.policy.checkedInAt && !value.policy.task &&
+			!value.dmDeliveryFailedAt && request.sendAutomaticDm === true;
+		if (current && !adopting && !quiet && ["closed", "dismissed"].indexOf(value.status) < 0) throw new Error("This case is already open.");
 		const category = request.automationCategory;
-		if (!incoming || !incoming.guildId || ["regular_missed", "regular_performance", "cwl_missed"].indexOf(category) < 0) {
+		if (!incoming || !incoming.guildId || (!isCwlWarFollowupCategory_(category) &&
+			["regular_missed", "regular_performance"].indexOf(category) < 0)) {
 			throw new Error("Automatic monitoring requires a category and guild.");
 		}
 		if (value.policy && parseIsoToMs_(value.policy.excusedUntil) > nowMs) throw new Error("This player has an active exception.");
@@ -130,9 +150,12 @@ function applyWarFollowupPolicyAction_(value, current, action, request, credenti
 		clearWarFollowupDmQueue_(value);
 		if (!adopting && request.sendAutomaticDm) {
 			const settings = readWarFollowupSettings_();
-			if (warFollowupPilotAllows_(value, settings, false) &&
+			if (warFollowupOutreachAllows_(value, settings, false) &&
+				warFollowupCheckinHasEnoughWars_(category, incoming.warIds, settings) &&
 				parseIsoToMs_(request.evidenceAt) > parseIsoToMs_(settings.moderationPilotSince)) {
 				queueWarFollowupPolicyDm_(value, request, nowIso, "automated_checkin");
+			} else if (quiet) {
+				throw new Error("This case no longer qualifies for automated outreach.");
 			}
 		}
 		appendWarFollowupActivity_(value, "automation_checkin", value.automationReason || "Automatic monitoring started.", actor, nowIso);
@@ -184,7 +207,7 @@ function applyWarFollowupPolicyAction_(value, current, action, request, credenti
 	}
 
 	if (action === "policy_cwl_digest") {
-		if (value.automationCategory !== "cwl_missed" || !incoming || incoming.warIds.length < 2 || !value.policy.season) {
+		if (!isCwlWarFollowupCategory_(value.automationCategory) || !incoming || incoming.warIds.length < 2 || !value.policy.season) {
 			throw new Error("A CWL digest requires repeated verified misses in the same season.");
 		}
 		value.policy.leagueCheckedAt = nowIso;
@@ -215,7 +238,7 @@ function applyWarFollowupPolicyAction_(value, current, action, request, credenti
 	const warIds = claim && task ? task.warIds : incoming && incoming.warIds;
 	const settings = readWarFollowupSettings_();
 	if (value.status !== "watching" || value.automationCategory !== "regular_missed" || !value.policy.checkedInAt ||
-		!warIds || warIds.length < 2 || !warFollowupPilotAllows_(value, settings, true) ||
+		!warIds || warIds.length < 2 || !warFollowupOutreachAllows_(value, settings, true) ||
 		parseIsoToMs_(value.automationStartedAt) < parseIsoToMs_(settings.moderationPilotSince) ||
 		nowMs - parseIsoToMs_(value.automationStartedAt) >= 30 * WAR_FOLLOWUP_DAY_MS) {
 		throw new Error("This case does not qualify for a regular-war lineup task.");

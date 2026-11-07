@@ -112,6 +112,9 @@ function sanitizeCwlAttackResults_(resultsRaw) {
 			destruction: Math.min(100, toNonNegativeInt_(result.destruction)),
 			townHallDelta: Number.isInteger(delta) ? Math.max(-18, Math.min(18, delta)) : null,
 		};
+		if (result.moderationComparable === true && !byWar[warId].missed && delta === 0) {
+			byWar[warId].moderationComparable = true;
+		}
 	}
 	return Object.keys(byWar).map(function (key) { return byWar[key]; })
 		.sort(function (a, b) { return b.endedAt.localeCompare(a.endedAt) || a.warId.localeCompare(b.warId); }).slice(0, 8);
@@ -1552,6 +1555,7 @@ function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw, warT
 	const opponentMembers = Array.isArray(sides.opponentSide && sides.opponentSide.members) ? sides.opponentSide.members : [];
 	const opponentThByTag = buildMemberThByTag_(opponentMembers);
 	const incomingByDefenderTag = buildIncomingCwlAttacksByDefenderTag_(opponentMembers);
+	const ownAttacksByDefender = buildIncomingCwlAttacksByDefenderTag_(sideMembers);
 	const trackedTagSet = trackedTagSetRaw && typeof trackedTagSetRaw === "object" ? trackedTagSetRaw : {};
 	const useTrackedFilter = Object.keys(trackedTagSet).length > 0;
 	const warState = normalizeWarState_(war.state);
@@ -1569,8 +1573,16 @@ function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw, warT
 		const warId = normalizeTag_(warTagRaw || war.warTag) || String(war.endTime || war.startTime || "");
 		if (warId && (warState === "warended" || (warState === "inwar" && attacks.length > 0))) {
 			const attack = attacks[0] || {};
-			const defenderTh = opponentThByTag[normalizeTag_(attack.defenderTag)];
+			const defenderTag = normalizeTag_(attack.defenderTag);
+			const defenderTh = opponentThByTag[defenderTag];
 			const attackerTh = readTownHallLevel_(member);
+			// A cleanup can serve a different purpose from a first attempt.
+			const comparable = warState === "warended" && attacks.length === 1 && attackerTh > 0 &&
+				defenderTh === attackerTh && Number.isInteger(attack.order) && attack.order > 0 &&
+				Number.isInteger(attack.destructionPercentage) && attack.destructionPercentage >= 0 && attack.destructionPercentage <= 100 &&
+				(ownAttacksByDefender[defenderTag] || []).every(function (other) {
+					return other === attack || (Number.isInteger(other.order) && other.order > attack.order);
+				});
 			stats.attackResults = sanitizeCwlAttackResults_([{
 				warId: warId,
 				endedAt: String(war.endTime || war.startTime || ""),
@@ -1578,6 +1590,7 @@ function buildCwlWarAggregateForClan_(warRaw, clanTagRaw, trackedTagSetRaw, warT
 				stars: attack.stars,
 				destruction: readAttackDestruction_(attack),
 				townHallDelta: attackerTh > 0 && defenderTh > 0 ? defenderTh - attackerTh : null,
+				moderationComparable: comparable,
 			}]);
 		}
 		out[tag] = stats;

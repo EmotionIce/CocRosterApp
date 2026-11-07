@@ -5149,6 +5149,29 @@ test("CWL aggregation tracks offense and defense independently", () => {
   assert.equal(stats["#C"].defenseStarsConceded, 2);
 });
 
+test("only a first CWL hit on a comparable base is tagged for moderation coaching", () => {
+  const backend = loadBackend();
+  const attack = (defenderTag, order) => ({ defenderTag, order, stars: 1, destructionPercentage: 60 });
+  const war = {
+    state: "warEnded",
+    endTime: "2026-11-07T00:00:00.000Z",
+    clan: { tag: "#AAA", members: [
+      { tag: "#A", townHallLevel: 16, attacks: [attack("#X", 3)] },
+      { tag: "#B", townHallLevel: 16, attacks: [attack("#X", 7)] },
+      { tag: "#C", townHallLevel: 16, attacks: [attack("#Y", 9)] },
+    ] },
+    opponent: { tag: "#BBB", members: [
+      { tag: "#X", townHallLevel: 16 },
+      { tag: "#Y", townHallLevel: 17 },
+    ] },
+  };
+  const stats = backend.buildCwlWarAggregateForClan_(war, "#AAA", null, "#QPYLQ");
+  assert.equal(stats["#A"].attackResults[0].moderationComparable, true);
+  assert.equal(stats["#B"].attackResults[0].moderationComparable, undefined);
+  assert.equal(stats["#C"].attackResults[0].moderationComparable, undefined);
+  assert.equal(stats["#B"].attacksMade, 1);
+});
+
 test("CWL active war missed attacks and unattacked defenses stay provisional", () => {
   const backend = loadBackend();
   const war = {
@@ -8860,7 +8883,7 @@ test("a v2 reply wins over a queued follow-up and the moderator's delivered repl
   now += 60_000;
   const started = apply("policy_start", null, {
     sourceClanTag: clan, discordId, automationCategory: "regular_missed", sendAutomaticDm: true,
-    evidenceAt: new Date(now - 500).toISOString(), dmText: "Check-in", policy: { guildId, discordId, warIds: ["first"] },
+    evidenceAt: new Date(now - 500).toISOString(), dmText: "Check-in", policy: { guildId, discordId, warIds: ["first", "earlier"] },
   });
   assert.equal(started.status, "needs_dm");
   const sent = apply("mark_dm_sent", started, {
@@ -8901,6 +8924,38 @@ test("a v2 reply wins over a queued follow-up and the moderator's delivered repl
   assert.equal(resolved.status, "closed");
   assert.ok(resolved.policy.excusedUntil > resolved.closedAt);
   assert.equal(resolved.conversation.at(-1).text, queued.dmText);
+});
+
+test("all-clan outreach requires a rehab exclusion and refuses to queue single-round CWL check-ins", () => {
+  const backend = installMemoryFirebase(loadBackend());
+  assert.throws(() => backend.saveWarFollowupSettings({ moderationOutreachMode: "all" }, "change-me"),
+    /Select the hero-down roster/);
+  const settings = backend.saveWarFollowupSettings({
+    moderationOutreachMode: "all", defaultHeroDownRosterId: "turtle-rehab", moderationLineupPauses: true,
+    cwlMissedThreshold: 1,
+  }, "change-me");
+  assert.equal(settings.moderationOutreachMode, "all");
+  assert.equal(settings.moderationPilotClanTag, "");
+  assert.equal(settings.moderationLineupPauses, false);
+  const discordId = "123456789012345678";
+  const guildId = "234567890123456789";
+  const start = (tag, rosterId, clanTag, warIds) => backend.mutateWarFollowupCase({
+    tag, action: "policy_start", expectedUpdatedAt: "", mutationId: "outreach-" + tag,
+    sourceRosterId: rosterId, sourceClanTag: clanTag, discordId,
+    automationCategory: "cwl_missed", sendAutomaticDm: true, dmText: "Private check-in",
+    evidenceAt: new Date(Date.parse(settings.moderationPilotSince) + 1).toISOString(),
+    policy: { guildId, discordId, season: "2026-11", warIds, upcomingWarTag: "#QPYLQ" },
+  }, "secret");
+  assert.equal(start("#P0LYGQ", "regular-one", "#9PYLQG", ["round-1"]).dmQueueId, "");
+  assert.equal(start("#P0LYGR", "turtle-rehab", "#9PYLQJ", ["round-1", "round-2"]).dmQueueId, "");
+  const queued = start("#P0LYGJ", "regular-two", "#9PYLQC", ["round-1", "round-2"]);
+  assert.equal(queued.status, "needs_dm");
+  backend.readWarFollowupPlayerClan_ = () => "#9PYLQJ";
+  const delivery = backend.verifyWarFollowupDelivery({
+    tag: queued.tag, guildId, expectedUpdatedAt: queued.updatedAt, dmQueueId: queued.dmQueueId,
+  }, "secret");
+  assert.equal(delivery.allowed, false);
+  assert.match(delivery.reason, /changed clans/);
 });
 
 test("war follow-up removal stays open until roster confirmation and preserves rejoin monitoring", () => {

@@ -19,7 +19,7 @@
     regularAverageStarsThreshold: 1.8,
     regularAverageDestructionThreshold: 75,
     cwlLookbackSeasons: 2,
-    cwlMissedThreshold: 1,
+    cwlMissedThreshold: 2,
     cwlPerformanceEnabled: true,
     cwlMinimumAttacks: 4,
     cwlAverageStarsThreshold: 1.8,
@@ -116,6 +116,8 @@
 
   const sanitizeSettings = (raw) => {
     const value = raw && typeof raw === "object" ? raw : {};
+    const pilotTag = normalizeTag(value.moderationPilotClanTag);
+    const outreachMode = value.moderationOutreachMode === "all" ? "all" : (pilotTag ? "pilot" : "quiet");
     return {
       schemaVersion: 4,
       regularLookbackWars: Math.floor(clamp(value.regularLookbackWars, 1, 8, DEFAULT_SETTINGS.regularLookbackWars)),
@@ -136,7 +138,8 @@
       defaultRecoveryWars: Math.floor(clamp(value.defaultRecoveryWars, 1, 8, DEFAULT_SETTINGS.defaultRecoveryWars)),
       defaultHeroDownRosterId: toText(value.defaultHeroDownRosterId).trim(),
       moderationVersion: value.moderationVersion === 2 ? 2 : 0,
-      moderationPilotClanTag: normalizeTag(value.moderationPilotClanTag),
+      moderationOutreachMode: outreachMode,
+      moderationPilotClanTag: outreachMode === "pilot" ? pilotTag : "",
       moderationPilotSince: toText(value.moderationPilotSince).trim(),
       moderationLineupPauses: value.moderationLineupPauses === true,
       missingDiscordEnabled: value.missingDiscordEnabled == null ? true : !!value.missingDiscordEnabled,
@@ -3982,7 +3985,7 @@
         const claimIsCurrent = task?.state === "claimed" && Date.now() - parseMs(task.claimedAt) < 10 * 60 * 1000;
         section.appendChild(createElement("h3", "wfu-drawer-section__title", actionable ? "One regular-war selection" : "Automatic monitoring"));
         section.appendChild(createElement("div", "wfu-closed-copy", task?.reason || item.case.automationReason));
-        if (item.case.automationCategory !== "cwl_missed") {
+        if (!toText(item.case.automationCategory).startsWith("cwl_")) {
           section.appendChild(createElement("div", "wfu-closed-copy", policy.observedWars + " of 3 eligible wars observed · " + policy.cleanWars + " clean"));
         }
         const actions = createElement("div", "wfu-form-actions");
@@ -4448,6 +4451,10 @@
       cwlPerfLabel.appendChild(cwlPerf); cwlPerfLabel.appendChild(createElement("span", "", "Flag poor results"));
       cwl.appendChild(cwlGrid);
       cwl.appendChild(cwlPerfLabel);
+      if (settings.moderationVersion === 2) {
+        cwl.appendChild(createElement("div", "wfu-closed-copy",
+          "CWL check-ins require at least two missed completed rounds this season, or at least four comparable attacks with a sustained weak pattern. Each selected round allows one attack."));
+      }
       form.appendChild(cwl);
 
       const workflow = createElement("fieldset", "wfu-settings-group");
@@ -4469,26 +4476,27 @@
       let lineup = null;
       if (settings.moderationVersion === 2) {
         pilot = createSelect("wfu-select");
-        addOption(pilot, "", "Quiet monitoring only", !settings.moderationPilotClanTag);
+        addOption(pilot, "", "Quiet monitoring only", settings.moderationOutreachMode === "quiet");
+        addOption(pilot, "*", "All eligible clans (except the hero-down clan)", settings.moderationOutreachMode === "all");
         const clans = new Set();
         for (const roster of state.work.directory.rosters) {
-          if (!roster.clanTag || clans.has(roster.clanTag)) continue;
+          if (!roster.clanTag || roster.clanTag === state.work.directory.exemptWarClanTag || clans.has(roster.clanTag)) continue;
           clans.add(roster.clanTag);
           addOption(pilot, roster.clanTag, roster.title, roster.clanTag === settings.moderationPilotClanTag);
         }
         setControlKey(pilot, "rules-moderation-pilot");
-        workflow.appendChild(setField("Clan piloting automatic DMs", pilot));
+        workflow.appendChild(setField("Automatic DM coverage", pilot));
         const lineupLabel = createElement("label", "wfu-check");
         lineup = createElement("input");
         lineup.type = "checkbox";
         lineup.checked = settings.moderationLineupPauses;
-        lineup.disabled = !settings.moderationPilotClanTag;
+        lineup.disabled = settings.moderationOutreachMode === "quiet";
         setControlKey(lineup, "rules-moderation-lineup");
         lineupLabel.appendChild(lineup);
-        lineupLabel.appendChild(createElement("span", "", "Enable one-war lineup tasks for the current pilot"));
+        lineupLabel.appendChild(createElement("span", "", "Enable one-war lineup tasks for the current outreach scope"));
         workflow.appendChild(lineupLabel);
         workflow.appendChild(createElement("div", "wfu-closed-copy",
-          "The pilot uses the Discord server's automatic DM opt-in. Changing the pilot resets lineup tasks and starts from new war results. Quiet monitoring keeps player replies open."));
+          "Outreach uses the Discord server's automatic DM opt-in. Changing coverage resets lineup tasks and starts from new war results. Quiet monitoring keeps player replies open."));
       }
       const gapLabel = createElement("label", "wfu-check");
       const gaps = createElement("input");
@@ -4527,7 +4535,11 @@
           defaultRecoveryWars: recovery.value,
           defaultHeroDownRosterId: target.value,
           missingDiscordEnabled: gaps.checked,
-          ...(pilot ? { moderationPilotClanTag: pilot.value, moderationLineupPauses: lineup.checked } : {}),
+          ...(pilot ? {
+            moderationOutreachMode: pilot.value === "*" ? "all" : (pilot.value ? "pilot" : "quiet"),
+            moderationPilotClanTag: pilot.value === "*" ? "" : pilot.value,
+            moderationLineupPauses: lineup.checked,
+          } : {}),
         };
         saveRulesInBackground(next, settings.rulesUpdatedAt);
       });
