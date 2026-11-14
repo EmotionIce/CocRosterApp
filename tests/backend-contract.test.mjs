@@ -8816,6 +8816,54 @@ test("war follow-up captures a player response exactly once and returns the case
   assert.equal(followup.conversation.at(-1).text, "I can provide more details if needed.");
 });
 
+test("regular-war moderation repairs an exact final snapshot once and ignores a conflicting snapshot", () => {
+  const backend = loadBackend();
+  const at = Date.parse("2026-11-14T12:00:00Z");
+  backend.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [at])); }
+    static now() { return at; }
+  };
+  const clanTag = "#2LUCULP";
+  const tag = "#P0LYGQ";
+  const warKey = clanTag + "|#9PYLQG|20261111T180000.000Z";
+  const stats = { possibleAttacks: 2, usedAttacks: 1, attacksMissed: 1 };
+  const performance = {
+    lastRegularWarSnapshot: {
+      warMeta: { warKey, clanTag, state: "warended", attacksPerMember: 2,
+        preparationStartTime: "20261111T180000.000Z", endTime: "20261113T170000.000Z" },
+      capturedAt: "2026-11-13T17:03:00Z",
+      isFinal: true, isComplete: true, statsByTag: { [tag]: stats },
+    },
+    regularWarHistoryByKey: {
+      [warKey]: { warKey, authoritative: true, source: "currentWarEnded", statsByTag: { [tag]: stats } },
+    },
+  };
+  const different = structuredClone(performance);
+  different.lastRegularWarSnapshot.statsByTag[tag] = { possibleAttacks: 2, usedAttacks: 2, attacksMissed: 0 };
+  const rosterData = { rosters: [
+    { id: "valid", connectedClanTag: clanTag, warPerformance: performance },
+    { id: "conflicting", connectedClanTag: clanTag, warPerformance: different },
+  ] };
+  backend.withActiveRosterJobLock_ = (_owner, _wait, callback) => callback();
+  backend.readActiveRosterSnapshot_ = () => ({ rosterData });
+  backend.updateActiveRosterDataCaches_ = () => null;
+  backend.tryReconcileRegularWarFinalizationTriggerStateValidated_ = () => null;
+  let writes = 0;
+  backend.putValidatedActiveRosterDataToFirebase_ = (data) => {
+    writes++;
+    return { rosterData: data, versionId: "war-timing-repair" };
+  };
+  const result = backend.runAdminApiMethod_("repairRegularWarFollowupTiming", ["change-me"]);
+  assert.equal(result.repaired.length, 1);
+  assert.equal(result.repaired[0].rosterId, "valid");
+  assert.equal(performance.regularWarHistoryByKey[warKey].moderationTiming.endTime, "2026-11-13T17:00:00.000Z");
+  assert.equal(different.regularWarHistoryByKey[warKey].moderationTiming, undefined);
+  const evidence = backend.getVerifiedWarFollowupResults_(rosterData.rosters, tag, clanTag, Date.parse("2026-11-10"));
+  assert.equal(evidence[0].missed, true);
+  assert.equal(backend.runAdminApiMethod_("repairRegularWarFollowupTiming", ["change-me"]).written, false);
+  assert.equal(writes, 1);
+});
+
 test("moderation holds for sign-up, a different clan's CWL group, unsettled rounds, and selected regular wars", () => {
   const backend = loadBackend();
   const now = Date.parse("2026-11-15T12:00:00Z");

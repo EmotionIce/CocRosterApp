@@ -1708,6 +1708,7 @@ function buildRosterWarResult_(workingRosterDataRaw, rosterIdRaw, pipelineResult
 		perRoster: perRoster,
 		issues: Array.isArray(accumulator.issues) ? accumulator.issues : [],
 		eventCandidates: dedupePlayerWarCandidates_(Array.isArray(eventCandidatesRaw) ? eventCandidatesRaw : []),
+		regularWarFinalizationDueAt: getRosterTrackingMode_(roster) === "regularWar" ? getRegularWarFinalizationDueAtForRoster_(roster) : "",
 		timings: timingsRaw && typeof timingsRaw === "object" ? timingsRaw : {},
 		writtenAt: new Date().toISOString(),
 	};
@@ -5405,6 +5406,7 @@ function executeAutoRefreshFinalizeTask_(currentRaw, taskRaw, executionStartMsRa
 		}
 		firebaseBatchPutJson_(finalizeWrites, { disableFallback: true });
 		publishActiveRosterVersionPointer_(runId, manifest);
+		tryReconcileRegularWarFinalizationFromRosterResults_(verifiedResults.warResultByRosterId);
 		recordAutoRefreshCanonicalCommit_(writtenAt);
 		clearActiveRosterDataCache_();
 		markActiveDataWriteSuccess_(writtenAt, ACTIVE_DATA_WRITE_SOURCE_AUTO_REFRESH);
@@ -7482,15 +7484,27 @@ function ensureSingleRegularWarFinalizationTrigger_(dueAtRaw, inventoryRaw) {
 	return keep;
 }
 
-// Reconcile one-shot regular-war finalization trigger state against a caller-supplied payload.
-function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payloadAlreadyValidatedRaw, inventoryRaw) {
+function reconcileRegularWarFinalizationTriggerAt_(enabled, nextDueAt, inventoryRaw) {
 	const props = PropertiesService.getScriptProperties();
-	if (!isAutoRefreshEnabled_()) {
+	if (!enabled || !nextDueAt) {
 		removeRegularWarFinalizationTriggers_(inventoryRaw);
 		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
 		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
-		return { enabled: false, triggerId: "", triggerAt: "", hasTrigger: false };
+		return { enabled: enabled, triggerId: "", triggerAt: "", hasTrigger: false };
 	}
+
+	const trigger = ensureSingleRegularWarFinalizationTrigger_(nextDueAt, inventoryRaw);
+	const triggerId = getTriggerUniqueId_(trigger);
+	if (triggerId) props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY, triggerId);
+	else props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
+	props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY, nextDueAt);
+	return { enabled: true, triggerId: triggerId, triggerAt: nextDueAt, hasTrigger: !!triggerId };
+}
+
+// Reconcile one-shot regular-war finalization trigger state against a caller-supplied payload.
+function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payloadAlreadyValidatedRaw, inventoryRaw) {
+	const enabled = isAutoRefreshEnabled_();
+	if (!enabled) return reconcileRegularWarFinalizationTriggerAt_(enabled, "", inventoryRaw);
 
 	let rosterData = rosterDataRaw && typeof rosterDataRaw === "object" ? rosterDataRaw : null;
 	if (!rosterData) {
@@ -7502,19 +7516,26 @@ function reconcileRegularWarFinalizationTriggerStateCore_(rosterDataRaw, payload
 			? findNextRegularWarFinalizationDueAtValidated_(rosterData)
 			: findNextRegularWarFinalizationDueAt_(rosterData)
 		: "";
-	if (!nextDueAt) {
-		removeRegularWarFinalizationTriggers_(inventoryRaw);
-		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
-		props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY);
-		return { enabled: true, triggerId: "", triggerAt: "", hasTrigger: false };
-	}
+	return reconcileRegularWarFinalizationTriggerAt_(enabled, nextDueAt, inventoryRaw);
+}
 
-	const trigger = ensureSingleRegularWarFinalizationTrigger_(nextDueAt, inventoryRaw);
-	const triggerId = getTriggerUniqueId_(trigger);
-	if (triggerId) props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY, triggerId);
-	else props.deleteProperty(REGULAR_WAR_FINALIZATION_TRIGGER_ID_PROPERTY);
-	props.setProperty(REGULAR_WAR_FINALIZATION_TRIGGER_AT_PROPERTY, nextDueAt);
-	return { enabled: true, triggerId: triggerId, triggerAt: nextDueAt, hasTrigger: !!triggerId };
+// Staged refreshes already read the war result markers. Old in-flight runs
+// without timing summaries leave the existing schedule to the watchdog.
+function tryReconcileRegularWarFinalizationFromRosterResults_(warResultsById) {
+	try {
+		const results = Object.values(warResultsById);
+		if (!results.length || results.some(function (result) {
+			return typeof result.regularWarFinalizationDueAt !== "string";
+		})) return null;
+		const dueTimes = results.map(function (result) {
+			return parseIsoToMs_(result.regularWarFinalizationDueAt);
+		}).filter(function (time) { return time > 0; });
+		const nextDueAt = dueTimes.length ? new Date(Math.min.apply(null, dueTimes)).toISOString() : "";
+		return reconcileRegularWarFinalizationTriggerAt_(isAutoRefreshEnabled_(), nextDueAt);
+	} catch (err) {
+		Logger.log("Unable to schedule regular-war finalization from staged roster results: %s", errorMessage_(err));
+		return null;
+	}
 }
 
 // Reconcile one-shot regular-war finalization trigger state against the active published payload.

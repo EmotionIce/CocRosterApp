@@ -571,6 +571,60 @@ test("regular-war star standing is oriented to the tracked clan and survives ros
   assert.equal(currentWar.endTime, "2026-07-16T18:00:00.000Z");
 });
 
+test("a new regular war supersedes a missing result and retains its verified final attendance", () => {
+  const backend = loadBackend();
+  const clanTag = "#2LUCULP";
+  const tag = "#P0LYGQ";
+  const data = buildRosterData();
+  Object.assign(data.rosters[0], {
+    trackingMode: "regularWar",
+    connectedClanTag: clanTag,
+    main: [Object.assign({}, data.rosters[0].main[0], { tag })],
+    warPerformance: {
+      regularWarLifecycle: {
+        activeWarKey: clanTag + "|#9PYLQG|2026-07-10T18:00:00.000Z",
+        activeWarEndTime: "2026-07-12T17:00:00.000Z",
+        finalizationDueAt: "2026-07-12T17:02:00.000Z",
+        finalizationStatus: "retrying",
+        finalizationAttemptCount: 2,
+      },
+    },
+  });
+  const war = {
+    state: "preparation",
+    teamSize: 1,
+    attacksPerMember: 2,
+    preparationStartTime: "2026-07-12T18:00:00.000Z",
+    startTime: "2026-07-13T17:00:00.000Z",
+    endTime: "2026-07-14T17:00:00.000Z",
+    clan: { tag: clanTag, attacks: 0, members: [{ tag, townHallLevel: 16 }] },
+    opponent: { tag: "#9PYLQG", attacks: 0, members: [{ tag: "#P0LYGR", townHallLevel: 16 }] },
+  };
+  const refresh = (input, currentWar) => backend.refreshRegularWarStatsCore_(input, "main", {
+    prefetchedCurrentRegularWarByClanTag: { [clanTag]: backend.mapCurrentRegularWarFromApiData_(clanTag, currentWar) },
+    prefetchedRegularWarLogByClanTag: { [clanTag]: [] },
+    allowRegularWarHistoryRepair: false,
+    allowRegularWarProvisionalFallback: false,
+  }).rosterData;
+  const prepared = refresh(data, war);
+  const tracking = prepared.rosters[0].warPerformance.regularWarLifecycle;
+  const warKey = backend.getStableRegularWarKey_(war, clanTag);
+  assert.equal(tracking.activeWarKey, warKey);
+  assert.equal(tracking.finalizationDueAt, "2026-07-14T17:02:00.000Z");
+  assert.equal(tracking.finalizationAttemptCount, 0);
+  assert.equal(Object.keys(prepared.rosters[0].warPerformance.regularWarHistoryByKey).length, 0);
+
+  war.state = "warEnded";
+  war.clan.attacks = 1;
+  war.clan.members[0].attacks = [{ order: 1, defenderTag: "#P0LYGR", stars: 2, destructionPercentage: 80 }];
+  const finished = refresh(prepared, war);
+  const result = finished.rosters[0].warPerformance.regularWarHistoryByKey[warKey];
+  assert.equal(result.moderationTiming.preparationStartTime, war.preparationStartTime);
+  assert.equal(result.moderationTiming.endTime, war.endTime);
+  assert.equal(result.statsByTag[tag].attacksMissed, 1);
+  assert.equal(refresh(finished, { state: "notInWar" }).rosters[0].warPerformance.regularWarLifecycle.finalizationStatus, "finalized");
+});
+
 test("direct CWL refresh stores the daily war star standing from prefetched data", () => {
   const backend = loadBackend();
   const rawData = buildRosterData();
@@ -5308,6 +5362,7 @@ test("staged queue finalization does not gate canonical completion on side-phase
 
 test("queue finalization uses source version guard without reading the active payload", () => {
   const backend = installMemoryFirebase(loadBackend());
+  backend.__properties.set("AUTO_REFRESH_ENABLED", "true");
   const data = backend.validateRosterData_(buildRosterData());
   const { runId, current, tasks } = setupQueueRun(backend, data, {
     rosterIds: ["main"],
@@ -5319,7 +5374,10 @@ test("queue finalization uses source version guard without reading the active pa
   backend.firebaseRequestJson_("activePublished/currentVersionId", "PUT", "source-1");
   backend.firebaseRequestJson_("activeVersions/run-1/rosters/main", "PUT", backend.encodeFirebaseObjectKeysRecursive_(data.rosters[0]));
   backend.writeAutoRefreshRunShard_(runId, "rosterWrites/main", { rosterId: "main", versionId: runId, playerTags: ["#PLAYER"] }, "PUT");
-  backend.writeAutoRefreshRunShard_(runId, "warResults/main", { rosterId: "main", rosterShardWritten: true, issues: [] }, "PUT");
+  const dueAt = "2030-01-01T18:02:00.000Z";
+  backend.writeAutoRefreshRunShard_(runId, "warResults/main", {
+    rosterId: "main", rosterShardWritten: true, issues: [], regularWarFinalizationDueAt: dueAt,
+  }, "PUT");
   backend.writeAutoRefreshRunShard_(runId, "metricResults/main", { byTag: {}, tags: [] }, "PUT");
   let activePayloadReads = 0;
   let targetRosterReads = 0;
@@ -5352,6 +5410,8 @@ test("queue finalization uses source version guard without reading the active pa
   assert.equal(activePayloadReads, 0);
   assert.equal(targetRosterReads, 0);
   assert.equal(backend.readPublishedActiveVersionId_(), runId);
+  assert.equal(backend.__properties.get("REGULAR_WAR_FINALIZATION_TRIGGER_AT"), dueAt);
+  assert.equal(backend.__triggers.filter(trigger => trigger.handler === "regularWarFinalizationTick").length, 1);
 });
 
 test("queue finalization refreshes a waiting CWL season event from staged source metadata", () => {

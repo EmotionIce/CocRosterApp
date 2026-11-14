@@ -2460,7 +2460,12 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	const trackedHistoryTagSet = buildTrackedWarHistoryTagSet_(ctx.roster, warPerformance, nowIso);
 	const liveSnapshot = isCurrentWarPrivate ? null : buildRegularWarLiveSnapshot_(currentWar, ctx.clanTag, trackedHistoryTagSet, nowIso);
 	const currentLiveWarKey = liveSnapshot && liveSnapshot.warMeta ? String(liveSnapshot.warMeta.warKey || "").trim() : "";
-	const previousActiveWarKey = String((lifecycle && lifecycle.activeWarKey) || (previousSnapshot && previousSnapshot.warMeta && previousSnapshot.warMeta.warKey) || "").trim();
+	const trackedWarKey = String(lifecycle.activeWarKey || (previousSnapshot && previousSnapshot.warMeta.warKey) || "").trim();
+	const trackedResult = warPerformance.regularWarHistoryByKey[trackedWarKey];
+	const currentHistory = warPerformance.regularWarHistoryByKey[currentLiveWarKey];
+	const currentHasUncapturedResult = currentWarState === "warended" && currentLiveWarKey && !currentHistory?.moderationTiming &&
+		warHasMemberLevelDataForClan_(currentWar, ctx.clanTag);
+	const previousActiveWarKey = trackedResult?.authoritative ? "" : trackedWarKey;
 	const sameTrackedLiveWar = !!(previousActiveWarKey && currentLiveWarKey && previousActiveWarKey === currentLiveWarKey);
 	const finalizationDueNow = isRegularWarFinalizationDue_(lifecycle, nowIso);
 	const allowRegularWarProvisionalFallback = options.allowRegularWarProvisionalFallback === true;
@@ -2488,37 +2493,24 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 	}
 
 	let finalization = { attempted: false, finalized: false, source: "", incomplete: false, reason: "" };
-	const shouldFinalizePreviousBase = !isCurrentWarPrivate && shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentLiveWarKey || currentWarMeta.warKey, currentWarState);
-	const shouldFinalizePrevious = shouldFinalizePreviousBase && !skipAutomaticRetryAfterExhausted;
-	if (shouldFinalizePrevious) {
-		const shouldDeferProvisionalFallback = sameTrackedLiveWar && currentWarState === "warended" && hasRegularWarFinalizationRetryBudget_(lifecycle);
+	// The live endpoint retains one war. Capture its finished lineup while it
+	// is still available, even if an older tracked war could not be finalized.
+	const shouldFinalizeCurrent = currentHasUncapturedResult &&
+		(currentLiveWarKey !== previousActiveWarKey || !skipAutomaticRetryAfterExhausted);
+	const finalizationWarKey = shouldFinalizeCurrent ? currentLiveWarKey : previousActiveWarKey;
+	if (!isCurrentWarPrivate && (shouldFinalizeCurrent || (!skipAutomaticRetryAfterExhausted &&
+		shouldFinalizePreviousRegularWar_(previousActiveWarKey, currentLiveWarKey || currentWarMeta.warKey, currentWarState)))) {
 		finalization = tryFinalizePreviousRegularWar_({
 			warPerformance: warPerformance,
-			previousWarKey: previousActiveWarKey,
+			previousWarKey: finalizationWarKey,
 			currentWar: currentWar,
 			currentWarMeta: liveSnapshot && liveSnapshot.warMeta ? liveSnapshot.warMeta : currentWarMeta,
-			previousSnapshot: previousSnapshot,
+			previousSnapshot: shouldFinalizeCurrent ? liveSnapshot : previousSnapshot,
 			clanTag: ctx.clanTag,
 			trackedTagSet: trackedHistoryTagSet,
 			nowIso: nowIso,
-			allowProvisionalFallback: allowRegularWarProvisionalFallback && !shouldDeferProvisionalFallback,
-			prefetchedRegularWarLogByClanTag: prefetchedRegularWarLogByClanTag,
-			prefetchedRegularWarLogErrorByClanTag: prefetchedRegularWarLogErrorByClanTag,
-			autoRefreshSnapshotMode: autoRefreshSnapshotMode,
-		});
-	}
-
-	if (!previousActiveWarKey && liveSnapshot && currentWarState === "warended" && currentLiveWarKey) {
-		finalization = tryFinalizePreviousRegularWar_({
-			warPerformance: warPerformance,
-			previousWarKey: currentLiveWarKey,
-			currentWar: currentWar,
-			currentWarMeta: liveSnapshot.warMeta,
-			previousSnapshot: liveSnapshot,
-			clanTag: ctx.clanTag,
-			trackedTagSet: trackedHistoryTagSet,
-			nowIso: nowIso,
-			allowProvisionalFallback: allowRegularWarProvisionalFallback,
+			allowProvisionalFallback: allowRegularWarProvisionalFallback &&
+				!(sameTrackedLiveWar && currentWarState === "warended" && hasRegularWarFinalizationRetryBudget_(lifecycle)),
 			prefetchedRegularWarLogByClanTag: prefetchedRegularWarLogByClanTag,
 			prefetchedRegularWarLogErrorByClanTag: prefetchedRegularWarLogErrorByClanTag,
 			autoRefreshSnapshotMode: autoRefreshSnapshotMode,
@@ -2546,7 +2538,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 
 	const nextLifecycle = sanitizeRegularWarLifecycleState_(warPerformance.regularWarLifecycle);
 	const pendingFinalizationWarKey =
-		finalization && finalization.attempted && !finalization.finalized ? previousActiveWarKey || currentLiveWarKey : "";
+		finalization && finalization.attempted && !finalization.finalized ? finalizationWarKey : "";
 	const keepPendingFinalization = !!pendingFinalizationWarKey;
 	const hasNewLiveWar =
 		!!(liveSnapshot && currentWarState !== "warended" && currentLiveWarKey && currentLiveWarKey !== previousActiveWarKey);
@@ -2568,7 +2560,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		Logger.log(
 			"regularWar finalization authoritative success rosterId=%s warKey=%s source=%s",
 			ctx.rosterId,
-			previousActiveWarKey || currentLiveWarKey || "",
+			finalizationWarKey || "",
 			String(finalization.source || ""),
 		);
 	}
@@ -2588,11 +2580,11 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 			keepPendingFinalization,
 		);
 	}
-	if (keepPendingFinalization) {
+	if (keepPendingFinalization && !hasNewLiveWar) {
 		nextLifecycle.activeWarKey = pendingFinalizationWarKey;
 		nextLifecycle.activeWarState = "pendingfinalization";
 		nextLifecycle.activeWarLastSeenAt = nowIso;
-		if (liveSnapshot) {
+		if (liveSnapshot && currentLiveWarKey === pendingFinalizationWarKey) {
 			warPerformance.lastRegularWarSnapshot = liveSnapshot;
 			nextLifecycle.activeWarEndTime = String(liveSnapshot.warMeta && liveSnapshot.warMeta.endTime ? liveSnapshot.warMeta.endTime : nextLifecycle.activeWarEndTime || "");
 		}
@@ -2624,7 +2616,7 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		nextLifecycle.activeWarState = currentWarState;
 		nextLifecycle.activeWarLastSeenAt = nowIso;
 		nextLifecycle.activeWarEndTime = String(liveSnapshot.warMeta && liveSnapshot.warMeta.endTime ? liveSnapshot.warMeta.endTime : "");
-		if (!previousActiveWarKey || previousActiveWarKey !== liveWarKey) {
+		if (hasNewLiveWar) {
 			const resetLifecycle = resetRegularWarFinalizationLifecycleForLiveWar_(nextLifecycle, liveSnapshot.warMeta);
 			nextLifecycle.activeWarEndTime = resetLifecycle.activeWarEndTime;
 			nextLifecycle.finalizationStatus = resetLifecycle.finalizationStatus;
@@ -2661,14 +2653,16 @@ function refreshRegularWarStatsCore_(rosterData, rosterId, optionsRaw) {
 		}
 	}
 	if (finalization && finalization.finalized) {
-		nextLifecycle.lastFinalizedWarKey = previousActiveWarKey || currentLiveWarKey || nextLifecycle.lastFinalizedWarKey;
+		nextLifecycle.lastFinalizedWarKey = finalizationWarKey || nextLifecycle.lastFinalizedWarKey;
 		nextLifecycle.lastFinalizedAt = nowIso;
 		nextLifecycle.lastFinalizationSource = String(finalization.source || "");
 		nextLifecycle.lastFinalizationIncomplete = !!finalization.incomplete;
-		nextLifecycle.finalizationStatus = finalization.incomplete ? "provisional" : "finalized";
-		nextLifecycle.finalizationDueAt = "";
-		nextLifecycle.lastFinalizationAttemptAt = nowIso;
-		nextLifecycle.lastFinalizationError = finalization.incomplete ? String(finalization.reason || "") : "";
+		if (!hasNewLiveWar) {
+			nextLifecycle.finalizationStatus = finalization.incomplete ? "provisional" : "finalized";
+			nextLifecycle.finalizationDueAt = "";
+			nextLifecycle.lastFinalizationAttemptAt = nowIso;
+			nextLifecycle.lastFinalizationError = finalization.incomplete ? String(finalization.reason || "") : "";
+		}
 	}
 	warPerformance.regularWarLifecycle = nextLifecycle;
 	let cwlHistoryFinalizedWars = 0;

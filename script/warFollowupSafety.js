@@ -42,8 +42,9 @@ function getVerifiedWarFollowupResults_(rosters, tag, clan, after) {
 				parseIsoToMs_(timing.preparationStartTime) <= after || parseIsoToMs_(timing.endTime) > Date.now()) continue;
 			const possible = Number(stats.possibleAttacks);
 			const used = Number(stats.usedAttacks);
+			const missed = stats.attacksMissed == null ? stats.missedAttacks : stats.attacksMissed;
 			if (!Number.isInteger(possible) || possible < 1 || possible > 4 || !Number.isInteger(used) ||
-				used < 0 || used > possible || stats.missedAttacks !== possible - used) continue;
+				used < 0 || used > possible || missed !== possible - used) continue;
 			const id = war.warKey || key;
 			const observation = { end: timing.endTime, missed: used < possible };
 			if (observations[id] && (observations[id].end !== observation.end || observations[id].missed !== observation.missed)) return [];
@@ -60,6 +61,49 @@ function hasWarFollowupLineupEvidence_(rosters, tag, clan, evidence) {
 	const latest = results[results.length - 1];
 	const misses = results.slice(0, 3).filter(function (result) { return result.missed; }).map(function (result) { return result.id; });
 	return !!latest && latest.missed && misses.length >= 2 && evidence.warIds.every(function (id) { return misses.indexOf(id) >= 0; });
+}
+
+function repairRegularWarFollowupTiming(password) {
+	assertAdminPassword_(password);
+	return withActiveRosterJobLock_("regular-war-followup-timing", 0, function () {
+		const source = readActiveRosterSnapshot_();
+		const rosterData = source.rosterData;
+		const updates = [];
+		const now = Date.now();
+		// Match the retained final snapshot to the authoritative history. A
+		// clan-level war log cannot restore individual attendance.
+		for (const roster of rosterData.rosters) {
+			const performance = roster.warPerformance;
+			const snapshot = performance && sanitizeRegularWarSnapshot_(performance.lastRegularWarSnapshot);
+			if (!snapshot || !snapshot.isFinal || !snapshot.isComplete || snapshot.warMeta.state !== "warended" ||
+				!isValidClanTag_(snapshot.warMeta.clanTag) || snapshot.warMeta.clanTag !== roster.connectedClanTag) continue;
+			const timing = sanitizeRegularWarModerationTiming_(snapshot.warMeta);
+			const end = parseIsoToMs_(timing && timing.endTime);
+			const captured = parseIsoToMs_(snapshot.capturedAt);
+			const allowance = snapshot.warMeta.attacksPerMember;
+			if (!end || end > now || now - end > 14 * 24 * 60 * 60 * 1000 || captured < end || captured > now ||
+				allowance < 1 || allowance > 4) continue;
+			const warKey = snapshot.warMeta.warKey;
+			const entry = performance.regularWarHistoryByKey[warKey];
+			if (!entry || entry.moderationTiming || !entry.authoritative || entry.incomplete || entry.source !== "currentWarEnded") continue;
+			const tags = Object.keys(entry.statsByTag);
+			if (!tags.length || !tags.every(function (tag) {
+				const stats = entry.statsByTag[tag];
+				const saved = snapshot.statsByTag[tag];
+				return saved && stats.possibleAttacks === allowance &&
+					stats.possibleAttacks === saved.possibleAttacks && stats.usedAttacks === saved.usedAttacks &&
+					stats.attacksMissed === saved.attacksMissed && stats.attacksMissed === stats.possibleAttacks - stats.usedAttacks;
+			})) continue;
+			entry.moderationTiming = timing;
+			updates.push({ rosterId: roster.id, endedAt: timing.endTime, participants: tags.length });
+		}
+		if (!updates.length) return { repaired: [], written: false };
+		const payload = withValidatedRosterLastUpdatedAt_(rosterData, new Date(now).toISOString());
+		const result = putValidatedActiveRosterDataToFirebase_(payload, { activeVersionSource: "regular-war-followup-timing" });
+		updateActiveRosterDataCaches_(result.text);
+		tryReconcileRegularWarFinalizationTriggerStateValidated_(result.rosterData);
+		return { repaired: updates, written: true, versionId: result.versionId };
+	});
 }
 
 function inspectWarFollowupGameSafety_(tag, sourceClan, targetClan, lineupPause, evidence) {

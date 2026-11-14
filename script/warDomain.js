@@ -2269,7 +2269,7 @@ function finalizeRegularWarIntoWarPerformance_(warPerformance, war, clanTag, tra
 	// preparation/end times only when the finished API lineup was complete.
 	const finalWar = incomplete ? null : buildModerationFinalWarSnapshot_(war, clanTag, "regular", "", nowIso);
 	const moderationTiming = finalWar && {
-		preparationStartTime: war.preparationStartTime,
+		preparationStartTime: (war.currentWarMeta || war).preparationStartTime,
 		endTime: finalWar.endTime,
 	};
 	const result = applyWarSnapshotToLongTermAggregate_(
