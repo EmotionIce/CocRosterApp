@@ -32,9 +32,9 @@ test("publishes complete crawlable metadata for the canonical public site", () =
   assert.match(indexHtml, /<meta name="description" content="[^"]*Clash of Clans[^"]*clan family[^"]*"/i);
   assert.match(indexHtml, /<link rel="canonical" href="https:\/\/turtle\.qzz\.io\/"/);
   assert.match(indexHtml, /<meta property="og:title"/);
-  assert.match(indexHtml, /<meta property="og:image" content="https:\/\/turtle\.qzz\.io\/android-chrome-512x512\.png"/);
+  assert.match(indexHtml, /<meta property="og:image" content="https:\/\/turtle\.qzz\.io\/assets\/images\/home-emblem-20261123\.jpg"/);
   assert.match(indexHtml, /<meta name="twitter:card" content="summary"/);
-  assert.match(indexHtml, /<link rel="manifest" href="\/site\.webmanifest"/);
+  assert.match(indexHtml, /<link rel="manifest" href="\/site\.webmanifest\?v=20261123a"/);
 });
 
 test("structured data describes the website and independent clan-family organization", () => {
